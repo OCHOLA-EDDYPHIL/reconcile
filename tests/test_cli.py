@@ -6,7 +6,12 @@ import tempfile
 import unittest
 from unittest import mock
 
-from lazarus.benchmark import _recovery_repeatability, freeze_benchmark
+from lazarus.benchmark import (
+    _recovery_repeatability,
+    build_model_input,
+    freeze_benchmark,
+    load_case,
+)
 from lazarus.locking import canonical_sha256
 from lazarus.cli import main
 
@@ -153,7 +158,17 @@ class CliTests(unittest.TestCase):
                 ),
                 0,
             )
-            value = json.loads(output.read_text(encoding="utf-8"))
+            payload = output.read_bytes()
+            self.assertEqual(
+                payload,
+                build_model_input(
+                    load_case(FIXTURES / "calibration" / "case-01"),
+                    "b-replay",
+                    FIXTURES / "protocol" / "prompts",
+                ),
+            )
+            self.assertFalse(payload.endswith(b"\n"))
+            value = json.loads(payload)
             self.assertEqual(value["schema_version"], "lazarus.model-input/v1")
             self.assertEqual(value["case"]["case_id"], "cal-01")
 

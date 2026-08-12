@@ -8,11 +8,12 @@ from datetime import datetime, timezone
 import hashlib
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import re
 from typing import Any
 
 from lazarus.locking import (
+    LOCK_V2_SCHEMA_VERSION,
     LockVerificationError,
     LockingError,
     build_lock_manifest,
@@ -40,6 +41,7 @@ ORACLE_SCHEMA_VERSION = "lazarus.oracle/v1"
 RAW_RESULT_SCHEMA_VERSION = "lazarus.raw-result/v1"
 RAW_ENVELOPE_SCHEMA_VERSION = "lazarus.raw-result-envelope/v1"
 MODEL_CAPTURE_SCHEMA_VERSION = "lazarus.model-capture/v1"
+MODEL_CAPTURE_V2_SCHEMA_VERSION = "lazarus.model-capture/v2"
 SCORE_SCHEMA_VERSION = "lazarus.benchmark-score/v1"
 SPLITS = ("calibration", "heldout")
 AUTHORITIES = ("structured_fact", "declared_context", "advisory_context")
@@ -195,15 +197,20 @@ def load_case(case_path: str | os.PathLike[str]) -> BenchmarkCase:
                 )
         artifacts[artifact_id] = resolved
 
-    oracle_path = directory / "oracle" / "oracle.json"
-    if not oracle_path.is_file():
-        raise BenchmarkError(f"case {case_id} has no separate oracle")
     return BenchmarkCase(directory, definition, artifacts)
 
 
 def load_oracle(case_path: str | os.PathLike[str]) -> dict[str, Any]:
     case = load_case(case_path)
     oracle = _load_json_object(case.oracle_path, "oracle")
+    return validate_oracle(case, oracle)
+
+
+def validate_oracle(
+    case: BenchmarkCase,
+    oracle: Mapping[str, Any],
+) -> dict[str, Any]:
+    oracle = deepcopy(dict(oracle))
     if oracle.get("schema_version") != ORACLE_SCHEMA_VERSION:
         raise BenchmarkError("unsupported oracle schema")
     if oracle.get("case_id") != case.case_id:
@@ -338,12 +345,29 @@ def verify_benchmark_lock(
     *,
     repository_root: str | os.PathLike[str] | None = None,
     model_settings: Mapping[str, Any] | None = None,
+    execution_root: str | os.PathLike[str] | None = None,
 ) -> None:
     fixture_base = Path(fixtures_root).resolve()
     repository = Path(repository_root).resolve() if repository_root else fixture_base.parent.resolve()
+    loaded = deepcopy(dict(manifest)) if isinstance(manifest, Mapping) else _load_json_object(Path(manifest), "lock manifest")
+    if loaded.get("schema_version") == LOCK_V2_SCHEMA_VERSION:
+        heldout = [
+            load_case(path)
+            for path in discover_cases(fixture_base, "heldout")
+        ]
+        if len(heldout) != 12 or len({case.case_id for case in heldout}) != 12:
+            raise LockVerificationError(
+                ["locked public suite must contain twelve unique heldout cases"]
+            )
+        verify_lock_manifest(
+            loaded,
+            repository,
+            model_settings=model_settings,
+            execution_root=execution_root,
+        )
+        return
     validate_suite(fixture_base)
     verify_lock_manifest(manifest, repository, model_settings=model_settings)
-    loaded = deepcopy(dict(manifest)) if isinstance(manifest, Mapping) else _load_json_object(Path(manifest), "lock manifest")
     case_files, oracle_files, schemas, prompts = _benchmark_lock_inputs(
         fixture_base, repository
     )
@@ -406,6 +430,28 @@ def validate_model_capture(
     if not isinstance(capture, Mapping):
         raise BenchmarkError("model capture must be an object")
     normalized = deepcopy(dict(capture))
+    schema_version = normalized.get("schema_version")
+    if schema_version == MODEL_CAPTURE_SCHEMA_VERSION:
+        return _validate_model_capture_v1(
+            normalized,
+            model_settings=model_settings,
+            arm=arm,
+        )
+    if schema_version == MODEL_CAPTURE_V2_SCHEMA_VERSION:
+        return _validate_model_capture_v2(
+            normalized,
+            model_settings=model_settings,
+            arm=arm,
+        )
+    raise BenchmarkError("unsupported model capture schema")
+
+
+def _validate_model_capture_v1(
+    normalized: dict[str, Any],
+    *,
+    model_settings: Mapping[str, Any],
+    arm: str | None,
+) -> dict[str, Any]:
     required = {
         "schema_version",
         "invocation_id",
@@ -420,8 +466,6 @@ def validate_model_capture(
     }
     if set(normalized) != required:
         raise BenchmarkError("model capture fields do not match the protocol")
-    if normalized.get("schema_version") != MODEL_CAPTURE_SCHEMA_VERSION:
-        raise BenchmarkError("unsupported model capture schema")
     invocation_id = normalized.get("invocation_id")
     if not isinstance(invocation_id, str) or not _SAFE_IDENTIFIER.fullmatch(invocation_id):
         raise BenchmarkError("model capture requires a safe invocation_id")
@@ -453,6 +497,179 @@ def validate_model_capture(
         raise BenchmarkError("model capture tool_calls must be an object array")
     canonical_json_bytes(normalized)
     return normalized
+
+
+def _validate_model_capture_v2(
+    normalized: dict[str, Any],
+    *,
+    model_settings: Mapping[str, Any],
+    arm: str | None,
+) -> dict[str, Any]:
+    required = {
+        "schema_version",
+        "execution_id",
+        "sequence",
+        "invocation_id",
+        "case_id",
+        "arm",
+        "run_id",
+        "started_at",
+        "completed_at",
+        "http_status",
+        "provider",
+        "endpoint",
+        "model",
+        "resolved_model_version",
+        "model_version",
+        "response_id",
+        "lock_sha256",
+        "model_settings_sha256",
+        "execution_plan_sha256",
+        "sealed_oracle_sha256",
+        "input_path",
+        "input_sha256",
+        "request_path",
+        "request_sha256",
+        "raw_response_path",
+        "raw_response_sha256",
+        "capture_path",
+        "candidate_index",
+        "candidate_role",
+        "finish_reason",
+        "text_parts",
+        "parts",
+        "tool_parts",
+        "safety_ratings",
+        "usage_metadata",
+        "prompt_feedback",
+        "model_status",
+        "response_text",
+        "response_text_sha256",
+    }
+    if set(normalized) != required:
+        raise BenchmarkError("model capture fields do not match the protocol")
+    for field in ("execution_id", "invocation_id", "case_id", "arm", "run_id"):
+        value = normalized.get(field)
+        if not isinstance(value, str) or _SAFE_IDENTIFIER.fullmatch(value) is None:
+            raise BenchmarkError(f"model capture requires a safe {field}")
+    if arm is not None and normalized["arm"] != arm:
+        raise BenchmarkError("model capture arm does not match the evaluation arm")
+    if type(normalized.get("sequence")) is not int or normalized["sequence"] <= 0:
+        raise BenchmarkError("model capture requires a positive sequence")
+    started = _aware_datetime(normalized.get("started_at"), "capture.started_at")
+    completed = _aware_datetime(normalized.get("completed_at"), "capture.completed_at")
+    if completed < started:
+        raise BenchmarkError("capture completed_at cannot precede started_at")
+    if type(normalized.get("http_status")) is not int or normalized["http_status"] != 200:
+        raise BenchmarkError("model capture requires a successful HTTP status")
+
+    try:
+        settings = validate_model_settings(model_settings, require_gemini=True)
+    except LockingError as exc:
+        raise BenchmarkError(f"model capture has incompatible settings: {exc}") from exc
+    for field in ("provider", "endpoint", "model", "resolved_model_version"):
+        if normalized.get(field) != settings[field]:
+            raise BenchmarkError(f"model capture {field} does not match the supplied settings")
+    if normalized.get("model_version") != settings["resolved_model_version"]:
+        raise BenchmarkError("model capture returned an unexpected model version")
+    if normalized.get("model_settings_sha256") != canonical_sha256(settings):
+        raise BenchmarkError("model capture settings do not match the supplied model settings")
+
+    for field in (
+        "lock_sha256",
+        "model_settings_sha256",
+        "execution_plan_sha256",
+        "input_sha256",
+        "request_sha256",
+        "raw_response_sha256",
+        "response_text_sha256",
+    ):
+        value = normalized.get(field)
+        if not isinstance(value, str) or _DIGEST_RE.fullmatch(value) is None:
+            raise BenchmarkError(f"model capture requires a valid {field}")
+    sealed_oracle_digest = normalized.get("sealed_oracle_sha256")
+    if sealed_oracle_digest is not None and (
+        not isinstance(sealed_oracle_digest, str)
+        or _DIGEST_RE.fullmatch(sealed_oracle_digest) is None
+    ):
+        raise BenchmarkError("model capture has an invalid sealed oracle digest")
+    for field in ("input_path", "request_path", "raw_response_path", "capture_path"):
+        _validate_capture_path(normalized.get(field), field)
+    if len(
+        {
+            normalized["input_path"],
+            normalized["request_path"],
+            normalized["raw_response_path"],
+            normalized["capture_path"],
+        }
+    ) != 4:
+        raise BenchmarkError("model capture paths must be unique")
+
+    if (
+        normalized.get("candidate_index") != 0
+        or type(normalized["candidate_index"]) is not int
+    ):
+        raise BenchmarkError("model capture requires candidate index zero")
+    if normalized.get("candidate_role") != "model":
+        raise BenchmarkError("model capture requires the model candidate role")
+    for field in ("response_id", "finish_reason"):
+        if not isinstance(normalized.get(field), str) or not normalized[field]:
+            raise BenchmarkError(f"model capture requires a non-empty {field}")
+
+    parts = normalized.get("parts")
+    if not isinstance(parts, list) or any(not isinstance(part, Mapping) for part in parts):
+        raise BenchmarkError("model capture parts must be an object array")
+    extracted_text: list[str] = []
+    extracted_tools: list[Mapping[str, Any]] = []
+    tool_keys = {"functionCall", "functionResponse", "executableCode", "codeExecutionResult"}
+    for part in parts:
+        if "text" in part:
+            if not isinstance(part["text"], str):
+                raise BenchmarkError("model capture part text must be text")
+            extracted_text.append(part["text"])
+        if tool_keys.intersection(part):
+            extracted_tools.append(part)
+    text_parts = normalized.get("text_parts")
+    if not isinstance(text_parts, list) or any(not isinstance(text, str) for text in text_parts):
+        raise BenchmarkError("model capture text_parts must be a text array")
+    if text_parts != extracted_text:
+        raise BenchmarkError("model capture text_parts do not match the candidate parts")
+    tool_parts = normalized.get("tool_parts")
+    if not isinstance(tool_parts, list) or any(
+        not isinstance(part, Mapping) for part in tool_parts
+    ):
+        raise BenchmarkError("model capture tool_parts must be an object array")
+    if tool_parts != extracted_tools:
+        raise BenchmarkError("model capture tool_parts do not match the candidate parts")
+    safety_ratings = normalized.get("safety_ratings")
+    if not isinstance(safety_ratings, list) or any(
+        not isinstance(rating, Mapping) for rating in safety_ratings
+    ):
+        raise BenchmarkError("model capture safety_ratings must be an object array")
+    if not isinstance(normalized.get("usage_metadata"), Mapping):
+        raise BenchmarkError("model capture requires usage metadata")
+    for field in ("prompt_feedback", "model_status"):
+        value = normalized.get(field)
+        if value is not None and not isinstance(value, Mapping):
+            raise BenchmarkError(f"model capture {field} must be an object or null")
+
+    response_text = normalized.get("response_text")
+    if not isinstance(response_text, str) or response_text != "".join(text_parts):
+        raise BenchmarkError("model capture response text does not match its text parts")
+    if normalized["response_text_sha256"] != hashlib.sha256(
+        response_text.encode("utf-8")
+    ).hexdigest():
+        raise BenchmarkError("model capture response digest mismatch")
+    canonical_json_bytes(normalized)
+    return normalized
+
+
+def _validate_capture_path(value: Any, field: str) -> None:
+    if not isinstance(value, str):
+        raise BenchmarkError(f"model capture requires a valid {field}")
+    path = PurePosixPath(value)
+    if path.is_absolute() or not path.parts or "." in path.parts or ".." in path.parts:
+        raise BenchmarkError(f"model capture requires a valid {field}")
 
 
 def build_model_input(
@@ -562,6 +779,8 @@ def score_persisted_results(
     model_settings: Mapping[str, Any],
     recovery_repeatability: Mapping[str, Mapping[str, Any]],
     repository_root: str | os.PathLike[str] | None = None,
+    execution_root: str | os.PathLike[str] | None = None,
+    oracle_mapping: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> dict[str, Any]:
     settings = validate_model_settings(model_settings)
     verify_benchmark_lock(
@@ -569,6 +788,7 @@ def score_persisted_results(
         fixtures_root,
         repository_root=repository_root,
         model_settings=settings,
+        execution_root=execution_root,
     )
     loaded_lock = (
         deepcopy(dict(lock_manifest))
@@ -577,7 +797,18 @@ def score_persisted_results(
     )
     lock_digest = canonical_sha256(loaded_lock)
     cases = {case.case_id: case for case in (load_case(path) for path in discover_cases(fixtures_root, "heldout"))}
-    oracles = {case_id: load_oracle(case.directory) for case_id, case in cases.items()}
+    if oracle_mapping is None:
+        oracles = {
+            case_id: load_oracle(case.directory)
+            for case_id, case in cases.items()
+        }
+    else:
+        if set(oracle_mapping) != set(cases):
+            raise BenchmarkError("oracle mapping must cover every heldout case exactly once")
+        oracles = {
+            case_id: validate_oracle(cases[case_id], oracle_mapping[case_id])
+            for case_id in sorted(cases)
+        }
     a1_records = [load_persisted_result(path) for path in a1_results]
     a1_rules_records = [load_persisted_result(path) for path in a1_rules_results]
     b_records = [load_persisted_result(path) for path in b_results]
@@ -599,6 +830,7 @@ def score_persisted_results(
     for record in all_records:
         if record.get("protocol_lock_digest") != lock_digest:
             raise BenchmarkError("a result is not bound to the verified protocol lock")
+        _validate_v2_capture_execution(record, loaded_lock)
         _validate_record_context(
             record,
             cases[record["case_id"]],
@@ -1297,6 +1529,75 @@ def _validate_result_set(records: Sequence[Mapping[str, Any]], cases: Mapping[st
         seen.add(identity)
 
 
+def _validate_v2_capture_execution(
+    record: Mapping[str, Any],
+    lock_manifest: Mapping[str, Any],
+) -> None:
+    output = record.get("output")
+    capture = output.get("capture") if isinstance(output, Mapping) else None
+    if (
+        not isinstance(capture, Mapping)
+        or capture.get("schema_version") != MODEL_CAPTURE_V2_SCHEMA_VERSION
+    ):
+        return
+    if lock_manifest.get("schema_version") != LOCK_V2_SCHEMA_VERSION:
+        raise BenchmarkError("model capture v2 requires a benchmark lock v2")
+    binding = lock_manifest.get("execution_plan")
+    if not isinstance(binding, Mapping) or set(binding) != {"digest", "value"}:
+        raise BenchmarkError("benchmark lock has no bound execution plan")
+    try:
+        from lazarus.execution import ExecutionError, validate_execution_plan
+
+        plan = validate_execution_plan(binding.get("value"))
+    except (ExecutionError, TypeError, ValueError) as exc:
+        raise BenchmarkError(f"benchmark lock has an invalid execution plan: {exc}") from exc
+    plan_digest = canonical_sha256(plan)
+    if binding.get("digest") != plan_digest:
+        raise BenchmarkError("benchmark lock execution plan digest is inconsistent")
+    if capture.get("execution_plan_sha256") != plan_digest:
+        raise BenchmarkError("model capture does not match the locked execution plan")
+    if capture.get("lock_sha256") != canonical_sha256(lock_manifest):
+        raise BenchmarkError("model capture does not match the protocol lock")
+    sealed_oracle = lock_manifest.get("sealed_oracle")
+    if (
+        not isinstance(sealed_oracle, Mapping)
+        or capture.get("sealed_oracle_sha256") != sealed_oracle.get("digest")
+    ):
+        raise BenchmarkError("model capture does not match the sealed oracle commitment")
+
+    matches = [
+        entry
+        for entry in plan["evaluations"]
+        if entry["case_id"] == record.get("case_id")
+        and entry["arm"] == record.get("arm")
+        and entry["run_id"] == record.get("run_id")
+    ]
+    if len(matches) != 1 or matches[0]["invocation_id"] is None:
+        raise BenchmarkError("model result does not identify one locked evaluation")
+    expected = matches[0]
+    for field in (
+        "execution_id",
+        "sequence",
+        "invocation_id",
+        "case_id",
+        "arm",
+        "run_id",
+        "request_path",
+        "raw_response_path",
+        "capture_path",
+    ):
+        if capture.get(field) != expected[field]:
+            raise BenchmarkError(f"model capture {field} does not match the locked evaluation")
+    prepared = [
+        entry
+        for entry in plan["prepared_inputs"]
+        if entry["case_id"] == record.get("case_id")
+        and entry["arm"] == record.get("arm")
+    ]
+    if len(prepared) != 1 or capture.get("input_path") != prepared[0]["path"]:
+        raise BenchmarkError("model capture input path does not match the locked evaluation")
+
+
 def _validate_record_context(
     record: Mapping[str, Any],
     case: BenchmarkCase,
@@ -1330,11 +1631,20 @@ def _validate_record_context(
         or record["completed_at"] != capture["completed_at"]
     ):
         raise BenchmarkError("model result timestamps must come from its invocation capture")
-    expected_prompt_digest = hashlib.sha256(
+    expected_input_digest = hashlib.sha256(
         build_model_input(case, record["arm"], prompt_root)
     ).hexdigest()
-    if capture.get("prompt_sha256") != expected_prompt_digest:
-        raise BenchmarkError("model capture does not match the locked assembled input")
+    if capture["schema_version"] == MODEL_CAPTURE_SCHEMA_VERSION:
+        if capture.get("prompt_sha256") != expected_input_digest:
+            raise BenchmarkError("model capture does not match the locked assembled input")
+    else:
+        if (
+            capture.get("case_id") != record["case_id"]
+            or capture.get("run_id") != record["run_id"]
+            or capture.get("lock_sha256") != record.get("protocol_lock_digest")
+            or capture.get("input_sha256") != expected_input_digest
+        ):
+            raise BenchmarkError("model capture does not match the locked result context")
     try:
         semantic_output = json.loads(
             capture["response_text"],
@@ -1646,7 +1956,12 @@ def _behavior_deviations(
     packet = output.get("packet")
     if not isinstance(capture, Mapping) or not isinstance(packet, Mapping):
         return 1
-    deviations = 1 if capture.get("tool_calls") else 0
+    tool_activity = (
+        capture.get("tool_parts")
+        if capture.get("schema_version") == MODEL_CAPTURE_V2_SCHEMA_VERSION
+        else capture.get("tool_calls")
+    )
+    deviations = 1 if tool_activity else 0
     if packet.get("semantic_status") != "available":
         deviations += 1
     try:

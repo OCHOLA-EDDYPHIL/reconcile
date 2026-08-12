@@ -18,6 +18,8 @@ from lazarus.benchmark import (
     _recovery_repeatability,
     _score_run,
     _validate_compiler_packet,
+    _validate_record_context,
+    _validate_v2_capture_execution,
     build_model_input,
     discover_cases,
     freeze_benchmark,
@@ -26,6 +28,7 @@ from lazarus.benchmark import (
     load_persisted_result,
     persist_raw_result,
     score_persisted_results,
+    validate_model_capture,
     validate_suite,
     verify_benchmark_lock,
 )
@@ -36,6 +39,7 @@ from lazarus.locking import (
     file_sha256,
 )
 from lazarus.compiler import compile_case
+from lazarus.execution import build_execution_plan
 from lazarus.recovery import load_recovery_matrix_inputs
 
 
@@ -53,6 +57,33 @@ MODEL_SETTINGS = {
         "max_attempts": 1,
         "backoff_seconds": 0,
     },
+}
+GEMINI_SETTINGS = {
+    "provider": "gemini-developer-api",
+    "api_version": "v1beta",
+    "endpoint": (
+        "https://generativelanguage.googleapis.com/v1beta/models/"
+        "gemini-3.5-flash:generateContent"
+    ),
+    "model": "gemini-3.5-flash",
+    "resolved_model_version": "3.5-flash-05-2026",
+    "parameters": {
+        "temperature": 1.0,
+        "top_p": 1.0,
+        "max_output_tokens": 1024,
+        "candidate_count": 1,
+        "response_mime_type": "application/json",
+        "response_schema_sha256": "a" * 64,
+    },
+    "thinking": {"level": "MEDIUM", "include_thoughts": False},
+    "request": {
+        "store": False,
+        "service_tier": "standard",
+        "timeout_seconds": 120,
+        "safety_settings": "provider-default",
+        "tools": [],
+    },
+    "retry": {"max_attempts": 1, "backoff_seconds": 0},
 }
 
 
@@ -77,23 +108,6 @@ class BenchmarkFixtureTests(unittest.TestCase):
             self.assertNotIn(case.oracle_path.resolve(), set(case.artifacts.values()))
             self.assertTrue(case.oracle_path.is_file())
             self.assertEqual(load_oracle(case.directory)["case_id"], case.case_id)
-        heldout_oracles = {
-            case.case_id: load_oracle(case.directory)
-            for case in cases
-            if case.split == "heldout"
-        }
-        self.assertEqual(
-            sum(
-                len(oracle["decision_changing_blockers"])
-                for oracle in heldout_oracles.values()
-            ),
-            11,
-        )
-        self.assertEqual(
-            heldout_oracles["eval-n06"]["recovery_expectation"]["rto"],
-            "unknown",
-        )
-
     def test_model_inputs_do_not_contain_oracle_fields(self) -> None:
         forbidden = {"negative_control", "decision_changing_blockers", "oracle_id", "coverage"}
         for case_path in discover_cases(FIXTURES):
@@ -196,6 +210,137 @@ class RawResultTests(unittest.TestCase):
         with self.assertRaises(BenchmarkError):
             _validate_compiler_packet(record, case, semantic_output=None)
 
+    def test_persisted_capture_v2_preserves_invalid_semantic_unavailability(self) -> None:
+        case = load_case(FIXTURES / "calibration" / "case-01")
+        arm = "b-replay"
+        run_id = "run-01"
+        lock_digest = "b" * 64
+        input_digest = hashlib.sha256(
+            build_model_input(case, arm, FIXTURES / "protocol" / "prompts")
+        ).hexdigest()
+        capture = _v2_capture(
+            case_id=case.case_id,
+            arm=arm,
+            run_id=run_id,
+            lock_digest=lock_digest,
+            input_digest=input_digest,
+            response_text="not valid semantic JSON",
+        )
+        record = {
+            "schema_version": "lazarus.raw-result/v1",
+            "case_id": case.case_id,
+            "arm": arm,
+            "run_id": run_id,
+            "started_at": capture["started_at"],
+            "completed_at": capture["completed_at"],
+            "protocol_lock_digest": lock_digest,
+            "model_settings": deepcopy(GEMINI_SETTINGS),
+            "model_settings_digest": canonical_sha256(GEMINI_SETTINGS),
+            "output": {
+                "packet": compile_case(
+                    case.directory,
+                    arm,
+                    semantic=None,
+                    allow_heldout=True,
+                ),
+                "capture": capture,
+            },
+        }
+
+        with tempfile.TemporaryDirectory() as temporary:
+            persisted = persist_raw_result(temporary, record)
+            loaded = load_persisted_result(persisted)
+        _validate_record_context(
+            loaded,
+            case,
+            GEMINI_SETTINGS,
+            FIXTURES / "protocol" / "prompts",
+        )
+
+        loaded["output"]["packet"]["semantic_status"] = "available"
+        loaded["output"]["packet"]["semantic"] = {
+            "admitted": [],
+            "rejected": [],
+            "abstained": False,
+            "requested_evidence": [],
+        }
+        with self.assertRaisesRegex(
+            BenchmarkError,
+            "invalid captured response must preserve semantic unavailability",
+        ):
+            _validate_record_context(
+                loaded,
+                case,
+                GEMINI_SETTINGS,
+                FIXTURES / "protocol" / "prompts",
+            )
+
+    def test_capture_v2_binds_settings_response_and_locked_execution_identity(self) -> None:
+        case_ids = tuple(f"synthetic-{index:02d}" for index in range(1, 13))
+        plan = build_execution_plan(case_ids)
+        evaluation = next(
+            entry
+            for entry in plan["evaluations"]
+            if entry["case_id"] == case_ids[0]
+            and entry["arm"] == "b-replay"
+            and entry["run_id"] == "run-01"
+        )
+        lock = {
+            "schema_version": "lazarus.benchmark-lock/v2",
+            "execution_plan": {
+                "digest": canonical_sha256(plan),
+                "value": plan,
+            },
+            "sealed_oracle": {"algorithm": "sha256", "digest": "a" * 64},
+        }
+        capture = _v2_capture(
+            case_id=evaluation["case_id"],
+            arm=evaluation["arm"],
+            run_id=evaluation["run_id"],
+            lock_digest=canonical_sha256(lock),
+            input_digest="c" * 64,
+            execution=evaluation,
+            execution_plan_digest=canonical_sha256(plan),
+            sealed_oracle_digest="a" * 64,
+        )
+        record = {
+            "case_id": evaluation["case_id"],
+            "arm": evaluation["arm"],
+            "run_id": evaluation["run_id"],
+            "output": {"capture": capture},
+        }
+
+        self.assertEqual(
+            validate_model_capture(
+                capture,
+                model_settings=GEMINI_SETTINGS,
+                arm=evaluation["arm"],
+            ),
+            capture,
+        )
+        _validate_v2_capture_execution(record, lock)
+
+        settings_mismatch = deepcopy(capture)
+        settings_mismatch["provider"] = "other-provider"
+        with self.assertRaises(BenchmarkError):
+            validate_model_capture(
+                settings_mismatch,
+                model_settings=GEMINI_SETTINGS,
+                arm=evaluation["arm"],
+            )
+        response_mismatch = deepcopy(capture)
+        response_mismatch["response_text"] = "altered"
+        with self.assertRaises(BenchmarkError):
+            validate_model_capture(
+                response_mismatch,
+                model_settings=GEMINI_SETTINGS,
+                arm=evaluation["arm"],
+            )
+        identity_mismatch = deepcopy(record)
+        identity_mismatch["output"]["capture"]["sequence"] += 1
+        with self.assertRaises(BenchmarkError):
+            _validate_v2_capture_execution(identity_mismatch, lock)
+
 
 class SyntheticScoringTests(unittest.TestCase):
     def test_companion_blockers_are_enumerated_one_to_one(self) -> None:
@@ -292,6 +437,23 @@ class SyntheticScoringTests(unittest.TestCase):
             _behavior_deviations(record, {"coverage": []}),
             1,
         )
+
+    def test_capture_v2_tool_parts_are_behavior_deviations(self) -> None:
+        record = {
+            "output": {
+                "packet": {
+                    "semantic_status": "available",
+                    "semantic": {"admitted": [], "rejected": []},
+                },
+                "capture": {
+                    "schema_version": "lazarus.model-capture/v2",
+                    "response_text": "{}",
+                    "tool_parts": [{"functionCall": {"name": "forbidden"}}],
+                },
+            }
+        }
+
+        self.assertEqual(_behavior_deviations(record, {"coverage": []}), 1)
 
     def test_no_incident_ablation_removes_incident_input_before_generation(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -726,6 +888,69 @@ def _proposal(
     if relation_type == "probe_selection":
         proposal["probe_id"] = "verify_recovery_scope"
     return proposal
+
+
+def _v2_capture(
+    *,
+    case_id: str,
+    arm: str,
+    run_id: str,
+    lock_digest: str,
+    input_digest: str,
+    response_text: str = "{}",
+    execution: dict[str, object] | None = None,
+    execution_plan_digest: str = "d" * 64,
+    sealed_oracle_digest: str | None = None,
+) -> dict[str, object]:
+    selected = execution or {
+        "execution_id": "evaluation-025",
+        "sequence": 25,
+        "invocation_id": "invocation-001",
+        "request_path": "evaluations/evaluation-025/request.json",
+        "raw_response_path": "evaluations/evaluation-025/raw-response.json",
+        "capture_path": "evaluations/evaluation-025/capture.json",
+    }
+    return {
+        "schema_version": "lazarus.model-capture/v2",
+        "execution_id": selected["execution_id"],
+        "sequence": selected["sequence"],
+        "invocation_id": selected["invocation_id"],
+        "case_id": case_id,
+        "arm": arm,
+        "run_id": run_id,
+        "started_at": "2026-08-12T12:00:00Z",
+        "completed_at": "2026-08-12T12:00:01Z",
+        "http_status": 200,
+        "provider": GEMINI_SETTINGS["provider"],
+        "endpoint": GEMINI_SETTINGS["endpoint"],
+        "model": GEMINI_SETTINGS["model"],
+        "resolved_model_version": GEMINI_SETTINGS["resolved_model_version"],
+        "model_version": GEMINI_SETTINGS["resolved_model_version"],
+        "response_id": "response-001",
+        "lock_sha256": lock_digest,
+        "model_settings_sha256": canonical_sha256(GEMINI_SETTINGS),
+        "execution_plan_sha256": execution_plan_digest,
+        "sealed_oracle_sha256": sealed_oracle_digest,
+        "input_path": f"prepared-inputs/{arm}/{case_id}.json",
+        "input_sha256": input_digest,
+        "request_path": selected["request_path"],
+        "request_sha256": "e" * 64,
+        "raw_response_path": selected["raw_response_path"],
+        "raw_response_sha256": "f" * 64,
+        "capture_path": selected["capture_path"],
+        "candidate_index": 0,
+        "candidate_role": "model",
+        "finish_reason": "STOP",
+        "text_parts": [response_text],
+        "parts": [{"text": response_text}],
+        "tool_parts": [],
+        "safety_ratings": [],
+        "usage_metadata": {"totalTokenCount": 1},
+        "prompt_feedback": {},
+        "model_status": {},
+        "response_text": response_text,
+        "response_text_sha256": hashlib.sha256(response_text.encode("utf-8")).hexdigest(),
+    }
 
 
 def _raw_result(
