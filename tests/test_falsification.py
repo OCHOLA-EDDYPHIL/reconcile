@@ -55,7 +55,7 @@ class _EmptySemanticTransport:
         response_text = canonical_json_bytes(semantic).decode("utf-8")
         payload = {
             "responseId": f"calibration-response-{self.calls}",
-            "modelVersion": "gemini-3.5-flash",
+            "modelVersion": "gemini-3.6-flash",
             "candidates": [
                 {
                     "index": 0,

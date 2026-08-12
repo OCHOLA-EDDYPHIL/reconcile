@@ -43,10 +43,7 @@ GEMINI_MODEL_SETTINGS_FIELDS = {
     "retry",
 }
 GEMINI_PARAMETER_FIELDS = {
-    "temperature",
-    "top_p",
     "max_output_tokens",
-    "candidate_count",
     "response_mime_type",
     "response_schema_sha256",
 }
@@ -146,9 +143,9 @@ def _validate_gemini_model_settings(settings: dict[str, Any]) -> dict[str, Any]:
     constants = {
         "provider": "gemini-developer-api",
         "api_version": "v1beta",
-        "model": "gemini-3.5-flash",
-        "catalog_model_version": "3.5-flash-05-2026",
-        "resolved_model_version": "gemini-3.5-flash",
+        "model": "gemini-3.6-flash",
+        "catalog_model_version": "3.6-flash-07-2026",
+        "resolved_model_version": "gemini-3.6-flash",
     }
     for field, expected in constants.items():
         if settings.get(field) != expected:
@@ -156,7 +153,7 @@ def _validate_gemini_model_settings(settings: dict[str, Any]) -> dict[str, Any]:
     endpoint = settings.get("endpoint")
     expected_endpoint = (
         "https://generativelanguage.googleapis.com/v1beta/"
-        "models/gemini-3.5-flash:generateContent"
+        "models/gemini-3.6-flash:generateContent"
     )
     if endpoint != expected_endpoint:
         raise LockingError("Gemini endpoint does not match the locked callable resource")
@@ -165,10 +162,7 @@ def _validate_gemini_model_settings(settings: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(parameters, Mapping) or set(parameters) != GEMINI_PARAMETER_FIELDS:
         raise LockingError("Gemini parameter fields do not match the protocol")
     expected_parameters = {
-        "temperature": 1.0,
-        "top_p": 1.0,
         "max_output_tokens": 8192,
-        "candidate_count": 1,
         "response_mime_type": "application/json",
     }
     for field, expected in expected_parameters.items():

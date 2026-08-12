@@ -894,9 +894,6 @@ def _validate_request_settings(
     parameters = model_settings["parameters"]
     thinking = model_settings["thinking"]
     expected_generation = {
-        "temperature": parameters["temperature"],
-        "topP": parameters["top_p"],
-        "candidateCount": parameters["candidate_count"],
         "maxOutputTokens": parameters["max_output_tokens"],
         "responseMimeType": parameters["response_mime_type"],
         "responseJsonSchema": schema,
