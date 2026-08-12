@@ -730,27 +730,31 @@ def validate_evidence_packet(
                 "a blocked packet must contain a deterministic blocker",
             )
         )
-    if human_state == "needs_confirmation" and not (blocker_rows or candidate_ids):
+    if human_state == "needs_confirmation" and not (
+        blocker_rows or candidate_ids or unknown_rows
+    ):
         issues.append(
             ValidationIssue(
                 "human_state",
                 "$.human_decision_state",
-                "confirmation state requires a candidate inference or confirmation blocker",
+                "confirmation state requires a blocker, unknown, or candidate inference",
             )
         )
     if semantic_status == "available" and abstained is True:
-        semantic_confirmation = any(
-            isinstance(blocker, Mapping)
-            and blocker.get("code") == "SEMANTIC_CONFIRMATION_REQUIRED"
-            and "semantic:abstention" in blocker.get("evidence_refs", [])
-            for blocker in blocker_rows
+        semantic_unknown = any(
+            isinstance(unknown, Mapping)
+            and unknown.get("code") == "SEMANTIC_EVIDENCE_INCOMPLETE"
+            for unknown in unknown_rows
         )
-        if not semantic_confirmation:
+        if not semantic_unknown or human_state not in {
+            "needs_confirmation",
+            "blocked",
+        }:
             issues.append(
                 ValidationIssue(
                     "abstention_not_fail_closed",
-                    "$.blockers",
-                    "an available semantic abstention must require human confirmation",
+                    "$.human_decision_state",
+                    "an available semantic abstention must remain an explicit unknown requiring confirmation",
                 )
             )
 
@@ -1575,6 +1579,7 @@ def _enforce_non_authoritative_semantics(
     semantic = packet.get("semantic")
     admitted = semantic.get("admitted", []) if isinstance(semantic, Mapping) else []
     admitted_ids: set[str] = set()
+    alias_ids: set[str] = set()
     non_blocking_ids: set[str] = set()
     if _is_array(admitted):
         for proposal in admitted:
@@ -1583,10 +1588,9 @@ def _enforce_non_authoritative_semantics(
             proposal_id = proposal.get("proposal_id")
             if isinstance(proposal_id, str):
                 admitted_ids.add(proposal_id)
-                if proposal.get("relation_type") in {
-                    "incident_relevance_advisory",
-                    "probe_selection",
-                }:
+                if proposal.get("relation_type") == "resource_alias_candidate":
+                    alias_ids.add(proposal_id)
+                else:
                     non_blocking_ids.add(proposal_id)
 
     facts = packet.get("facts")
@@ -1611,7 +1615,32 @@ def _enforce_non_authoritative_semantics(
                     ValidationIssue(
                         "non_blocking_semantic",
                         f"$.blockers[{index}].evidence_refs",
-                        "advisory relevance and probe selection cannot directly support a blocker",
+                        "only a validated resource alias may directly support a semantic blocker",
+                    )
+                )
+            if not _is_array(refs):
+                continue
+            linked_alias_ids = alias_ids.intersection(refs)
+            if (
+                blocker.get("code") == "SEMANTIC_CONFIRMATION_REQUIRED"
+                and not linked_alias_ids
+            ):
+                issues.append(
+                    ValidationIssue(
+                        "semantic_alias_link_missing",
+                        f"$.blockers[{index}].evidence_refs",
+                        "a semantic confirmation blocker must cite an admitted resource alias",
+                    )
+                )
+            if (
+                linked_alias_ids
+                and blocker.get("code") != "SEMANTIC_CONFIRMATION_REQUIRED"
+            ):
+                issues.append(
+                    ValidationIssue(
+                        "semantic_alias_blocker_code",
+                        f"$.blockers[{index}].code",
+                        "a resource alias may support only a semantic confirmation blocker",
                     )
                 )
 

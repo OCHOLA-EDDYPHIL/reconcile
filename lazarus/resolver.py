@@ -21,6 +21,7 @@ from .protocol import (
 
 
 _SUPPORT_REQUIRED_RELATION_TYPES = frozenset(RELATION_EVIDENCE_CLASSES)
+_ADVISORY_CONTEXT_RELATION_TYPES = frozenset({"incident_relevance_advisory"})
 
 
 def resolve_semantic_output(
@@ -46,6 +47,11 @@ def resolve_semantic_output(
 
     declared_ids = frozenset(
         artifact["artifact_id"] for artifact in validated_case["artifacts"]
+    )
+    advisory_ids = frozenset(
+        artifact["artifact_id"]
+        for artifact in validated_case["artifacts"]
+        if artifact["authority"] == "advisory_context"
     )
     unknown_disabled_artifacts = disabled_artifact_ids - declared_ids
     if unknown_disabled_artifacts:
@@ -130,6 +136,17 @@ def resolve_semantic_output(
                                 "artifact_disabled",
                                 f"{citation_path}.artifact_id",
                                 "artifact is excluded by this ablation",
+                            )
+                        )
+                    if (
+                        citation.get("artifact_id") in advisory_ids
+                        and relation_type not in _ADVISORY_CONTEXT_RELATION_TYPES
+                    ):
+                        issues.append(
+                            ValidationIssue(
+                                "advisory_context_decision_attempt",
+                                f"{citation_path}.artifact_id",
+                                "advisory context cannot support a decision-capable relation",
                             )
                         )
                     try:

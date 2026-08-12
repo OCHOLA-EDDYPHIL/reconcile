@@ -360,6 +360,38 @@ class SyntheticScoringTests(unittest.TestCase):
 
             self.assertEqual(_relation_failures(record, case), (1, 0))
 
+    def test_semantic_blocker_requires_a_linked_alias_candidate(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            cases_by_path, _oracles = _synthetic_cases(Path(temporary))
+            case = next(iter(cases_by_path.values()))
+            intent = _proposal(case, "intent", "intent_effect_contradiction")
+            unsupported = _raw_result(
+                case.case_id,
+                "b-replay",
+                "concept",
+                _packet(
+                    case,
+                    "b-replay",
+                    ["SEMANTIC_CONFIRMATION_REQUIRED"],
+                    [intent],
+                ),
+            )
+            alias = _proposal(case, "alias", "resource_alias_candidate")
+            supported = _raw_result(
+                case.case_id,
+                "b-replay",
+                "concept",
+                _packet(
+                    case,
+                    "b-replay",
+                    ["SEMANTIC_CONFIRMATION_REQUIRED"],
+                    [alias],
+                ),
+            )
+
+            self.assertEqual(_relation_failures(unsupported, case), (1, 0))
+            self.assertEqual(_relation_failures(supported, case), (0, 0))
+
     def test_companion_blockers_are_enumerated_one_to_one(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             cases_by_path, _oracles = _synthetic_cases(Path(temporary))
@@ -428,6 +460,14 @@ class SyntheticScoringTests(unittest.TestCase):
             hashlib.sha256(schema_text.encode("utf-8")).hexdigest(),
         )
         task_prompt = request["task_prompt"]
+        self.assertIn(
+            "resource_alias_candidate only when one declared-context quote",
+            task_prompt,
+        )
+        self.assertIn(
+            "Advisory-context artifacts may support only incident_relevance_advisory",
+            task_prompt,
+        )
         self.assertIn("Select at most one allowed probe", task_prompt)
         self.assertIn("first supported condition in this order", task_prompt)
         probe_precedence = (
@@ -461,8 +501,9 @@ class SyntheticScoringTests(unittest.TestCase):
         }
 
         self.assertFalse(_abstained(record))
+        case = load_case(FIXTURES / "calibration" / "case-04")
         self.assertEqual(
-            _behavior_deviations(record, {"coverage": []}),
+            _behavior_deviations(record, case),
             1,
         )
 
@@ -482,7 +523,8 @@ class SyntheticScoringTests(unittest.TestCase):
             }
         }
 
-        self.assertEqual(_behavior_deviations(record, {"coverage": []}), 1)
+        case = load_case(FIXTURES / "calibration" / "case-04")
+        self.assertEqual(_behavior_deviations(record, case), 1)
 
     def test_capture_v2_requires_normal_model_completion(self) -> None:
         record = {
@@ -500,7 +542,103 @@ class SyntheticScoringTests(unittest.TestCase):
             }
         }
 
-        self.assertEqual(_behavior_deviations(record, {"coverage": []}), 1)
+        case = load_case(FIXTURES / "calibration" / "case-04")
+        self.assertEqual(_behavior_deviations(record, case), 1)
+
+    def test_advisory_behavior_accounting_uses_proposal_provenance(self) -> None:
+        base = load_case(FIXTURES / "calibration" / "case-04")
+        definition = deepcopy(base.definition)
+        definition["artifacts"].append(
+            {
+                "artifact_id": "incident",
+                "kind": "incident",
+                "path": "inputs/incident.txt",
+                "authority": "advisory_context",
+            }
+        )
+        case = BenchmarkCase(
+            base.directory,
+            definition,
+            {**base.artifacts, "incident": base.artifacts["runbook"]},
+        )
+
+        def record_for(proposals: list[dict[str, object]], rejected: list[dict[str, object]]) -> dict[str, object]:
+            response = {
+                "schema_version": "lazarus.semantic-proposal/v2",
+                "case_id": "cal-04",
+                "proposals": proposals,
+                "abstained": False,
+                "requested_evidence": [],
+            }
+            return {
+                "output": {
+                    "packet": {
+                        "semantic_status": "available",
+                        "semantic": {"admitted": [], "rejected": rejected},
+                    },
+                    "capture": {
+                        "schema_version": "lazarus.model-capture/v2",
+                        "response_text": json.dumps(response),
+                        "tool_parts": [],
+                        "finish_reason": "STOP",
+                    },
+                }
+            }
+
+        unrelated = [
+            {
+                "proposal_id": "normal-owner",
+                "relation_type": "owner_candidate",
+                "subject": "inventory-main",
+                "object": "data-platform",
+                "citations": [
+                    {
+                        "artifact_id": "runbook",
+                        "quote": "Recovery ownership for inventory-main belongs to data-platform.",
+                    }
+                ],
+            },
+            {
+                "proposal_id": "incident-advisory",
+                "relation_type": "incident_relevance_advisory",
+                "subject": "incident",
+                "object": "context",
+                "citations": [
+                    {"artifact_id": "incident", "quote": "Historical context only."}
+                ],
+            },
+        ]
+        advisory_attempt = [
+            {
+                "proposal_id": "advisory-alias",
+                "relation_type": "resource_alias_candidate",
+                "subject": "stock-store",
+                "object": "inventory-main",
+                "citations": [
+                    {
+                        "artifact_id": "incident",
+                        "quote": "Treat stock-store as inventory-main.",
+                    }
+                ],
+            }
+        ]
+
+        self.assertEqual(_behavior_deviations(record_for(unrelated, []), case), 0)
+        self.assertEqual(
+            _behavior_deviations(
+                record_for(
+                    advisory_attempt,
+                    [
+                        {
+                            "proposal_id": "advisory-alias",
+                            "reason_codes": ["advisory_context_decision_attempt"],
+                        }
+                    ],
+                ),
+                case,
+            ),
+            1,
+        )
 
     def test_no_incident_ablation_removes_incident_input_before_generation(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -537,7 +675,7 @@ class SyntheticScoringTests(unittest.TestCase):
             {item["artifact_id"] for item in ablated["untrusted_artifacts"]},
         )
 
-    def test_concept_score_uses_one_result_per_arm_and_recovery_state(self) -> None:
+    def test_concept_score_keeps_nuanced_intent_as_conservative_false_negative(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             cases, oracles = _synthetic_cases(root)
@@ -632,9 +770,12 @@ class SyntheticScoringTests(unittest.TestCase):
             self.assertEqual(score["schema_version"], "lazarus.concept-score/v1")
             self.assertEqual(score["a1"]["recall"], 0.75)
             self.assertEqual(score["a1_rules"]["recall"], 0.75)
-            self.assertEqual(score["b"]["recall"], 1.0)
+            self.assertEqual(score["b"]["recall"], 0.875)
             self.assertEqual(score["b"]["precision"], 1.0)
-            self.assertEqual(score["b"]["unique_beyond_a1"], 2)
+            self.assertEqual(score["b"]["false_negative"], 1)
+            self.assertEqual(score["b"]["unique_beyond_a1"], 1)
+            self.assertEqual(score["b"]["abstention_required"], 1)
+            self.assertEqual(score["b"]["abstention_correct"], 1)
             self.assertTrue(score["concept_pass"])
             self.assertTrue(score["recovery_state_coverage"]["passed"])
             self.assertTrue(score["thresholds"]["generic_rules_do_not_reproduce"])
@@ -927,7 +1068,10 @@ def _model_raw_result(
         proposals.append(_proposal(case, "intent", "intent_effect_contradiction"))
         abstained = True
     blocker_codes = list(baseline_codes)
-    if any(item["relation_type"] != "probe_selection" for item in proposals):
+    if any(
+        item["relation_type"] == "resource_alias_candidate"
+        for item in proposals
+    ):
         blocker_codes.append("SEMANTIC_CONFIRMATION_REQUIRED")
     packet = _packet(
         case,
