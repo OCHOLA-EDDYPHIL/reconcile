@@ -9,7 +9,6 @@ import unittest
 from unittest import mock
 
 from lazarus.compiler import B_ARM_DISABLED_RELATIONS, compile_case, normalize_operations
-from lazarus.protocol import artifact_digest
 
 
 class CompilerTests(unittest.TestCase):
@@ -146,7 +145,7 @@ class CompilerTests(unittest.TestCase):
     def test_b_replay_abstention_requires_human_confirmation(self) -> None:
         case_dir = Path(__file__).resolve().parents[1] / "fixtures" / "calibration" / "case-03"
         semantic = {
-            "schema_version": "lazarus.semantic-proposal/v1",
+            "schema_version": "lazarus.semantic-proposal/v2",
             "case_id": "cal-03",
             "proposals": [],
             "abstained": True,
@@ -170,7 +169,7 @@ class CompilerTests(unittest.TestCase):
         request = (case_dir / "inputs" / "request.txt").read_text(encoding="utf-8")
         plan = (case_dir / "inputs" / "plan.json").read_text(encoding="utf-8")
         semantic = {
-            "schema_version": "lazarus.semantic-proposal/v1",
+            "schema_version": "lazarus.semantic-proposal/v2",
             "case_id": "cal-03",
             "proposals": [
                 {
@@ -181,16 +180,10 @@ class CompilerTests(unittest.TestCase):
                     "citations": [
                         {
                             "artifact_id": "plan",
-                            "digest": artifact_digest(plan),
-                            "start": 0,
-                            "end": len(plan),
                             "quote": plan,
                         },
                         {
                             "artifact_id": "request",
-                            "digest": artifact_digest(request),
-                            "start": 0,
-                            "end": len(request),
                             "quote": request,
                         }
                     ],
@@ -227,7 +220,7 @@ class CompilerTests(unittest.TestCase):
     def test_b_replay_does_not_inherit_fixed_generic_rules(self) -> None:
         case_dir = Path(__file__).resolve().parents[1] / "fixtures" / "calibration" / "case-03"
         semantic = {
-            "schema_version": "lazarus.semantic-proposal/v1",
+            "schema_version": "lazarus.semantic-proposal/v2",
             "case_id": "cal-03",
             "proposals": [],
             "abstained": True,
@@ -321,7 +314,7 @@ class CompilerTests(unittest.TestCase):
 
         def response(subject: str, object_: str) -> dict[str, object]:
             return {
-                "schema_version": "lazarus.semantic-proposal/v1",
+                "schema_version": "lazarus.semantic-proposal/v2",
                 "case_id": "cal-04",
                 "proposals": [
                     {
@@ -332,9 +325,6 @@ class CompilerTests(unittest.TestCase):
                         "citations": [
                             {
                                 "artifact_id": "runbook",
-                                "digest": artifact_digest(runbook),
-                                "start": 0,
-                                "end": len(runbook),
                                 "quote": runbook,
                             }
                         ],

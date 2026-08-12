@@ -694,7 +694,7 @@ def build_model_input(
             ablation_policy_text,
             object_pairs_hook=_unique_json_mapping,
         )
-        semantic_schema_path = root.parents[2] / "schemas" / "semantic-proposal-v1.json"
+        semantic_schema_path = root.parents[2] / "schemas" / "semantic-proposal-v2.json"
         semantic_schema_text = semantic_schema_path.read_text(encoding="utf-8")
         semantic_schema = json.loads(
             semantic_schema_text,
@@ -714,7 +714,7 @@ def build_model_input(
     )
     if (
         not isinstance(schema_version, Mapping)
-        or schema_version.get("const") != "lazarus.semantic-proposal/v1"
+        or schema_version.get("const") != "lazarus.semantic-proposal/v2"
     ):
         raise BenchmarkError("semantic output schema does not match the protocol")
     arms = ablation_policy.get("arms") if isinstance(ablation_policy, Mapping) else None

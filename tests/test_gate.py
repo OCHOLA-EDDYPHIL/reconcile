@@ -33,7 +33,7 @@ from lazarus.locking import LOCK_V2_SCHEMA_VERSION, canonical_json_bytes, canoni
 
 
 REPOSITORY = Path(__file__).resolve().parents[1]
-SEMANTIC_SCHEMA_TEXT = (REPOSITORY / "schemas" / "semantic-proposal-v1.json").read_text(
+SEMANTIC_SCHEMA_TEXT = (REPOSITORY / "schemas" / "semantic-proposal-v2.json").read_text(
     encoding="utf-8"
 )
 SEMANTIC_SCHEMA = json.loads(SEMANTIC_SCHEMA_TEXT)

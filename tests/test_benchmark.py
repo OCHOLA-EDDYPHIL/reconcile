@@ -421,12 +421,23 @@ class SyntheticScoringTests(unittest.TestCase):
 
         self.assertEqual(
             json.loads(schema_text)["properties"]["schema_version"]["const"],
-            "lazarus.semantic-proposal/v1",
+            "lazarus.semantic-proposal/v2",
         )
         self.assertEqual(
             request["semantic_output_schema_sha256"],
             hashlib.sha256(schema_text.encode("utf-8")).hexdigest(),
         )
+        task_prompt = request["task_prompt"]
+        self.assertIn("Select at most one allowed probe", task_prompt)
+        self.assertIn("first supported condition in this order", task_prompt)
+        probe_precedence = (
+            "verify_recovery_scope",
+            "verify_owner_record",
+            "verify_resource_generation",
+            "run_application_canary",
+        )
+        probe_positions = [task_prompt.index(probe_id) for probe_id in probe_precedence]
+        self.assertEqual(probe_positions, sorted(probe_positions))
 
     def test_invalid_semantic_object_is_not_a_correct_abstention(self) -> None:
         packet = {
@@ -926,12 +937,9 @@ def _model_raw_result(
         abstained=abstained,
     )
     semantic_response = {
-        "schema_version": "lazarus.semantic-proposal/v1",
+        "schema_version": "lazarus.semantic-proposal/v2",
         "case_id": case.case_id,
-        "proposals": [
-            {key: value for key, value in proposal.items() if key != "evidence_class"}
-            for proposal in proposals
-        ],
+        "proposals": [_model_proposal(proposal) for proposal in proposals],
         "abstained": abstained,
         "requested_evidence": ["clarify intended effect"] if abstained else [],
     }
@@ -996,6 +1004,22 @@ def _proposal(
     if relation_type == "probe_selection":
         proposal["probe_id"] = "verify_recovery_scope"
     return proposal
+
+
+def _model_proposal(proposal: dict[str, object]) -> dict[str, object]:
+    projected = {
+        key: value
+        for key, value in proposal.items()
+        if key not in {"citations", "evidence_class"}
+    }
+    projected["citations"] = [
+        {
+            "artifact_id": citation["artifact_id"],
+            "quote": citation["quote"],
+        }
+        for citation in proposal["citations"]
+    ]
+    return projected
 
 
 def _v2_capture(
