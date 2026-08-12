@@ -1,0 +1,30 @@
+{
+  "schema_version": "lazarus.oracle/v1",
+  "case_id": "eval-n03",
+  "negative_control": false,
+  "decision_changing_blockers": [
+    {
+      "oracle_id": "n-ob03",
+      "decision_changing": true,
+      "acceptable_matches": [
+        "SEMANTIC_CONFIRMATION_REQUIRED"
+      ],
+      "required_relation_types": [
+        "resource_alias_candidate"
+      ]
+    }
+  ],
+  "advisory_findings": [],
+  "coverage": [
+    "semantic_alias"
+  ],
+  "abstention_required": false,
+  "required_probe": "verify_recovery_scope",
+  "recovery_expectation": {
+    "restore": "pass",
+    "canary": "pass",
+    "rpo": "pass",
+    "rto": "pass",
+    "cleanup": "pass"
+  }
+}

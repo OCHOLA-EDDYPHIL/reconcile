@@ -1,0 +1,1 @@
+svc-n10 completed its move to an append-only file feed and no longer opens state-n10. The structured dependency record is inactive.

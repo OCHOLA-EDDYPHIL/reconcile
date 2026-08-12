@@ -1,0 +1,12 @@
+{
+  "records": [
+    {
+      "resource_ref": "google_sql_database_instance.unit_n04",
+      "project": "synthetic-core",
+      "generation": "rev-13",
+      "environment": "production",
+      "tested_at": "2026-07-15T13:00:00Z",
+      "application_canary": true
+    }
+  ]
+}

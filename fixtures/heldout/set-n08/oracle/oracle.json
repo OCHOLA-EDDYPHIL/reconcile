@@ -1,0 +1,38 @@
+{
+  "schema_version": "lazarus.oracle/v1",
+  "case_id": "eval-n08",
+  "negative_control": false,
+  "decision_changing_blockers": [
+    {
+      "oracle_id": "n-ob08",
+      "decision_changing": true,
+      "acceptable_matches": [
+        "SEMANTIC_CONFIRMATION_REQUIRED"
+      ],
+      "required_relation_types": [
+        "intent_effect_contradiction"
+      ]
+    },
+    {
+      "oracle_id": "n-ob08-abstention",
+      "decision_changing": true,
+      "acceptable_matches": [
+        "SEMANTIC_CONFIRMATION_REQUIRED"
+      ],
+      "requires_abstention": true
+    }
+  ],
+  "advisory_findings": [],
+  "coverage": [
+    "nuanced_intent"
+  ],
+  "abstention_required": true,
+  "required_probe": null,
+  "recovery_expectation": {
+    "restore": "pass",
+    "canary": "pass",
+    "rpo": "pass",
+    "rto": "pass",
+    "cleanup": "pass"
+  }
+}

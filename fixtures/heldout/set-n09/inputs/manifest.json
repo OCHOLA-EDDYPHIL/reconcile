@@ -1,0 +1,18 @@
+{
+  "services": [
+    {
+      "service_id": "svc-n09",
+      "environment": "production",
+      "aliases": [],
+      "dependencies": [
+        {
+          "resource_ref": "state-n09",
+          "project": "synthetic-core",
+          "environment": "production",
+          "generation": "prod-rev-19",
+          "active": true
+        }
+      ]
+    }
+  ]
+}

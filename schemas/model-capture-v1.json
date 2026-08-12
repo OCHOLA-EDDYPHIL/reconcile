@@ -1,0 +1,49 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:lazarus:schema:model-capture:v1",
+  "title": "Lazarus model capture contract v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "invocation_id",
+    "arm",
+    "started_at",
+    "completed_at",
+    "model_settings_digest",
+    "prompt_sha256",
+    "response_text",
+    "response_sha256",
+    "tool_calls"
+  ],
+  "properties": {
+    "schema_version": {"const": "lazarus.model-capture/v1"},
+    "invocation_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]*$"
+    },
+    "arm": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]*$"
+    },
+    "started_at": {"type": "string", "format": "date-time"},
+    "completed_at": {"type": "string", "format": "date-time"},
+    "model_settings_digest": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "prompt_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "response_text": {"type": "string"},
+    "response_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "tool_calls": {
+      "type": "array",
+      "items": {"type": "object"}
+    }
+  }
+}

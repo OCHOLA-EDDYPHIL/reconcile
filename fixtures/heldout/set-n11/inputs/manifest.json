@@ -1,0 +1,18 @@
+{
+  "services": [
+    {
+      "service_id": "svc-n11",
+      "environment": "production",
+      "aliases": [],
+      "dependencies": [
+        {
+          "resource_ref": "google_sql_database_instance.unit_n11",
+          "project": "synthetic-core",
+          "environment": "production",
+          "generation": "rev-21",
+          "active": true
+        }
+      ]
+    }
+  ]
+}

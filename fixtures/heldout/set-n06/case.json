@@ -1,0 +1,71 @@
+{
+  "schema_version": "lazarus.case/v1",
+  "case_id": "eval-n06",
+  "split": "heldout",
+  "artifacts": [
+    {
+      "artifact_id": "plan",
+      "kind": "terraform_plan",
+      "path": "inputs/plan.json",
+      "authority": "structured_fact"
+    },
+    {
+      "artifact_id": "ticket",
+      "kind": "change_ticket",
+      "path": "inputs/ticket.json",
+      "authority": "declared_context"
+    },
+    {
+      "artifact_id": "manifest",
+      "kind": "service_manifest",
+      "path": "inputs/manifest.json",
+      "authority": "structured_fact"
+    },
+    {
+      "artifact_id": "ownership",
+      "kind": "ownership",
+      "path": "inputs/ownership.json",
+      "authority": "structured_fact"
+    },
+    {
+      "artifact_id": "ledger",
+      "kind": "recovery_ledger",
+      "path": "inputs/ledger.json",
+      "authority": "structured_fact"
+    }
+  ],
+  "recovery": {
+    "dump_path": "inputs/database.sql",
+    "backup_created_at": "2026-07-15T14:50:00Z",
+    "reference_time": "2026-07-15T15:00:00Z",
+    "rpo_seconds": 3600,
+    "rto_ms": 60000,
+    "minimum_delay_ms": 0,
+    "expected_schema_version": 2,
+    "required_tables": [
+      "entries"
+    ],
+    "assertions": [
+      {
+        "assertion_id": "nonnegative-quantities",
+        "sql": "SELECT COUNT(*) FROM entries WHERE quantity < 0",
+        "expected": 0
+      }
+    ]
+  },
+  "policy": {
+    "reference_time": "2026-07-15T15:00:00Z",
+    "max_evidence_age_seconds": 86400,
+    "allowed_probe_ids": [
+      "verify_resource_generation",
+      "verify_recovery_scope",
+      "verify_owner_record",
+      "run_application_canary"
+    ],
+    "required_owner_fields": [
+      "owner",
+      "recovery_owner"
+    ],
+    "human_decision_required": true
+  }
+}

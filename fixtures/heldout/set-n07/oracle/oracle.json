@@ -1,0 +1,27 @@
+{
+  "schema_version": "lazarus.oracle/v1",
+  "case_id": "eval-n07",
+  "negative_control": false,
+  "decision_changing_blockers": [
+    {
+      "oracle_id": "n-ob07",
+      "decision_changing": true,
+      "acceptable_matches": [
+        "RTO_BREACH"
+      ]
+    }
+  ],
+  "advisory_findings": [],
+  "coverage": [
+    "rto_breach"
+  ],
+  "abstention_required": false,
+  "required_probe": null,
+  "recovery_expectation": {
+    "restore": "pass",
+    "canary": "pass",
+    "rpo": "pass",
+    "rto": "fail",
+    "cleanup": "pass"
+  }
+}

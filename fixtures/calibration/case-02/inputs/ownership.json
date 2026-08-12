@@ -1,0 +1,12 @@
+{
+  "resources": [
+    {
+      "resource_ref": "orders-pri",
+      "project": "core-platform",
+      "environment": "production",
+      "generation": "gen-4",
+      "owner": "fulfillment",
+      "recovery_owner": "fulfillment"
+    }
+  ]
+}

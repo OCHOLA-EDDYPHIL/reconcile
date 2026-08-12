@@ -1,0 +1,5 @@
+{
+  "intended_environment": "production",
+  "intended_effect": "delete",
+  "summary": "Carry out the data-store maintenance described in the attached request."
+}
