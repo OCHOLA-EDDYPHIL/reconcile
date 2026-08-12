@@ -248,7 +248,7 @@ def build_generate_content_request(model_input: bytes) -> bytes:
             "temperature": 1.0,
             "topP": 1.0,
             "candidateCount": 1,
-            "maxOutputTokens": 4096,
+            "maxOutputTokens": 8192,
             "responseMimeType": "application/json",
             "responseJsonSchema": projected_schema,
             "thinkingConfig": {
