@@ -25,6 +25,7 @@ from lazarus.gemini import (
     GeminiInvocation,
     GeminiResponseError,
     GeminiTransportError,
+    RequestPacer,
     Transport,
     build_generate_content_request,
     invoke_generate_content,
@@ -77,6 +78,7 @@ def capture_execution_plan(
     sealed_oracle_digest: str,
     api_key: str,
     transport: Transport | None = None,
+    pacer: RequestPacer | None = None,
     clock: Clock | None = None,
     progress: ProgressCallback | None = None,
 ) -> tuple[dict[str, Any], ...]:
@@ -104,6 +106,7 @@ def capture_execution_plan(
             plan,
             sealed_oracle_digest,
         )
+        selected_pacer = _select_pacer(pacer, transport, context.model_settings)
         prepared = {
             (entry["case_id"], entry["arm"]): deepcopy(entry)
             for entry in plan["prepared_inputs"]
@@ -154,6 +157,7 @@ def capture_execution_plan(
                 context=context,
                 api_key=api_key,
                 transport=transport,
+                pacer=selected_pacer,
                 clock=clock,
                 seen_response_ids=response_ids,
             )
@@ -175,6 +179,7 @@ def capture_model_evaluation(
     sealed_oracle_digest: str,
     api_key: str,
     transport: Transport | None = None,
+    pacer: RequestPacer | None = None,
     clock: Clock | None = None,
 ) -> dict[str, Any]:
     """Capture one model evaluation after checking every locked identity."""
@@ -200,6 +205,7 @@ def capture_model_evaluation(
             plan,
             sealed_oracle_digest,
         )
+        selected_pacer = _select_pacer(pacer, transport, context.model_settings)
         selected = _select_model_evaluation(plan, evaluation)
         expected_input = next(
             entry
@@ -233,6 +239,7 @@ def capture_model_evaluation(
         context=context,
         api_key=api_key,
         transport=transport,
+        pacer=selected_pacer,
         clock=clock,
     )
 
@@ -269,6 +276,7 @@ def capture_calibration_inputs(
     model_settings: Mapping[str, Any],
     api_key: str,
     transport: Transport | None = None,
+    pacer: RequestPacer | None = None,
     clock: Clock | None = None,
     progress: ProgressCallback | None = None,
 ) -> dict[str, Any]:
@@ -291,6 +299,7 @@ def capture_calibration_inputs(
             model_settings,
             plan,
         )
+        selected_pacer = _select_pacer(pacer, transport, context.model_settings)
     except (LockingError, GateError, TypeError, ValueError):
         error_path = root / "calibration" / "error.json"
         _write_error(
@@ -331,6 +340,7 @@ def capture_calibration_inputs(
             context=context,
             api_key=api_key,
             transport=transport,
+            pacer=selected_pacer,
             clock=clock,
             seen_response_ids=response_ids,
         )
@@ -393,6 +403,7 @@ def _capture_one(
     context: _CaptureContext,
     api_key: str,
     transport: Transport | None,
+    pacer: RequestPacer | None,
     clock: Clock | None,
     seen_response_ids: set[str] | None = None,
 ) -> dict[str, Any]:
@@ -442,6 +453,7 @@ def _capture_one(
             model_input,
             api_key,
             transport=transport,
+            pacer=pacer,
             timeout_seconds=context.model_settings["request"]["timeout_seconds"],
             clock=clock,
         )
@@ -800,6 +812,22 @@ def _embedded_final_lock_values(
             raise GateError(f"locked_{field}_invalid")
         values[field] = deepcopy(dict(value))
     return values
+
+
+def _select_pacer(
+    pacer: RequestPacer | None,
+    transport: Transport | None,
+    model_settings: Mapping[str, Any],
+) -> RequestPacer | None:
+    interval = model_settings["request"]["minimum_interval_seconds"]
+    if pacer is None:
+        return RequestPacer(interval) if transport is None else None
+    if (
+        not isinstance(pacer, RequestPacer)
+        or pacer.minimum_interval_seconds != interval
+    ):
+        raise GateError("provider_pacer_mismatch")
+    return pacer
 
 
 def _validate_progress(progress: ProgressCallback | None) -> None:

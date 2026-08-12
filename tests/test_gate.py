@@ -28,7 +28,7 @@ from lazarus.gate import (
     capture_execution_plan,
     capture_model_evaluation,
 )
-from lazarus.gemini import project_response_schema
+from lazarus.gemini import RequestPacer, project_response_schema
 from lazarus.locking import LOCK_V2_SCHEMA_VERSION, canonical_json_bytes, canonical_sha256
 
 
@@ -64,6 +64,7 @@ SETTINGS = {
         "store": False,
         "service_tier": "standard",
         "timeout_seconds": 120,
+        "minimum_interval_seconds": 16,
         "safety_settings": "provider-default",
         "tools": [],
     },
@@ -583,6 +584,35 @@ class CaptureTests(_FinalLockVerificationTests):
 
 
 class PlanOrchestrationTests(_FinalLockVerificationTests):
+    def test_rejects_a_pacer_that_does_not_match_locked_settings(self) -> None:
+        plan = build_execution_plan(CASE_IDS)
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            locked = _write_prepared_inputs(root, plan)
+            lock = _lock(plan, locked)
+            transport = _Transport()
+            pacer = RequestPacer(
+                15,
+                monotonic=lambda: 0.0,
+                sleeper=lambda _seconds: None,
+            )
+
+            with self.assertRaisesRegex(GateError, "execution_context_invalid"):
+                capture_execution_plan(
+                    root,
+                    plan,
+                    repository_root=root / "repository",
+                    lock_manifest=lock,
+                    model_settings=SETTINGS,
+                    sealed_oracle_digest=SEALED_ORACLE_DIGEST,
+                    api_key="fake",
+                    transport=transport,
+                    pacer=pacer,
+                    clock=_Clock(),
+                )
+
+            self.assertEqual(transport.calls, [])
+
     def test_walks_only_model_evaluations_in_plan_order_sequentially_and_silently(self) -> None:
         plan = build_execution_plan(CASE_IDS)
         with tempfile.TemporaryDirectory() as temporary:

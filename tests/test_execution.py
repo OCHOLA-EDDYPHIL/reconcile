@@ -63,6 +63,7 @@ GEMINI_SETTINGS = {
         "store": False,
         "service_tier": "standard",
         "timeout_seconds": 120,
+        "minimum_interval_seconds": 16,
         "safety_settings": "provider-default",
         "tools": [],
     },

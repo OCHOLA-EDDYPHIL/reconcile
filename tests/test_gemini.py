@@ -13,6 +13,7 @@ from lazarus.gemini import (
     GeminiResponseError,
     GeminiSchemaError,
     GeminiTransportError,
+    RequestPacer,
     build_generate_content_request,
     extract_generate_content_response,
     invoke_generate_content,
@@ -72,6 +73,7 @@ def _gemini_model_settings() -> dict[str, object]:
             "store": False,
             "service_tier": "standard",
             "timeout_seconds": 120,
+            "minimum_interval_seconds": 16,
             "safety_settings": "provider-default",
             "tools": [],
         },
@@ -157,6 +159,74 @@ class _Clock:
         current = self.value
         self.value += timedelta(milliseconds=25)
         return current
+
+
+class _Timeline:
+    def __init__(self, *, now: float = 0.0, oversleep: float = 0.0) -> None:
+        self.now = now
+        self.oversleep = oversleep
+        self.sleeps: list[float] = []
+
+    def monotonic(self) -> float:
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        self.sleeps.append(seconds)
+        self.now += seconds + self.oversleep
+
+
+class RequestPacerTests(unittest.TestCase):
+    def test_spaces_sequential_starts_from_actual_post_sleep_time(self) -> None:
+        timeline = _Timeline(now=10.0, oversleep=0.25)
+        pacer = RequestPacer(
+            2,
+            monotonic=timeline.monotonic,
+            sleeper=timeline.sleep,
+        )
+
+        self.assertEqual(pacer.minimum_interval_seconds, 2.0)
+        with self.assertRaises(AttributeError):
+            pacer.minimum_interval_seconds = 1  # type: ignore[misc]
+        self.assertIsNone(pacer.wait())
+        self.assertEqual(timeline.sleeps, [])
+
+        timeline.now += 0.5
+        pacer.wait()
+        self.assertEqual(timeline.sleeps, [1.5])
+
+        timeline.now += 0.5
+        pacer.wait()
+        self.assertEqual(timeline.sleeps, [1.5, 1.5])
+
+        timeline.now += 2
+        pacer.wait()
+        self.assertEqual(timeline.sleeps, [1.5, 1.5])
+
+    def test_zero_interval_never_sleeps(self) -> None:
+        timeline = _Timeline()
+        pacer = RequestPacer(
+            0,
+            monotonic=timeline.monotonic,
+            sleeper=timeline.sleep,
+        )
+
+        pacer.wait()
+        pacer.wait()
+
+        self.assertEqual(timeline.sleeps, [])
+
+    def test_rejects_invalid_interval_clock_and_callbacks(self) -> None:
+        for interval in (True, -1, float("inf"), float("nan"), "1"):
+            with self.subTest(interval=interval):
+                with self.assertRaises(GeminiInputError):
+                    RequestPacer(interval)  # type: ignore[arg-type]
+
+        with self.assertRaises(TypeError):
+            RequestPacer(1, monotonic=None)  # type: ignore[arg-type]
+        with self.assertRaises(TypeError):
+            RequestPacer(1, sleeper=None)  # type: ignore[arg-type]
+        with self.assertRaises(GeminiInputError):
+            RequestPacer(1, monotonic=lambda: float("nan")).wait()
 
 
 class SchemaProjectionTests(unittest.TestCase):
@@ -342,6 +412,18 @@ class LockSettingsTests(unittest.TestCase):
                 with self.assertRaisesRegex(
                     LockingError,
                     "Gemini thinking must be MINIMAL with thoughts excluded",
+                ):
+                    validate_model_settings(invalid, require_gemini=True)
+
+    def test_requires_the_registered_request_interval(self) -> None:
+        settings = _gemini_model_settings()
+        for interval in (0, 15, 16.0, True):
+            with self.subTest(interval=interval):
+                invalid = deepcopy(settings)
+                invalid["request"]["minimum_interval_seconds"] = interval
+                with self.assertRaisesRegex(
+                    LockingError,
+                    "Gemini request settings do not match the protocol",
                 ):
                     validate_model_settings(invalid, require_gemini=True)
 
