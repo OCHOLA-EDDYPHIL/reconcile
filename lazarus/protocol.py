@@ -12,7 +12,7 @@ from typing import Any
 
 
 CASE_SCHEMA_VERSION = "lazarus.case/v1"
-SEMANTIC_SCHEMA_VERSION = "lazarus.semantic-proposal/v1"
+SEMANTIC_SCHEMA_VERSION = "lazarus.semantic-proposal/v2"
 EVIDENCE_PACKET_SCHEMA_VERSION = "lazarus.evidence-packet/v1"
 
 CASE_SPLITS = frozenset({"calibration", "heldout"})
@@ -227,7 +227,7 @@ def validate_semantic_contract(
     if _is_array(proposals):
         for index, proposal in enumerate(proposals):
             path = f"$.proposals[{index}]"
-            candidate_issues = validate_proposal_shape(proposal, path=path)
+            candidate_issues = validate_model_proposal_shape(proposal, path=path)
             issues.extend(candidate_issues)
             if isinstance(proposal, Mapping):
                 proposal_id = proposal.get("proposal_id")
@@ -254,8 +254,20 @@ def validate_semantic_envelope(
     return dict(semantic_output)
 
 
+def validate_model_proposal_shape(
+    proposal: Any, *, path: str = "$.proposal"
+) -> tuple[ValidationIssue, ...]:
+    return _validate_proposal_shape(proposal, path=path, model_facing=True)
+
+
 def validate_proposal_shape(
     proposal: Any, *, path: str = "$.proposal"
+) -> tuple[ValidationIssue, ...]:
+    return _validate_proposal_shape(proposal, path=path, model_facing=False)
+
+
+def _validate_proposal_shape(
+    proposal: Any, *, path: str, model_facing: bool
 ) -> tuple[ValidationIssue, ...]:
     issues: list[ValidationIssue] = []
     if not isinstance(proposal, Mapping):
@@ -314,25 +326,54 @@ def validate_proposal_shape(
             )
         )
     else:
-        seen_citations: set[tuple[Any, ...]] = set()
+        seen_citations: set[str] = set()
         for index, citation in enumerate(citations):
             citation_path = f"{path}.citations[{index}]"
-            issues.extend(validate_citation_shape(citation, path=citation_path))
+            citation_shape = (
+                validate_model_citation_shape
+                if model_facing
+                else validate_citation_shape
+            )
+            issues.extend(citation_shape(citation, path=citation_path))
             if isinstance(citation, Mapping):
-                identity = repr((
+                identity = (
                     citation.get("artifact_id"),
-                    citation.get("digest"),
-                    citation.get("start"),
-                    citation.get("end"),
                     citation.get("quote"),
-                ))
-                if identity in seen_citations:
+                )
+                if not model_facing:
+                    identity = (
+                        citation.get("artifact_id"),
+                        citation.get("digest"),
+                        citation.get("start"),
+                        citation.get("end"),
+                        citation.get("quote"),
+                    )
+                identity_key = repr(identity)
+                if identity_key in seen_citations:
                     issues.append(
                         ValidationIssue(
                             "duplicate", citation_path, "citations must be unique"
                         )
                     )
-                seen_citations.add(identity)
+                seen_citations.add(identity_key)
+    return tuple(issues)
+
+
+def validate_model_citation_shape(
+    citation: Any, *, path: str = "$.citation"
+) -> tuple[ValidationIssue, ...]:
+    issues: list[ValidationIssue] = []
+    if not isinstance(citation, Mapping):
+        return (ValidationIssue("type", path, "citation must be an object"),)
+    _check_keys(
+        citation,
+        required={"artifact_id", "quote"},
+        allowed={"artifact_id", "quote"},
+        path=path,
+        issues=issues,
+    )
+    _check_identifier(citation.get("artifact_id"), f"{path}.artifact_id", issues)
+    _check_nonempty_text(citation.get("quote"), f"{path}.quote", issues)
     return tuple(issues)
 
 

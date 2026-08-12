@@ -23,7 +23,7 @@ from lazarus.locking import LockingError, canonical_json_bytes, validate_model_s
 
 
 REPOSITORY = Path(__file__).resolve().parents[1]
-SEMANTIC_SCHEMA_TEXT = (REPOSITORY / "schemas" / "semantic-proposal-v1.json").read_text(
+SEMANTIC_SCHEMA_TEXT = (REPOSITORY / "schemas" / "semantic-proposal-v2.json").read_text(
     encoding="utf-8"
 )
 
@@ -237,14 +237,14 @@ class SchemaProjectionTests(unittest.TestCase):
         self.assertEqual(source, original)
         self.assertEqual(first, second)
         projected_bytes = canonical_json_bytes(first)
-        self.assertEqual(len(projected_bytes), 1622)
+        self.assertEqual(len(projected_bytes), 1473)
         self.assertEqual(
             hashlib.sha256(projected_bytes).hexdigest(),
-            "9b9cb6f10676f2bec05c9de1d877df9d2eb4f04dc293fe190f779b6ecdbdb85c",
+            "15e207b52a7f5f5217749e3476eef8bc69a327ea244d789a44b8e4d44d26609f",
         )
         self.assertEqual(
             first["properties"]["schema_version"],
-            {"enum": ["lazarus.semantic-proposal/v1"], "type": "string"},
+            {"enum": ["lazarus.semantic-proposal/v2"], "type": "string"},
         )
         self.assertEqual(
             first["propertyOrdering"],
@@ -254,6 +254,11 @@ class SchemaProjectionTests(unittest.TestCase):
             first["properties"]["proposals"]["items"]["propertyOrdering"],
             ["proposal_id", "relation_type", "subject", "object", "citations", "probe_id"],
         )
+        citation_schema = first["properties"]["proposals"]["items"]["properties"][
+            "citations"
+        ]["items"]
+        self.assertEqual(citation_schema["required"], ["artifact_id", "quote"])
+        self.assertEqual(set(citation_schema["properties"]), {"artifact_id", "quote"})
         projected_text = projected_bytes.decode("utf-8")
         for unsupported in (
             '"$schema"',

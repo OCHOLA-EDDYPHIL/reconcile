@@ -85,7 +85,7 @@ class FalsificationOutcome:
 
 def build_registered_model_settings(repository_root: str | os.PathLike[str]) -> dict[str, Any]:
     repository = Path(repository_root).resolve()
-    schema_path = repository / "schemas" / "semantic-proposal-v1.json"
+    schema_path = repository / "schemas" / "semantic-proposal-v2.json"
     try:
         schema = json.loads(
             schema_path.read_text(encoding="utf-8"),

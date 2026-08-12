@@ -88,6 +88,10 @@ def citation(artifact_id: str, text: str, quote: str) -> dict:
     }
 
 
+def model_citation(artifact_id: str, quote: str) -> dict:
+    return {"artifact_id": artifact_id, "quote": quote}
+
+
 def proposal(
     proposal_id: str,
     relation_type: str,
@@ -243,7 +247,7 @@ class SemanticResolverTests(unittest.TestCase):
         }
 
     def test_valid_candidate_is_admitted_but_not_as_structured_fact(self) -> None:
-        cited = citation("ticket", self.texts["ticket"], self.texts["ticket"])
+        cited = model_citation("ticket", self.texts["ticket"])
         output = semantic_response(
             [
                 proposal(
@@ -260,8 +264,90 @@ class SemanticResolverTests(unittest.TestCase):
         self.assertEqual(resolution["admitted"][0]["evidence_class"], "candidate_inference")
         self.assertNotEqual(resolution["admitted"][0]["evidence_class"], "structured_fact")
 
+    def test_unique_unicode_quote_is_resolved_to_character_offsets_and_digest(self) -> None:
+        text = "Prefix 🚀 café — target omega Ω."
+        self.texts["ticket"] = text.encode("utf-8")
+        quote = "target omega Ω"
+        output = semantic_response(
+            [
+                proposal(
+                    "unicode-1",
+                    "owner_candidate",
+                    model_citation("ticket", quote),
+                    subject="target",
+                    object_="omega",
+                )
+            ]
+        )
+
+        resolution = resolve_semantic_output(make_case(), output, self.texts)
+
+        resolved = resolution["admitted"][0]["citations"][0]
+        self.assertEqual(
+            set(resolved),
+            {"artifact_id", "digest", "start", "end", "quote"},
+        )
+        self.assertEqual(resolved["digest"], artifact_digest(text))
+        self.assertEqual(resolved["start"], text.index(quote))
+        self.assertEqual(resolved["end"], text.index(quote) + len(quote))
+        self.assertEqual(text[resolved["start"] : resolved["end"]], quote)
+
+    def test_missing_quote_is_rejected(self) -> None:
+        output = semantic_response(
+            [
+                proposal(
+                    "missing-1",
+                    "owner_candidate",
+                    model_citation("ticket", "production"),
+                )
+            ]
+        )
+
+        resolution = resolve_semantic_output(make_case(), output, self.texts)
+
+        self.assertEqual(resolution["admitted"], [])
+        self.assertIn(
+            "citation_quote_missing",
+            resolution["rejected"][0]["reason_codes"],
+        )
+
+    def test_ambiguous_overlapping_quote_is_rejected(self) -> None:
+        self.texts["ticket"] = "aaaa"
+        output = semantic_response(
+            [
+                proposal(
+                    "ambiguous-1",
+                    "owner_candidate",
+                    model_citation("ticket", "aaa"),
+                )
+            ]
+        )
+
+        resolution = resolve_semantic_output(make_case(), output, self.texts)
+
+        self.assertEqual(resolution["admitted"], [])
+        self.assertIn(
+            "citation_quote_ambiguous",
+            resolution["rejected"][0]["reason_codes"],
+        )
+
+    def test_model_citation_cannot_supply_deterministic_locator_fields(self) -> None:
+        cited = model_citation("ticket", "staging")
+        cited["digest"] = "0" * 64
+        output = semantic_response(
+            [proposal("locator-1", "owner_candidate", cited)]
+        )
+
+        with self.assertRaises(ProtocolValidationError) as raised:
+            validate_semantic_contract(output)
+
+        self.assertIn(
+            "additional_property",
+            {issue.code for issue in raised.exception.issues},
+        )
+
     def test_candidate_endpoints_must_be_grounded_in_cited_quotes(self) -> None:
-        cited = citation("ticket", self.texts["ticket"], "staging")
+        cited = model_citation("ticket", "staging")
         output = semantic_response(
             [proposal("p-1", "owner_candidate", cited)]
         )
@@ -276,7 +362,7 @@ class SemanticResolverTests(unittest.TestCase):
         )
 
     def test_intent_contradiction_endpoints_must_be_distinct(self) -> None:
-        cited = citation("ticket", self.texts["ticket"], "staging")
+        cited = model_citation("ticket", "staging")
         output = semantic_response(
             [proposal("p-1", "intent_effect_contradiction", cited)]
         )
@@ -323,12 +409,12 @@ class SemanticResolverTests(unittest.TestCase):
         good = proposal(
             "p-good",
             "resource_alias_candidate",
-            citation("ticket", self.texts["ticket"], "staging"),
+            model_citation("ticket", "staging"),
         )
         bad = proposal(
             "p-bad",
             "unbounded_relation",
-            citation("ticket", self.texts["ticket"], "staging"),
+            model_citation("ticket", "staging"),
         )
         bad["citations"][0]["quote"] = "production"
         resolution = resolve_semantic_output(
@@ -337,10 +423,10 @@ class SemanticResolverTests(unittest.TestCase):
         self.assertEqual([item["proposal_id"] for item in resolution["admitted"]], ["p-good"])
         self.assertEqual(resolution["rejected"][0]["proposal_id"], "p-bad")
         self.assertIn("enum", resolution["rejected"][0]["reason_codes"])
-        self.assertIn("citation_quote_mismatch", resolution["rejected"][0]["reason_codes"])
+        self.assertIn("citation_quote_missing", resolution["rejected"][0]["reason_codes"])
 
     def test_only_enabled_allowlisted_probe_is_admitted(self) -> None:
-        cited = citation("plan", self.texts["plan"], "production")
+        cited = model_citation("plan", "production")
         allowed = proposal(
             "probe-1",
             "probe_selection",
@@ -360,7 +446,7 @@ class SemanticResolverTests(unittest.TestCase):
         self.assertEqual(resolution["rejected"][0]["reason_codes"], ["probe_not_allowed"])
 
     def test_only_one_allowlisted_probe_can_be_admitted(self) -> None:
-        cited = citation("plan", self.texts["plan"], "production")
+        cited = model_citation("plan", "production")
         first = proposal(
             "probe-1",
             "probe_selection",
@@ -385,7 +471,7 @@ class SemanticResolverTests(unittest.TestCase):
         )
 
     def test_ablation_rejects_an_otherwise_valid_relation(self) -> None:
-        cited = citation("ticket", self.texts["ticket"], "staging")
+        cited = model_citation("ticket", "staging")
         output = semantic_response(
             [proposal("alias-1", "resource_alias_candidate", cited)]
         )
@@ -402,7 +488,7 @@ class SemanticResolverTests(unittest.TestCase):
         )
 
     def test_artifact_instruction_remains_advisory_data(self) -> None:
-        cited = citation("incident", self.texts["incident"], "authoritative")
+        cited = model_citation("incident", "authoritative")
         output = semantic_response(
             [proposal("p-incident", "incident_relevance_advisory", cited)]
         )
@@ -412,6 +498,10 @@ class SemanticResolverTests(unittest.TestCase):
     def test_empty_response_distinguishes_no_findings_from_abstention(self) -> None:
         no_findings = semantic_response([])
         self.assertFalse(validate_semantic_contract(no_findings)["abstained"])
+        stale = copy.deepcopy(no_findings)
+        stale["schema_version"] = "lazarus.semantic-proposal/v1"
+        with self.assertRaises(ProtocolValidationError):
+            validate_semantic_contract(stale)
         abstained = semantic_response([], abstained=True)
         self.assertTrue(validate_semantic_contract(abstained)["abstained"])
         abstained["requested_evidence"] = []
@@ -426,7 +516,7 @@ class EvidencePacketTests(unittest.TestCase):
             "plan": '{"environment":"production"}',
             "incident": "Historical discussion only.",
         }
-        cited = citation("ticket", self.texts["ticket"], self.texts["ticket"])
+        cited = model_citation("ticket", self.texts["ticket"])
         output = semantic_response(
             [
                 proposal(
@@ -502,7 +592,8 @@ class PublishedSchemaTests(unittest.TestCase):
         schema_dir = Path(__file__).resolve().parents[1] / "schemas"
         versions = {
             "case-v1.json": CASE_SCHEMA_VERSION,
-            "semantic-proposal-v1.json": SEMANTIC_SCHEMA_VERSION,
+            "semantic-proposal-v1.json": "lazarus.semantic-proposal/v1",
+            "semantic-proposal-v2.json": SEMANTIC_SCHEMA_VERSION,
             "evidence-packet-v1.json": EVIDENCE_PACKET_SCHEMA_VERSION,
             "model-capture-v1.json": "lazarus.model-capture/v1",
         }

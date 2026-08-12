@@ -46,7 +46,7 @@ class _EmptySemanticTransport:
         model_input = json.loads(request_body["contents"][0]["parts"][0]["text"])
         case_id = model_input["case"]["case_id"]
         semantic = {
-            "schema_version": "lazarus.semantic-proposal/v1",
+            "schema_version": "lazarus.semantic-proposal/v2",
             "case_id": case_id,
             "proposals": [],
             "abstained": False,
