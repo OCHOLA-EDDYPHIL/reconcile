@@ -14,7 +14,7 @@ from lazarus.falsification import (
     read_api_key,
     run_registered_falsification,
 )
-from lazarus.gemini import build_generate_content_request
+from lazarus.gemini import RequestPacer, build_generate_content_request
 from lazarus.locking import canonical_json_bytes, canonical_sha256
 
 
@@ -78,6 +78,24 @@ class _EmptySemanticTransport:
         return _Response(canonical_json_bytes(payload))
 
 
+def _virtual_pacer() -> tuple[RequestPacer, list[float]]:
+    monotonic_time = [0.0]
+    sleeps: list[float] = []
+
+    def sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+        monotonic_time[0] += seconds
+
+    return (
+        RequestPacer(
+            16,
+            monotonic=lambda: monotonic_time[0],
+            sleeper=sleep,
+        ),
+        sleeps,
+    )
+
+
 class SettingsTests(unittest.TestCase):
     def test_registered_settings_match_the_exact_rendered_request_schema(self) -> None:
         settings = build_registered_model_settings(REPOSITORY)
@@ -100,6 +118,7 @@ class SettingsTests(unittest.TestCase):
             settings["thinking"],
             {"level": "MINIMAL", "include_thoughts": False},
         )
+        self.assertEqual(settings["request"]["minimum_interval_seconds"], 16)
         self.assertEqual(settings["retry"], {"max_attempts": 1, "backoff_seconds": 0})
         self.assertEqual(EXPECTED_GENERATION_CALLS, 16)
 
@@ -122,6 +141,7 @@ class SettingsTests(unittest.TestCase):
 class CalibrationBoundaryTests(unittest.TestCase):
     def test_incomplete_calibration_never_generates_a_heldout_suite(self) -> None:
         transport = _EmptySemanticTransport(complete=False)
+        pacer, sleeps = _virtual_pacer()
         repository_state = {
             "head_sha": "1" * 40,
             "tree_sha": "2" * 40,
@@ -145,12 +165,14 @@ class CalibrationBoundaryTests(unittest.TestCase):
                     run_root,
                     api_key="test-key",
                     transport=transport,
+                    pacer=pacer,
                     require_exact_main=False,
                 )
             self.assertEqual(transport.calls, 4)
             self.assertEqual(transport.assert_timeout, 120)
             self.assertEqual(outcome.summary["generation_calls"], 4)
             self.assertEqual(outcome.summary["disposition"], "calibration_failed")
+            self.assertEqual(sleeps, [16.0] * 3)
             self.assertFalse((run_root / "runtime" / "public-suite").exists())
             self.assertEqual(
                 len(list((run_root / "calibration-run" / "calibration").glob("*/raw-response.json"))),
@@ -159,6 +181,7 @@ class CalibrationBoundaryTests(unittest.TestCase):
 
     def test_valid_transport_reaches_the_concept_score_without_model_gain(self) -> None:
         transport = _EmptySemanticTransport()
+        pacer, sleeps = _virtual_pacer()
         repository_state = {
             "head_sha": "1" * 40,
             "tree_sha": "2" * 40,
@@ -182,11 +205,13 @@ class CalibrationBoundaryTests(unittest.TestCase):
                     run_root,
                     api_key="test-key",
                     transport=transport,
+                    pacer=pacer,
                     require_exact_main=False,
                 )
             self.assertEqual(transport.calls, EXPECTED_GENERATION_CALLS)
             self.assertEqual(outcome.summary["generation_calls"], EXPECTED_GENERATION_CALLS)
             self.assertEqual(outcome.summary["disposition"], "concept_fail")
+            self.assertEqual(sleeps, [16.0] * (EXPECTED_GENERATION_CALLS - 1))
             self.assertTrue((run_root / "control" / "benchmark-lock.json").is_file())
             self.assertEqual(
                 len(list((run_root / "execution" / "evaluations").glob("*/raw-response.json"))),

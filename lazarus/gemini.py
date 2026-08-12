@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 import hashlib
 import json
 import math
+import time
 from typing import Any, Protocol
 import urllib.error
 import urllib.request
@@ -131,6 +132,67 @@ class _HTTPResponse(Protocol):
 
 Transport = Callable[[urllib.request.Request, float], _HTTPResponse]
 Clock = Callable[[], datetime]
+
+
+class RequestPacer:
+    """Space sequential request starts by a locked monotonic interval."""
+
+    __slots__ = (
+        "_last_started_at",
+        "_minimum_interval_seconds",
+        "_monotonic",
+        "_sleeper",
+    )
+
+    def __init__(
+        self,
+        minimum_interval_seconds: float,
+        *,
+        monotonic: Callable[[], float] = time.monotonic,
+        sleeper: Callable[[float], None] = time.sleep,
+    ) -> None:
+        if (
+            isinstance(minimum_interval_seconds, bool)
+            or not isinstance(minimum_interval_seconds, (int, float))
+            or not math.isfinite(minimum_interval_seconds)
+            or minimum_interval_seconds < 0
+        ):
+            raise GeminiInputError(
+                "minimum_interval_seconds must be a non-negative finite number"
+            )
+        if not callable(monotonic):
+            raise TypeError("monotonic must be callable")
+        if not callable(sleeper):
+            raise TypeError("sleeper must be callable")
+        self._minimum_interval_seconds = float(minimum_interval_seconds)
+        self._monotonic = monotonic
+        self._sleeper = sleeper
+        self._last_started_at: float | None = None
+
+    @property
+    def minimum_interval_seconds(self) -> float:
+        return self._minimum_interval_seconds
+
+    def wait(self) -> None:
+        started_at = self._read_monotonic()
+        if self._last_started_at is not None:
+            remaining = self._minimum_interval_seconds - (
+                started_at - self._last_started_at
+            )
+            if remaining > 0:
+                self._sleeper(remaining)
+                started_at = self._read_monotonic()
+        self._last_started_at = started_at
+
+    def _read_monotonic(self) -> float:
+        value = self._monotonic()
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(value)
+        ):
+            raise GeminiInputError("monotonic must return a finite number")
+        return float(value)
 
 
 class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
@@ -350,6 +412,7 @@ def invoke_generate_content(
     api_key: str,
     *,
     transport: Transport | None = None,
+    pacer: RequestPacer | None = None,
     timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
     clock: Clock | None = None,
 ) -> GeminiInvocation:
@@ -376,6 +439,10 @@ def invoke_generate_content(
     )
     selected_transport = transport or _urllib_transport
     selected_clock = clock or _utc_now
+    if pacer is not None:
+        if not isinstance(pacer, RequestPacer):
+            raise GeminiInputError("pacer must be a RequestPacer")
+        pacer.wait()
     started_at = _timestamp(selected_clock())
 
     try:
@@ -822,3 +889,26 @@ def _timestamp(value: datetime) -> str:
     return value.astimezone(timezone.utc).isoformat(timespec="microseconds").replace(
         "+00:00", "Z"
     )
+
+
+__all__ = [
+    "Clock",
+    "DEFAULT_TIMEOUT_SECONDS",
+    "GEMINI_ENDPOINT",
+    "GEMINI_MODEL",
+    "GeminiCandidate",
+    "GeminiError",
+    "GeminiInputError",
+    "GeminiInvocation",
+    "GeminiResponse",
+    "GeminiResponseError",
+    "GeminiSchemaError",
+    "GeminiTransportError",
+    "MODEL_INPUT_SCHEMA_VERSION",
+    "RequestPacer",
+    "Transport",
+    "build_generate_content_request",
+    "extract_generate_content_response",
+    "invoke_generate_content",
+    "project_response_schema",
+]

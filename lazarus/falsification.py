@@ -37,7 +37,12 @@ from lazarus.gate import (
     capture_calibration_inputs,
     capture_execution_plan,
 )
-from lazarus.gemini import GEMINI_ENDPOINT, Transport, project_response_schema
+from lazarus.gemini import (
+    GEMINI_ENDPOINT,
+    RequestPacer,
+    Transport,
+    project_response_schema,
+)
 from lazarus.locking import (
     build_calibration_lock_manifest,
     build_lock_manifest_v2,
@@ -111,6 +116,7 @@ def build_registered_model_settings(repository_root: str | os.PathLike[str]) -> 
             "store": False,
             "service_tier": "standard",
             "timeout_seconds": 120,
+            "minimum_interval_seconds": 16,
             "safety_settings": "provider-default",
             "tools": [],
         },
@@ -124,6 +130,7 @@ def run_registered_falsification(
     *,
     api_key: str,
     transport: Transport | None = None,
+    pacer: RequestPacer | None = None,
     progress: Progress | None = None,
     require_exact_main: bool = True,
 ) -> FalsificationOutcome:
@@ -147,6 +154,8 @@ def run_registered_falsification(
         directory.mkdir(mode=0o700)
 
     settings = build_registered_model_settings(repository)
+    if pacer is None:
+        pacer = RequestPacer(settings["request"]["minimum_interval_seconds"])
     write_immutable_json(control / "model-settings.json", settings)
     _notify(progress, "calibration_prepare", 0, 4)
     calibration_index = _run_calibration(
@@ -156,6 +165,7 @@ def run_registered_falsification(
         settings,
         api_key=api_key,
         transport=transport,
+        pacer=pacer,
         progress=progress,
     )
     if calibration_index.get("passed") is not True:
@@ -273,6 +283,7 @@ def run_registered_falsification(
         sealed_oracle_digest=sealed_digest,
         api_key=api_key,
         transport=transport,
+        pacer=pacer,
         progress=(
             (lambda completed, total: _notify(progress, "heldout_capture", completed, total))
             if progress is not None
@@ -358,6 +369,7 @@ def _run_calibration(
     *,
     api_key: str,
     transport: Transport | None,
+    pacer: RequestPacer | None,
     progress: Progress | None,
 ) -> dict[str, Any]:
     fixtures_root = repository / "fixtures"
@@ -439,6 +451,7 @@ def _run_calibration(
         repository_root=repository,
         api_key=api_key,
         transport=transport,
+        pacer=pacer,
         progress=(
             (lambda completed, total: _notify(progress, "calibration_capture", completed, total))
             if progress is not None

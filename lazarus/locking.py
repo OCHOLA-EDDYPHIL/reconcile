@@ -199,6 +199,7 @@ def _validate_gemini_model_settings(settings: dict[str, Any]) -> dict[str, Any]:
         "store": False,
         "service_tier": "standard",
         "timeout_seconds": 120,
+        "minimum_interval_seconds": 16,
         "safety_settings": "provider-default",
         "tools": [],
     }
@@ -210,6 +211,8 @@ def _validate_gemini_model_settings(settings: dict[str, Any]) -> dict[str, Any]:
         or not isinstance(request.get("service_tier"), str)
         or type(request.get("timeout_seconds")) is not int
         or request.get("timeout_seconds") != 120
+        or type(request.get("minimum_interval_seconds")) is not int
+        or request.get("minimum_interval_seconds") != 16
         or request.get("safety_settings") != "provider-default"
         or not isinstance(request.get("safety_settings"), str)
         or not isinstance(request.get("tools"), list)
