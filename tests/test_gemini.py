@@ -57,15 +57,15 @@ def _gemini_model_settings() -> dict[str, object]:
         "provider": "gemini-developer-api",
         "api_version": "v1beta",
         "endpoint": GEMINI_ENDPOINT,
-        "model": "gemini-2.5-flash",
-        "catalog_model_version": "001",
-        "resolved_model_version": "gemini-2.5-flash",
+        "model": "gemini-3.5-flash-lite",
+        "catalog_model_version": "3.5-flash-lite-07-2026",
+        "resolved_model_version": "gemini-3.5-flash-lite",
         "parameters": {
             "max_output_tokens": 8192,
             "response_mime_type": "application/json",
             "response_schema_sha256": "a" * 64,
         },
-        "thinking": {"budget": 0, "include_thoughts": False},
+        "thinking": {"level": "MINIMAL", "include_thoughts": False},
         "request": {
             "store": False,
             "service_tier": "standard",
@@ -86,7 +86,7 @@ def _provider_body(
     return json.dumps(
         {
             "responseId": "response-1",
-            "modelVersion": "gemini-2.5-flash",
+            "modelVersion": "gemini-3.5-flash-lite",
             "usageMetadata": {
                 "promptTokenCount": 120,
                 "candidatesTokenCount": 30,
@@ -350,7 +350,7 @@ class RequestTests(unittest.TestCase):
         self.assertEqual(config["responseMimeType"], "application/json")
         self.assertEqual(
             config["thinkingConfig"],
-            {"thinkingBudget": 0, "includeThoughts": False},
+            {"thinkingLevel": "MINIMAL", "includeThoughts": False},
         )
         self.assertFalse(request["store"])
         self.assertEqual(request["serviceTier"], "standard")
@@ -361,7 +361,7 @@ class RequestTests(unittest.TestCase):
             '"cachedContent"',
             '"seed"',
             '"safetySettings"',
-            '"thinkingLevel"',
+            '"thinkingBudget"',
             '"temperature"',
             '"topP"',
             '"candidateCount"',
@@ -394,7 +394,7 @@ class RequestTests(unittest.TestCase):
 
 
 class LockSettingsTests(unittest.TestCase):
-    def test_requires_zero_thinking_budget_with_thoughts_excluded(self) -> None:
+    def test_requires_minimal_thinking_level_with_thoughts_excluded(self) -> None:
         settings = _gemini_model_settings()
         self.assertEqual(
             validate_model_settings(settings, require_gemini=True),
@@ -402,15 +402,15 @@ class LockSettingsTests(unittest.TestCase):
         )
 
         for thinking in (
-            {"budget": 1, "include_thoughts": False},
-            {"budget": 0.0, "include_thoughts": False},
-            {"budget": False, "include_thoughts": False},
-            {"budget": 0, "include_thoughts": True},
-            {"level": "MINIMAL", "include_thoughts": False},
+            {"level": "LOW", "include_thoughts": False},
+            {"level": 0, "include_thoughts": False},
+            {"level": True, "include_thoughts": False},
+            {"level": "MINIMAL", "include_thoughts": True},
+            {"budget": 0, "include_thoughts": False},
             {
-                "budget": 0,
+                "level": "MINIMAL",
                 "include_thoughts": False,
-                "thinkingLevel": "MINIMAL",
+                "budget": 0,
             },
         ):
             with self.subTest(thinking=thinking):
@@ -438,7 +438,7 @@ class ResponseTests(unittest.TestCase):
         response = extract_generate_content_response(_provider_body(invalid_semantics))
 
         self.assertEqual(response.response_id, "response-1")
-        self.assertEqual(response.model_version, "gemini-2.5-flash")
+        self.assertEqual(response.model_version, "gemini-3.5-flash-lite")
         self.assertEqual(response.usage_metadata["thoughtsTokenCount"], 12)
         self.assertEqual(response.model_status, {"modelStage": "STABLE"})
         self.assertEqual(response.finish_reason, "STOP")

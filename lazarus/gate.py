@@ -898,7 +898,7 @@ def _validate_request_settings(
         "responseMimeType": parameters["response_mime_type"],
         "responseJsonSchema": schema,
         "thinkingConfig": {
-            "thinkingBudget": thinking["budget"],
+            "thinkingLevel": thinking["level"],
             "includeThoughts": thinking["include_thoughts"],
         },
     }

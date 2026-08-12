@@ -40,24 +40,24 @@ SEMANTIC_SCHEMA_TEXT = (REPOSITORY / "schemas" / "semantic-proposal-v2.json").re
 SEMANTIC_SCHEMA = json.loads(SEMANTIC_SCHEMA_TEXT)
 PROJECTED_SCHEMA_SHA256 = canonical_sha256(project_response_schema(SEMANTIC_SCHEMA))
 CASE_IDS = tuple(f"sealed-{index:02d}" for index in range(1, 13))
-MODEL_VERSION = "gemini-2.5-flash"
+MODEL_VERSION = "gemini-3.5-flash-lite"
 SEALED_ORACLE_DIGEST = "e" * 64
 SETTINGS = {
     "provider": "gemini-developer-api",
     "api_version": "v1beta",
     "endpoint": (
         "https://generativelanguage.googleapis.com/v1beta/models/"
-        "gemini-2.5-flash:generateContent"
+        "gemini-3.5-flash-lite:generateContent"
     ),
-    "model": "gemini-2.5-flash",
-    "catalog_model_version": "001",
+    "model": "gemini-3.5-flash-lite",
+    "catalog_model_version": "3.5-flash-lite-07-2026",
     "resolved_model_version": MODEL_VERSION,
     "parameters": {
         "max_output_tokens": 8192,
         "response_mime_type": "application/json",
         "response_schema_sha256": PROJECTED_SCHEMA_SHA256,
     },
-    "thinking": {"budget": 0, "include_thoughts": False},
+    "thinking": {"level": "MINIMAL", "include_thoughts": False},
     "request": {
         "store": False,
         "service_tier": "standard",
@@ -298,7 +298,7 @@ class _CalibrationLockVerificationTests(unittest.TestCase):
 
 
 class CaptureTests(_FinalLockVerificationTests):
-    def test_request_validation_rejects_thinking_level_and_unknown_alternatives(self) -> None:
+    def test_request_validation_rejects_budget_unknown_and_typed_alternatives(self) -> None:
         request = json.loads(
             gate.build_generate_content_request(
                 _model_input("sealed-01", "b-replay")
@@ -307,13 +307,16 @@ class CaptureTests(_FinalLockVerificationTests):
         gate._validate_request_settings(canonical_json_bytes(request), SETTINGS)
 
         alternatives = (
-            {"thinkingLevel": "MINIMAL", "includeThoughts": False},
+            {"thinkingBudget": 0, "includeThoughts": False},
             {
-                "thinkingBudget": 0,
-                "includeThoughts": False,
                 "thinkingLevel": "MINIMAL",
+                "includeThoughts": False,
+                "thinkingBudget": 0,
             },
-            {"thinkingBudget": 0.0, "includeThoughts": False},
+            {"thinkingLevel": 0, "includeThoughts": False},
+            {"thinkingLevel": True, "includeThoughts": False},
+            {"thinkingLevel": "LOW", "includeThoughts": False},
+            {"thinkingLevel": "MINIMAL", "includeThoughts": 0},
         )
         for thinking_config in alternatives:
             with self.subTest(thinking_config=thinking_config):
