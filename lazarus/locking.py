@@ -192,8 +192,8 @@ def _validate_gemini_model_settings(settings: dict[str, Any]) -> dict[str, Any]:
         "include_thoughts",
     }:
         raise LockingError("Gemini thinking settings do not match the protocol")
-    if thinking.get("level") != "MEDIUM" or thinking.get("include_thoughts") is not False:
-        raise LockingError("Gemini thinking must be MEDIUM with thoughts excluded")
+    if thinking.get("level") != "MINIMAL" or thinking.get("include_thoughts") is not False:
+        raise LockingError("Gemini thinking must be MINIMAL with thoughts excluded")
     request = settings.get("request")
     expected_request = {
         "store": False,
@@ -764,6 +764,14 @@ def _validate_final_lock_links(
         raise LockingError("calibration index must be an object")
     if not isinstance(suite_manifest, Mapping):
         raise LockingError("suite manifest must be an object")
+    from lazarus.suite import SuiteError, validate_calibration_index
+
+    try:
+        calibration_index = validate_calibration_index(calibration_index)
+    except (SuiteError, TypeError, ValueError) as exc:
+        raise LockingError(
+            f"calibration index does not match the protocol: {exc}"
+        ) from exc
     calibration_digest = canonical_sha256(calibration_index)
     if suite_manifest.get("calibration_index_sha256") != calibration_digest:
         raise LockingError("suite manifest does not bind the calibration index")

@@ -18,7 +18,7 @@ from lazarus.gemini import (
     invoke_generate_content,
     project_response_schema,
 )
-from lazarus.locking import canonical_json_bytes
+from lazarus.locking import LockingError, canonical_json_bytes, validate_model_settings
 
 
 REPOSITORY = Path(__file__).resolve().parents[1]
@@ -49,6 +49,34 @@ def _model_input(**changes: object) -> bytes:
     }
     value.update(changes)
     return canonical_json_bytes(value)
+
+
+def _gemini_model_settings() -> dict[str, object]:
+    return {
+        "provider": "gemini-developer-api",
+        "api_version": "v1beta",
+        "endpoint": GEMINI_ENDPOINT,
+        "model": "gemini-3.5-flash",
+        "catalog_model_version": "3.5-flash-05-2026",
+        "resolved_model_version": "gemini-3.5-flash",
+        "parameters": {
+            "temperature": 1.0,
+            "top_p": 1.0,
+            "max_output_tokens": 8192,
+            "candidate_count": 1,
+            "response_mime_type": "application/json",
+            "response_schema_sha256": "a" * 64,
+        },
+        "thinking": {"level": "MINIMAL", "include_thoughts": False},
+        "request": {
+            "store": False,
+            "service_tier": "standard",
+            "timeout_seconds": 120,
+            "safety_settings": "provider-default",
+            "tools": [],
+        },
+        "retry": {"max_attempts": 1, "backoff_seconds": 0},
+    }
 
 
 def _provider_body(
@@ -256,7 +284,7 @@ class RequestTests(unittest.TestCase):
         self.assertEqual(config["responseMimeType"], "application/json")
         self.assertEqual(
             config["thinkingConfig"],
-            {"thinkingLevel": "MEDIUM", "includeThoughts": False},
+            {"thinkingLevel": "MINIMAL", "includeThoughts": False},
         )
         self.assertFalse(request["store"])
         self.assertEqual(request["serviceTier"], "standard")
@@ -294,6 +322,28 @@ class RequestTests(unittest.TestCase):
                     semantic_output_schema_sha256=hashlib.sha256(schema.encode()).hexdigest(),
                 )
             )
+
+
+class LockSettingsTests(unittest.TestCase):
+    def test_requires_minimal_thinking_with_thoughts_excluded(self) -> None:
+        settings = _gemini_model_settings()
+        self.assertEqual(
+            validate_model_settings(settings, require_gemini=True),
+            settings,
+        )
+
+        for thinking in (
+            {"level": "MEDIUM", "include_thoughts": False},
+            {"level": "MINIMAL", "include_thoughts": True},
+        ):
+            with self.subTest(thinking=thinking):
+                invalid = deepcopy(settings)
+                invalid["thinking"] = thinking
+                with self.assertRaisesRegex(
+                    LockingError,
+                    "Gemini thinking must be MINIMAL with thoughts excluded",
+                ):
+                    validate_model_settings(invalid, require_gemini=True)
 
 
 class ResponseTests(unittest.TestCase):

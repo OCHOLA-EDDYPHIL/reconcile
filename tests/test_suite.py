@@ -116,9 +116,9 @@ class FreshSuiteTests(unittest.TestCase):
                 canonical_sha256(_calibration_index()),
             )
             other_calibration = _calibration_index()
-            other_calibration["score"]["value"]["score_digest"] = "e" * 64
-            other_calibration["score"]["digest"] = canonical_sha256(
-                other_calibration["score"]["value"]
+            other_calibration["capture_index"]["value"]["index_digest"] = "e" * 64
+            other_calibration["capture_index"]["digest"] = canonical_sha256(
+                other_calibration["capture_index"]["value"]
             )
             with self.assertRaisesRegex(SuiteError, "commitment does not match"):
                 validate_public_suite(
@@ -351,9 +351,16 @@ def _calibration_index() -> dict[str, object]:
             "results_digest": "c" * 64,
         },
         "score": {
-            "schema_version": "lazarus.calibration-score/v1",
+            "schema_version": "lazarus.calibration-transport/v1",
+            "criteria": {
+                "four_results": True,
+                "complete_responses": True,
+                "valid_semantic_envelopes": True,
+                "no_tool_activity": True,
+                "unique_invocations": True,
+                "unique_responses": True,
+            },
             "passed": True,
-            "score_digest": "d" * 64,
         },
     }
     return {

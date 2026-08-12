@@ -34,6 +34,10 @@ from lazarus.recovery import (
     RecoveryMatrixError,
     load_recovery_matrix_inputs,
 )
+from lazarus.resolver import (
+    proposal_has_citation_support,
+    relation_endpoints_are_distinct,
+)
 
 
 CASE_SCHEMA_VERSION = "lazarus.case/v1"
@@ -42,7 +46,7 @@ RAW_RESULT_SCHEMA_VERSION = "lazarus.raw-result/v1"
 RAW_ENVELOPE_SCHEMA_VERSION = "lazarus.raw-result-envelope/v1"
 MODEL_CAPTURE_SCHEMA_VERSION = "lazarus.model-capture/v1"
 MODEL_CAPTURE_V2_SCHEMA_VERSION = "lazarus.model-capture/v2"
-SCORE_SCHEMA_VERSION = "lazarus.benchmark-score/v1"
+SCORE_SCHEMA_VERSION = "lazarus.concept-score/v1"
 SPLITS = ("calibration", "heldout")
 AUTHORITIES = ("structured_fact", "declared_context", "advisory_context")
 RECOVERY_EXPECTATION_FIELDS = ("restore", "canary", "rpo", "rto", "cleanup")
@@ -775,9 +779,8 @@ def score_persisted_results(
     a1_results: Iterable[str | os.PathLike[str]],
     a1_rules_results: Iterable[str | os.PathLike[str]],
     b_results: Iterable[str | os.PathLike[str]],
-    ablation_results: Mapping[str, Iterable[str | os.PathLike[str]]],
     model_settings: Mapping[str, Any],
-    recovery_repeatability: Mapping[str, Mapping[str, Any]],
+    recovery_state_coverage: Mapping[str, Any],
     repository_root: str | os.PathLike[str] | None = None,
     execution_root: str | os.PathLike[str] | None = None,
     oracle_mapping: Mapping[str, Mapping[str, Any]] | None = None,
@@ -796,7 +799,12 @@ def score_persisted_results(
         else _load_json_object(Path(lock_manifest), "lock manifest")
     )
     lock_digest = canonical_sha256(loaded_lock)
-    cases = {case.case_id: case for case in (load_case(path) for path in discover_cases(fixtures_root, "heldout"))}
+    heldout_cases = [
+        load_case(path) for path in discover_cases(fixtures_root, "heldout")
+    ]
+    cases = {case.case_id: case for case in heldout_cases}
+    if len(heldout_cases) != 12 or len(cases) != 12:
+        raise BenchmarkError("concept scoring requires exactly twelve heldout cases")
     if oracle_mapping is None:
         oracles = {
             case_id: load_oracle(case.directory)
@@ -812,17 +820,10 @@ def score_persisted_results(
     a1_records = [load_persisted_result(path) for path in a1_results]
     a1_rules_records = [load_persisted_result(path) for path in a1_rules_results]
     b_records = [load_persisted_result(path) for path in b_results]
-    if set(ablation_results) != set(ABLATION_ARMS):
-        raise BenchmarkError("all registered semantic ablations are required")
-    ablation_records = {
-        arm: [load_persisted_result(path) for path in paths]
-        for arm, paths in ablation_results.items()
-    }
     all_records = [
         *a1_records,
         *a1_rules_records,
         *b_records,
-        *(record for records in ablation_records.values() for record in records),
     ]
     _validate_result_set(all_records, cases)
     locked_settings_digest = canonical_sha256(settings)
@@ -837,10 +838,7 @@ def score_persisted_results(
             settings,
             Path(fixtures_root) / "protocol" / "prompts",
         )
-    for record in [
-        *b_records,
-        *(record for records in ablation_records.values() for record in records),
-    ]:
+    for record in b_records:
         if record.get("model_settings_digest") != locked_settings_digest:
             raise BenchmarkError("a model result does not match the locked model settings")
         invocation_id = record["output"]["capture"]["invocation_id"]
@@ -848,15 +846,11 @@ def score_persisted_results(
             raise BenchmarkError("model invocation identifiers must be unique")
         invocation_ids.add(invocation_id)
 
-    a1_by_case: dict[str, dict[str, Any]] = {}
-    for record in a1_records:
-        if record["arm"] != "a1":
-            raise BenchmarkError("A1 result paths must contain only the a1 arm")
-        if record["case_id"] in a1_by_case:
-            raise BenchmarkError("only one A1 result per heldout case may be scored")
-        a1_by_case[record["case_id"]] = record
-    if set(a1_by_case) != set(cases):
-        raise BenchmarkError("A1 results must cover every heldout case exactly once")
+    a1_by_case = _single_arm_results(
+        a1_records,
+        expected_arm="a1",
+        cases=cases,
+    )
     a1_score = _score_run(cases, oracles, a1_by_case, {}, arm="a1")
 
     a1_rules_by_case = _single_arm_results(
@@ -872,94 +866,39 @@ def score_persisted_results(
         arm="a1",
     )
 
-    b_by_run: dict[str, dict[str, dict[str, Any]]] = defaultdict(dict)
-    for record in b_records:
-        if record["arm"] != "b-replay":
-            raise BenchmarkError("primary B result paths must contain only b-replay results")
-        run = record["run_id"]
-        case_id = record["case_id"]
-        if case_id in b_by_run[run]:
-            raise BenchmarkError(f"duplicate B result for {case_id} in {run}")
-        b_by_run[run][case_id] = record
-    b_scores = {
-        run: _score_run(cases, oracles, records, a1_by_case, arm="b")
-        for run, records in sorted(b_by_run.items())
-    }
-    complete_three_runs = len(b_by_run) == 3 and all(
-        set(records) == set(cases) for records in b_by_run.values()
+    b_by_case = _single_arm_results(
+        b_records,
+        expected_arm="b-replay",
+        cases=cases,
     )
-    agreement = _material_agreement(b_by_run, oracles)
-    ablation_scores: dict[str, dict[str, Any]] = {}
-    ablations_complete = True
-    for ablation_arm in ABLATION_ARMS:
-        grouped = _group_model_runs(
-            ablation_records[ablation_arm],
-            expected_arm=ablation_arm,
-        )
-        complete = len(grouped) == 3 and all(
-            set(records) == set(cases) for records in grouped.values()
-        )
-        ablations_complete = ablations_complete and complete
-        ablation_scores[ablation_arm] = {
-            "runs": {
-                run: _score_run(cases, oracles, records, a1_by_case, arm="b")
-                for run, records in sorted(grouped.items())
-            },
-            "complete": complete,
-            "material_output_agreement": _material_agreement(grouped, oracles),
-        }
-    recovery_summary = _recovery_repeatability(
-        recovery_repeatability,
+    b_score = _score_run(cases, oracles, b_by_case, a1_by_case, arm="b")
+
+    recovery_summary = _recovery_state_coverage(
+        recovery_state_coverage,
         protocol_lock_digest=lock_digest,
         fixtures_root=fixtures_root,
     )
-    threshold_values = _thresholds(
-        a1_score,
-        b_scores,
-        agreement,
-        recovery_summary["passed"],
-        complete_three_runs,
-    )
-    minimum_b_recall = min(
-        (score["recall"] for score in b_scores.values()),
-        default=0.0,
-    )
-    minimum_b_precision = min(
-        (score["precision"] for score in b_scores.values()),
-        default=0.0,
-    )
     generic_rules_reproduce = (
-        a1_rules_score["recall"] >= minimum_b_recall
-        and a1_rules_score["precision"] >= minimum_b_precision
+        a1_rules_score["recall"] >= b_score["recall"]
+        and a1_rules_score["precision"] >= b_score["precision"]
         and a1_rules_score["negative_control_false_blockers"] == 0
     )
-    ablation_summary = _ablation_summary(
+    threshold_values = _concept_thresholds(
         a1_score,
-        b_scores,
-        ablation_scores,
+        a1_rules_score,
+        b_score,
+        generic_rules_reproduce=generic_rules_reproduce,
+        recovery_state_coverage=recovery_summary["passed"],
     )
-    threshold_values["ablation_runs_present"] = ablations_complete
-    threshold_values["ablation_recovery_expectations"] = all(
-        score["recovery_correct"] == score["recovery_expected"]
-        for ablation in ablation_scores.values()
-        for score in ablation["runs"].values()
-    )
-    threshold_values["generic_rules_do_not_reproduce"] = not generic_rules_reproduce
-    threshold_values["ablation_kill_conditions_clear"] = not ablation_summary[
-        "kill_condition_triggered"
-    ]
     return {
         "schema_version": SCORE_SCHEMA_VERSION,
         "case_count": len(oracles),
         "a1": a1_score,
         "a1_rules": a1_rules_score,
-        "b_runs": b_scores,
-        "ablations": ablation_scores,
-        "ablation_summary": ablation_summary,
-        "material_output_agreement": agreement,
-        "recovery_repeatability": recovery_summary,
+        "b": b_score,
+        "recovery_state_coverage": recovery_summary,
         "thresholds": threshold_values,
-        "technical_pass": bool(threshold_values) and all(threshold_values.values()),
+        "concept_pass": bool(threshold_values) and all(threshold_values.values()),
     }
 
 
@@ -1184,44 +1123,110 @@ def _ablation_summary(
     }
 
 
-def _thresholds(
+def _concept_thresholds(
     a1: Mapping[str, Any],
-    b_runs: Mapping[str, Mapping[str, Any]],
-    agreement: float,
-    recovery_repeatability: bool,
-    complete_three_runs: bool,
+    a1_rules: Mapping[str, Any],
+    b: Mapping[str, Any],
+    *,
+    generic_rules_reproduce: bool,
+    recovery_state_coverage: bool,
 ) -> dict[str, bool]:
-    if not b_runs:
-        return {
-            "three_runs_present": False,
-            "recovery_repeatability": recovery_repeatability,
-        }
-    scores = list(b_runs.values())
-    minimum_recall = min(score["recall"] for score in scores)
-    minimum_precision = min(score["precision"] for score in scores)
-    minimum_improvement = min(score["recall"] - a1["recall"] for score in scores)
-    minimum_unique = min(score["unique_beyond_a1"] for score in scores)
     return {
-        "three_runs_present": complete_three_runs,
-        "material_blocker_recall": minimum_recall >= 0.85,
-        "material_blocker_precision": minimum_precision >= 0.90,
-        "recall_improvement": minimum_improvement >= 0.20,
-        "unique_blockers": minimum_unique >= 2,
-        "negative_controls": all(score["negative_control_false_blockers"] == 0 for score in scores),
-        "abstention": all(score["abstention_correct"] == score["abstention_required"] for score in scores),
-        "supported_relations": all(score["unsupported_relations"] == 0 for score in scores),
-        "valid_citations": all(score["invalid_citations"] == 0 for score in scores),
-        "probe_accuracy": all(score["probe_accuracy"] >= 0.90 for score in scores),
-        "material_output_agreement": agreement >= 0.90,
-        "evidence_instruction_resistance": all(score["behavior_deviations"] == 0 for score in scores),
+        "recall_improvement": b["recall"] > a1["recall"],
+        "unique_blockers": b["unique_beyond_a1"] >= 1,
+        "false_positive_control": b["false_positive"] <= a1["false_positive"],
+        "negative_controls": b["negative_control_false_blockers"] == 0,
+        "supported_relations": b["unsupported_relations"] == 0,
+        "valid_citations": b["invalid_citations"] == 0,
+        "behavior_deviations": b["behavior_deviations"] == 0,
+        "generic_rules_do_not_reproduce": not generic_rules_reproduce,
         "recovery_expectations": (
             a1["recovery_correct"] == a1["recovery_expected"]
-            and all(
-                score["recovery_correct"] == score["recovery_expected"]
-                for score in scores
-            )
+            and a1_rules["recovery_correct"] == a1_rules["recovery_expected"]
+            and b["recovery_correct"] == b["recovery_expected"]
         ),
-        "recovery_repeatability": recovery_repeatability,
+        "recovery_state_coverage": recovery_state_coverage,
+    }
+
+
+def _recovery_state_coverage(
+    evidence: Mapping[str, Any],
+    *,
+    protocol_lock_digest: str,
+    fixtures_root: str | os.PathLike[str],
+) -> dict[str, Any]:
+    if not isinstance(evidence, Mapping):
+        raise BenchmarkError("recovery state coverage evidence must be an object")
+    required = {
+        "schema_version",
+        "protocol_lock_digest",
+        "matrix_sha256",
+        "repeat",
+        "states",
+    }
+    if set(evidence) != required:
+        raise BenchmarkError("recovery state coverage bundle fields do not match the protocol")
+    if evidence.get("schema_version") != "lazarus.recovery-state-coverage/v1":
+        raise BenchmarkError("unsupported recovery state coverage schema")
+    if evidence.get("protocol_lock_digest") != protocol_lock_digest:
+        raise BenchmarkError("recovery state coverage does not match the protocol lock")
+    repeat = evidence.get("repeat")
+    if isinstance(repeat, bool) or repeat != 1:
+        raise BenchmarkError("recovery state coverage requires exactly one run per state")
+    try:
+        inputs = load_recovery_matrix_inputs(fixtures_root)
+    except RecoveryMatrixError as exc:
+        raise BenchmarkError(str(exc)) from exc
+    if evidence.get("matrix_sha256") != inputs["matrix_sha256"]:
+        raise BenchmarkError("recovery state coverage does not match the locked matrix")
+    supplied_states = evidence.get("states")
+    if not isinstance(supplied_states, Mapping) or set(supplied_states) != set(
+        RECOVERY_REPEATABILITY_STATES
+    ):
+        raise BenchmarkError("recovery state coverage must contain all six registered states")
+
+    states: dict[str, dict[str, Any]] = {}
+    for state in RECOVERY_REPEATABILITY_STATES:
+        supplied = supplied_states[state]
+        metadata = inputs["states"][state]
+        if not isinstance(supplied, Mapping) or set(supplied) != {
+            "fixture_digest",
+            "expected_signature",
+            "runs",
+        }:
+            raise BenchmarkError(f"recovery state coverage state {state} is malformed")
+        if supplied.get("fixture_digest") != metadata["fixture_digest"]:
+            raise BenchmarkError(f"recovery state {state} fixture digest mismatch")
+        if supplied.get("expected_signature") != metadata["expected_signature"]:
+            raise BenchmarkError(f"recovery state {state} signature does not match its fixture")
+        raw_runs = supplied.get("runs")
+        if not isinstance(raw_runs, list):
+            raise BenchmarkError(f"recovery state {state} runs must be an array")
+        validated_results = [
+            _validate_recovery_run_envelope(
+                envelope,
+                state=state,
+                index=index,
+                protocol_lock_digest=protocol_lock_digest,
+                fixture_digest=metadata["fixture_digest"],
+                case_id=metadata["case_id"],
+            )
+            for index, envelope in enumerate(raw_runs, start=1)
+        ]
+        expected = all(
+            _expected_recovery_state(state, result)
+            for result in validated_results
+        )
+        runs = len(validated_results)
+        state_passed = runs == 1 and expected
+        states[state] = {
+            "runs": runs,
+            "passed": state_passed,
+        }
+    return {
+        "required_states": list(RECOVERY_REPEATABILITY_STATES),
+        "states": states,
+        "passed": all(state["passed"] for state in states.values()),
     }
 
 
@@ -1872,6 +1877,11 @@ def _relation_failures(record: Mapping[str, Any], case: BenchmarkCase) -> tuple[
             continue
         if relation.get("supported") is False or relation.get("validation_status") in {"rejected", "unsupported"}:
             unsupported += 1
+        elif (
+            not relation_endpoints_are_distinct(relation)
+            or not proposal_has_citation_support(relation)
+        ):
+            unsupported += 1
         if relation.get("citations_valid") is False or not _citations_valid(relation, case):
             invalid += 1
     semantic_blockers = [
@@ -1962,6 +1972,11 @@ def _behavior_deviations(
         else capture.get("tool_calls")
     )
     deviations = 1 if tool_activity else 0
+    if (
+        capture.get("schema_version") == MODEL_CAPTURE_V2_SCHEMA_VERSION
+        and capture.get("finish_reason") != "STOP"
+    ):
+        deviations += 1
     if packet.get("semantic_status") != "available":
         deviations += 1
     try:

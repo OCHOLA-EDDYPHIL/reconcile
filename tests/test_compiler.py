@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 import json
 from pathlib import Path
 import shutil
@@ -164,6 +165,65 @@ class CompilerTests(unittest.TestCase):
         )
         self.assertEqual(packet["human_decision_state"], "needs_confirmation")
 
+    def test_abstained_consequential_relation_uses_one_confirmation_blocker(self) -> None:
+        case_dir = Path(__file__).resolve().parents[1] / "fixtures" / "calibration" / "case-03"
+        request = (case_dir / "inputs" / "request.txt").read_text(encoding="utf-8")
+        plan = (case_dir / "inputs" / "plan.json").read_text(encoding="utf-8")
+        semantic = {
+            "schema_version": "lazarus.semantic-proposal/v1",
+            "case_id": "cal-03",
+            "proposals": [
+                {
+                    "proposal_id": "intent-candidate",
+                    "relation_type": "intent_effect_contradiction",
+                    "subject": "google_sql_database_instance.audit",
+                    "object": "retired export",
+                    "citations": [
+                        {
+                            "artifact_id": "plan",
+                            "digest": artifact_digest(plan),
+                            "start": 0,
+                            "end": len(plan),
+                            "quote": plan,
+                        },
+                        {
+                            "artifact_id": "request",
+                            "digest": artifact_digest(request),
+                            "start": 0,
+                            "end": len(request),
+                            "quote": request,
+                        }
+                    ],
+                }
+            ],
+            "abstained": True,
+            "requested_evidence": ["the intended audit-store generation"],
+        }
+
+        packet = compile_case(case_dir, "b-replay", semantic=semantic)
+        confirmations = [
+            blocker
+            for blocker in packet["blockers"]
+            if blocker["code"] == "SEMANTIC_CONFIRMATION_REQUIRED"
+        ]
+
+        self.assertEqual(len(confirmations), 1)
+        self.assertIn("intent-candidate", confirmations[0]["evidence_refs"])
+        self.assertIn("semantic:abstention", confirmations[0]["evidence_refs"])
+
+        nonconsequential = deepcopy(semantic)
+        nonconsequential["proposals"][0]["subject"] = "current audit store"
+        nonconsequential["proposals"][0]["citations"] = [
+            nonconsequential["proposals"][0]["citations"][1]
+        ]
+        nonconsequential["abstained"] = False
+        nonconsequential["requested_evidence"] = []
+        packet = compile_case(case_dir, "b-replay", semantic=nonconsequential)
+        self.assertNotIn(
+            "SEMANTIC_CONFIRMATION_REQUIRED",
+            {blocker["code"] for blocker in packet["blockers"]},
+        )
+
     def test_b_replay_does_not_inherit_fixed_generic_rules(self) -> None:
         case_dir = Path(__file__).resolve().parents[1] / "fixtures" / "calibration" / "case-03"
         semantic = {
@@ -292,7 +352,7 @@ class CompilerTests(unittest.TestCase):
         diagnostic_only = compile_case(
             case_dir,
             "b-replay",
-            semantic=response("unrelated-a", "unrelated-b"),
+            semantic=response("Restore", "stock-api"),
         )
 
         self.assertIn(

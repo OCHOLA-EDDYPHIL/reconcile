@@ -725,17 +725,10 @@ def _apply_semantic(
     )
     packet["semantic"] = resolution
     packet["semantic_status"] = "available"
-    if resolution.get("abstained") is True:
+    abstained = resolution.get("abstained") is True
+    if abstained:
         packet["unknowns"].append({"code": "SEMANTIC_EVIDENCE_INCOMPLETE"})
-        _append_unique(
-            packet["blockers"],
-            _new_blocker(
-                "SEMANTIC_CONFIRMATION_REQUIRED",
-                "The semantic resolver abstained and requested additional evidence.",
-                ["semantic:abstention"],
-            ),
-            "blocker_id",
-        )
+    consequence_blocked = False
     for proposal in resolution.get("admitted", []):
         relation_type = proposal.get("relation_type")
         consequence_refs: list[str] = []
@@ -757,6 +750,9 @@ def _apply_semantic(
             )
         if consequence_refs:
             proposal_id = str(proposal.get("proposal_id", "semantic-proposal"))
+            blocker_refs = [proposal_id, *consequence_refs]
+            if abstained:
+                blocker_refs.append("semantic:abstention")
             consequence_id = hashlib.sha256(
                 (proposal_id + "\0" + "\0".join(consequence_refs)).encode("utf-8")
             ).hexdigest()[:12]
@@ -777,10 +773,11 @@ def _apply_semantic(
                 _new_blocker(
                     "SEMANTIC_CONFIRMATION_REQUIRED",
                     "A cited semantic candidate has a deterministic change consequence and requires human confirmation.",
-                    [proposal_id, *consequence_refs],
+                    blocker_refs,
                 ),
                 "blocker_id",
             )
+            consequence_blocked = True
         elif relation_type == "incident_relevance_advisory":
             proposal_id = str(proposal.get("proposal_id", "semantic-proposal"))
             packet["advisory"].append(
@@ -791,6 +788,16 @@ def _apply_semantic(
                     "evidence_refs": [proposal_id],
                 }
             )
+    if abstained and not consequence_blocked:
+        _append_unique(
+            packet["blockers"],
+            _new_blocker(
+                "SEMANTIC_CONFIRMATION_REQUIRED",
+                "The semantic resolver abstained and requested additional evidence.",
+                ["semantic:abstention"],
+            ),
+            "blocker_id",
+        )
 
 
 def _intent_consequence_refs(
@@ -798,23 +805,58 @@ def _intent_consequence_refs(
     case: Mapping[str, Any],
     operations: list[dict[str, Any]],
 ) -> list[str]:
+    from lazarus.resolver import citation_supports_endpoint, relation_endpoints_are_distinct
+
+    if not relation_endpoints_are_distinct(proposal):
+        return []
     declared_context_ids = {
         entry["artifact_id"]
         for entry in case.get("artifacts", [])
         if isinstance(entry, Mapping) and entry.get("authority") == "declared_context"
     }
-    cited_ids = {
-        citation.get("artifact_id")
+    structured_ids = {
+        entry["artifact_id"]
+        for entry in case.get("artifacts", [])
+        if isinstance(entry, Mapping)
+        and entry.get("authority") == "structured_fact"
+    }
+    citations = [
+        citation
         for citation in proposal.get("citations", [])
         if isinstance(citation, Mapping)
-    }
-    if not declared_context_ids.intersection(cited_ids):
-        return []
-    return [
-        operation["operation_id"]
-        for operation in operations
-        if operation.get("destructive") is True
     ]
+    endpoints = (proposal.get("subject"), proposal.get("object"))
+    supported_ids = tuple(
+        {
+            citation.get("artifact_id")
+            for citation in citations
+            if citation_supports_endpoint(citation, endpoint)
+        }
+        for endpoint in endpoints
+    )
+    if not any(ids.intersection(declared_context_ids) for ids in supported_ids):
+        return []
+    consequences: list[str] = []
+    for operation in operations:
+        if operation.get("destructive") is not True:
+            continue
+        operation_endpoints = {
+            index
+            for index, endpoint in enumerate(endpoints)
+            if _resource_matches(operation, endpoint, strong=True)
+            or _similar(endpoint, operation.get("effect"))
+            or any(
+                _similar(endpoint, action)
+                for action in operation.get("actions", [])
+            )
+        }
+        if any(
+            supported_ids[index].intersection(structured_ids)
+            and supported_ids[1 - index].intersection(declared_context_ids)
+            for index in operation_endpoints
+        ):
+            consequences.append(operation["operation_id"])
+    return consequences
 
 
 def _dependency_consequence_refs(

@@ -35,8 +35,9 @@ class _Response:
 
 
 class _EmptySemanticTransport:
-    def __init__(self) -> None:
+    def __init__(self, *, complete: bool = True) -> None:
         self.calls = 0
+        self.complete = complete
 
     def __call__(self, request, timeout: float) -> _Response:
         self.calls += 1
@@ -51,17 +52,18 @@ class _EmptySemanticTransport:
             "abstained": False,
             "requested_evidence": [],
         }
+        response_text = canonical_json_bytes(semantic).decode("utf-8")
         payload = {
             "responseId": f"calibration-response-{self.calls}",
             "modelVersion": "gemini-3.5-flash",
             "candidates": [
                 {
                     "index": 0,
-                    "finishReason": "STOP",
+                    "finishReason": "STOP" if self.complete else "MAX_TOKENS",
                     "content": {
                         "role": "model",
                         "parts": [
-                            {"text": canonical_json_bytes(semantic).decode("utf-8")}
+                            {"text": response_text if self.complete else "{"}
                         ],
                     },
                     "safetyRatings": [],
@@ -90,8 +92,16 @@ class SettingsTests(unittest.TestCase):
             canonical_sha256(request["generationConfig"]["responseJsonSchema"]),
             settings["parameters"]["response_schema_sha256"],
         )
+        self.assertEqual(
+            request["generationConfig"]["thinkingConfig"],
+            {"thinkingLevel": "MINIMAL", "includeThoughts": False},
+        )
+        self.assertEqual(
+            settings["thinking"],
+            {"level": "MINIMAL", "include_thoughts": False},
+        )
         self.assertEqual(settings["retry"], {"max_attempts": 1, "backoff_seconds": 0})
-        self.assertEqual(EXPECTED_GENERATION_CALLS, 184)
+        self.assertEqual(EXPECTED_GENERATION_CALLS, 16)
 
     def test_api_key_reader_never_accepts_multiline_or_symlink_input(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -110,8 +120,8 @@ class SettingsTests(unittest.TestCase):
 
 
 class CalibrationBoundaryTests(unittest.TestCase):
-    def test_failed_four_call_calibration_never_generates_a_heldout_suite(self) -> None:
-        transport = _EmptySemanticTransport()
+    def test_incomplete_calibration_never_generates_a_heldout_suite(self) -> None:
+        transport = _EmptySemanticTransport(complete=False)
         repository_state = {
             "head_sha": "1" * 40,
             "tree_sha": "2" * 40,
@@ -145,6 +155,42 @@ class CalibrationBoundaryTests(unittest.TestCase):
             self.assertEqual(
                 len(list((run_root / "calibration-run" / "calibration").glob("*/raw-response.json"))),
                 4,
+            )
+
+    def test_valid_transport_reaches_the_concept_score_without_model_gain(self) -> None:
+        transport = _EmptySemanticTransport()
+        repository_state = {
+            "head_sha": "1" * 40,
+            "tree_sha": "2" * 40,
+            "tracked_clean": True,
+        }
+        with tempfile.TemporaryDirectory(dir=REPOSITORY) as temporary:
+            run_root = Path(temporary) / "run"
+            with (
+                mock.patch("lazarus.falsification._verify_repository"),
+                mock.patch(
+                    "lazarus.locking._repository_state",
+                    return_value=repository_state,
+                ),
+                mock.patch(
+                    "lazarus.falsification._git_state",
+                    return_value=repository_state,
+                ),
+            ):
+                outcome = run_registered_falsification(
+                    REPOSITORY,
+                    run_root,
+                    api_key="test-key",
+                    transport=transport,
+                    require_exact_main=False,
+                )
+            self.assertEqual(transport.calls, EXPECTED_GENERATION_CALLS)
+            self.assertEqual(outcome.summary["generation_calls"], EXPECTED_GENERATION_CALLS)
+            self.assertEqual(outcome.summary["disposition"], "concept_fail")
+            self.assertTrue((run_root / "control" / "benchmark-lock.json").is_file())
+            self.assertEqual(
+                len(list((run_root / "execution" / "evaluations").glob("*/raw-response.json"))),
+                12,
             )
 
 

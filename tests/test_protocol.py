@@ -19,7 +19,7 @@ from lazarus.protocol import (
     validate_evidence_packet,
     validate_semantic_contract,
 )
-from lazarus.resolver import resolve_semantic_output
+from lazarus.resolver import proposal_has_citation_support, resolve_semantic_output
 
 
 def make_case() -> dict:
@@ -94,12 +94,14 @@ def proposal(
     cited: dict,
     *,
     probe_id: str | None = None,
+    subject: str | None = None,
+    object_: str | None = None,
 ) -> dict:
     value = {
         "proposal_id": proposal_id,
         "relation_type": relation_type,
-        "subject": "service-api",
-        "object": "database-primary",
+        "subject": subject or cited["quote"],
+        "object": object_ or cited["quote"],
         "citations": [cited],
     }
     if probe_id is not None:
@@ -241,14 +243,81 @@ class SemanticResolverTests(unittest.TestCase):
         }
 
     def test_valid_candidate_is_admitted_but_not_as_structured_fact(self) -> None:
-        cited = citation("ticket", self.texts["ticket"], "staging")
+        cited = citation("ticket", self.texts["ticket"], self.texts["ticket"])
         output = semantic_response(
-            [proposal("p-1", "intent_effect_contradiction", cited)]
+            [
+                proposal(
+                    "p-1",
+                    "intent_effect_contradiction",
+                    cited,
+                    subject="Requested environment",
+                    object_="staging",
+                )
+            ]
         )
         resolution = resolve_semantic_output(make_case(), output, self.texts)
         self.assertEqual(resolution["rejected"], [])
         self.assertEqual(resolution["admitted"][0]["evidence_class"], "candidate_inference")
         self.assertNotEqual(resolution["admitted"][0]["evidence_class"], "structured_fact")
+
+    def test_candidate_endpoints_must_be_grounded_in_cited_quotes(self) -> None:
+        cited = citation("ticket", self.texts["ticket"], "staging")
+        output = semantic_response(
+            [proposal("p-1", "owner_candidate", cited)]
+        )
+        output["proposals"][0]["subject"] = "unrelated-resource"
+
+        resolution = resolve_semantic_output(make_case(), output, self.texts)
+
+        self.assertEqual(resolution["admitted"], [])
+        self.assertEqual(
+            resolution["rejected"][0]["reason_codes"],
+            ["citation_support_missing"],
+        )
+
+    def test_intent_contradiction_endpoints_must_be_distinct(self) -> None:
+        cited = citation("ticket", self.texts["ticket"], "staging")
+        output = semantic_response(
+            [proposal("p-1", "intent_effect_contradiction", cited)]
+        )
+
+        resolution = resolve_semantic_output(make_case(), output, self.texts)
+
+        self.assertEqual(resolution["admitted"], [])
+        self.assertEqual(
+            resolution["rejected"][0]["reason_codes"],
+            ["relation_endpoints_identical"],
+        )
+
+    def test_citation_support_uses_complete_tokens_within_one_quote(self) -> None:
+        base = {
+            "relation_type": "incident_relevance_advisory",
+            "subject": "api",
+            "object": "database primary",
+            "citations": [
+                {"quote": "Capital planning mentions database-primary."},
+            ],
+        }
+        self.assertFalse(proposal_has_citation_support(base))
+
+        split = copy.deepcopy(base)
+        split["subject"] = "database primary"
+        split["object"] = "recovery owner"
+        split["citations"] = [
+            {"quote": "database"},
+            {"quote": "primary recovery owner"},
+        ]
+        self.assertFalse(proposal_has_citation_support(split))
+
+        grounded = copy.deepcopy(base)
+        grounded["citations"] = [
+            {"quote": "The api protects database-primary."},
+        ]
+        self.assertTrue(proposal_has_citation_support(grounded))
+
+        too_short = copy.deepcopy(grounded)
+        too_short["subject"] = "a"
+        self.assertFalse(proposal_has_citation_support(too_short))
 
     def test_bad_candidate_is_rejected_without_discarding_valid_candidate(self) -> None:
         good = proposal(
@@ -357,9 +426,17 @@ class EvidencePacketTests(unittest.TestCase):
             "plan": '{"environment":"production"}',
             "incident": "Historical discussion only.",
         }
-        cited = citation("ticket", self.texts["ticket"], "staging")
+        cited = citation("ticket", self.texts["ticket"], self.texts["ticket"])
         output = semantic_response(
-            [proposal("p-1", "intent_effect_contradiction", cited)]
+            [
+                proposal(
+                    "p-1",
+                    "intent_effect_contradiction",
+                    cited,
+                    subject="Requested environment",
+                    object_="staging",
+                )
+            ]
         )
         self.semantic = resolve_semantic_output(make_case(), output, self.texts)
 

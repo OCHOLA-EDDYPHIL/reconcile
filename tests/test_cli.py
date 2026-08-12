@@ -141,6 +141,47 @@ class CliTests(unittest.TestCase):
                 )["passed"]
             )
 
+    def test_recovery_coverage_command_produces_one_run_per_state(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            lock = root / "lock.json"
+            settings = root / "settings.json"
+            output = root / "coverage.json"
+            settings.write_text(json.dumps(MODEL_SETTINGS), encoding="utf-8")
+            freeze_benchmark(
+                FIXTURES,
+                model_settings=MODEL_SETTINGS,
+                destination=lock,
+            )
+
+            self.assertEqual(
+                main(
+                    [
+                        "recovery-coverage",
+                        str(FIXTURES),
+                        "--lock",
+                        str(lock),
+                        "--model-settings",
+                        str(settings),
+                        "--repository-root",
+                        str(Path(__file__).resolve().parents[1]),
+                        "--output",
+                        str(output),
+                    ]
+                ),
+                0,
+            )
+
+            coverage = json.loads(output.read_text(encoding="utf-8"))
+            self.assertEqual(
+                coverage["schema_version"],
+                "lazarus.recovery-state-coverage/v1",
+            )
+            self.assertEqual(coverage["repeat"], 1)
+            self.assertTrue(
+                all(len(state["runs"]) == 1 for state in coverage["states"].values())
+            )
+
     def test_renders_only_a_registered_visible_model_input(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             output = Path(temporary) / "input.json"

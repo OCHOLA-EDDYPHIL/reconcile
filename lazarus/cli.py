@@ -22,9 +22,19 @@ from lazarus.benchmark import (
     verify_benchmark_lock,
 )
 from lazarus.compiler import ARMS, B_ARMS, CompilationError, compile_case, load_case
-from lazarus.locking import LockingError, canonical_json_bytes, canonical_sha256
+from lazarus.locking import (
+    LOCK_V2_SCHEMA_VERSION,
+    LockingError,
+    canonical_json_bytes,
+    canonical_sha256,
+)
 from lazarus.protocol import ProtocolValidationError, validate_case_contract
-from lazarus.recovery import RecoveryMatrixError, run_recovery, run_recovery_matrix
+from lazarus.recovery import (
+    RecoveryMatrixError,
+    run_recovery,
+    run_recovery_matrix,
+    run_recovery_state_coverage,
+)
 
 
 class CommandError(ValueError):
@@ -57,8 +67,19 @@ def _parser() -> argparse.ArgumentParser:
     repeatability.add_argument("fixtures", type=Path)
     repeatability.add_argument("--lock", type=Path, required=True)
     repeatability.add_argument("--model-settings", type=Path, required=True)
+    repeatability.add_argument("--execution-root", type=Path)
     repeatability.add_argument("--repository-root", type=Path, default=Path.cwd())
     repeatability.add_argument("--output", type=Path, required=True)
+
+    coverage = subcommands.add_parser(
+        "recovery-coverage", help="run each locked recovery state once"
+    )
+    coverage.add_argument("fixtures", type=Path)
+    coverage.add_argument("--lock", type=Path, required=True)
+    coverage.add_argument("--model-settings", type=Path, required=True)
+    coverage.add_argument("--execution-root", type=Path)
+    coverage.add_argument("--repository-root", type=Path, default=Path.cwd())
+    coverage.add_argument("--output", type=Path, required=True)
 
     render = subcommands.add_parser("render-input", help="render one bounded model input")
     render.add_argument("fixtures", type=Path)
@@ -92,23 +113,21 @@ def _parser() -> argparse.ArgumentParser:
     evaluate.add_argument("--model-settings", type=Path)
     evaluate.add_argument("--repository-root", type=Path, default=Path.cwd())
 
-    score = subcommands.add_parser("score", help="score persisted held-out results")
+    score = subcommands.add_parser(
+        "score", help="score static persisted fixture results"
+    )
     score.add_argument("fixtures", type=Path)
     score.add_argument("--lock", type=Path, required=True)
     score.add_argument("--model-settings", type=Path, required=True)
     score.add_argument("--a1-result", action="append", type=Path, required=True)
     score.add_argument("--a1-rules-result", action="append", type=Path, required=True)
     score.add_argument("--b-result", action="append", type=Path, required=True)
-    score.add_argument("--b-no-alias-result", action="append", type=Path, required=True)
-    score.add_argument("--b-no-intent-result", action="append", type=Path, required=True)
-    score.add_argument("--b-no-probe-result", action="append", type=Path, required=True)
-    score.add_argument("--b-no-incident-result", action="append", type=Path, required=True)
-    score.add_argument("--recovery-repeatability", type=Path, required=True)
+    score.add_argument("--recovery-state-coverage", type=Path, required=True)
     score.add_argument("--repository-root", type=Path, default=Path.cwd())
     score.add_argument("--output", type=Path)
 
     falsify = subcommands.add_parser(
-        "falsify", help="run the registered Gemini falsification protocol"
+        "falsify", help="run the locked Lazarus concept check"
     )
     falsify.add_argument("--api-key-file", type=Path, required=True)
     falsify.add_argument("--run-root", type=Path, required=True)
@@ -271,9 +290,26 @@ def _repeatability_command(arguments: argparse.Namespace) -> dict[str, Any]:
         arguments.fixtures,
         repository_root=arguments.repository_root,
         model_settings=model_settings,
+        execution_root=arguments.execution_root,
     )
     lock_digest = canonical_sha256(_load_json(arguments.lock))
     return run_recovery_matrix(
+        arguments.fixtures,
+        protocol_lock_digest=lock_digest,
+    )
+
+
+def _recovery_coverage_command(arguments: argparse.Namespace) -> dict[str, Any]:
+    model_settings = _load_json(arguments.model_settings)
+    verify_benchmark_lock(
+        arguments.lock,
+        arguments.fixtures,
+        repository_root=arguments.repository_root,
+        model_settings=model_settings,
+        execution_root=arguments.execution_root,
+    )
+    lock_digest = canonical_sha256(_load_json(arguments.lock))
+    return run_recovery_state_coverage(
         arguments.fixtures,
         protocol_lock_digest=lock_digest,
     )
@@ -402,6 +438,8 @@ def _run(arguments: argparse.Namespace) -> tuple[Any, Path | None]:
         return _restore_command(arguments), arguments.output
     if arguments.command == "repeatability":
         return _repeatability_command(arguments), arguments.output
+    if arguments.command == "recovery-coverage":
+        return _recovery_coverage_command(arguments), arguments.output
     if arguments.command == "render-input":
         return _render_input_command(arguments), arguments.output
     if arguments.command == "freeze":
@@ -424,20 +462,19 @@ def _run(arguments: argparse.Namespace) -> tuple[Any, Path | None]:
     if arguments.command == "evaluate":
         return _evaluate_command(arguments), None
     if arguments.command == "score":
+        score_lock = _load_json(arguments.lock)
+        if score_lock.get("schema_version") == LOCK_V2_SCHEMA_VERSION:
+            raise CommandError(
+                "registered concept runs are scored only inside falsify with sealed oracle custody"
+            )
         score = score_persisted_results(
             arguments.fixtures,
-            lock_manifest=arguments.lock,
+            lock_manifest=score_lock,
             a1_results=_result_files(arguments.a1_result),
             a1_rules_results=_result_files(arguments.a1_rules_result),
             b_results=_result_files(arguments.b_result),
-            ablation_results={
-                "b-replay-no-alias": _result_files(arguments.b_no_alias_result),
-                "b-replay-no-intent": _result_files(arguments.b_no_intent_result),
-                "b-replay-no-probe": _result_files(arguments.b_no_probe_result),
-                "b-replay-no-incident": _result_files(arguments.b_no_incident_result),
-            },
             model_settings=_load_json(arguments.model_settings),
-            recovery_repeatability=_load_json(arguments.recovery_repeatability),
+            recovery_state_coverage=_load_json(arguments.recovery_state_coverage),
             repository_root=arguments.repository_root,
         )
         return score, arguments.output
