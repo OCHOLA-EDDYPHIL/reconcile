@@ -106,6 +106,13 @@ def _parser() -> argparse.ArgumentParser:
     score.add_argument("--recovery-repeatability", type=Path, required=True)
     score.add_argument("--repository-root", type=Path, default=Path.cwd())
     score.add_argument("--output", type=Path)
+
+    falsify = subcommands.add_parser(
+        "falsify", help="run the registered Gemini falsification protocol"
+    )
+    falsify.add_argument("--api-key-file", type=Path, required=True)
+    falsify.add_argument("--run-root", type=Path, required=True)
+    falsify.add_argument("--repository-root", type=Path, default=Path.cwd())
     return parser
 
 
@@ -154,6 +161,18 @@ def _semantic_response(capture: Mapping[str, Any]) -> dict[str, Any] | None:
 
 def _emit(value: Any, destination: Path | None = None) -> None:
     payload = canonical_json_bytes(value) + b"\n"
+    if destination is None:
+        sys.stdout.buffer.write(payload)
+        return
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        with destination.open("xb") as stream:
+            stream.write(payload)
+    except FileExistsError as exc:
+        raise CommandError(f"refusing to overwrite {destination}") from exc
+
+
+def _emit_bytes(payload: bytes, destination: Path | None = None) -> None:
     if destination is None:
         sys.stdout.buffer.write(payload)
         return
@@ -222,7 +241,7 @@ def _restore_command(arguments: argparse.Namespace) -> dict[str, Any]:
     }
 
 
-def _render_input_command(arguments: argparse.Namespace) -> dict[str, Any]:
+def _render_input_command(arguments: argparse.Namespace) -> bytes:
     case = load_benchmark_case(arguments.case)
     registered = {
         path.resolve() for path in discover_cases(arguments.fixtures, case.split)
@@ -238,12 +257,11 @@ def _render_input_command(arguments: argparse.Namespace) -> dict[str, Any]:
             repository_root=arguments.repository_root,
             model_settings=_load_json(arguments.model_settings),
         )
-    request = build_model_input(
+    return build_model_input(
         case,
         arguments.arm,
         arguments.fixtures / "protocol" / "prompts",
     )
-    return json.loads(request)
 
 
 def _repeatability_command(arguments: argparse.Namespace) -> dict[str, Any]:
@@ -370,6 +388,11 @@ def _result_files(paths: list[Path]) -> list[Path]:
     return results
 
 
+def _falsification_progress(stage: str, completed: int, total: int) -> None:
+    if completed in {0, total} or total <= 4 or completed % 10 == 0:
+        print(f"lazarus: {stage} {completed}/{total}", file=sys.stderr, flush=True)
+
+
 def _run(arguments: argparse.Namespace) -> tuple[Any, Path | None]:
     if arguments.command == "validate":
         return _validate_command(arguments), None
@@ -418,6 +441,16 @@ def _run(arguments: argparse.Namespace) -> tuple[Any, Path | None]:
             repository_root=arguments.repository_root,
         )
         return score, arguments.output
+    if arguments.command == "falsify":
+        from lazarus.falsification import read_api_key, run_registered_falsification
+
+        outcome = run_registered_falsification(
+            arguments.repository_root,
+            arguments.run_root,
+            api_key=read_api_key(arguments.api_key_file),
+            progress=_falsification_progress,
+        )
+        return outcome.summary, None
     raise CommandError(f"unsupported command: {arguments.command}")
 
 
@@ -425,7 +458,9 @@ def main(argv: list[str] | None = None) -> int:
     arguments = _parser().parse_args(argv)
     try:
         value, output = _run(arguments)
-        if arguments.command != "freeze":
+        if arguments.command == "render-input":
+            _emit_bytes(value, output)
+        elif arguments.command != "freeze":
             _emit(value, output)
         else:
             _emit(
