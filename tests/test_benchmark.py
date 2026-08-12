@@ -66,17 +66,17 @@ GEMINI_SETTINGS = {
     "api_version": "v1beta",
     "endpoint": (
         "https://generativelanguage.googleapis.com/v1beta/models/"
-        "gemini-3.6-flash:generateContent"
+        "gemini-2.5-flash:generateContent"
     ),
-    "model": "gemini-3.6-flash",
-    "catalog_model_version": "3.6-flash-07-2026",
-    "resolved_model_version": "gemini-3.6-flash",
+    "model": "gemini-2.5-flash",
+    "catalog_model_version": "001",
+    "resolved_model_version": "gemini-2.5-flash",
     "parameters": {
         "max_output_tokens": 8192,
         "response_mime_type": "application/json",
         "response_schema_sha256": "a" * 64,
     },
-    "thinking": {"level": "MINIMAL", "include_thoughts": False},
+    "thinking": {"budget": 0, "include_thoughts": False},
     "request": {
         "store": False,
         "service_tier": "standard",

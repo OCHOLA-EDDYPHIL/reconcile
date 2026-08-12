@@ -16,7 +16,7 @@ from lazarus.locking import canonical_json_bytes
 
 
 MODEL_INPUT_SCHEMA_VERSION = "lazarus.model-input/v1"
-GEMINI_MODEL = "gemini-3.6-flash"
+GEMINI_MODEL = "gemini-2.5-flash"
 GEMINI_ENDPOINT = (
     "https://generativelanguage.googleapis.com/v1beta/"
     f"models/{GEMINI_MODEL}:generateContent"
@@ -311,7 +311,7 @@ def build_generate_content_request(model_input: bytes) -> bytes:
             "responseMimeType": "application/json",
             "responseJsonSchema": projected_schema,
             "thinkingConfig": {
-                "thinkingLevel": "MINIMAL",
+                "thinkingBudget": 0,
                 "includeThoughts": False,
             },
         },
