@@ -86,7 +86,7 @@ def _provider_body(
     return json.dumps(
         {
             "responseId": "response-1",
-            "modelVersion": "gemini-3.6-flash-001",
+            "modelVersion": "gemini-3.6-flash",
             "usageMetadata": {
                 "promptTokenCount": 120,
                 "candidatesTokenCount": 30,
@@ -428,7 +428,7 @@ class ResponseTests(unittest.TestCase):
         response = extract_generate_content_response(_provider_body(invalid_semantics))
 
         self.assertEqual(response.response_id, "response-1")
-        self.assertEqual(response.model_version, "gemini-3.6-flash-001")
+        self.assertEqual(response.model_version, "gemini-3.6-flash")
         self.assertEqual(response.usage_metadata["thoughtsTokenCount"], 12)
         self.assertEqual(response.model_status, {"modelStage": "STABLE"})
         self.assertEqual(response.finish_reason, "STOP")
