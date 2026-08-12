@@ -39,7 +39,7 @@ SEMANTIC_SCHEMA_TEXT = (REPOSITORY / "schemas" / "semantic-proposal-v1.json").re
 SEMANTIC_SCHEMA = json.loads(SEMANTIC_SCHEMA_TEXT)
 PROJECTED_SCHEMA_SHA256 = canonical_sha256(project_response_schema(SEMANTIC_SCHEMA))
 CASE_IDS = tuple(f"sealed-{index:02d}" for index in range(1, 13))
-MODEL_VERSION = "3.5-flash-05-2026"
+MODEL_VERSION = "gemini-3.5-flash"
 SEALED_ORACLE_DIGEST = "e" * 64
 SETTINGS = {
     "provider": "gemini-developer-api",
@@ -49,11 +49,12 @@ SETTINGS = {
         "gemini-3.5-flash:generateContent"
     ),
     "model": "gemini-3.5-flash",
+    "catalog_model_version": "3.5-flash-05-2026",
     "resolved_model_version": MODEL_VERSION,
     "parameters": {
         "temperature": 1.0,
         "top_p": 1.0,
-        "max_output_tokens": 1024,
+        "max_output_tokens": 4096,
         "candidate_count": 1,
         "response_mime_type": "application/json",
         "response_schema_sha256": PROJECTED_SCHEMA_SHA256,
