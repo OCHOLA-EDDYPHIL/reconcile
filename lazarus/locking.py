@@ -35,6 +35,7 @@ GEMINI_MODEL_SETTINGS_FIELDS = {
     "api_version",
     "endpoint",
     "model",
+    "catalog_model_version",
     "resolved_model_version",
     "parameters",
     "thinking",
@@ -146,7 +147,8 @@ def _validate_gemini_model_settings(settings: dict[str, Any]) -> dict[str, Any]:
         "provider": "gemini-developer-api",
         "api_version": "v1beta",
         "model": "gemini-3.5-flash",
-        "resolved_model_version": "3.5-flash-05-2026",
+        "catalog_model_version": "3.5-flash-05-2026",
+        "resolved_model_version": "gemini-3.5-flash",
     }
     for field, expected in constants.items():
         if settings.get(field) != expected:
@@ -165,7 +167,7 @@ def _validate_gemini_model_settings(settings: dict[str, Any]) -> dict[str, Any]:
     expected_parameters = {
         "temperature": 1.0,
         "top_p": 1.0,
-        "max_output_tokens": 1024,
+        "max_output_tokens": 4096,
         "candidate_count": 1,
         "response_mime_type": "application/json",
     }

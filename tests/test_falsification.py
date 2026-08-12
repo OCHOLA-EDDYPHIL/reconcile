@@ -53,7 +53,7 @@ class _EmptySemanticTransport:
         }
         payload = {
             "responseId": f"calibration-response-{self.calls}",
-            "modelVersion": "3.5-flash-05-2026",
+            "modelVersion": "gemini-3.5-flash",
             "candidates": [
                 {
                     "index": 0,
