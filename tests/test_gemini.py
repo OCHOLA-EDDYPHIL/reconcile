@@ -142,10 +142,10 @@ class SchemaProjectionTests(unittest.TestCase):
         self.assertEqual(source, original)
         self.assertEqual(first, second)
         projected_bytes = canonical_json_bytes(first)
-        self.assertEqual(len(projected_bytes), 1865)
+        self.assertEqual(len(projected_bytes), 1622)
         self.assertEqual(
             hashlib.sha256(projected_bytes).hexdigest(),
-            "8c391105812c642f9be6bc1dca88d5120e2ac08e25d73140968e1e262b94b153",
+            "9b9cb6f10676f2bec05c9de1d877df9d2eb4f04dc293fe190f779b6ecdbdb85c",
         )
         self.assertEqual(
             first["properties"]["schema_version"],
@@ -156,7 +156,7 @@ class SchemaProjectionTests(unittest.TestCase):
             ["schema_version", "case_id", "proposals", "abstained", "requested_evidence"],
         )
         self.assertEqual(
-            first["$defs"]["proposal"]["propertyOrdering"],
+            first["properties"]["proposals"]["items"]["propertyOrdering"],
             ["proposal_id", "relation_type", "subject", "object", "citations", "probe_id"],
         )
         projected_text = projected_bytes.decode("utf-8")
@@ -171,6 +171,8 @@ class SchemaProjectionTests(unittest.TestCase):
             '"minLength"',
             '"uniqueItems"',
             '"const"',
+            '"$defs"',
+            '"$ref"',
         ):
             self.assertNotIn(unsupported, projected_text)
 
@@ -192,6 +194,8 @@ class SchemaProjectionTests(unittest.TestCase):
             project_response_schema({"type": "string", "default": "unsafe"})
         with self.assertRaisesRegex(GeminiSchemaError, "unsupported sibling"):
             project_response_schema({"$ref": "#/$defs/value", "type": "string"})
+        with self.assertRaisesRegex(GeminiSchemaError, "undefined schema"):
+            project_response_schema({"$ref": "#/$defs/missing"})
 
     def test_rejects_unrepresentable_const_and_bad_property_order(self) -> None:
         with self.assertRaisesRegex(GeminiSchemaError, "string or number"):

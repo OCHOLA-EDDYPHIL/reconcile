@@ -215,7 +215,8 @@ def project_response_schema(schema: Mapping[str, Any]) -> dict[str, Any]:
 
     if not isinstance(schema, Mapping):
         raise GeminiSchemaError("response schema must be an object")
-    return _project_schema(schema, path="$")
+    projected = _project_schema(schema, path="$")
+    return _inline_local_schema_refs(projected)
 
 
 def build_generate_content_request(model_input: bytes) -> bytes:
@@ -615,6 +616,52 @@ def _project_schema_array(value: Any, *, path: str) -> list[dict[str, Any]]:
             _project_schema(member, path=f"{path}[{index}]")
         )
     return projected
+
+
+def _inline_local_schema_refs(projected: Mapping[str, Any]) -> dict[str, Any]:
+    definitions = projected.get("$defs", {})
+    if not isinstance(definitions, Mapping):
+        raise GeminiSchemaError("$.$defs must be an object")
+
+    def resolve(value: Any, *, path: str, stack: tuple[str, ...]) -> Any:
+        if isinstance(value, list):
+            return [
+                resolve(item, path=f"{path}[{index}]", stack=stack)
+                for index, item in enumerate(value)
+            ]
+        if not isinstance(value, Mapping):
+            return deepcopy(value)
+        reference = value.get("$ref")
+        if reference is not None:
+            if set(value) != {"$ref"} or not isinstance(reference, str):
+                raise GeminiSchemaError(f"{path} has an unsupported $ref shape")
+            prefix = "#/$defs/"
+            if not reference.startswith(prefix):
+                raise GeminiSchemaError(f"{path} uses a non-local $ref")
+            encoded_name = reference[len(prefix) :]
+            if not encoded_name or "/" in encoded_name:
+                raise GeminiSchemaError(f"{path} uses an unsupported $ref pointer")
+            name = encoded_name.replace("~1", "/").replace("~0", "~")
+            target = definitions.get(name)
+            if not isinstance(target, Mapping):
+                raise GeminiSchemaError(f"{path} references an undefined schema")
+            if name in stack:
+                raise GeminiSchemaError(f"{path} contains a recursive schema reference")
+            return resolve(
+                target,
+                path=f"$.$defs.{name}",
+                stack=(*stack, name),
+            )
+        return {
+            key: resolve(item, path=f"{path}.{key}", stack=stack)
+            for key, item in value.items()
+            if key != "$defs"
+        }
+
+    resolved = resolve(projected, path="$", stack=())
+    if not isinstance(resolved, dict):
+        raise GeminiSchemaError("projected response schema must be an object")
+    return resolved
 
 
 def _parse_model_input(model_input: bytes) -> dict[str, Any]:
