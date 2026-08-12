@@ -23,6 +23,24 @@ B_ARMS = tuple(B_ARM_DISABLED_RELATIONS)
 ARMS = ("a0", "a1", "a1-rules", *B_ARMS)
 DESTRUCTIVE_ACTIONS = {"delete"}
 SAFE_HUMAN_STATE = "ready_for_human_decision"
+_ALIAS_EVIDENCE_GAP_CODES = frozenset(
+    {
+        "DEPENDENCY_RECOVERY_EVIDENCE_MISSING",
+        "OWNER_CONFLICT",
+        "RECOVERY_EVIDENCE_STALE",
+        "RECOVERY_SCOPE_MISMATCH",
+        "REQUIRED_EVIDENCE_UNKNOWN",
+        "RESOURCE_GENERATION_MISMATCH",
+    }
+)
+_ALIAS_EVIDENCE_GAP_PRIORITY = (
+    "RECOVERY_SCOPE_MISMATCH",
+    "RECOVERY_EVIDENCE_STALE",
+    "RESOURCE_GENERATION_MISMATCH",
+    "OWNER_CONFLICT",
+    "REQUIRED_EVIDENCE_UNKNOWN",
+    "DEPENDENCY_RECOVERY_EVIDENCE_MISSING",
+)
 
 
 class CompilationError(ValueError):
@@ -680,6 +698,11 @@ def compile_case(
             packet["human_decision_state"] = "needs_confirmation"
         else:
             packet["human_decision_state"] = "blocked"
+    elif (
+        packet["semantic_status"] == "available"
+        and packet["semantic"].get("abstained") is True
+    ):
+        packet["human_decision_state"] = "needs_confirmation"
     elif any(
         proposal.get("evidence_class") == "candidate_inference"
         for proposal in packet["semantic"]["admitted"]
@@ -728,57 +751,22 @@ def _apply_semantic(
     abstained = resolution.get("abstained") is True
     if abstained:
         packet["unknowns"].append({"code": "SEMANTIC_EVIDENCE_INCOMPLETE"})
-    consequence_blocked = False
+    promoted: dict[tuple[str, str], set[str]] = {}
     for proposal in resolution.get("admitted", []):
         relation_type = proposal.get("relation_type")
-        consequence_refs: list[str] = []
-        if relation_type == "intent_effect_contradiction":
-            consequence_refs = _intent_consequence_refs(
-                proposal,
-                case,
-                operations,
-            )
-        elif relation_type in {
-            "resource_alias_candidate",
-            "conditional_dependency_candidate",
-        }:
-            consequence_refs = _dependency_consequence_refs(
+        if relation_type == "resource_alias_candidate":
+            proposal_id = str(proposal.get("proposal_id", "semantic-proposal"))
+            for operation_id, gap_code, evidence_refs in _alias_evidence_gaps(
+                packet,
                 proposal,
                 case,
                 artifacts,
                 operations,
-            )
-        if consequence_refs:
-            proposal_id = str(proposal.get("proposal_id", "semantic-proposal"))
-            blocker_refs = [proposal_id, *consequence_refs]
-            if abstained:
-                blocker_refs.append("semantic:abstention")
-            consequence_id = hashlib.sha256(
-                (proposal_id + "\0" + "\0".join(consequence_refs)).encode("utf-8")
-            ).hexdigest()[:12]
-            packet["derivations"].append(
-                {
-                    "derivation_id": f"semantic-consequence-{consequence_id}",
-                    "kind": "semantic_candidate_consequence",
-                    "value": {
-                        "proposal_id": proposal_id,
-                        "relation_type": relation_type,
-                        "requires_human_confirmation": True,
-                    },
-                    "evidence_refs": [proposal_id, *consequence_refs],
-                }
-            )
-            _append_unique(
-                packet["blockers"],
-                _new_blocker(
-                    "SEMANTIC_CONFIRMATION_REQUIRED",
-                    "A cited semantic candidate has a deterministic change consequence and requires human confirmation.",
-                    blocker_refs,
-                ),
-                "blocker_id",
-            )
-            consequence_blocked = True
-        elif relation_type == "incident_relevance_advisory":
+            ):
+                promoted.setdefault((operation_id, gap_code), set()).update(
+                    (proposal_id, *evidence_refs)
+                )
+        if relation_type == "incident_relevance_advisory":
             proposal_id = str(proposal.get("proposal_id", "semantic-proposal"))
             packet["advisory"].append(
                 {
@@ -788,129 +776,360 @@ def _apply_semantic(
                     "evidence_refs": [proposal_id],
                 }
             )
-    if abstained and not consequence_blocked:
+
+    grouped: dict[str, dict[str, set[str]]] = {}
+    for (operation_id, gap_code), reference_set in promoted.items():
+        grouped.setdefault(operation_id, {})[gap_code] = reference_set
+
+    for operation_id, gaps in sorted(grouped.items()):
+        gap_codes = tuple(sorted(gaps, key=_alias_gap_priority))
+        gap_code = gap_codes[0]
+        evidence_refs = sorted(
+            {
+                reference
+                for reference_set in gaps.values()
+                for reference in reference_set
+            }
+        )
+        consequence_id = hashlib.sha256(
+            (operation_id + "\0" + gap_code).encode("utf-8")
+        ).hexdigest()[:12]
+        packet["derivations"].append(
+            {
+                "derivation_id": f"semantic-consequence-{consequence_id}",
+                "kind": "semantic_candidate_consequence",
+                "value": {
+                    "operation_id": operation_id,
+                    "relation_type": "resource_alias_candidate",
+                    "evidence_gap": gap_code,
+                    "observed_evidence_gaps": list(gap_codes),
+                    "requires_human_confirmation": True,
+                },
+                "evidence_refs": evidence_refs,
+            }
+        )
         _append_unique(
             packet["blockers"],
             _new_blocker(
                 "SEMANTIC_CONFIRMATION_REQUIRED",
-                "The semantic resolver abstained and requested additional evidence.",
-                ["semantic:abstention"],
+                "An exact cited resource alias exposes a deterministic evidence gap and requires human confirmation.",
+                evidence_refs,
             ),
             "blocker_id",
         )
 
 
-def _intent_consequence_refs(
-    proposal: Mapping[str, Any],
-    case: Mapping[str, Any],
-    operations: list[dict[str, Any]],
-) -> list[str]:
-    from lazarus.resolver import citation_supports_endpoint, relation_endpoints_are_distinct
-
-    if not relation_endpoints_are_distinct(proposal):
-        return []
-    declared_context_ids = {
-        entry["artifact_id"]
-        for entry in case.get("artifacts", [])
-        if isinstance(entry, Mapping) and entry.get("authority") == "declared_context"
-    }
-    structured_ids = {
-        entry["artifact_id"]
-        for entry in case.get("artifacts", [])
-        if isinstance(entry, Mapping)
-        and entry.get("authority") == "structured_fact"
-    }
-    citations = [
-        citation
-        for citation in proposal.get("citations", [])
-        if isinstance(citation, Mapping)
-    ]
-    endpoints = (proposal.get("subject"), proposal.get("object"))
-    supported_ids = tuple(
-        {
-            citation.get("artifact_id")
-            for citation in citations
-            if citation_supports_endpoint(citation, endpoint)
-        }
-        for endpoint in endpoints
-    )
-    if not any(ids.intersection(declared_context_ids) for ids in supported_ids):
-        return []
-    consequences: list[str] = []
-    for operation in operations:
-        if operation.get("destructive") is not True:
-            continue
-        operation_endpoints = {
-            index
-            for index, endpoint in enumerate(endpoints)
-            if _resource_matches(operation, endpoint, strong=True)
-            or _similar(endpoint, operation.get("effect"))
-            or any(
-                _similar(endpoint, action)
-                for action in operation.get("actions", [])
-            )
-        }
-        if any(
-            supported_ids[index].intersection(structured_ids)
-            and supported_ids[1 - index].intersection(declared_context_ids)
-            for index in operation_endpoints
-        ):
-            consequences.append(operation["operation_id"])
-    return consequences
-
-
-def _dependency_consequence_refs(
+def _alias_evidence_gaps(
+    packet: Mapping[str, Any],
     proposal: Mapping[str, Any],
     case: Mapping[str, Any],
     artifacts: Mapping[str, Any],
     operations: list[dict[str, Any]],
-) -> list[str]:
+) -> list[tuple[str, str, tuple[str, ...]]]:
+    if not _alias_has_declared_same_quote(proposal, case):
+        return []
     subject = proposal.get("subject")
     object_ = proposal.get("object")
     if not isinstance(subject, str) or not isinstance(object_, str):
         return []
-    manifest = _first_mapping(_values_by_kind(case, artifacts, "service_manifest"))
-    relation_type = proposal.get("relation_type")
+    if _normal_form(subject) == _normal_form(object_):
+        return []
+    manifest_id = _first_artifact_id(case, "service_manifest")
+    manifest_artifact = artifacts.get(manifest_id)
+    manifest = (
+        manifest_artifact.get("value")
+        if isinstance(manifest_artifact, Mapping)
+        else None
+    )
+    if not isinstance(manifest, Mapping):
+        return []
+    services = manifest.get("services")
+    if not isinstance(services, list):
+        return []
+    baseline_ids = {
+        blocker.get("blocker_id")
+        for blocker in packet.get("blockers", [])
+        if isinstance(blocker, Mapping)
+    }
+    results: list[tuple[str, str, tuple[str, ...]]] = []
+    seen_bridges: set[tuple[str, int, int]] = set()
     for operation in operations:
         if operation.get("destructive") is not True:
             continue
-        for operation_endpoint, other_endpoint in ((subject, object_), (object_, subject)):
-            if not _resource_matches(operation, operation_endpoint, strong=True):
+        for operation_endpoint, dependency_endpoint in (
+            (subject, object_),
+            (object_, subject),
+        ):
+            if not _operation_identity_matches(operation, operation_endpoint):
                 continue
-            services = manifest.get("services", [])
-            for service in services if isinstance(services, list) else []:
+            for service_index, service in enumerate(services):
                 if not isinstance(service, Mapping):
                     continue
-                service_id = str(service.get("service_id", "service"))
-                service_names = (service_id, *_aliases(service.get("aliases")))
                 dependencies = service.get("dependencies", [])
-                for dependency in dependencies if isinstance(dependencies, list) else []:
-                    if not isinstance(dependency, Mapping) or dependency.get("active") is False:
+                if not isinstance(dependencies, list):
+                    continue
+                for dependency_index, dependency in enumerate(dependencies):
+                    if (
+                        not isinstance(dependency, Mapping)
+                        or dependency.get("active") is not True
+                        or not _scope_equal(dependency, operation)
+                        or not _dependency_identity_matches(
+                            dependency,
+                            dependency_endpoint,
+                        )
+                    ):
                         continue
-                    dependency_names = (
-                        str(dependency.get("resource_ref", "")),
-                        *_aliases(dependency.get("aliases")),
+                    bridge_key = (
+                        operation["operation_id"],
+                        service_index,
+                        dependency_index,
                     )
-                    endpoint_matches_dependency = any(
-                        _similar(other_endpoint, name)
-                        for name in dependency_names
-                        if name
+                    if bridge_key in seen_bridges:
+                        continue
+                    seen_bridges.add(bridge_key)
+                    adjusted = _bind_alias_for_evidence(
+                        artifacts,
+                        manifest_id=manifest_id,
+                        service_index=service_index,
+                        dependency_index=dependency_index,
+                        operation=operation,
+                        dependency=dependency,
                     )
-                    endpoint_matches_service = any(
-                        _similar(other_endpoint, name)
-                        for name in service_names
-                        if name
+                    evaluated = _empty_structured_packet()
+                    _structured_checks(
+                        evaluated,
+                        case,
+                        adjusted,
+                        [operation],
+                        strong=False,
                     )
-                    if relation_type == "resource_alias_candidate":
-                        consequential = endpoint_matches_dependency
-                    else:
-                        consequential = endpoint_matches_dependency or endpoint_matches_service
-                    if consequential and _scope_equal(dependency, operation):
-                        return [
-                            operation["operation_id"],
-                            _first_artifact_id(case, "service_manifest"),
-                        ]
-    return []
+                    for blocker in evaluated["blockers"]:
+                        if (
+                            blocker["blocker_id"] in baseline_ids
+                            or blocker["code"] not in _ALIAS_EVIDENCE_GAP_CODES
+                        ):
+                            continue
+                        evidence_refs = tuple(
+                            sorted(
+                                {
+                                    operation["operation_id"],
+                                    manifest_id,
+                                    *blocker["evidence_refs"],
+                                }
+                            )
+                        )
+                        results.append(
+                            (
+                                operation["operation_id"],
+                                blocker["code"],
+                                evidence_refs,
+                            )
+                        )
+    return results
+
+
+def _alias_has_declared_same_quote(
+    proposal: Mapping[str, Any], case: Mapping[str, Any]
+) -> bool:
+    subject = proposal.get("subject")
+    object_ = proposal.get("object")
+    if not isinstance(subject, str) or not isinstance(object_, str):
+        return False
+    declared_ids = {
+        entry["artifact_id"]
+        for entry in case.get("artifacts", [])
+        if isinstance(entry, Mapping) and entry.get("authority") == "declared_context"
+    }
+    return any(
+        isinstance(citation, Mapping)
+        and citation.get("artifact_id") in declared_ids
+        and _quote_affirms_alias(citation.get("quote"), subject, object_)
+        for citation in proposal.get("citations", [])
+    )
+
+
+def _quote_affirms_alias(quote: Any, subject: str, object_: str) -> bool:
+    if not isinstance(quote, str):
+        return False
+    normalized_quote = unicodedata.normalize("NFKC", quote).casefold()
+    if "?" in normalized_quote or re.search(
+        r"\b(?:assuming|could|different|disputed|distinct|if|may|might|never|"
+        r"no|not|separate|suppose|supposing|uncertain|unclear|unconfirmed|"
+        r"unknown|unrelated|were|whether|would)\b|"
+        r"\b(?:doesn['’]?t|don['’]?t|isn['’]?t|aren['’]?t)\b",
+        normalized_quote,
+    ):
+        return False
+    subject_spans = _standalone_endpoint_spans(normalized_quote, subject)
+    object_spans = _standalone_endpoint_spans(normalized_quote, object_)
+    direct_cue = re.compile(
+        r"\s*(?:"
+        r"is\s+(?:(?:an?|the)\s+)?"
+        r"(?:(?:operational|service[-\s]+facing)\s+)?"
+        r"(?:alias|name)\s+for"
+        r"|aka"
+        r"|also\s+known\s+as"
+        r")\s*"
+    )
+    for subject_span in subject_spans:
+        for object_span in object_spans:
+            if subject_span[1] <= object_span[0]:
+                between = normalized_quote[subject_span[1] : object_span[0]]
+            elif object_span[1] <= subject_span[0]:
+                between = normalized_quote[object_span[1] : subject_span[0]]
+            else:
+                continue
+            if re.search(r"[.?!;\r\n]", between):
+                continue
+            if direct_cue.fullmatch(between):
+                return True
+    return False
+
+
+def _standalone_endpoint_spans(
+    normalized_quote: str, endpoint: str
+) -> tuple[tuple[int, int], ...]:
+    tokens = re.findall(r"[a-z0-9]+", _normal_form(endpoint))
+    if not tokens:
+        return ()
+    separator = r"[\s._:/-]+"
+    endpoint_pattern = separator.join(re.escape(token) for token in tokens)
+    pattern = re.compile(endpoint_pattern)
+    spans = []
+    joining_punctuation = "._:/-"
+    for match in pattern.finditer(normalized_quote):
+        start, end = match.span()
+        left = start
+        while left > 0 and normalized_quote[left - 1] in joining_punctuation:
+            left -= 1
+        if left > 0 and normalized_quote[left - 1].isalnum():
+            continue
+        right = end
+        while (
+            right < len(normalized_quote)
+            and normalized_quote[right] in joining_punctuation
+        ):
+            right += 1
+        if right < len(normalized_quote) and normalized_quote[right].isalnum():
+            continue
+        spans.append((start, end))
+    return tuple(spans)
+
+
+def _operation_identity_matches(
+    operation: Mapping[str, Any], endpoint: str
+) -> bool:
+    return any(
+        _exact_normalized_match(endpoint, identity)
+        for identity in (operation.get("address"), operation.get("name"))
+    )
+
+
+def _dependency_identity_matches(
+    dependency: Mapping[str, Any], endpoint: str
+) -> bool:
+    return any(
+        _exact_normalized_match(endpoint, identity)
+        for identity in (
+            dependency.get("resource_ref"),
+            *_aliases(dependency.get("aliases")),
+        )
+    )
+
+
+def _exact_normalized_match(left: Any, right: Any) -> bool:
+    if not isinstance(left, str) or not left or not isinstance(right, str) or not right:
+        return False
+    left_normal = _normal_form(left)
+    right_normal = _normal_form(right)
+    return bool(left_normal and right_normal and left_normal == right_normal)
+
+
+def _alias_gap_priority(code: str) -> int:
+    try:
+        return _ALIAS_EVIDENCE_GAP_PRIORITY.index(code)
+    except ValueError:
+        return len(_ALIAS_EVIDENCE_GAP_PRIORITY)
+
+
+def _bind_alias_for_evidence(
+    artifacts: Mapping[str, Any],
+    *,
+    manifest_id: str,
+    service_index: int,
+    dependency_index: int,
+    operation: Mapping[str, Any],
+    dependency: Mapping[str, Any],
+) -> dict[str, Any]:
+    adjusted = deepcopy(dict(artifacts))
+    manifest_artifact = adjusted[manifest_id]
+    manifest = deepcopy(manifest_artifact["value"])
+    bound_dependency = manifest["services"][service_index]["dependencies"][
+        dependency_index
+    ]
+    original_names = (
+        str(dependency.get("resource_ref", "")),
+        *_aliases(dependency.get("aliases")),
+    )
+    target = str(operation.get("address") or operation.get("name") or "")
+    bound_dependency["resource_ref"] = target
+    bound_dependency["aliases"] = list(
+        dict.fromkeys(name for name in original_names if name)
+    )
+    manifest_artifact["value"] = manifest
+    for artifact in adjusted.values():
+        if not isinstance(artifact, dict):
+            continue
+        entry = artifact.get("entry")
+        value = artifact.get("value")
+        kind = entry.get("kind") if isinstance(entry, Mapping) else None
+        rows_key = {
+            "ownership": "resources",
+            "recovery_ledger": "records",
+        }.get(kind)
+        if rows_key is None or not isinstance(value, Mapping):
+            continue
+        bound_value = deepcopy(dict(value))
+        rows = bound_value.get(rows_key)
+        if not isinstance(rows, list):
+            continue
+        for row in rows:
+            if not isinstance(row, dict) or not _row_uses_alias(row, original_names):
+                continue
+            row_names = (
+                str(row.get("resource_ref", "")),
+                *_aliases(row.get("aliases")),
+            )
+            row["resource_ref"] = target
+            row["aliases"] = list(
+                dict.fromkeys(name for name in (*row_names, *original_names) if name)
+            )
+        artifact["value"] = bound_value
+    return adjusted
+
+
+def _row_uses_alias(
+    row: Mapping[str, Any], aliases: tuple[str, ...]
+) -> bool:
+    row_names = (
+        row.get("resource_ref"),
+        *_aliases(row.get("aliases")),
+    )
+    return any(
+        _exact_normalized_match(row_name, alias)
+        for row_name in row_names
+        for alias in aliases
+    )
+
+
+def _empty_structured_packet() -> dict[str, list[dict[str, Any]]]:
+    return {
+        "facts": [],
+        "derivations": [],
+        "advisory": [],
+        "unknowns": [],
+        "blockers": [],
+    }
 
 
 def _unknown_recovery() -> dict[str, Any]:

@@ -495,6 +495,28 @@ class SemanticResolverTests(unittest.TestCase):
         resolution = resolve_semantic_output(make_case(), output, self.texts)
         self.assertEqual(resolution["admitted"][0]["evidence_class"], "semantic_proposal")
 
+    def test_advisory_context_cannot_support_a_decision_candidate(self) -> None:
+        cited = model_citation("incident", self.texts["incident"])
+        output = semantic_response(
+            [
+                proposal(
+                    "p-decision",
+                    "resource_alias_candidate",
+                    cited,
+                    subject="reviewer",
+                    object_="authoritative",
+                )
+            ]
+        )
+
+        resolution = resolve_semantic_output(make_case(), output, self.texts)
+
+        self.assertEqual(resolution["admitted"], [])
+        self.assertIn(
+            "advisory_context_decision_attempt",
+            resolution["rejected"][0]["reason_codes"],
+        )
+
     def test_empty_response_distinguishes_no_findings_from_abstention(self) -> None:
         no_findings = semantic_response([])
         self.assertFalse(validate_semantic_contract(no_findings)["abstained"])
@@ -530,6 +552,21 @@ class EvidencePacketTests(unittest.TestCase):
         )
         self.semantic = resolve_semantic_output(make_case(), output, self.texts)
 
+    def _alias_semantic(self) -> dict:
+        cited = model_citation("ticket", self.texts["ticket"])
+        output = semantic_response(
+            [
+                proposal(
+                    "alias-1",
+                    "resource_alias_candidate",
+                    cited,
+                    subject="Requested environment",
+                    object_="staging",
+                )
+            ]
+        )
+        return resolve_semantic_output(make_case(), output, self.texts)
+
     def test_packet_revalidates_every_admitted_citation(self) -> None:
         packet = evidence_packet(self.semantic)
         self.assertEqual(
@@ -548,6 +585,78 @@ class EvidencePacketTests(unittest.TestCase):
         with self.assertRaises(ProtocolValidationError) as raised:
             validate_evidence_packet(packet, case=make_case(), artifact_texts=self.texts)
         self.assertIn("semantic_promotion", {issue.code for issue in raised.exception.issues})
+
+    def test_non_alias_candidate_cannot_be_forged_into_a_semantic_blocker(self) -> None:
+        packet = evidence_packet(self.semantic)
+        packet["blockers"] = [
+            {
+                "blocker_id": "blocker-forged",
+                "code": "SEMANTIC_CONFIRMATION_REQUIRED",
+                "message": "Forged model consequence.",
+                "evidence_refs": ["p-1"],
+                "decision_effect": "block",
+            }
+        ]
+
+        with self.assertRaises(ProtocolValidationError) as raised:
+            validate_evidence_packet(
+                packet,
+                case=make_case(),
+                artifact_texts=self.texts,
+            )
+
+        self.assertIn(
+            "non_blocking_semantic",
+            {issue.code for issue in raised.exception.issues},
+        )
+
+    def test_semantic_confirmation_blocker_requires_alias_link(self) -> None:
+        packet = evidence_packet(self._alias_semantic())
+        packet["blockers"] = [
+            {
+                "blocker_id": "blocker-missing-alias",
+                "code": "SEMANTIC_CONFIRMATION_REQUIRED",
+                "message": "Missing alias provenance.",
+                "evidence_refs": ["operation-1"],
+                "decision_effect": "block",
+            }
+        ]
+
+        with self.assertRaises(ProtocolValidationError) as raised:
+            validate_evidence_packet(
+                packet,
+                case=make_case(),
+                artifact_texts=self.texts,
+            )
+
+        self.assertIn(
+            "semantic_alias_link_missing",
+            {issue.code for issue in raised.exception.issues},
+        )
+
+    def test_alias_link_cannot_be_attached_to_deterministic_blocker(self) -> None:
+        packet = evidence_packet(self._alias_semantic())
+        packet["blockers"] = [
+            {
+                "blocker_id": "blocker-alias-misuse",
+                "code": "OWNER_CONFLICT",
+                "message": "Alias attached to a deterministic blocker.",
+                "evidence_refs": ["operation-1", "alias-1"],
+                "decision_effect": "block",
+            }
+        ]
+
+        with self.assertRaises(ProtocolValidationError) as raised:
+            validate_evidence_packet(
+                packet,
+                case=make_case(),
+                artifact_texts=self.texts,
+            )
+
+        self.assertIn(
+            "semantic_alias_blocker_code",
+            {issue.code for issue in raised.exception.issues},
+        )
 
     def test_human_state_does_not_accept_automatic_approval(self) -> None:
         packet = evidence_packet(self.semantic)
