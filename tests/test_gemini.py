@@ -57,14 +57,11 @@ def _gemini_model_settings() -> dict[str, object]:
         "provider": "gemini-developer-api",
         "api_version": "v1beta",
         "endpoint": GEMINI_ENDPOINT,
-        "model": "gemini-3.5-flash",
-        "catalog_model_version": "3.5-flash-05-2026",
-        "resolved_model_version": "gemini-3.5-flash",
+        "model": "gemini-3.6-flash",
+        "catalog_model_version": "3.6-flash-07-2026",
+        "resolved_model_version": "gemini-3.6-flash",
         "parameters": {
-            "temperature": 1.0,
-            "top_p": 1.0,
             "max_output_tokens": 8192,
-            "candidate_count": 1,
             "response_mime_type": "application/json",
             "response_schema_sha256": "a" * 64,
         },
@@ -89,7 +86,7 @@ def _provider_body(
     return json.dumps(
         {
             "responseId": "response-1",
-            "modelVersion": "gemini-3.5-flash-001",
+            "modelVersion": "gemini-3.6-flash",
             "usageMetadata": {
                 "promptTokenCount": 120,
                 "candidatesTokenCount": 30,
@@ -338,18 +335,12 @@ class RequestTests(unittest.TestCase):
         self.assertEqual(
             set(config),
             {
-                "temperature",
-                "topP",
-                "candidateCount",
                 "maxOutputTokens",
                 "responseMimeType",
                 "responseJsonSchema",
                 "thinkingConfig",
             },
         )
-        self.assertEqual(config["temperature"], 1.0)
-        self.assertEqual(config["topP"], 1.0)
-        self.assertEqual(config["candidateCount"], 1)
         self.assertEqual(config["maxOutputTokens"], 8192)
         self.assertEqual(config["responseMimeType"], "application/json")
         self.assertEqual(
@@ -366,6 +357,9 @@ class RequestTests(unittest.TestCase):
             '"seed"',
             '"safetySettings"',
             '"thinkingBudget"',
+            '"temperature"',
+            '"topP"',
+            '"candidateCount"',
         ):
             self.assertNotIn(omitted, serialized)
 
@@ -434,7 +428,7 @@ class ResponseTests(unittest.TestCase):
         response = extract_generate_content_response(_provider_body(invalid_semantics))
 
         self.assertEqual(response.response_id, "response-1")
-        self.assertEqual(response.model_version, "gemini-3.5-flash-001")
+        self.assertEqual(response.model_version, "gemini-3.6-flash")
         self.assertEqual(response.usage_metadata["thoughtsTokenCount"], 12)
         self.assertEqual(response.model_status, {"modelStage": "STABLE"})
         self.assertEqual(response.finish_reason, "STOP")
