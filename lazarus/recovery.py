@@ -714,6 +714,20 @@ def run_recovery_matrix(
     }
 
 
+def run_recovery_state_coverage(
+    fixtures_root: str | os.PathLike[str],
+    *,
+    protocol_lock_digest: str,
+) -> dict[str, Any]:
+    coverage = run_recovery_matrix(
+        fixtures_root,
+        protocol_lock_digest=protocol_lock_digest,
+        repeat=1,
+    )
+    coverage["schema_version"] = "lazarus.recovery-state-coverage/v1"
+    return coverage
+
+
 def _result_signature(result: Mapping[str, Any]) -> tuple[str, ...]:
     return (
         str(result.get("classification")),
@@ -744,4 +758,5 @@ __all__ = [
     "load_recovery_matrix_inputs",
     "run_recovery",
     "run_recovery_matrix",
+    "run_recovery_state_coverage",
 ]

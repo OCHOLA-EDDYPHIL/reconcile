@@ -14,8 +14,11 @@ from lazarus.benchmark import (
     BenchmarkError,
     _abstained,
     _behavior_deviations,
+    _concept_thresholds,
     _prediction_matches,
+    _relation_failures,
     _recovery_repeatability,
+    _recovery_state_coverage,
     _score_run,
     _validate_compiler_packet,
     _validate_record_context,
@@ -76,7 +79,7 @@ GEMINI_SETTINGS = {
         "response_mime_type": "application/json",
         "response_schema_sha256": "a" * 64,
     },
-    "thinking": {"level": "MEDIUM", "include_thoughts": False},
+    "thinking": {"level": "MINIMAL", "include_thoughts": False},
     "request": {
         "store": False,
         "service_tier": "standard",
@@ -344,6 +347,21 @@ class RawResultTests(unittest.TestCase):
 
 
 class SyntheticScoringTests(unittest.TestCase):
+    def test_admitted_candidate_requires_endpoint_support_from_its_citations(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            cases_by_path, _oracles = _synthetic_cases(Path(temporary))
+            case = next(iter(cases_by_path.values()))
+            proposal = _proposal(case, "owner", "owner_candidate")
+            proposal["subject"] = "uncited-resource"
+            record = _raw_result(
+                case.case_id,
+                "b-replay",
+                "concept",
+                _packet(case, "b-replay", [], [proposal]),
+            )
+
+            self.assertEqual(_relation_failures(record, case), (1, 0))
+
     def test_companion_blockers_are_enumerated_one_to_one(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             cases_by_path, _oracles = _synthetic_cases(Path(temporary))
@@ -450,6 +468,25 @@ class SyntheticScoringTests(unittest.TestCase):
                     "schema_version": "lazarus.model-capture/v2",
                     "response_text": "{}",
                     "tool_parts": [{"functionCall": {"name": "forbidden"}}],
+                    "finish_reason": "STOP",
+                },
+            }
+        }
+
+        self.assertEqual(_behavior_deviations(record, {"coverage": []}), 1)
+
+    def test_capture_v2_requires_normal_model_completion(self) -> None:
+        record = {
+            "output": {
+                "packet": {
+                    "semantic_status": "available",
+                    "semantic": {"admitted": [], "rejected": []},
+                },
+                "capture": {
+                    "schema_version": "lazarus.model-capture/v2",
+                    "response_text": "{}",
+                    "tool_parts": [],
+                    "finish_reason": "MAX_TOKENS",
                 },
             }
         }
@@ -491,7 +528,7 @@ class SyntheticScoringTests(unittest.TestCase):
             {item["artifact_id"] for item in ablated["untrusted_artifacts"]},
         )
 
-    def test_complete_gate_uses_isolated_cases_and_raw_recovery_runs(self) -> None:
+    def test_concept_score_uses_one_result_per_arm_and_recovery_state(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             cases, oracles = _synthetic_cases(root)
@@ -502,7 +539,6 @@ class SyntheticScoringTests(unittest.TestCase):
             a1_paths: list[Path] = []
             rules_paths: list[Path] = []
             b_paths: list[Path] = []
-            ablation_paths = {arm: [] for arm in ABLATION_ARMS}
             for index, case in enumerate(cases.values(), start=1):
                 baseline_codes = [f"BASELINE_{index:02d}"] if index <= 6 else []
                 a1_packet = _packet(case, "a1", baseline_codes, [])
@@ -532,34 +568,19 @@ class SyntheticScoringTests(unittest.TestCase):
                     )
                 )
                 coverage = oracles[case.directory]["coverage"][0]
-                for run in ("run-1", "run-2", "run-3"):
-                    b_paths.append(
-                        persist_raw_result(
-                            result_root,
-                            _model_raw_result(
-                                case,
-                                "b-replay",
-                                run,
-                                baseline_codes,
-                                coverage,
-                                lock_digest,
-                            ),
-                        )
+                b_paths.append(
+                    persist_raw_result(
+                        result_root,
+                        _model_raw_result(
+                            case,
+                            "b-replay",
+                            "concept",
+                            baseline_codes,
+                            coverage,
+                            lock_digest,
+                        ),
                     )
-                    for arm in ABLATION_ARMS:
-                        ablation_paths[arm].append(
-                            persist_raw_result(
-                                result_root,
-                                _model_raw_result(
-                                    case,
-                                    arm,
-                                    run,
-                                    baseline_codes,
-                                    coverage,
-                                    lock_digest,
-                                ),
-                            )
-                        )
+                )
 
             case_paths = tuple(cases)
 
@@ -582,21 +603,109 @@ class SyntheticScoringTests(unittest.TestCase):
                     a1_results=a1_paths,
                     a1_rules_results=rules_paths,
                     b_results=b_paths,
-                    ablation_results=ablation_paths,
                     model_settings=MODEL_SETTINGS,
-                    recovery_repeatability=_repeatability_evidence(lock_digest),
+                    recovery_state_coverage=_state_coverage_evidence(lock_digest),
                 )
 
+            self.assertEqual(
+                set(score),
+                {
+                    "schema_version",
+                    "case_count",
+                    "a1",
+                    "a1_rules",
+                    "b",
+                    "recovery_state_coverage",
+                    "thresholds",
+                    "concept_pass",
+                },
+            )
+            self.assertEqual(score["schema_version"], "lazarus.concept-score/v1")
             self.assertEqual(score["a1"]["recall"], 0.75)
             self.assertEqual(score["a1_rules"]["recall"], 0.75)
-            self.assertTrue(score["technical_pass"])
-            self.assertEqual(score["material_output_agreement"], 1.0)
-            self.assertTrue(score["thresholds"]["ablation_runs_present"])
+            self.assertEqual(score["b"]["recall"], 1.0)
+            self.assertEqual(score["b"]["precision"], 1.0)
+            self.assertEqual(score["b"]["unique_beyond_a1"], 2)
+            self.assertTrue(score["concept_pass"])
+            self.assertTrue(score["recovery_state_coverage"]["passed"])
             self.assertTrue(score["thresholds"]["generic_rules_do_not_reproduce"])
-            for run in score["b_runs"].values():
-                self.assertEqual(run["recall"], 1.0)
-                self.assertEqual(run["precision"], 1.0)
-                self.assertEqual(run["unique_beyond_a1"], 2)
+
+    def test_concept_thresholds_use_only_the_registered_checks(self) -> None:
+        a1 = {
+            "recall": 0.5,
+            "false_positive": 1,
+            "recovery_correct": 12,
+            "recovery_expected": 12,
+        }
+        a1_rules = {
+            "recovery_correct": 12,
+            "recovery_expected": 12,
+        }
+        b = {
+            "recall": 0.5001,
+            "false_positive": 1,
+            "unique_beyond_a1": 1,
+            "negative_control_false_blockers": 0,
+            "unsupported_relations": 0,
+            "invalid_citations": 0,
+            "behavior_deviations": 0,
+            "recovery_correct": 12,
+            "recovery_expected": 12,
+        }
+
+        thresholds = _concept_thresholds(
+            a1,
+            a1_rules,
+            b,
+            generic_rules_reproduce=False,
+            recovery_state_coverage=True,
+        )
+
+        self.assertEqual(
+            set(thresholds),
+            {
+                "recall_improvement",
+                "unique_blockers",
+                "false_positive_control",
+                "negative_controls",
+                "supported_relations",
+                "valid_citations",
+                "behavior_deviations",
+                "generic_rules_do_not_reproduce",
+                "recovery_expectations",
+                "recovery_state_coverage",
+            },
+        )
+        self.assertTrue(all(thresholds.values()))
+
+    def test_recovery_state_coverage_requires_one_exact_run_per_state(self) -> None:
+        lock_digest = "a" * 64
+        evidence = _state_coverage_evidence(lock_digest)
+        self.assertTrue(
+            _recovery_state_coverage(
+                evidence,
+                protocol_lock_digest=lock_digest,
+                fixtures_root=FIXTURES,
+            )["passed"]
+        )
+
+        evidence["states"]["fresh"]["runs"] = []
+        self.assertFalse(
+            _recovery_state_coverage(
+                evidence,
+                protocol_lock_digest=lock_digest,
+                fixtures_root=FIXTURES,
+            )["passed"]
+        )
+
+        wrong_repeat = _state_coverage_evidence(lock_digest)
+        wrong_repeat["repeat"] = 20
+        with self.assertRaises(BenchmarkError):
+            _recovery_state_coverage(
+                wrong_repeat,
+                protocol_lock_digest=lock_digest,
+                fixtures_root=FIXTURES,
+            )
 
     def test_repeatability_ignores_self_attested_summary_fields(self) -> None:
         lock_digest = "a" * 64
@@ -869,8 +978,8 @@ def _proposal(
     proposal: dict[str, object] = {
         "proposal_id": f"proposal-{suffix}-{case.case_id}",
         "relation_type": relation_type,
-        "subject": "synthetic-service",
-        "object": "synthetic-database",
+        "subject": "Synthetic evidence",
+        "object": text.removeprefix("Synthetic evidence for ").rstrip("."),
         "citations": [
             {
                 "artifact_id": "ticket",
@@ -1017,6 +1126,15 @@ def _repeatability_evidence(lock_digest: str) -> dict[str, object]:
         "repeat": 20,
         "states": states,
     }
+
+
+def _state_coverage_evidence(lock_digest: str) -> dict[str, object]:
+    evidence = _repeatability_evidence(lock_digest)
+    evidence["schema_version"] = "lazarus.recovery-state-coverage/v1"
+    evidence["repeat"] = 1
+    for state in evidence["states"].values():
+        state["runs"] = state["runs"][:1]
+    return evidence
 
 
 def _recovery_result(state: str) -> dict[str, object]:

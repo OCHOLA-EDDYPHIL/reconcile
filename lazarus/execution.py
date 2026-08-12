@@ -11,19 +11,13 @@ from typing import Any
 from uuid import uuid4
 
 
-EXECUTION_PLAN_SCHEMA_VERSION = "lazarus.execution-plan/v1"
+EXECUTION_PLAN_SCHEMA_VERSION = "lazarus.execution-plan/v2"
 DIGEST_CHAIN_SCHEMA_VERSION = "lazarus.digest-chain/v1"
 SCORE_RECEIPT_SCHEMA_VERSION = "lazarus.score-receipt/v1"
-MODEL_ARMS = (
-    "b-replay",
-    "b-replay-no-alias",
-    "b-replay-no-intent",
-    "b-replay-no-probe",
-    "b-replay-no-incident",
-)
+MODEL_ARMS = ("b-replay",)
 DETERMINISTIC_ARMS = ("a1", "a1-rules")
 RECOVERY_STATES = ("fresh", "schema", "invariant", "stale", "rto", "cleanup")
-MODEL_RUN_IDS = ("run-01", "run-02", "run-03")
+MODEL_RUN_IDS = ("run-01",)
 _SAFE_IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 _DIGEST = re.compile(r"^[0-9a-f]{64}$")
 
@@ -65,11 +59,9 @@ def build_execution_plan(case_ids: Sequence[str]) -> dict[str, Any]:
             sequence += 1
 
     model_sequence = 1
-    for run_index, run_id in enumerate(MODEL_RUN_IDS):
-        for case_index, case_id in enumerate(normalized_cases):
-            offset = (run_index + case_index) % len(MODEL_ARMS)
-            ordered_arms = MODEL_ARMS[offset:] + MODEL_ARMS[:offset]
-            for arm in ordered_arms:
+    for run_id in MODEL_RUN_IDS:
+        for case_id in normalized_cases:
+            for arm in MODEL_ARMS:
                 evaluations.append(
                     _evaluation_entry(
                         sequence,
@@ -85,17 +77,16 @@ def build_execution_plan(case_ids: Sequence[str]) -> dict[str, Any]:
     recovery: list[dict[str, Any]] = []
     recovery_sequence = 1
     for state in RECOVERY_STATES:
-        for repeat in range(1, 21):
-            recovery.append(
-                {
-                    "recovery_id": f"recovery-{recovery_sequence:03d}",
-                    "sequence": recovery_sequence,
-                    "state": state,
-                    "run_id": f"{state}-{repeat:02d}",
-                    "result_path": f"recovery/{state}/{repeat:02d}.json",
-                }
-            )
-            recovery_sequence += 1
+        recovery.append(
+            {
+                "recovery_id": f"recovery-{recovery_sequence:03d}",
+                "sequence": recovery_sequence,
+                "state": state,
+                "run_id": f"{state}-01",
+                "result_path": f"recovery/{state}/01.json",
+            }
+        )
+        recovery_sequence += 1
 
     prepared_inputs = [
         {

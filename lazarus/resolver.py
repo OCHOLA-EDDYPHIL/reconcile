@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections import Counter
 from collections.abc import Mapping
 from pathlib import Path
+import re
 from typing import Any
 
 from .protocol import (
@@ -16,6 +17,9 @@ from .protocol import (
     validate_proposal_shape,
     validate_semantic_envelope,
 )
+
+
+_SUPPORT_REQUIRED_RELATION_TYPES = frozenset(RELATION_EVIDENCE_CLASSES)
 
 
 def resolve_semantic_output(
@@ -135,6 +139,30 @@ def resolve_semantic_output(
                         )
                     except ProtocolValidationError as exc:
                         issues.extend(exc.issues)
+            if (
+                not issues
+                and relation_type in _SUPPORT_REQUIRED_RELATION_TYPES
+                and not relation_endpoints_are_distinct(proposal)
+            ):
+                issues.append(
+                    ValidationIssue(
+                        "relation_endpoints_identical",
+                        proposal_path,
+                        "intent contradiction endpoints must be distinct",
+                    )
+                )
+            if (
+                not issues
+                and relation_type in _SUPPORT_REQUIRED_RELATION_TYPES
+                and not proposal_has_citation_support(proposal)
+            ):
+                issues.append(
+                    ValidationIssue(
+                        "citation_support_missing",
+                        proposal_path,
+                        "candidate relation endpoints must appear in the cited quotes",
+                    )
+                )
 
         if issues:
             rejected.append(
@@ -183,6 +211,73 @@ def not_requested_semantic_resolution() -> dict[str, Any]:
         "abstained": False,
         "requested_evidence": [],
     }
+
+
+def proposal_has_citation_support(proposal: Mapping[str, Any]) -> bool:
+    if proposal.get("relation_type") not in _SUPPORT_REQUIRED_RELATION_TYPES:
+        return True
+    citations = proposal.get("citations")
+    if not isinstance(citations, list):
+        return False
+    citation_tokens = [
+        _support_tokens(citation["quote"])
+        for citation in citations
+        if isinstance(citation, Mapping)
+        and isinstance(citation.get("quote"), str)
+    ]
+    if not citation_tokens:
+        return False
+    for endpoint in (proposal.get("subject"), proposal.get("object")):
+        if not any(
+            citation_supports_endpoint(citation, endpoint)
+            for citation in citations
+        ):
+            return False
+    return True
+
+
+def citation_supports_endpoint(citation: Any, endpoint: Any) -> bool:
+    if (
+        not isinstance(citation, Mapping)
+        or not isinstance(citation.get("quote"), str)
+        or not isinstance(endpoint, str)
+    ):
+        return False
+    endpoint_tokens = _support_tokens(endpoint)
+    if sum(len(token) for token in endpoint_tokens) < 2:
+        return False
+    return _contains_token_sequence(
+        _support_tokens(citation["quote"]),
+        endpoint_tokens,
+    )
+
+
+def relation_endpoints_are_distinct(proposal: Mapping[str, Any]) -> bool:
+    if proposal.get("relation_type") != "intent_effect_contradiction":
+        return True
+    subject = proposal.get("subject")
+    object_ = proposal.get("object")
+    if not isinstance(subject, str) or not isinstance(object_, str):
+        return False
+    subject_tokens = _support_tokens(subject)
+    object_tokens = _support_tokens(object_)
+    return bool(subject_tokens and object_tokens and subject_tokens != object_tokens)
+
+
+def _support_tokens(value: str) -> tuple[str, ...]:
+    return tuple(re.findall(r"[a-z0-9]+", value.casefold()))
+
+
+def _contains_token_sequence(
+    evidence: tuple[str, ...], endpoint: tuple[str, ...]
+) -> bool:
+    if not endpoint or len(endpoint) > len(evidence):
+        return False
+    width = len(endpoint)
+    return any(
+        evidence[index : index + width] == endpoint
+        for index in range(len(evidence) - width + 1)
+    )
 
 
 def _proposal_id(proposal: Any, index: int) -> str:

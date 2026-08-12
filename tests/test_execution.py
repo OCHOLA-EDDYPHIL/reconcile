@@ -12,6 +12,7 @@ from lazarus.execution import (
     ExecutionError,
     InventoryError,
     MODEL_ARMS,
+    RECOVERY_STATES,
     build_digest_chain_record,
     build_execution_plan,
     expected_execution_paths,
@@ -57,7 +58,7 @@ GEMINI_SETTINGS = {
         "response_mime_type": "application/json",
         "response_schema_sha256": "b" * 64,
     },
-    "thinking": {"level": "MEDIUM", "include_thoughts": False},
+    "thinking": {"level": "MINIMAL", "include_thoughts": False},
     "request": {
         "store": False,
         "service_tier": "standard",
@@ -105,22 +106,44 @@ def _bound(value: dict) -> dict:
 
 def _calibration_index(calibration_lock: dict) -> dict:
     return {
-        "schema_version": "lazarus.calibration-index/v2",
+        "schema_version": "lazarus.calibration-index/v3",
         "passed": True,
         "calibration_lock": _bound(calibration_lock),
         "capture_index": _bound({"schema_version": "capture-index/v1", "count": 4}),
         "results": _bound({"schema_version": "results/v1", "count": 4}),
-        "score": _bound({"schema_version": "score/v1", "passed": True}),
+        "score": _bound(
+            {
+                "schema_version": "lazarus.calibration-transport/v1",
+                "criteria": {
+                    "four_results": True,
+                    "complete_responses": True,
+                    "valid_semantic_envelopes": True,
+                    "no_tool_activity": True,
+                    "unique_invocations": True,
+                    "unique_responses": True,
+                },
+                "passed": True,
+            }
+        ),
     }
 
 
 class ExecutionPlanTests(unittest.TestCase):
-    def test_fixed_plan_has_registered_counts_and_cyclic_model_order(self) -> None:
+    def test_fixed_plan_has_registered_v2_shape(self) -> None:
         plan = build_execution_plan(CASE_IDS)
         self.assertEqual(validate_execution_plan(plan), plan)
-        self.assertEqual(len(plan["prepared_inputs"]), 60)
-        self.assertEqual(len(plan["evaluations"]), 204)
-        self.assertEqual(len(plan["recovery"]), 120)
+        self.assertEqual(plan["schema_version"], "lazarus.execution-plan/v2")
+        self.assertEqual(MODEL_ARMS, ("b-replay",))
+        self.assertEqual(len(plan["prepared_inputs"]), 12)
+        self.assertEqual(len(plan["evaluations"]), 36)
+        self.assertEqual(len(plan["recovery"]), 6)
+        self.assertEqual(
+            [
+                (entry["case_id"], entry["arm"])
+                for entry in plan["prepared_inputs"]
+            ],
+            [(case_id, "b-replay") for case_id in CASE_IDS],
+        )
 
         deterministic = [
             entry for entry in plan["evaluations"] if entry["invocation_id"] is None
@@ -129,39 +152,53 @@ class ExecutionPlanTests(unittest.TestCase):
             entry for entry in plan["evaluations"] if entry["invocation_id"] is not None
         ]
         self.assertEqual(len(deterministic), 24)
-        self.assertEqual({entry["arm"] for entry in deterministic}, {"a1", "a1-rules"})
+        self.assertEqual(
+            [
+                (entry["case_id"], entry["arm"], entry["run_id"])
+                for entry in deterministic
+            ],
+            [
+                (case_id, arm, "baseline")
+                for arm in ("a1", "a1-rules")
+                for case_id in CASE_IDS
+            ],
+        )
         self.assertNotIn("a0", {entry["arm"] for entry in plan["evaluations"]})
-        self.assertEqual(len(model), 180)
+        self.assertEqual(len(model), 12)
         self.assertEqual(
-            [entry["arm"] for entry in model[: len(MODEL_ARMS)]],
-            list(MODEL_ARMS),
+            [
+                (entry["case_id"], entry["arm"], entry["run_id"])
+                for entry in model
+            ],
+            [(case_id, "b-replay", "run-01") for case_id in CASE_IDS],
         )
         self.assertEqual(
-            [entry["arm"] for entry in model[len(MODEL_ARMS) : 2 * len(MODEL_ARMS)]],
-            [*MODEL_ARMS[1:], MODEL_ARMS[0]],
+            [entry["invocation_id"] for entry in model],
+            [f"invocation-{index:03d}" for index in range(1, 13)],
         )
-        second_run = len(CASE_IDS) * len(MODEL_ARMS)
         self.assertEqual(
-            [entry["arm"] for entry in model[second_run : second_run + len(MODEL_ARMS)]],
-            [*MODEL_ARMS[1:], MODEL_ARMS[0]],
+            [
+                (entry["state"], entry["run_id"], entry["result_path"])
+                for entry in plan["recovery"]
+            ],
+            [
+                (state, f"{state}-01", f"recovery/{state}/01.json")
+                for state in RECOVERY_STATES
+            ],
         )
         self.assertEqual(
             len({entry["execution_id"] for entry in plan["evaluations"]}),
-            204,
+            36,
         )
-        self.assertEqual(len({entry["invocation_id"] for entry in model}), 180)
-        self.assertTrue(
-            all(
-                sum(entry["state"] == state for entry in plan["recovery"]) == 20
-                for state in {entry["state"] for entry in plan["recovery"]}
-            )
-        )
+        self.assertEqual(len({entry["invocation_id"] for entry in model}), 12)
 
-    def test_plan_rejects_reordering_and_case_count_changes(self) -> None:
+    def test_plan_rejects_reordering_case_count_changes_and_mutation(self) -> None:
         with self.assertRaises(ExecutionError):
             build_execution_plan(tuple(reversed(CASE_IDS)))
+        with self.assertRaises(ExecutionError):
+            build_execution_plan(CASE_IDS[:-1])
         changed = build_execution_plan(CASE_IDS)
-        changed["evaluations"][24]["run_id"] = "selected-afterward"
+        changed["evaluations"][24]["run_id"] = "run-02"
         with self.assertRaises(ExecutionError):
             validate_execution_plan(changed)
 
@@ -449,6 +486,32 @@ class LockV2Tests(unittest.TestCase):
                 execution_plan=plan,
                 sealed_oracle_digest="a" * 64,
             )
+
+            malformed_calibration = deepcopy(manifest)
+            malformed_score = malformed_calibration["calibration_index"]["value"][
+                "score"
+            ]
+            malformed_score["value"]["schema_version"] = (
+                "lazarus.calibration-transport/v0"
+            )
+            malformed_score["digest"] = canonical_sha256(malformed_score["value"])
+            malformed_calibration["calibration_index"]["digest"] = canonical_sha256(
+                malformed_calibration["calibration_index"]["value"]
+            )
+            malformed_suite = malformed_calibration["suite_manifest"]
+            malformed_suite["value"]["calibration_index_sha256"] = (
+                malformed_calibration["calibration_index"]["digest"]
+            )
+            malformed_suite["digest"] = canonical_sha256(malformed_suite["value"])
+            with self.assertRaisesRegex(
+                LockVerificationError,
+                "calibration index does not match the protocol",
+            ):
+                verify_lock_manifest(
+                    malformed_calibration,
+                    repository,
+                    execution_root=execution,
+                )
 
             broken_link = deepcopy(manifest)
             broken_link["suite_manifest"]["value"][

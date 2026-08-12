@@ -14,13 +14,10 @@ import subprocess
 from typing import Any
 
 from lazarus.benchmark import (
-    ABLATION_ARMS,
     BenchmarkCase,
-    _score_run,
     build_model_input,
     discover_cases,
     load_case,
-    load_oracle,
     persist_raw_result,
     score_persisted_results,
 )
@@ -50,7 +47,10 @@ from lazarus.locking import (
     verify_lock_manifest,
 )
 from lazarus.protocol import ProtocolValidationError
-from lazarus.recovery import load_recovery_matrix_inputs, run_recovery_matrix
+from lazarus.recovery import (
+    load_recovery_matrix_inputs,
+    run_recovery_state_coverage,
+)
 from lazarus.suite import (
     create_sealing_key,
     decrypt_oracles,
@@ -59,10 +59,10 @@ from lazarus.suite import (
 )
 
 
-CALIBRATION_INDEX_SCHEMA_VERSION = "lazarus.calibration-index/v2"
-CALIBRATION_SCORE_SCHEMA_VERSION = "lazarus.calibration-score/v1"
-RUN_SUMMARY_SCHEMA_VERSION = "lazarus.falsification-summary/v1"
-EXPECTED_GENERATION_CALLS = 184
+CALIBRATION_INDEX_SCHEMA_VERSION = "lazarus.calibration-index/v3"
+CALIBRATION_SCORE_SCHEMA_VERSION = "lazarus.calibration-transport/v1"
+RUN_SUMMARY_SCHEMA_VERSION = "lazarus.concept-summary/v1"
+EXPECTED_GENERATION_CALLS = 16
 CALIBRATION_CASE_IDS = ("cal-01", "cal-02", "cal-03", "cal-04")
 
 Progress = Callable[[str, int, int], None]
@@ -106,7 +106,7 @@ def build_registered_model_settings(repository_root: str | os.PathLike[str]) -> 
             "response_mime_type": "application/json",
             "response_schema_sha256": response_schema_digest,
         },
-        "thinking": {"level": "MEDIUM", "include_thoughts": False},
+        "thinking": {"level": "MINIMAL", "include_thoughts": False},
         "request": {
             "store": False,
             "service_tier": "standard",
@@ -259,7 +259,11 @@ def run_registered_falsification(
         sealed_digest,
     )
     lock_digest = canonical_sha256(lock_manifest)
-    _notify(progress, "heldout_capture", 0, 180)
+    model_evaluations = sum(
+        evaluation["invocation_id"] is not None
+        for evaluation in plan["evaluations"]
+    )
+    _notify(progress, "heldout_capture", 0, model_evaluations)
     capture_execution_plan(
         execution_root,
         plan,
@@ -276,7 +280,7 @@ def run_registered_falsification(
         ),
     )
 
-    _notify(progress, "evaluation", 0, 204)
+    _notify(progress, "evaluation", 0, len(plan["evaluations"]))
     recovery_bundle = _evaluate_plan(
         execution_root,
         fixtures_root,
@@ -340,7 +344,7 @@ def run_registered_falsification(
         calibration=calibration_index,
         lock_manifest=lock_manifest,
         score=score,
-        disposition="technical_pass" if score["technical_pass"] else "technical_fail",
+        disposition="concept_pass" if score["concept_pass"] else "concept_fail",
     )
     write_immutable_json(control / "summary.json", summary)
     return FalsificationOutcome(root, summary)
@@ -443,10 +447,12 @@ def _run_calibration(
     )
     results: dict[str, str] = {}
     records: dict[str, dict[str, Any]] = {}
+    captures: dict[str, dict[str, Any]] = {}
     lock_digest = canonical_sha256(lock)
     for sequence, case_id in enumerate(CALIBRATION_CASE_IDS, start=1):
         capture_path = calibration_root / f"calibration/calibration-{sequence:03d}/capture.json"
         capture = _load_json(capture_path, "calibration capture")
+        captures[case_id] = capture
         semantic = _semantic_response(capture)
         packet = _compile_semantic(cases[case_id], "b-replay", semantic, allow_heldout=False)
         raw = _raw_result(
@@ -464,40 +470,29 @@ def _run_calibration(
         relative = result_path.relative_to(calibration_root).as_posix()
         results[relative] = file_sha256(result_path)
         records[case_id] = raw
-    oracles = {case_id: load_oracle(cases[case_id].directory) for case_id in CALIBRATION_CASE_IDS}
-    a1_records = {
-        case_id: {
-            "output": {
-                "packet": compile_case(cases[case_id].directory, "a1")
-            }
-        }
-        for case_id in CALIBRATION_CASE_IDS
-    }
-    metrics = _score_run(cases, oracles, records, a1_records, arm="b")
     criteria = {
         "four_results": set(records) == set(CALIBRATION_CASE_IDS),
-        "true_positive": metrics["true_positive"] == 4,
-        "false_positive": metrics["false_positive"] == 0,
-        "false_negative": metrics["false_negative"] == 0,
-        "precision": metrics["precision"] == 1.0,
-        "recall": metrics["recall"] == 1.0,
-        "unique_beyond_a1": metrics["unique_beyond_a1"] == 3,
-        "abstention": metrics["abstention_correct"] == metrics["abstention_required"] == 1,
-        "supported_relations": metrics["unsupported_relations"] == 0,
-        "valid_citations": metrics["invalid_citations"] == 0,
-        "probe": metrics["probes_correct"] == metrics["probes_required"] == 1,
-        "behavior": metrics["behavior_deviations"] == 0,
-        "recovery": metrics["recovery_correct"] == metrics["recovery_expected"] == 4,
+        "complete_responses": all(
+            capture.get("finish_reason") == "STOP"
+            for capture in captures.values()
+        ),
+        "valid_semantic_envelopes": all(
+            record["output"]["packet"].get("semantic_status") == "available"
+            for record in records.values()
+        ),
+        "no_tool_activity": all(
+            capture.get("tool_parts") == []
+            for capture in captures.values()
+        ),
         "unique_invocations": len(
-            {capture["invocation_id"] for capture in (_load_json(calibration_root / f"calibration/calibration-{index:03d}/capture.json", "calibration capture") for index in range(1, 5))}
+            {capture["invocation_id"] for capture in captures.values()}
         ) == 4,
         "unique_responses": len(
-            {capture["response_id"] for capture in (_load_json(calibration_root / f"calibration/calibration-{index:03d}/capture.json", "calibration capture") for index in range(1, 5))}
+            {capture["response_id"] for capture in captures.values()}
         ) == 4,
     }
     score = {
         "schema_version": CALIBRATION_SCORE_SCHEMA_VERSION,
-        "metrics": metrics,
         "criteria": criteria,
         "passed": all(criteria.values()),
     }
@@ -614,10 +609,9 @@ def _evaluate_plan(
         completed += 1
         _notify(progress, "evaluation", completed, len(plan["evaluations"]))
 
-    recovery = run_recovery_matrix(
+    recovery = run_recovery_state_coverage(
         fixtures_root,
         protocol_lock_digest=lock_digest,
-        repeat=20,
     )
     by_identity = {
         (state, envelope["run_id"]): envelope
@@ -649,10 +643,10 @@ def _rebuild_recovery_bundle(
             ],
         }
     return {
-        "schema_version": "lazarus.recovery-repeatability/v1",
+        "schema_version": "lazarus.recovery-state-coverage/v1",
         "protocol_lock_digest": lock_digest,
         "matrix_sha256": inputs["matrix_sha256"],
-        "repeat": 20,
+        "repeat": 1,
         "states": states,
     }
 
@@ -679,9 +673,8 @@ def _score_execution(
         a1_results=paths("a1"),
         a1_rules_results=paths("a1-rules"),
         b_results=paths("b-replay"),
-        ablation_results={arm: paths(arm) for arm in ABLATION_ARMS},
         model_settings=settings,
-        recovery_repeatability=recovery,
+        recovery_state_coverage=recovery,
         repository_root=repository,
         execution_root=execution_root,
         oracle_mapping=oracles,

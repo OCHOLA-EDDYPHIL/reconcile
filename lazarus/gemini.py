@@ -252,7 +252,7 @@ def build_generate_content_request(model_input: bytes) -> bytes:
             "responseMimeType": "application/json",
             "responseJsonSchema": projected_schema,
             "thinkingConfig": {
-                "thinkingLevel": "MEDIUM",
+                "thinkingLevel": "MINIMAL",
                 "includeThoughts": False,
             },
         },

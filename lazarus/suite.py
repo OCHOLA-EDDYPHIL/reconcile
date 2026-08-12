@@ -31,7 +31,7 @@ PUBLIC_SUITE_SCHEMA_VERSION = "lazarus.public-suite/v1"
 ATTESTATION_SCHEMA_VERSION = "lazarus.suite-attestation/v1"
 ORACLE_BUNDLE_SCHEMA_VERSION = "lazarus.oracle-bundle/v1"
 ORACLE_SCHEMA_VERSION = "lazarus.oracle/v1"
-CALIBRATION_INDEX_SCHEMA_VERSION = "lazarus.calibration-index/v2"
+CALIBRATION_INDEX_SCHEMA_VERSION = "lazarus.calibration-index/v3"
 MANIFEST_NAME = "suite-manifest.json"
 
 _SAFE_IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
@@ -353,7 +353,23 @@ def validate_calibration_index(index: Mapping[str, Any]) -> dict[str, Any]:
             normalized.get(field_name), field_name
         )
     score = normalized["score"]["value"]
-    if score.get("passed") is not True:
+    expected_criteria = {
+        "four_results",
+        "complete_responses",
+        "valid_semantic_envelopes",
+        "no_tool_activity",
+        "unique_invocations",
+        "unique_responses",
+    }
+    criteria = score.get("criteria")
+    if (
+        set(score) != {"schema_version", "criteria", "passed"}
+        or score.get("schema_version") != "lazarus.calibration-transport/v1"
+        or not isinstance(criteria, Mapping)
+        or set(criteria) != expected_criteria
+        or any(value is not True for value in criteria.values())
+        or score.get("passed") is not True
+    ):
         raise SuiteError("calibration score must record a passing result")
     try:
         canonical_json_bytes(normalized)

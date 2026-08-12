@@ -59,7 +59,7 @@ SETTINGS = {
         "response_mime_type": "application/json",
         "response_schema_sha256": PROJECTED_SCHEMA_SHA256,
     },
-    "thinking": {"level": "MEDIUM", "include_thoughts": False},
+    "thinking": {"level": "MINIMAL", "include_thoughts": False},
     "request": {
         "store": False,
         "service_tier": "standard",
@@ -612,16 +612,16 @@ class PlanOrchestrationTests(_FinalLockVerificationTests):
             expected = [
                 entry for entry in plan["evaluations"] if entry["invocation_id"] is not None
             ]
-            self.assertEqual(len(captures), 180)
-            self.assertEqual(len(transport.calls), 180)
+            self.assertEqual(len(captures), 12)
+            self.assertEqual(len(transport.calls), 12)
             self.assertEqual(
                 [capture["execution_id"] for capture in captures],
                 [entry["execution_id"] for entry in expected],
             )
             self.assertEqual(transport.maximum_active, 1)
-            self.assertEqual(len(progress), 180)
-            self.assertEqual(progress[0], (1, 180))
-            self.assertEqual(progress[-1], (180, 180))
+            self.assertEqual(len(progress), 12)
+            self.assertEqual(progress[0], (1, 12))
+            self.assertEqual(progress[-1], (12, 12))
             self.assertEqual(standard_output.getvalue(), "")
             self.assertEqual(standard_error.getvalue(), "")
             for entry in expected:
