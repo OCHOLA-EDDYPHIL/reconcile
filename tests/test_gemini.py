@@ -252,7 +252,7 @@ class RequestTests(unittest.TestCase):
         self.assertEqual(config["temperature"], 1.0)
         self.assertEqual(config["topP"], 1.0)
         self.assertEqual(config["candidateCount"], 1)
-        self.assertEqual(config["maxOutputTokens"], 4096)
+        self.assertEqual(config["maxOutputTokens"], 8192)
         self.assertEqual(config["responseMimeType"], "application/json")
         self.assertEqual(
             config["thinkingConfig"],

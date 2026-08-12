@@ -54,7 +54,7 @@ SETTINGS = {
     "parameters": {
         "temperature": 1.0,
         "top_p": 1.0,
-        "max_output_tokens": 4096,
+        "max_output_tokens": 8192,
         "candidate_count": 1,
         "response_mime_type": "application/json",
         "response_schema_sha256": PROJECTED_SCHEMA_SHA256,

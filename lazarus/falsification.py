@@ -101,7 +101,7 @@ def build_registered_model_settings(repository_root: str | os.PathLike[str]) -> 
         "parameters": {
             "temperature": 1.0,
             "top_p": 1.0,
-            "max_output_tokens": 4096,
+            "max_output_tokens": 8192,
             "candidate_count": 1,
             "response_mime_type": "application/json",
             "response_schema_sha256": response_schema_digest,
