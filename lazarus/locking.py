@@ -143,9 +143,9 @@ def _validate_gemini_model_settings(settings: dict[str, Any]) -> dict[str, Any]:
     constants = {
         "provider": "gemini-developer-api",
         "api_version": "v1beta",
-        "model": "gemini-2.5-flash",
-        "catalog_model_version": "001",
-        "resolved_model_version": "gemini-2.5-flash",
+        "model": "gemini-3.5-flash-lite",
+        "catalog_model_version": "3.5-flash-lite-07-2026",
+        "resolved_model_version": "gemini-3.5-flash-lite",
     }
     for field, expected in constants.items():
         if settings.get(field) != expected:
@@ -153,7 +153,7 @@ def _validate_gemini_model_settings(settings: dict[str, Any]) -> dict[str, Any]:
     endpoint = settings.get("endpoint")
     expected_endpoint = (
         "https://generativelanguage.googleapis.com/v1beta/"
-        "models/gemini-2.5-flash:generateContent"
+        "models/gemini-3.5-flash-lite:generateContent"
     )
     if endpoint != expected_endpoint:
         raise LockingError("Gemini endpoint does not match the locked callable resource")
@@ -182,12 +182,12 @@ def _validate_gemini_model_settings(settings: dict[str, Any]) -> dict[str, Any]:
 
     thinking = settings.get("thinking")
     if not isinstance(thinking, Mapping) or set(thinking) != {
-        "budget",
+        "level",
         "include_thoughts",
     }:
         raise LockingError("Gemini thinking settings do not match the protocol")
-    if type(thinking.get("budget")) is not int or thinking.get("budget") != 0:
-        raise LockingError("Gemini thinking budget must be zero")
+    if type(thinking.get("level")) is not str or thinking.get("level") != "MINIMAL":
+        raise LockingError("Gemini thinking level must be MINIMAL")
     if thinking.get("include_thoughts") is not False:
         raise LockingError("Gemini thoughts must be excluded")
     request = settings.get("request")
