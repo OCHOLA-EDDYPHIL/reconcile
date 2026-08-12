@@ -1,0 +1,59 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "lazarus.raw-result/v1",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "case_id",
+    "arm",
+    "run_id",
+    "started_at",
+    "completed_at",
+    "output"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "lazarus.raw-result/v1"
+    },
+    "case_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "arm": {
+      "type": "string",
+      "minLength": 1
+    },
+    "run_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "started_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "completed_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "model_settings": {
+      "type": "object"
+    },
+    "model_settings_digest": {
+      "type": "string"
+    },
+    "protocol_lock_digest": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "output": {
+      "type": "object",
+      "required": ["packet"],
+      "properties": {
+        "packet": {"type": "object"},
+        "capture": {"type": "object"}
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

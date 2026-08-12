@@ -1,0 +1,21 @@
+{
+  "resource_changes": [
+    {
+      "address": "google_sql_database_instance.unit_n12",
+      "type": "google_sql_database_instance",
+      "provider_name": "registry.terraform.io/hashicorp/google",
+      "change": {
+        "actions": [
+          "delete"
+        ],
+        "before": {
+          "name": "state-n12",
+          "project": "synthetic-core",
+          "environment": "development",
+          "generation": "rev-22"
+        },
+        "after": null
+      }
+    }
+  ]
+}

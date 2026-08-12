@@ -1,0 +1,12 @@
+{
+  "resources": [
+    {
+      "resource_ref": "google_sql_database_instance.unit_n01",
+      "project": "synthetic-core",
+      "environment": "production",
+      "generation": "rev-11",
+      "owner": "platform-unit",
+      "recovery_owner": "recovery-unit"
+    }
+  ]
+}

@@ -1,0 +1,21 @@
+{
+  "resource_changes": [
+    {
+      "address": "google_sql_database_instance.payments",
+      "type": "google_sql_database_instance",
+      "provider_name": "registry.terraform.io/hashicorp/google",
+      "change": {
+        "actions": [
+          "delete"
+        ],
+        "before": {
+          "name": "payments-main",
+          "project": "core-platform",
+          "environment": "production",
+          "generation": "gen-7"
+        },
+        "after": null
+      }
+    }
+  ]
+}

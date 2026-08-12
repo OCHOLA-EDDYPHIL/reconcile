@@ -1,0 +1,12 @@
+{
+  "resources": [
+    {
+      "resource_ref": "google_sql_database_instance.payments",
+      "project": "core-platform",
+      "environment": "production",
+      "generation": "gen-7",
+      "owner": "data-platform",
+      "recovery_owner": "service-reliability"
+    }
+  ]
+}

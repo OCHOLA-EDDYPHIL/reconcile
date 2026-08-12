@@ -1,0 +1,18 @@
+{
+  "services": [
+    {
+      "service_id": "stock-api",
+      "environment": "production",
+      "aliases": [],
+      "dependencies": [
+        {
+          "resource_ref": "stock-store",
+          "project": "core-platform",
+          "environment": "production",
+          "generation": "gen-6",
+          "active": true
+        }
+      ]
+    }
+  ]
+}

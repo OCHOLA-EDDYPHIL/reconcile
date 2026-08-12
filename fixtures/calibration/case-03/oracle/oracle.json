@@ -1,0 +1,28 @@
+{
+  "schema_version": "lazarus.oracle/v1",
+  "case_id": "cal-03",
+  "negative_control": false,
+  "decision_changing_blockers": [
+    {
+      "oracle_id": "ob-03",
+      "decision_changing": true,
+      "acceptable_matches": [
+        "SEMANTIC_CONFIRMATION_REQUIRED"
+      ],
+      "requires_abstention": true
+    }
+  ],
+  "advisory_findings": [],
+  "coverage": [
+    "insufficient_evidence"
+  ],
+  "abstention_required": true,
+  "required_probe": null,
+  "recovery_expectation": {
+    "restore": "pass",
+    "canary": "pass",
+    "rpo": "pass",
+    "rto": "pass",
+    "cleanup": "pass"
+  }
+}

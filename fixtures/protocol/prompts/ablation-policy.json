@@ -1,0 +1,28 @@
+{
+  "schema_version": "lazarus.ablation-policy/v1",
+  "arms": {
+    "b-replay": {
+      "disabled_relation_types": []
+    },
+    "b-replay-no-alias": {
+      "disabled_relation_types": [
+        "resource_alias_candidate"
+      ]
+    },
+    "b-replay-no-intent": {
+      "disabled_relation_types": [
+        "intent_effect_contradiction"
+      ]
+    },
+    "b-replay-no-probe": {
+      "disabled_relation_types": [
+        "probe_selection"
+      ]
+    },
+    "b-replay-no-incident": {
+      "disabled_relation_types": [
+        "incident_relevance_advisory"
+      ]
+    }
+  }
+}

@@ -1,0 +1,1 @@
+Stock store is the operational name for inventory-main. Restore inventory-main before starting stock-api.

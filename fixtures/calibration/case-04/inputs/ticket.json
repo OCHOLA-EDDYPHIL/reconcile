@@ -1,0 +1,5 @@
+{
+  "intended_environment": "production",
+  "intended_effect": "delete",
+  "summary": "Remove the database after dependent services are reconciled."
+}

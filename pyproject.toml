@@ -1,0 +1,9 @@
+[project]
+name = "lazarus"
+version = "0.1.0"
+description = "Evidence compilation for destructive infrastructure changes"
+requires-python = ">=3.12"
+dependencies = []
+
+[project.scripts]
+lazarus = "lazarus.cli:main"

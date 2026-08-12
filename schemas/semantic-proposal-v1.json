@@ -1,0 +1,163 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:lazarus:schema:semantic-proposal:v1",
+  "title": "Lazarus semantic proposal contract v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "case_id",
+    "proposals",
+    "abstained",
+    "requested_evidence"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "lazarus.semantic-proposal/v1"
+    },
+    "case_id": {
+      "$ref": "#/$defs/identifier"
+    },
+    "proposals": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/proposal"
+      }
+    },
+    "abstained": {
+      "type": "boolean"
+    },
+    "requested_evidence": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "abstained": {
+            "const": true
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "requested_evidence": {
+            "minItems": 1
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "identifier": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$"
+    },
+    "proposal": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "proposal_id",
+        "relation_type",
+        "subject",
+        "object",
+        "citations"
+      ],
+      "properties": {
+        "proposal_id": {
+          "$ref": "#/$defs/identifier"
+        },
+        "relation_type": {
+          "$ref": "#/$defs/relation_type"
+        },
+        "subject": {
+          "type": "string",
+          "minLength": 1
+        },
+        "object": {
+          "type": "string",
+          "minLength": 1
+        },
+        "citations": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/citation"
+          }
+        },
+        "probe_id": {
+          "$ref": "#/$defs/probe_id"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "relation_type": {
+                "const": "probe_selection"
+              }
+            }
+          },
+          "then": {
+            "required": ["probe_id"]
+          },
+          "else": {
+            "not": {
+              "required": ["probe_id"]
+            }
+          }
+        }
+      ]
+    },
+    "citation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["artifact_id", "digest", "start", "end", "quote"],
+      "properties": {
+        "artifact_id": {
+          "$ref": "#/$defs/identifier"
+        },
+        "digest": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "start": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "end": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "quote": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "relation_type": {
+      "enum": [
+        "intent_effect_contradiction",
+        "resource_alias_candidate",
+        "conditional_dependency_candidate",
+        "owner_candidate",
+        "incident_relevance_advisory",
+        "probe_selection"
+      ]
+    },
+    "probe_id": {
+      "enum": [
+        "verify_resource_generation",
+        "verify_recovery_scope",
+        "verify_owner_record",
+        "run_application_canary"
+      ]
+    }
+  }
+}

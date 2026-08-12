@@ -1,0 +1,5 @@
+{
+  "intended_environment": "production",
+  "intended_effect": "update",
+  "summary": "Rotate connection settings while retaining the stored records."
+}
