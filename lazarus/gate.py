@@ -898,7 +898,7 @@ def _validate_request_settings(
         "responseMimeType": parameters["response_mime_type"],
         "responseJsonSchema": schema,
         "thinkingConfig": {
-            "thinkingLevel": thinking["level"],
+            "thinkingBudget": thinking["budget"],
             "includeThoughts": thinking["include_thoughts"],
         },
     }
@@ -907,7 +907,7 @@ def _validate_request_settings(
         or set(request) != expected_top_level
         or request.get("store") is not model_settings["request"]["store"]
         or request.get("serviceTier") != model_settings["request"]["service_tier"]
-        or generation != expected_generation
+        or canonical_json_bytes(generation) != canonical_json_bytes(expected_generation)
     ):
         raise GateError("provider_request_settings_mismatch")
     expected = model_settings["parameters"]["response_schema_sha256"]

@@ -55,7 +55,7 @@ class _EmptySemanticTransport:
         response_text = canonical_json_bytes(semantic).decode("utf-8")
         payload = {
             "responseId": f"calibration-response-{self.calls}",
-            "modelVersion": "gemini-3.6-flash",
+            "modelVersion": "gemini-2.5-flash",
             "candidates": [
                 {
                     "index": 0,
@@ -112,11 +112,11 @@ class SettingsTests(unittest.TestCase):
         )
         self.assertEqual(
             request["generationConfig"]["thinkingConfig"],
-            {"thinkingLevel": "MINIMAL", "includeThoughts": False},
+            {"thinkingBudget": 0, "includeThoughts": False},
         )
         self.assertEqual(
             settings["thinking"],
-            {"level": "MINIMAL", "include_thoughts": False},
+            {"budget": 0, "include_thoughts": False},
         )
         self.assertEqual(settings["request"]["minimum_interval_seconds"], 16)
         self.assertEqual(settings["retry"], {"max_attempts": 1, "backoff_seconds": 0})
