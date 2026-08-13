@@ -9,6 +9,8 @@ description = "Evidence-backed reconciliation of ambiguous agent tool outcomes"
 requires-python = ">=3.12,<3.13"
 dependencies = [
   "fastapi==0.141.1",
+  "google-adk==2.6.3",
+  "google-genai==2.18.0",
   "jsonschema==4.25.1",
   "pydantic==2.13.4",
   "textual==8.2.8",
