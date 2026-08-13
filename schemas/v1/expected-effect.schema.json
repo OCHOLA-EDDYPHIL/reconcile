@@ -1,0 +1,53 @@
+{
+  "$defs": {
+    "JsonValue": {},
+    "NonEmptySmallJsonObject": {
+      "additionalProperties": {
+        "$ref": "#/$defs/JsonValue"
+      },
+      "maxProperties": 32,
+      "minProperties": 1,
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "commit_scope": {
+      "maxLength": 128,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+      "title": "Commit Scope",
+      "type": "string"
+    },
+    "description": {
+      "maxLength": 4096,
+      "minLength": 1,
+      "title": "Description",
+      "type": "string"
+    },
+    "effect_id": {
+      "maxLength": 128,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+      "title": "Effect Id",
+      "type": "string"
+    },
+    "predicate": {
+      "$ref": "#/$defs/NonEmptySmallJsonObject"
+    },
+    "schema_version": {
+      "const": "reconcile/expected-effect/v1",
+      "title": "Schema Version",
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema_version",
+    "effect_id",
+    "commit_scope",
+    "predicate",
+    "description"
+  ],
+  "title": "ExpectedEffect",
+  "type": "object"
+}

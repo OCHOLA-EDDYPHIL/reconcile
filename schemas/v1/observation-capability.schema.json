@@ -1,0 +1,112 @@
+{
+  "$defs": {
+    "JsonObject": {
+      "additionalProperties": {
+        "$ref": "#/$defs/JsonValue"
+      },
+      "maxProperties": 128,
+      "type": "object"
+    },
+    "JsonValue": {},
+    "NonEmptySmallJsonObject": {
+      "additionalProperties": {
+        "$ref": "#/$defs/JsonValue"
+      },
+      "maxProperties": 32,
+      "minProperties": 1,
+      "type": "object"
+    },
+    "TargetConstraint": {
+      "additionalProperties": false,
+      "description": "An exact provider-neutral target scope admitted by a capability.",
+      "properties": {
+        "scope": {
+          "$ref": "#/$defs/NonEmptySmallJsonObject"
+        },
+        "target_kind": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Target Kind",
+          "type": "string"
+        }
+      },
+      "required": [
+        "target_kind",
+        "scope"
+      ],
+      "title": "TargetConstraint",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "allowed_targets": {
+      "items": {
+        "$ref": "#/$defs/TargetConstraint"
+      },
+      "maxItems": 32,
+      "minItems": 1,
+      "title": "Allowed Targets",
+      "type": "array"
+    },
+    "argument_schema": {
+      "$ref": "#/$defs/JsonObject"
+    },
+    "cost_units": {
+      "maximum": 9223372036854775807,
+      "minimum": 1,
+      "title": "Cost Units",
+      "type": "integer"
+    },
+    "name": {
+      "maxLength": 128,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+      "title": "Name",
+      "type": "string"
+    },
+    "read_only": {
+      "const": true,
+      "title": "Read Only",
+      "type": "boolean"
+    },
+    "result_byte_ceiling": {
+      "maximum": 9223372036854775807,
+      "minimum": 1,
+      "title": "Result Byte Ceiling",
+      "type": "integer"
+    },
+    "schema_version": {
+      "const": "reconcile/observation-capability/v1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "timeout_ms": {
+      "maximum": 9223372036854775807,
+      "minimum": 1,
+      "title": "Timeout Ms",
+      "type": "integer"
+    },
+    "version": {
+      "maxLength": 128,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+      "title": "Version",
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema_version",
+    "name",
+    "version",
+    "read_only",
+    "argument_schema",
+    "allowed_targets",
+    "timeout_ms",
+    "result_byte_ceiling",
+    "cost_units"
+  ],
+  "title": "ObservationCapability",
+  "type": "object"
+}

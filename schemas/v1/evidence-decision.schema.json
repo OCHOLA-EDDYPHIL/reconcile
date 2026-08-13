@@ -1,0 +1,66 @@
+{
+  "$defs": {
+    "EvidenceDisposition": {
+      "enum": [
+        "ADMITTED",
+        "WEAK",
+        "REJECTED"
+      ],
+      "title": "EvidenceDisposition",
+      "type": "string"
+    },
+    "EvidenceReason": {
+      "enum": [
+        "authoritative_exact_correlation",
+        "authoritative_affirmative_non_execution",
+        "authoritative_active_status",
+        "non_authoritative_log_only",
+        "not_found_absence_only",
+        "stale_observation",
+        "correlation_mismatch",
+        "scope_mismatch",
+        "unsupported_capability",
+        "malformed_observation",
+        "unverifiable_authority",
+        "conflicting_authority",
+        "budget_exhausted",
+        "probe_timeout",
+        "result_too_large",
+        "duplicate_candidates",
+        "clock_ambiguity",
+        "expected_effect_mismatch"
+      ],
+      "title": "EvidenceReason",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "disposition": {
+      "$ref": "#/$defs/EvidenceDisposition"
+    },
+    "evidence_id": {
+      "maxLength": 128,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+      "title": "Evidence Id",
+      "type": "string"
+    },
+    "reason": {
+      "$ref": "#/$defs/EvidenceReason"
+    },
+    "schema_version": {
+      "const": "reconcile/evidence-decision/v1",
+      "title": "Schema Version",
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema_version",
+    "evidence_id",
+    "disposition",
+    "reason"
+  ],
+  "title": "EvidenceDecision",
+  "type": "object"
+}

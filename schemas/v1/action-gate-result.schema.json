@@ -1,0 +1,94 @@
+{
+  "$defs": {
+    "ActionGateReason": {
+      "enum": [
+        "all_effects_established",
+        "duplicate_effect_risk",
+        "compensation_out_of_scope_v1",
+        "explicit_retry_policy_required",
+        "operator_review_available",
+        "incomplete_effect_set",
+        "operator_intervention_required",
+        "operation_active",
+        "read_only_follow_up",
+        "insufficient_authoritative_evidence",
+        "ambiguous_duplicate_risk"
+      ],
+      "title": "ActionGateReason",
+      "type": "string"
+    },
+    "Classification": {
+      "enum": [
+        "COMMITTED",
+        "NOT_COMMITTED",
+        "PARTIAL",
+        "PENDING",
+        "UNKNOWN"
+      ],
+      "title": "Classification",
+      "type": "string"
+    },
+    "RequestedAction": {
+      "enum": [
+        "CONTINUE",
+        "RETRY",
+        "COMPENSATE",
+        "ESCALATE",
+        "OBSERVE"
+      ],
+      "title": "RequestedAction",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "action_policy_version": {
+      "maxLength": 128,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+      "title": "Action Policy Version",
+      "type": "string"
+    },
+    "allowed": {
+      "title": "Allowed",
+      "type": "boolean"
+    },
+    "classification": {
+      "$ref": "#/$defs/Classification"
+    },
+    "classification_policy_version": {
+      "maxLength": 128,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+      "title": "Classification Policy Version",
+      "type": "string"
+    },
+    "escalation_required": {
+      "title": "Escalation Required",
+      "type": "boolean"
+    },
+    "reason": {
+      "$ref": "#/$defs/ActionGateReason"
+    },
+    "requested_action": {
+      "$ref": "#/$defs/RequestedAction"
+    },
+    "schema_version": {
+      "const": "reconcile/action-gate-result/v1",
+      "title": "Schema Version",
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema_version",
+    "requested_action",
+    "allowed",
+    "reason",
+    "classification",
+    "classification_policy_version",
+    "action_policy_version",
+    "escalation_required"
+  ],
+  "title": "ActionGateResult",
+  "type": "object"
+}

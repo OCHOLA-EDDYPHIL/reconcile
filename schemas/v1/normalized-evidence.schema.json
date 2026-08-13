@@ -1,0 +1,282 @@
+{
+  "$defs": {
+    "EffectAssertion": {
+      "additionalProperties": false,
+      "properties": {
+        "effect_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Effect Id",
+          "type": "string"
+        },
+        "state": {
+          "$ref": "#/$defs/EffectAssertionState"
+        }
+      },
+      "required": [
+        "effect_id",
+        "state"
+      ],
+      "title": "EffectAssertion",
+      "type": "object"
+    },
+    "EffectAssertionState": {
+      "enum": [
+        "ESTABLISHED",
+        "NOT_ESTABLISHED",
+        "UNVERIFIED"
+      ],
+      "title": "EffectAssertionState",
+      "type": "string"
+    },
+    "EvidenceAuthority": {
+      "enum": [
+        "TARGET_STATE",
+        "SUPPLEMENTARY",
+        "WEAK"
+      ],
+      "title": "EvidenceAuthority",
+      "type": "string"
+    },
+    "EvidenceProvenance": {
+      "additionalProperties": false,
+      "properties": {
+        "adapter_version": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Adapter Version",
+          "type": "string"
+        },
+        "retrieved_at": {
+          "format": "date-time",
+          "title": "Retrieved At",
+          "type": "string"
+        },
+        "source": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Source",
+          "type": "string"
+        },
+        "source_record": {
+          "maxLength": 4096,
+          "minLength": 1,
+          "title": "Source Record",
+          "type": "string"
+        }
+      },
+      "required": [
+        "source",
+        "source_record",
+        "adapter_version",
+        "retrieved_at"
+      ],
+      "title": "EvidenceProvenance",
+      "type": "object"
+    },
+    "FreshnessWindow": {
+      "additionalProperties": false,
+      "properties": {
+        "valid_from": {
+          "format": "date-time",
+          "title": "Valid From",
+          "type": "string"
+        },
+        "valid_until": {
+          "format": "date-time",
+          "title": "Valid Until",
+          "type": "string"
+        }
+      },
+      "required": [
+        "valid_from",
+        "valid_until"
+      ],
+      "title": "FreshnessWindow",
+      "type": "object"
+    },
+    "JsonValue": {},
+    "NonEmptySmallJsonObject": {
+      "additionalProperties": {
+        "$ref": "#/$defs/JsonValue"
+      },
+      "maxProperties": 32,
+      "minProperties": 1,
+      "type": "object"
+    },
+    "OperationStatus": {
+      "enum": [
+        "ACTIVE",
+        "UNRESOLVED",
+        "TERMINAL_COMMITTED",
+        "TERMINAL_NOT_COMMITTED"
+      ],
+      "title": "OperationStatus",
+      "type": "string"
+    },
+    "RawObservationReference": {
+      "additionalProperties": false,
+      "properties": {
+        "byte_count": {
+          "maximum": 9223372036854775807,
+          "minimum": 0,
+          "title": "Byte Count",
+          "type": "integer"
+        },
+        "reference": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Reference",
+          "type": "string"
+        },
+        "sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Sha256",
+          "type": "string"
+        }
+      },
+      "required": [
+        "sha256",
+        "reference",
+        "byte_count"
+      ],
+      "title": "RawObservationReference",
+      "type": "object"
+    },
+    "TargetBinding": {
+      "additionalProperties": false,
+      "properties": {
+        "resource": {
+          "$ref": "#/$defs/NonEmptySmallJsonObject"
+        },
+        "scope": {
+          "$ref": "#/$defs/NonEmptySmallJsonObject"
+        },
+        "target_kind": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Target Kind",
+          "type": "string"
+        }
+      },
+      "required": [
+        "target_kind",
+        "scope",
+        "resource"
+      ],
+      "title": "TargetBinding",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "authority": {
+      "$ref": "#/$defs/EvidenceAuthority"
+    },
+    "authority_policy_version": {
+      "maxLength": 128,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+      "title": "Authority Policy Version",
+      "type": "string"
+    },
+    "capability_name": {
+      "maxLength": 128,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+      "title": "Capability Name",
+      "type": "string"
+    },
+    "capability_version": {
+      "maxLength": 128,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+      "title": "Capability Version",
+      "type": "string"
+    },
+    "correlation": {
+      "maxProperties": 32,
+      "patternProperties": {
+        "^[A-Za-z0-9][A-Za-z0-9._:-]*$": {
+          "maxLength": 4096,
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "propertyNames": {
+        "maxLength": 128,
+        "minLength": 1
+      },
+      "title": "Correlation",
+      "type": "object"
+    },
+    "effect_assertions": {
+      "items": {
+        "$ref": "#/$defs/EffectAssertion"
+      },
+      "maxItems": 64,
+      "title": "Effect Assertions",
+      "type": "array"
+    },
+    "evidence_id": {
+      "maxLength": 128,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+      "title": "Evidence Id",
+      "type": "string"
+    },
+    "freshness": {
+      "$ref": "#/$defs/FreshnessWindow"
+    },
+    "observed_at": {
+      "format": "date-time",
+      "title": "Observed At",
+      "type": "string"
+    },
+    "operation_status": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/OperationStatus"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "provenance": {
+      "$ref": "#/$defs/EvidenceProvenance"
+    },
+    "raw_observation": {
+      "$ref": "#/$defs/RawObservationReference"
+    },
+    "schema_version": {
+      "const": "reconcile/normalized-evidence/v1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "target": {
+      "$ref": "#/$defs/TargetBinding"
+    }
+  },
+  "required": [
+    "schema_version",
+    "evidence_id",
+    "capability_name",
+    "capability_version",
+    "target",
+    "provenance",
+    "observed_at",
+    "freshness",
+    "authority",
+    "authority_policy_version",
+    "raw_observation"
+  ],
+  "title": "NormalizedEvidence",
+  "type": "object"
+}
