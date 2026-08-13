@@ -1,1 +1,0 @@
-Operator notes use store-amber for the database provisioned as state-n03. svc-n03 reads committed records from store-amber during reconciliation.

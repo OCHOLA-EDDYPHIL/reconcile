@@ -1,5 +1,0 @@
-{
-  "intended_environment": "production",
-  "intended_effect": "delete",
-  "summary": "The request may refer to an older audit store; confirm the target before proceeding."
-}

@@ -1,1 +1,0 @@
-The fulfillment group has handled recovery work for the orders primary database in recent change history.

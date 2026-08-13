@@ -1,5 +1,0 @@
-{
-  "intended_environment": "development",
-  "intended_effect": "delete",
-  "summary": "Remove the disposable development instance after the local check."
-}
