@@ -35,17 +35,22 @@ PROBE_REQUEST_VERSION = "reconcile/probe-request/v1"
 
 _TARGET_COORDINATE_TOKENS = frozenset(
     {
+        "address",
         "bucket",
         "credential",
         "credentials",
         "database",
         "document",
+        "domain",
         "endpoint",
         "headers",
         "header",
+        "host",
+        "hostname",
         "method",
         "object",
         "path",
+        "port",
         "project",
         "resource",
         "scope",
