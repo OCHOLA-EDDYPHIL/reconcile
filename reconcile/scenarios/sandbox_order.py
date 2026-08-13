@@ -1,0 +1,485 @@
+"""Local sandbox-order ambiguity scenario with deliberately weak evidence."""
+
+from __future__ import annotations
+
+import asyncio
+import hashlib
+import time
+from collections.abc import Callable
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Protocol
+
+from pydantic import JsonValue
+
+from reconcile.adapters.sandbox_order import (
+    SANDBOX_ORDER_AGGREGATE_CAPABILITY_NAME,
+    SANDBOX_ORDER_AUTHORITY_POLICY_VERSION,
+    SANDBOX_ORDER_CAPABILITY_VERSION,
+    SANDBOX_ORDER_CLASSIFICATION_POLICY_VERSION,
+    SANDBOX_ORDER_INGRESS_CAPABILITY_NAME,
+    build_sandbox_order_aggregate_capability_registration,
+    build_sandbox_order_aggregate_rule_registration,
+    build_sandbox_order_ingress_capability_registration,
+    build_sandbox_order_ingress_rule_registration,
+    build_sandbox_order_target,
+)
+from reconcile.contracts import (
+    EXECUTION_ENVELOPE_VERSION,
+    EXPECTED_EFFECT_VERSION,
+    PROBE_REQUEST_VERSION,
+    AmbiguityKind,
+    AmbiguousExecution,
+    CapabilityRef,
+    EnvelopeContext,
+    EvidenceBudget,
+    ExecutionEnvelope,
+    ExpectedEffect,
+    FreshnessPolicy,
+    InvestigationReport,
+    OriginalInvocation,
+    PolicyReferences,
+    ProbeRequest,
+    ScenarioRef,
+    canonical_json_bytes,
+    decode_contract,
+)
+from reconcile.contracts.base import canonical_json_value_bytes
+from reconcile.controller import CapabilityRegistry, ProbeController
+from reconcile.evidence import EvidenceEngine, ProbeRun, TargetRuleRegistry
+from reconcile.scenarios.adk_mutation import run_adk_mutation
+from reconcile.scenarios.local_order import (
+    HiddenOrderOutcome,
+    LocalOrderCleanupTarget,
+    LocalOrderMutationTarget,
+    LocalOrderReadTarget,
+)
+from reconcile.scenarios.runner import (
+    MutationBoundary,
+    PreparedScenario,
+    ScenarioCleanupManifest,
+    ScenarioCleanupOutcome,
+    ScenarioMutationResponse,
+    ScenarioPlan,
+    ScenarioPreparation,
+)
+
+SANDBOX_ORDER_SCENARIO = ScenarioRef(name="sandbox-order-unknown", version="1.0.0")
+SANDBOX_ORDER_EFFECT_ID = "order-accepted"
+SANDBOX_ORDER_ACTION_POLICY_VERSION = "action-v1"
+SANDBOX_ORDER_TOOL_NAME = "submit_sandbox_order"
+SANDBOX_ORDER_TOOL_VERSION = "1.0.0"
+SANDBOX_ORDER_ITEM_CODE = "widget-blue"
+SANDBOX_ORDER_QUANTITY = 2
+SANDBOX_ORDER_INGRESS_FIRST = (
+    SANDBOX_ORDER_INGRESS_CAPABILITY_NAME,
+    SANDBOX_ORDER_AGGREGATE_CAPABILITY_NAME,
+)
+SANDBOX_ORDER_AGGREGATE_FIRST = (
+    SANDBOX_ORDER_AGGREGATE_CAPABILITY_NAME,
+    SANDBOX_ORDER_INGRESS_CAPABILITY_NAME,
+)
+
+_MAX_AGE_SECONDS = 60
+_CLOCK_SKEW_SECONDS = 2
+
+type SandboxOrderProbeOrder = tuple[str, str]
+
+
+class SandboxOrderInvestigationClock(Protocol):
+    """Wall and monotonic time needed by one bounded investigation."""
+
+    def monotonic(self) -> float:
+        """Return monotonic seconds."""
+
+    def now(self) -> datetime:
+        """Return an aware wall-clock timestamp."""
+
+
+class _SystemInvestigationClock:
+    def monotonic(self) -> float:
+        return time.monotonic()
+
+    def now(self) -> datetime:
+        return datetime.now(UTC)
+
+
+def _aware_utc(value: datetime) -> datetime:
+    if value.tzinfo is None or value.utcoffset() is None:
+        raise ValueError("sandbox-order timestamps must include a UTC offset")
+    return value.astimezone(UTC)
+
+
+def _mutation_arguments() -> dict[str, JsonValue]:
+    return {
+        "item_code": SANDBOX_ORDER_ITEM_CODE,
+        "quantity": SANDBOX_ORDER_QUANTITY,
+    }
+
+
+def _owner_token(plan: ScenarioPlan) -> str:
+    material = {
+        "namespace_id": plan.namespace_id,
+        "operation_id": plan.identifiers.operation_id,
+    }
+    digest = hashlib.sha256(canonical_json_value_bytes(material)).hexdigest()
+    return f"sandbox-owner-{digest[:32]}"
+
+
+def _cleanup_resource_ids(plan: ScenarioPlan) -> tuple[str, ...]:
+    owner_token = _owner_token(plan)
+    prefix = f"sandbox-order:{plan.namespace_id}/{owner_token}"
+    return (
+        f"{prefix}/order",
+        f"{prefix}/ingress",
+        f"{prefix}/receipt",
+    )
+
+
+def _validated_probe_order(
+    probe_order: SandboxOrderProbeOrder,
+) -> SandboxOrderProbeOrder:
+    if type(probe_order) is not tuple or probe_order not in {
+        SANDBOX_ORDER_INGRESS_FIRST,
+        SANDBOX_ORDER_AGGREGATE_FIRST,
+    }:
+        raise ValueError("sandbox-order investigation requires a permitted probe order")
+    return probe_order
+
+
+class SandboxOrderScenarioDefinition:
+    """One ambiguous local order mutation through the offline ADK runner."""
+
+    scenario = SANDBOX_ORDER_SCENARIO
+
+    def __init__(
+        self,
+        private_database_path: str | Path,
+        observation_database_path: str | Path,
+        *,
+        hidden_outcome: HiddenOrderOutcome,
+        invoked_at: datetime | None = None,
+        target_clock: Callable[[], datetime] | None = None,
+    ) -> None:
+        self._mutation_target = LocalOrderMutationTarget(
+            private_database_path,
+            observation_database_path,
+            hidden_outcome=hidden_outcome,
+            clock=target_clock,
+        )
+        self._read_target = LocalOrderReadTarget(observation_database_path)
+        self._cleanup_target = LocalOrderCleanupTarget(
+            private_database_path,
+            observation_database_path,
+        )
+        self._invoked_at = _aware_utc(invoked_at or datetime.now(UTC))
+
+    def investigate(
+        self,
+        envelope: ExecutionEnvelope,
+        *,
+        probe_order: SandboxOrderProbeOrder = SANDBOX_ORDER_INGRESS_FIRST,
+        clock: SandboxOrderInvestigationClock | None = None,
+        revision: int = 1,
+    ) -> InvestigationReport:
+        """Run bounded weak reads without exposing the private order store."""
+
+        return run_sandbox_order_investigation(
+            envelope,
+            self._read_target,
+            probe_order=probe_order,
+            clock=clock,
+            revision=revision,
+        )
+
+    def prepare(self, plan: ScenarioPlan) -> ScenarioPreparation:
+        identifiers = plan.identifiers
+        if identifiers.function_call_id is None:
+            raise ValueError(
+                "the sandbox-order ADK scenario requires a function-call identifier"
+            )
+        arguments = _mutation_arguments()
+        target = build_sandbox_order_target(sandbox_id=plan.namespace_id)
+        envelope = ExecutionEnvelope(
+            schema_version=EXECUTION_ENVELOPE_VERSION,
+            investigation_id=identifiers.investigation_id,
+            operation_id=identifiers.operation_id,
+            target=target,
+            invoked_at=self._invoked_at,
+            ambiguity=AmbiguousExecution(
+                kind=AmbiguityKind.OTHER,
+                observed_at=self._invoked_at,
+                detail="Sealed local sandbox-order scenario envelope template.",
+            ),
+            expected_effects=(
+                ExpectedEffect(
+                    schema_version=EXPECTED_EFFECT_VERSION,
+                    effect_id=SANDBOX_ORDER_EFFECT_ID,
+                    commit_scope="sandbox-order",
+                    predicate={
+                        "item_code": SANDBOX_ORDER_ITEM_CODE,
+                        "quantity": SANDBOX_ORDER_QUANTITY,
+                    },
+                    description=(
+                        "The sandbox accepted the requested order as one private "
+                        "business effect."
+                    ),
+                ),
+            ),
+            context=EnvelopeContext(
+                invocation=OriginalInvocation(
+                    invocation_id=identifiers.invocation_id,
+                    function_call_id=identifiers.function_call_id,
+                    tool_name=SANDBOX_ORDER_TOOL_NAME,
+                    tool_version=SANDBOX_ORDER_TOOL_VERSION,
+                    arguments=arguments,
+                    arguments_sha256=hashlib.sha256(
+                        canonical_json_value_bytes(arguments)
+                    ).hexdigest(),
+                ),
+                enabled_capabilities=(
+                    CapabilityRef(
+                        name=SANDBOX_ORDER_INGRESS_CAPABILITY_NAME,
+                        version=SANDBOX_ORDER_CAPABILITY_VERSION,
+                    ),
+                    CapabilityRef(
+                        name=SANDBOX_ORDER_AGGREGATE_CAPABILITY_NAME,
+                        version=SANDBOX_ORDER_CAPABILITY_VERSION,
+                    ),
+                ),
+                correlation_fields={},
+                evidence_budget=EvidenceBudget(
+                    max_probes=2,
+                    max_elapsed_ms=5_000,
+                    max_total_result_bytes=8_192,
+                    max_cost_units=2,
+                ),
+                freshness=FreshnessPolicy(
+                    max_age_seconds=_MAX_AGE_SECONDS,
+                    clock_skew_seconds=_CLOCK_SKEW_SECONDS,
+                ),
+                policies=PolicyReferences(
+                    authority=SANDBOX_ORDER_AUTHORITY_POLICY_VERSION,
+                    classification=SANDBOX_ORDER_CLASSIFICATION_POLICY_VERSION,
+                    action=SANDBOX_ORDER_ACTION_POLICY_VERSION,
+                ),
+            ),
+        )
+        return ScenarioPreparation(
+            execution_envelope=envelope,
+            cleanup_manifest=ScenarioCleanupManifest(
+                resource_ids=_cleanup_resource_ids(plan)
+            ),
+        )
+
+    def setup(self, prepared: PreparedScenario) -> None:
+        self._mutation_target.initialize()
+
+    def mutate(
+        self,
+        boundary: MutationBoundary,
+        prepared: PreparedScenario,
+    ) -> ScenarioMutationResponse:
+        envelope = decode_contract(
+            prepared.execution_envelope_bytes,
+            ExecutionEnvelope,
+        )
+        expected_arguments = _mutation_arguments()
+        if canonical_json_value_bytes(envelope.context.invocation.arguments) != (
+            canonical_json_value_bytes(expected_arguments)
+        ):
+            raise ValueError("sealed sandbox-order mutation arguments changed")
+        function_call_id = prepared.plan.identifiers.function_call_id
+        if function_call_id is None:
+            raise ValueError(
+                "the sandbox-order ADK scenario requires a function-call identifier"
+            )
+        owner_token = _owner_token(prepared.plan)
+
+        def submit_sandbox_order(item_code: str, quantity: int) -> None:
+            received = {"item_code": item_code, "quantity": quantity}
+            if canonical_json_value_bytes(received) != canonical_json_value_bytes(
+                expected_arguments
+            ):
+                raise ValueError("ADK changed the sandbox-order mutation arguments")
+            boundary.before_commit()
+            self._mutation_target.submit_order(
+                owner_token=owner_token,
+                item_code=item_code,
+                quantity=quantity,
+            )
+            boundary.after_commit()
+
+        public_response = run_adk_mutation(
+            submit_sandbox_order,
+            arguments=expected_arguments,
+            public_response={"accepted": True},
+            function_call_id=function_call_id,
+            invocation_id=prepared.plan.identifiers.invocation_id,
+        )
+        return ScenarioMutationResponse(is_error=False, payload=public_response)
+
+    def remaining(self, prepared: PreparedScenario) -> int | None:
+        return self._cleanup_target.count_owned(owner_token=_owner_token(prepared.plan))
+
+    def cleanup(self, prepared: PreparedScenario) -> ScenarioCleanupOutcome:
+        deletion = self._cleanup_target.delete_owned(
+            owner_token=_owner_token(prepared.plan)
+        )
+        declared = _cleanup_resource_ids(prepared.plan)
+        removed: list[str] = []
+        if deletion.order_removed:
+            removed.append(declared[0])
+        if deletion.ingress_removed:
+            removed.append(declared[1])
+        if deletion.receipt_removed:
+            removed.append(declared[2])
+        return ScenarioCleanupOutcome(removed_resource_ids=tuple(removed))
+
+
+def _probe_request(
+    envelope: ExecutionEnvelope,
+    capability_name: str,
+) -> ProbeRequest:
+    rationale = {
+        SANDBOX_ORDER_INGRESS_CAPABILITY_NAME: (
+            "Read the generic sandbox ingress observation without order correlation."
+        ),
+        SANDBOX_ORDER_AGGREGATE_CAPABILITY_NAME: (
+            "Read the coarse sandbox order-count band without order identity."
+        ),
+    }[capability_name]
+    return ProbeRequest(
+        schema_version=PROBE_REQUEST_VERSION,
+        capability_name=capability_name,
+        capability_version=SANDBOX_ORDER_CAPABILITY_VERSION,
+        relevant_effect_ids=tuple(
+            effect.effect_id for effect in envelope.expected_effects
+        ),
+        arguments={},
+        rationale=rationale,
+    )
+
+
+async def investigate_sandbox_order(
+    envelope: ExecutionEnvelope,
+    read_target: LocalOrderReadTarget,
+    *,
+    probe_order: SandboxOrderProbeOrder = SANDBOX_ORDER_INGRESS_FIRST,
+    clock: SandboxOrderInvestigationClock | None = None,
+    revision: int = 1,
+) -> InvestigationReport:
+    """Run both permitted weak reads through deterministic product boundaries."""
+
+    envelope = decode_contract(canonical_json_bytes(envelope), ExecutionEnvelope)
+    if type(read_target) is not LocalOrderReadTarget:
+        raise TypeError(
+            "the sandbox-order investigation requires the restricted read target"
+        )
+    probe_order = _validated_probe_order(probe_order)
+    selected_clock = clock or _SystemInvestigationClock()
+
+    capabilities = CapabilityRegistry()
+    capabilities.register(
+        build_sandbox_order_ingress_capability_registration(
+            read_target=read_target,
+            target=envelope.target,
+            clock=selected_clock.now,
+        )
+    )
+    capabilities.register(
+        build_sandbox_order_aggregate_capability_registration(
+            read_target=read_target,
+            target=envelope.target,
+            clock=selected_clock.now,
+        )
+    )
+    rules = TargetRuleRegistry()
+    rules.register(build_sandbox_order_ingress_rule_registration())
+    rules.register(build_sandbox_order_aggregate_rule_registration())
+
+    controller = ProbeController(envelope, capabilities, clock=selected_clock)
+    engine = EvidenceEngine(envelope, rules)
+    processed_sequences: set[int] = set()
+    for capability_name in probe_order:
+        request = _probe_request(envelope, capability_name)
+        execution = await controller.execute(request)
+        if execution.audit.sequence in processed_sequences:
+            break
+        processed_sequences.add(execution.audit.sequence)
+        engine.process(ProbeRun(request=request, execution=execution))
+
+    report = engine.report(
+        controller.audit_trail,
+        created_at=envelope.ambiguity.observed_at,
+        updated_at=selected_clock.now(),
+        revision=revision,
+    )
+    payload = report.model_dump(mode="python")
+    payload["limitations"] = (
+        *report.limitations,
+        (
+            "The local sandbox exposes no authoritative order-status lookup or "
+            "durable unique order correlation."
+        ),
+        (
+            "Ingress logs and coarse aggregate counts are weak, non-discriminating "
+            "observations and cannot establish order commitment."
+        ),
+        (
+            "A human operator may escalate the indeterminate result; deterministic "
+            "action gates deny automatic retry and compensation."
+        ),
+        (
+            "Evidence comes only from a local SQLite sandbox and does not establish "
+            "third-party API, network, latency, or hosted isolation behavior."
+        ),
+    )
+    return InvestigationReport.model_validate(payload)
+
+
+def run_sandbox_order_investigation(
+    envelope: ExecutionEnvelope,
+    read_target: LocalOrderReadTarget,
+    *,
+    probe_order: SandboxOrderProbeOrder = SANDBOX_ORDER_INGRESS_FIRST,
+    clock: SandboxOrderInvestigationClock | None = None,
+    revision: int = 1,
+) -> InvestigationReport:
+    """Synchronously execute the bounded local sandbox-order investigation."""
+
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        pass
+    else:
+        raise RuntimeError(
+            "run_sandbox_order_investigation cannot run inside an active event loop"
+        )
+    return asyncio.run(
+        investigate_sandbox_order(
+            envelope,
+            read_target,
+            probe_order=probe_order,
+            clock=clock,
+            revision=revision,
+        )
+    )
+
+
+__all__ = [
+    "SANDBOX_ORDER_ACTION_POLICY_VERSION",
+    "SANDBOX_ORDER_AGGREGATE_FIRST",
+    "SANDBOX_ORDER_EFFECT_ID",
+    "SANDBOX_ORDER_INGRESS_FIRST",
+    "SANDBOX_ORDER_ITEM_CODE",
+    "SANDBOX_ORDER_QUANTITY",
+    "SANDBOX_ORDER_SCENARIO",
+    "SANDBOX_ORDER_TOOL_NAME",
+    "SANDBOX_ORDER_TOOL_VERSION",
+    "SandboxOrderInvestigationClock",
+    "SandboxOrderProbeOrder",
+    "SandboxOrderScenarioDefinition",
+    "investigate_sandbox_order",
+    "run_sandbox_order_investigation",
+]
