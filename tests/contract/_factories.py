@@ -9,10 +9,12 @@ from reconcile.contracts import (
     ACTION_GATE_RESULT_VERSION,
     ADAPTIVE_PLANNER_INPUT_VERSION,
     ADAPTIVE_PLANNER_OUTPUT_VERSION,
+    ERROR_VERSION,
     EVIDENCE_DECISION_VERSION,
     EXECUTION_ENVELOPE_VERSION,
     EXPECTED_EFFECT_VERSION,
     INVESTIGATION_COMPARISON_RECORD_VERSION,
+    INVESTIGATION_EVENT_VERSION,
     INVESTIGATION_REPORT_VERSION,
     NORMALIZED_EVIDENCE_VERSION,
     OBSERVATION_CAPABILITY_VERSION,
@@ -22,6 +24,7 @@ from reconcile.contracts import (
     SCENARIO_FAULT_TRACE_VERSION,
     SCENARIO_RUN_REQUEST_VERSION,
     SCENARIO_RUN_RESULT_VERSION,
+    ActionGateEventPayload,
     ActionGateReason,
     ActionGateResult,
     AdaptivePlannerInput,
@@ -30,8 +33,11 @@ from reconcile.contracts import (
     AdvisoryExplanation,
     AmbiguityKind,
     AmbiguousExecution,
+    ApiError,
+    ApiErrorCode,
     CapabilityRef,
     Classification,
+    ClassificationEventPayload,
     ComparisonModelUsage,
     ComparisonModelUsageStatus,
     ComparisonRun,
@@ -44,6 +50,7 @@ from reconcile.contracts import (
     EvidenceAuthority,
     EvidenceBudget,
     EvidenceDecision,
+    EvidenceDecisionEventPayload,
     EvidenceDisposition,
     EvidenceProvenance,
     EvidenceReason,
@@ -53,8 +60,11 @@ from reconcile.contracts import (
     FreshnessPolicy,
     FreshnessWindow,
     InvestigationComparisonRecord,
+    InvestigationEvent,
+    InvestigationEventType,
     InvestigationReport,
     InvestigationStatus,
+    LifecycleEventPayload,
     MissingEvidence,
     NormalizedEvidence,
     ObservationCapability,
@@ -75,6 +85,7 @@ from reconcile.contracts import (
     PolicyReferences,
     PreregisteredExpectedClassification,
     ProbeAuditRecord,
+    ProbeEventPayload,
     ProbeOutcome,
     ProbeRequest,
     RawObservationReference,
@@ -663,6 +674,59 @@ def make_report(classification: Classification) -> InvestigationReport:
     )
 
 
+def make_api_error(
+    code: ApiErrorCode = ApiErrorCode.INVALID_CONTRACT,
+) -> ApiError:
+    details = (
+        {"investigation_id": "investigation-7"}
+        if code
+        in {
+            ApiErrorCode.INVESTIGATION_NOT_FOUND,
+            ApiErrorCode.DUPLICATE_INVESTIGATION_ID,
+        }
+        else {}
+    )
+    return ApiError(
+        schema_version=ERROR_VERSION,
+        code=code,
+        message="The request could not be completed.",
+        details=details,
+    )
+
+
+def make_investigation_event(
+    event_type: InvestigationEventType = InvestigationEventType.LIFECYCLE,
+    *,
+    sequence: int = 1,
+) -> InvestigationEvent:
+    report = make_report(Classification.COMMITTED)
+    payloads = {
+        InvestigationEventType.LIFECYCLE: LifecycleEventPayload(
+            status=InvestigationStatus.COMPLETED,
+        ),
+        InvestigationEventType.PROBE: ProbeEventPayload(
+            probe_audit=report.probe_audit[0],
+        ),
+        InvestigationEventType.EVIDENCE_DECISION: EvidenceDecisionEventPayload(
+            decision=report.evidence_decisions[0],
+        ),
+        InvestigationEventType.CLASSIFICATION: ClassificationEventPayload(
+            classification=Classification.COMMITTED,
+        ),
+        InvestigationEventType.ACTION_GATE: ActionGateEventPayload(
+            action_gate=report.action_gate[0],
+        ),
+    }
+    return InvestigationEvent(
+        schema_version=INVESTIGATION_EVENT_VERSION,
+        investigation_id=report.investigation_id,
+        sequence=sequence,
+        type=event_type,
+        occurred_at=report.updated_at,
+        payload=payloads[event_type],
+    )
+
+
 def make_comparison_record(
     *,
     include_adaptive: bool = False,
@@ -888,6 +952,8 @@ def public_examples() -> tuple[object, ...]:
         make_comparison_record(),
         make_planner_input(),
         make_planner_output(),
+        make_api_error(),
+        make_investigation_event(),
     )
 
 

@@ -1,0 +1,52 @@
+{
+  "$defs": {
+    "ApiErrorCode": {
+      "enum": [
+        "invalid_contract",
+        "unsupported_contract_version",
+        "investigation_not_found",
+        "duplicate_investigation_id",
+        "dependency_unavailable",
+        "internal_failure"
+      ],
+      "title": "ApiErrorCode",
+      "type": "string"
+    },
+    "JsonValue": {},
+    "SmallJsonObject": {
+      "additionalProperties": {
+        "$ref": "#/$defs/JsonValue"
+      },
+      "maxProperties": 32,
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "code": {
+      "$ref": "#/$defs/ApiErrorCode"
+    },
+    "details": {
+      "$ref": "#/$defs/SmallJsonObject"
+    },
+    "message": {
+      "maxLength": 512,
+      "minLength": 1,
+      "title": "Message",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": "reconcile/error/v1",
+      "title": "Schema Version",
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema_version",
+    "code",
+    "message",
+    "details"
+  ],
+  "title": "ApiError",
+  "type": "object"
+}
