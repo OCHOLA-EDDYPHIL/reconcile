@@ -18,6 +18,7 @@ from reconcile.controller.executor import (
     ProbeExecution,
     ProbeStopReason,
     ValidatedObservation,
+    probe_request_sha256,
 )
 
 __all__ = [
@@ -36,4 +37,5 @@ __all__ = [
     "ProbeStopReason",
     "RegistryFrozen",
     "ValidatedObservation",
+    "probe_request_sha256",
 ]

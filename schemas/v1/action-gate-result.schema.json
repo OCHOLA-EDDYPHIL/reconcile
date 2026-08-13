@@ -3,6 +3,7 @@
     "ActionGateReason": {
       "enum": [
         "all_effects_established",
+        "operation_not_committed",
         "duplicate_effect_risk",
         "compensation_out_of_scope_v1",
         "explicit_retry_policy_required",

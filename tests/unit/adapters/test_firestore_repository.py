@@ -245,7 +245,7 @@ def test_outgoing_document_limit_is_measured_in_utf8_bytes() -> None:
         repository = FirestoreInvestigationRepository(port)
         record = make_record()
         large_report = record.report.model_copy(
-            update={"limitations": ("😀" * 4096,) * 70}
+            update={"limitations": ("😀" * 4096,) * 64}
         )
         large_record = type(record)(
             schema_version=record.schema_version,
