@@ -1,0 +1,584 @@
+{
+  "$defs": {
+    "ActionGateEventPayload": {
+      "additionalProperties": false,
+      "properties": {
+        "action_gate": {
+          "$ref": "#/$defs/ActionGateResult"
+        }
+      },
+      "required": [
+        "action_gate"
+      ],
+      "title": "ActionGateEventPayload",
+      "type": "object"
+    },
+    "ActionGateReason": {
+      "enum": [
+        "all_effects_established",
+        "operation_not_committed",
+        "duplicate_effect_risk",
+        "compensation_out_of_scope_v1",
+        "explicit_retry_policy_required",
+        "operator_review_available",
+        "incomplete_effect_set",
+        "operator_intervention_required",
+        "operation_active",
+        "read_only_follow_up",
+        "insufficient_authoritative_evidence",
+        "ambiguous_duplicate_risk"
+      ],
+      "title": "ActionGateReason",
+      "type": "string"
+    },
+    "ActionGateResult": {
+      "additionalProperties": false,
+      "properties": {
+        "action_policy_version": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Action Policy Version",
+          "type": "string"
+        },
+        "allowed": {
+          "title": "Allowed",
+          "type": "boolean"
+        },
+        "classification": {
+          "$ref": "#/$defs/Classification"
+        },
+        "classification_policy_version": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Classification Policy Version",
+          "type": "string"
+        },
+        "escalation_required": {
+          "title": "Escalation Required",
+          "type": "boolean"
+        },
+        "reason": {
+          "$ref": "#/$defs/ActionGateReason"
+        },
+        "requested_action": {
+          "$ref": "#/$defs/RequestedAction"
+        },
+        "schema_version": {
+          "const": "reconcile/action-gate-result/v1",
+          "title": "Schema Version",
+          "type": "string"
+        }
+      },
+      "required": [
+        "schema_version",
+        "requested_action",
+        "allowed",
+        "reason",
+        "classification",
+        "classification_policy_version",
+        "action_policy_version",
+        "escalation_required"
+      ],
+      "title": "ActionGateResult",
+      "type": "object"
+    },
+    "Classification": {
+      "enum": [
+        "COMMITTED",
+        "NOT_COMMITTED",
+        "PARTIAL",
+        "PENDING",
+        "UNKNOWN"
+      ],
+      "title": "Classification",
+      "type": "string"
+    },
+    "ClassificationEventPayload": {
+      "additionalProperties": false,
+      "properties": {
+        "classification": {
+          "$ref": "#/$defs/Classification"
+        }
+      },
+      "required": [
+        "classification"
+      ],
+      "title": "ClassificationEventPayload",
+      "type": "object"
+    },
+    "EvidenceDecision": {
+      "additionalProperties": false,
+      "properties": {
+        "disposition": {
+          "$ref": "#/$defs/EvidenceDisposition"
+        },
+        "evidence_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Evidence Id",
+          "type": "string"
+        },
+        "reason": {
+          "$ref": "#/$defs/EvidenceReason"
+        },
+        "schema_version": {
+          "const": "reconcile/evidence-decision/v1",
+          "title": "Schema Version",
+          "type": "string"
+        }
+      },
+      "required": [
+        "schema_version",
+        "evidence_id",
+        "disposition",
+        "reason"
+      ],
+      "title": "EvidenceDecision",
+      "type": "object"
+    },
+    "EvidenceDecisionEventPayload": {
+      "additionalProperties": false,
+      "properties": {
+        "decision": {
+          "$ref": "#/$defs/EvidenceDecision"
+        }
+      },
+      "required": [
+        "decision"
+      ],
+      "title": "EvidenceDecisionEventPayload",
+      "type": "object"
+    },
+    "EvidenceDisposition": {
+      "enum": [
+        "ADMITTED",
+        "WEAK",
+        "REJECTED"
+      ],
+      "title": "EvidenceDisposition",
+      "type": "string"
+    },
+    "EvidenceReason": {
+      "enum": [
+        "authoritative_exact_correlation",
+        "authoritative_affirmative_non_execution",
+        "authoritative_active_status",
+        "non_authoritative_log_only",
+        "not_found_absence_only",
+        "stale_observation",
+        "correlation_mismatch",
+        "scope_mismatch",
+        "unsupported_capability",
+        "malformed_observation",
+        "unverifiable_authority",
+        "conflicting_authority",
+        "budget_exhausted",
+        "probe_timeout",
+        "result_too_large",
+        "duplicate_candidates",
+        "clock_ambiguity",
+        "expected_effect_mismatch"
+      ],
+      "title": "EvidenceReason",
+      "type": "string"
+    },
+    "InvestigationEventPayload": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/LifecycleEventPayload"
+        },
+        {
+          "$ref": "#/$defs/ProbeEventPayload"
+        },
+        {
+          "$ref": "#/$defs/EvidenceDecisionEventPayload"
+        },
+        {
+          "$ref": "#/$defs/ClassificationEventPayload"
+        },
+        {
+          "$ref": "#/$defs/ActionGateEventPayload"
+        }
+      ]
+    },
+    "InvestigationEventType": {
+      "enum": [
+        "LIFECYCLE",
+        "PROBE",
+        "EVIDENCE_DECISION",
+        "CLASSIFICATION",
+        "ACTION_GATE"
+      ],
+      "title": "InvestigationEventType",
+      "type": "string"
+    },
+    "InvestigationStatus": {
+      "enum": [
+        "CREATED",
+        "INVESTIGATING",
+        "COMPLETED"
+      ],
+      "title": "InvestigationStatus",
+      "type": "string"
+    },
+    "LifecycleEventPayload": {
+      "additionalProperties": false,
+      "properties": {
+        "status": {
+          "$ref": "#/$defs/InvestigationStatus"
+        }
+      },
+      "required": [
+        "status"
+      ],
+      "title": "LifecycleEventPayload",
+      "type": "object"
+    },
+    "ProbeAuditRecord": {
+      "additionalProperties": false,
+      "properties": {
+        "capability_name": {
+          "anyOf": [
+            {
+              "maxLength": 128,
+              "minLength": 1,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Capability Name"
+        },
+        "capability_version": {
+          "anyOf": [
+            {
+              "maxLength": 128,
+              "minLength": 1,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Capability Version"
+        },
+        "completed_at": {
+          "format": "date-time",
+          "title": "Completed At",
+          "type": "string"
+        },
+        "cost_units_used": {
+          "maximum": 9223372036854775807,
+          "minimum": 0,
+          "title": "Cost Units Used",
+          "type": "integer"
+        },
+        "evidence_ids": {
+          "items": {
+            "maxLength": 128,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+            "type": "string"
+          },
+          "maxItems": 1,
+          "minItems": 1,
+          "title": "Evidence Ids",
+          "type": "array"
+        },
+        "outcome": {
+          "$ref": "#/$defs/ProbeOutcome"
+        },
+        "probe_count_used": {
+          "maximum": 9223372036854775807,
+          "minimum": 0,
+          "title": "Probe Count Used",
+          "type": "integer"
+        },
+        "probe_sequence": {
+          "maximum": 9223372036854775807,
+          "minimum": 1,
+          "title": "Probe Sequence",
+          "type": "integer"
+        },
+        "request_sha256": {
+          "anyOf": [
+            {
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Request Sha256"
+        },
+        "result_byte_count": {
+          "anyOf": [
+            {
+              "maximum": 9223372036854775807,
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Result Byte Count"
+        },
+        "result_bytes_acquired": {
+          "maximum": 9223372036854775807,
+          "minimum": 0,
+          "title": "Result Bytes Acquired",
+          "type": "integer"
+        },
+        "result_sha256": {
+          "anyOf": [
+            {
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Result Sha256"
+        },
+        "session_elapsed_ms": {
+          "maximum": 9223372036854775807,
+          "minimum": 0,
+          "title": "Session Elapsed Ms",
+          "type": "integer"
+        },
+        "started_at": {
+          "format": "date-time",
+          "title": "Started At",
+          "type": "string"
+        },
+        "stop_reason": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Stop Reason",
+          "type": "string"
+        },
+        "target_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Target Sha256",
+          "type": "string"
+        }
+      },
+      "required": [
+        "probe_sequence",
+        "target_sha256",
+        "outcome",
+        "stop_reason",
+        "started_at",
+        "completed_at",
+        "session_elapsed_ms",
+        "probe_count_used",
+        "cost_units_used",
+        "result_bytes_acquired",
+        "evidence_ids"
+      ],
+      "title": "ProbeAuditRecord",
+      "type": "object"
+    },
+    "ProbeEventPayload": {
+      "additionalProperties": false,
+      "properties": {
+        "probe_audit": {
+          "$ref": "#/$defs/ProbeAuditRecord"
+        }
+      },
+      "required": [
+        "probe_audit"
+      ],
+      "title": "ProbeEventPayload",
+      "type": "object"
+    },
+    "ProbeOutcome": {
+      "enum": [
+        "COMPLETED",
+        "REJECTED",
+        "TIMED_OUT",
+        "UNAVAILABLE",
+        "CANCELLED",
+        "MALFORMED",
+        "BUDGET_EXHAUSTED"
+      ],
+      "title": "ProbeOutcome",
+      "type": "string"
+    },
+    "RequestedAction": {
+      "enum": [
+        "CONTINUE",
+        "RETRY",
+        "COMPENSATE",
+        "ESCALATE",
+        "OBSERVE"
+      ],
+      "title": "RequestedAction",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "LIFECYCLE"
+          }
+        },
+        "required": [
+          "type"
+        ]
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "required": [
+              "status"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "PROBE"
+          }
+        },
+        "required": [
+          "type"
+        ]
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "required": [
+              "probe_audit"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "EVIDENCE_DECISION"
+          }
+        },
+        "required": [
+          "type"
+        ]
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "required": [
+              "decision"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "CLASSIFICATION"
+          }
+        },
+        "required": [
+          "type"
+        ]
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "required": [
+              "classification"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "ACTION_GATE"
+          }
+        },
+        "required": [
+          "type"
+        ]
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "required": [
+              "action_gate"
+            ]
+          }
+        }
+      }
+    }
+  ],
+  "properties": {
+    "investigation_id": {
+      "maxLength": 128,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+      "title": "Investigation Id",
+      "type": "string"
+    },
+    "occurred_at": {
+      "format": "date-time",
+      "title": "Occurred At",
+      "type": "string"
+    },
+    "payload": {
+      "$ref": "#/$defs/InvestigationEventPayload"
+    },
+    "schema_version": {
+      "const": "reconcile/investigation-event/v1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "sequence": {
+      "maximum": 137,
+      "minimum": 1,
+      "title": "Sequence",
+      "type": "integer"
+    },
+    "type": {
+      "$ref": "#/$defs/InvestigationEventType"
+    }
+  },
+  "required": [
+    "schema_version",
+    "investigation_id",
+    "sequence",
+    "type",
+    "occurred_at",
+    "payload"
+  ],
+  "title": "InvestigationEvent",
+  "type": "object"
+}
