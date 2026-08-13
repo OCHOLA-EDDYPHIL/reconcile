@@ -93,7 +93,7 @@ class OriginalInvocation(StrictModel):
 
 
 class EvidenceBudget(StrictModel):
-    max_probes: int = Field(ge=1, le=2**63 - 1)
+    max_probes: int = Field(ge=1, le=64)
     max_elapsed_ms: int = Field(ge=1, le=2**63 - 1)
     max_total_result_bytes: int = Field(ge=1, le=2**63 - 1)
     max_cost_units: int = Field(ge=1, le=2**63 - 1)

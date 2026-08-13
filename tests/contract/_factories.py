@@ -270,18 +270,35 @@ def _gates(classification: Classification) -> tuple[ActionGateResult, ...]:
                 False,
                 ActionGateReason.COMPENSATION_OUT_OF_SCOPE_V1,
             ),
+            (
+                RequestedAction.ESCALATE,
+                False,
+                ActionGateReason.ALL_EFFECTS_ESTABLISHED,
+            ),
+            (RequestedAction.OBSERVE, True, ActionGateReason.READ_ONLY_FOLLOW_UP),
         ),
         Classification.NOT_COMMITTED: (
+            (
+                RequestedAction.CONTINUE,
+                False,
+                ActionGateReason.OPERATION_NOT_COMMITTED,
+            ),
             (
                 RequestedAction.RETRY,
                 False,
                 ActionGateReason.EXPLICIT_RETRY_POLICY_REQUIRED,
             ),
             (
+                RequestedAction.COMPENSATE,
+                False,
+                ActionGateReason.COMPENSATION_OUT_OF_SCOPE_V1,
+            ),
+            (
                 RequestedAction.ESCALATE,
                 True,
                 ActionGateReason.OPERATOR_REVIEW_AVAILABLE,
             ),
+            (RequestedAction.OBSERVE, True, ActionGateReason.READ_ONLY_FOLLOW_UP),
         ),
         Classification.PARTIAL: (
             (RequestedAction.CONTINUE, False, ActionGateReason.INCOMPLETE_EFFECT_SET),
@@ -296,10 +313,21 @@ def _gates(classification: Classification) -> tuple[ActionGateResult, ...]:
                 True,
                 ActionGateReason.OPERATOR_INTERVENTION_REQUIRED,
             ),
+            (RequestedAction.OBSERVE, True, ActionGateReason.READ_ONLY_FOLLOW_UP),
         ),
         Classification.PENDING: (
             (RequestedAction.CONTINUE, False, ActionGateReason.OPERATION_ACTIVE),
             (RequestedAction.RETRY, False, ActionGateReason.OPERATION_ACTIVE),
+            (
+                RequestedAction.COMPENSATE,
+                False,
+                ActionGateReason.COMPENSATION_OUT_OF_SCOPE_V1,
+            ),
+            (
+                RequestedAction.ESCALATE,
+                True,
+                ActionGateReason.OPERATOR_INTERVENTION_REQUIRED,
+            ),
             (RequestedAction.OBSERVE, True, ActionGateReason.READ_ONLY_FOLLOW_UP),
         ),
         Classification.UNKNOWN: (
@@ -323,6 +351,7 @@ def _gates(classification: Classification) -> tuple[ActionGateResult, ...]:
                 True,
                 ActionGateReason.OPERATOR_INTERVENTION_REQUIRED,
             ),
+            (RequestedAction.OBSERVE, True, ActionGateReason.READ_ONLY_FOLLOW_UP),
         ),
     }
     return tuple(
@@ -334,12 +363,7 @@ def _gates(classification: Classification) -> tuple[ActionGateResult, ...]:
             classification=classification,
             classification_policy_version="classification-v1",
             action_policy_version="action-v1",
-            escalation_required=classification
-            in {
-                Classification.NOT_COMMITTED,
-                Classification.PARTIAL,
-                Classification.UNKNOWN,
-            },
+            escalation_required=classification is not Classification.COMMITTED,
         )
         for action, allowed, reason in definitions[classification]
     )
@@ -347,6 +371,7 @@ def _gates(classification: Classification) -> tuple[ActionGateResult, ...]:
 
 def make_report(classification: Classification) -> InvestigationReport:
     envelope = make_envelope()
+    probe = make_probe()
     evidence, decision = make_evidence(classification)
     admitted_ids = (
         (evidence.evidence_id,)
@@ -370,8 +395,20 @@ def make_report(classification: Classification) -> InvestigationReport:
     }:
         missing = (
             MissingEvidence(
-                effect_ids=("audit-record",),
-                reason="authoritative-terminal-proof-required",
+                effect_ids=(
+                    ("business-record", "audit-record")
+                    if classification is Classification.UNKNOWN
+                    else ("audit-record",)
+                ),
+                reason=(
+                    "authoritative-effect-proof-required"
+                    if classification is Classification.PARTIAL
+                    else (
+                        "non_authoritative_log_only"
+                        if classification is Classification.UNKNOWN
+                        else "authoritative-terminal-proof-required"
+                    )
+                ),
             ),
         )
     return InvestigationReport(
@@ -382,12 +419,30 @@ def make_report(classification: Classification) -> InvestigationReport:
         probe_audit=(
             ProbeAuditRecord(
                 probe_sequence=1,
-                request=make_probe(),
+                capability_name=probe.capability_name,
+                capability_version=probe.capability_version,
+                request_sha256=hashlib.sha256(
+                    canonical_json_value_bytes(
+                        {
+                            "arguments": probe.arguments,
+                            "capability_name": probe.capability_name,
+                            "capability_version": probe.capability_version,
+                            "relevant_effect_ids": sorted(probe.relevant_effect_ids),
+                        }
+                    )
+                ).hexdigest(),
+                target_sha256=canonical_sha256(envelope.target),
                 outcome=ProbeOutcome.COMPLETED,
+                stop_reason="probe_completed",
                 started_at=NOW + timedelta(seconds=2),
                 completed_at=NOW + timedelta(seconds=4),
+                session_elapsed_ms=2_000,
+                probe_count_used=1,
+                cost_units_used=1,
+                result_bytes_acquired=512,
+                result_sha256=evidence.raw_observation.sha256,
+                result_byte_count=evidence.raw_observation.byte_count,
                 evidence_ids=(evidence.evidence_id,),
-                stop_reason="sufficient-evidence",
             ),
         ),
         evidence=(evidence,),

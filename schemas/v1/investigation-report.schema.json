@@ -3,6 +3,7 @@
     "ActionGateReason": {
       "enum": [
         "all_effects_established",
+        "operation_not_committed",
         "duplicate_effect_risk",
         "compensation_out_of_scope_v1",
         "explicit_retry_policy_required",
@@ -80,7 +81,8 @@
             "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
             "type": "string"
           },
-          "maxItems": 128,
+          "maxItems": 64,
+          "minItems": 1,
           "title": "Cited Evidence Ids",
           "type": "array"
         },
@@ -92,16 +94,10 @@
         }
       },
       "required": [
-        "text"
+        "text",
+        "cited_evidence_ids"
       ],
       "title": "AdvisoryExplanation",
-      "type": "object"
-    },
-    "ArgumentsObject": {
-      "additionalProperties": {
-        "$ref": "#/$defs/JsonValue"
-      },
-      "maxProperties": 64,
       "type": "object"
     },
     "Classification": {
@@ -125,7 +121,7 @@
             "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
             "type": "string"
           },
-          "maxItems": 128,
+          "maxItems": 64,
           "title": "Admitted Evidence Ids",
           "type": "array"
         },
@@ -530,40 +526,7 @@
     "ProbeAuditRecord": {
       "additionalProperties": false,
       "properties": {
-        "completed_at": {
-          "format": "date-time",
-          "title": "Completed At",
-          "type": "string"
-        },
-        "evidence_ids": {
-          "items": {
-            "maxLength": 128,
-            "minLength": 1,
-            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
-            "type": "string"
-          },
-          "maxItems": 64,
-          "title": "Evidence Ids",
-          "type": "array"
-        },
-        "outcome": {
-          "$ref": "#/$defs/ProbeOutcome"
-        },
-        "probe_sequence": {
-          "maximum": 9223372036854775807,
-          "minimum": 1,
-          "title": "Probe Sequence",
-          "type": "integer"
-        },
-        "request": {
-          "$ref": "#/$defs/ProbeRequest"
-        },
-        "started_at": {
-          "format": "date-time",
-          "title": "Started At",
-          "type": "string"
-        },
-        "stop_reason": {
+        "capability_name": {
           "anyOf": [
             {
               "maxLength": 128,
@@ -576,15 +539,143 @@
             }
           ],
           "default": null,
-          "title": "Stop Reason"
+          "title": "Capability Name"
+        },
+        "capability_version": {
+          "anyOf": [
+            {
+              "maxLength": 128,
+              "minLength": 1,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Capability Version"
+        },
+        "completed_at": {
+          "format": "date-time",
+          "title": "Completed At",
+          "type": "string"
+        },
+        "cost_units_used": {
+          "maximum": 9223372036854775807,
+          "minimum": 0,
+          "title": "Cost Units Used",
+          "type": "integer"
+        },
+        "evidence_ids": {
+          "items": {
+            "maxLength": 128,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+            "type": "string"
+          },
+          "maxItems": 1,
+          "minItems": 1,
+          "title": "Evidence Ids",
+          "type": "array"
+        },
+        "outcome": {
+          "$ref": "#/$defs/ProbeOutcome"
+        },
+        "probe_count_used": {
+          "maximum": 9223372036854775807,
+          "minimum": 0,
+          "title": "Probe Count Used",
+          "type": "integer"
+        },
+        "probe_sequence": {
+          "maximum": 9223372036854775807,
+          "minimum": 1,
+          "title": "Probe Sequence",
+          "type": "integer"
+        },
+        "request_sha256": {
+          "anyOf": [
+            {
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Request Sha256"
+        },
+        "result_byte_count": {
+          "anyOf": [
+            {
+              "maximum": 9223372036854775807,
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Result Byte Count"
+        },
+        "result_bytes_acquired": {
+          "maximum": 9223372036854775807,
+          "minimum": 0,
+          "title": "Result Bytes Acquired",
+          "type": "integer"
+        },
+        "result_sha256": {
+          "anyOf": [
+            {
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Result Sha256"
+        },
+        "session_elapsed_ms": {
+          "maximum": 9223372036854775807,
+          "minimum": 0,
+          "title": "Session Elapsed Ms",
+          "type": "integer"
+        },
+        "started_at": {
+          "format": "date-time",
+          "title": "Started At",
+          "type": "string"
+        },
+        "stop_reason": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Stop Reason",
+          "type": "string"
+        },
+        "target_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Target Sha256",
+          "type": "string"
         }
       },
       "required": [
         "probe_sequence",
-        "request",
+        "target_sha256",
         "outcome",
+        "stop_reason",
         "started_at",
-        "completed_at"
+        "completed_at",
+        "session_elapsed_ms",
+        "probe_count_used",
+        "cost_units_used",
+        "result_bytes_acquired",
+        "evidence_ids"
       ],
       "title": "ProbeAuditRecord",
       "type": "object"
@@ -601,60 +692,6 @@
       ],
       "title": "ProbeOutcome",
       "type": "string"
-    },
-    "ProbeRequest": {
-      "additionalProperties": false,
-      "properties": {
-        "arguments": {
-          "$ref": "#/$defs/ArgumentsObject"
-        },
-        "capability_name": {
-          "maxLength": 128,
-          "minLength": 1,
-          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
-          "title": "Capability Name",
-          "type": "string"
-        },
-        "capability_version": {
-          "maxLength": 128,
-          "minLength": 1,
-          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
-          "title": "Capability Version",
-          "type": "string"
-        },
-        "rationale": {
-          "maxLength": 4096,
-          "minLength": 1,
-          "title": "Rationale",
-          "type": "string"
-        },
-        "relevant_effect_ids": {
-          "items": {
-            "maxLength": 128,
-            "minLength": 1,
-            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
-            "type": "string"
-          },
-          "maxItems": 64,
-          "minItems": 1,
-          "title": "Relevant Effect Ids",
-          "type": "array"
-        },
-        "schema_version": {
-          "const": "reconcile/probe-request/v1",
-          "title": "Schema Version",
-          "type": "string"
-        }
-      },
-      "required": [
-        "schema_version",
-        "capability_name",
-        "capability_version",
-        "relevant_effect_ids",
-        "rationale"
-      ],
-      "title": "ProbeRequest",
-      "type": "object"
     },
     "RawObservationReference": {
       "additionalProperties": false,
@@ -726,11 +763,24 @@
   "additionalProperties": false,
   "properties": {
     "action_gate": {
-      "items": {
-        "$ref": "#/$defs/ActionGateResult"
-      },
-      "title": "Action Gate",
-      "type": "array"
+      "anyOf": [
+        {
+          "items": {
+            "$ref": "#/$defs/ActionGateResult"
+          },
+          "maxItems": 0,
+          "type": "array"
+        },
+        {
+          "items": {
+            "$ref": "#/$defs/ActionGateResult"
+          },
+          "maxItems": 5,
+          "minItems": 5,
+          "type": "array"
+        }
+      ],
+      "title": "Action Gate"
     },
     "advisory_explanation": {
       "anyOf": [
@@ -768,6 +818,7 @@
       "items": {
         "$ref": "#/$defs/NormalizedEvidence"
       },
+      "maxItems": 64,
       "title": "Evidence",
       "type": "array"
     },
@@ -775,6 +826,7 @@
       "items": {
         "$ref": "#/$defs/EvidenceDecision"
       },
+      "maxItems": 64,
       "title": "Evidence Decisions",
       "type": "array"
     },
@@ -791,6 +843,7 @@
         "minLength": 1,
         "type": "string"
       },
+      "maxItems": 64,
       "title": "Limitations",
       "type": "array"
     },
@@ -798,6 +851,7 @@
       "items": {
         "$ref": "#/$defs/MissingEvidence"
       },
+      "maxItems": 64,
       "title": "Missing Evidence",
       "type": "array"
     },
@@ -805,6 +859,7 @@
       "items": {
         "$ref": "#/$defs/ProbeAuditRecord"
       },
+      "maxItems": 64,
       "title": "Probe Audit",
       "type": "array"
     },

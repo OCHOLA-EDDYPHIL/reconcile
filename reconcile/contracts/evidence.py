@@ -12,6 +12,7 @@ from reconcile.contracts.base import (
     Identifier,
     NonEmptyText,
     StrictModel,
+    reject_sensitive_keys,
 )
 from reconcile.contracts.common import (
     EvidenceProvenance,
@@ -71,10 +72,38 @@ class NormalizedEvidence(StrictModel):
     raw_observation: RawObservationReference
 
     @model_validator(mode="after")
-    def validate_assertion_identity(self) -> NormalizedEvidence:
+    def validate_evidence_semantics(self) -> NormalizedEvidence:
         effect_ids = [assertion.effect_id for assertion in self.effect_assertions]
         if len(effect_ids) != len(set(effect_ids)):
             raise ValueError("effect assertions must have unique identifiers")
+        reject_sensitive_keys(self.correlation)
+        if (
+            not self.freshness.valid_from
+            <= self.observed_at
+            <= self.freshness.valid_until
+        ):
+            raise ValueError("observation must fall inside its freshness window")
+        authoritative = self.authority is EvidenceAuthority.TARGET_STATE
+        if not authoritative:
+            if self.operation_status is not None:
+                raise ValueError(
+                    "non-target evidence cannot assert authoritative operation status"
+                )
+            if any(
+                assertion.state is not EffectAssertionState.UNVERIFIED
+                for assertion in self.effect_assertions
+            ):
+                raise ValueError(
+                    "non-target evidence cannot establish expected effects"
+                )
+
+        if self.operation_status is OperationStatus.TERMINAL_NOT_COMMITTED and any(
+            assertion.state is EffectAssertionState.ESTABLISHED
+            for assertion in self.effect_assertions
+        ):
+            raise ValueError(
+                "terminal non-execution cannot coexist with an established effect"
+            )
         return self
 
 

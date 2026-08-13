@@ -8,10 +8,12 @@ import inspect
 import json
 import re
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import StrEnum
+from threading import RLock
 from typing import Protocol
+from weakref import WeakSet
 
 from jsonschema import Draft202012Validator, validators
 from pydantic import Field, model_validator
@@ -26,6 +28,7 @@ from reconcile.contracts.base import (
 from reconcile.contracts.codec import (
     ContractError,
     canonical_json_bytes,
+    canonical_sha256,
     decode_contract,
 )
 from reconcile.contracts.envelope import ExecutionEnvelope, ProbeRequest
@@ -136,9 +139,15 @@ class ControllerAuditRecord(StrictModel):
         if self.completed_at < self.started_at:
             raise ValueError("audit completion cannot precede its start")
         if self.outcome is ProbeOutcome.COMPLETED:
-            if self.result_sha256 is None or self.result_byte_count is None:
+            if (
+                self.capability_name is None
+                or self.capability_version is None
+                or self.request_sha256 is None
+                or self.result_sha256 is None
+                or self.result_byte_count is None
+            ):
                 raise ValueError(
-                    "completed probes require a result digest and byte count"
+                    "completed probes require request, capability, and result identity"
                 )
         elif self.result_sha256 is not None:
             raise ValueError("rejected probe output cannot become an evidence digest")
@@ -152,15 +161,49 @@ class ValidatedObservation:
     byte_count: int
 
 
-@dataclass(frozen=True, slots=True)
+_PROBE_EXECUTION_SEAL = object()
+_PROBE_EXECUTION_LOCK = RLock()
+_VALID_PROBE_EXECUTIONS: WeakSet[ProbeExecution] = WeakSet()
+
+
+@dataclass(frozen=True, slots=True, init=False, eq=False, weakref_slot=True)
 class ProbeExecution:
+    envelope_sha256: str
     audit: ControllerAuditRecord
     observation: ValidatedObservation | None = None
+    _controller_session: object = field(repr=False)
 
-    def __post_init__(self) -> None:
-        completed = self.audit.outcome is ProbeOutcome.COMPLETED
-        if completed != (self.observation is not None):
+    def __init__(
+        self,
+        *,
+        envelope_sha256: str,
+        audit: ControllerAuditRecord,
+        observation: ValidatedObservation | None = None,
+        _controller_session: object,
+        _seal: object,
+    ) -> None:
+        if _seal is not _PROBE_EXECUTION_SEAL:
+            raise TypeError("probe executions are created only by the controller")
+        if type(audit) is not ControllerAuditRecord:
+            raise TypeError("probe execution audit must be exact")
+        if observation is not None and type(observation) is not ValidatedObservation:
+            raise TypeError("probe execution observation must be exact")
+        completed = audit.outcome is ProbeOutcome.COMPLETED
+        if completed != (observation is not None):
             raise ValueError("only completed probes may return an observation")
+        object.__setattr__(self, "envelope_sha256", envelope_sha256)
+        object.__setattr__(self, "audit", audit)
+        object.__setattr__(self, "observation", observation)
+        object.__setattr__(self, "_controller_session", _controller_session)
+        with _PROBE_EXECUTION_LOCK:
+            _VALID_PROBE_EXECUTIONS.add(self)
+
+    def is_controller_output(self) -> bool:
+        with _PROBE_EXECUTION_LOCK:
+            return self in _VALID_PROBE_EXECUTIONS
+
+    def _session_token(self) -> object:
+        return self._controller_session
 
 
 class _InvocationState(StrEnum):
@@ -211,6 +254,19 @@ def _discard_task(task: asyncio.Task[object]) -> None:
     task.add_done_callback(_consume_task_result)
 
 
+def probe_request_sha256(request: ProbeRequest) -> str:
+    """Hash only the executable request identity, excluding model rationale."""
+
+    request = decode_contract(canonical_json_bytes(request), ProbeRequest)
+    identity = {
+        "arguments": request.arguments,
+        "capability_name": request.capability_name,
+        "capability_version": request.capability_version,
+        "relevant_effect_ids": sorted(request.relevant_effect_ids),
+    }
+    return hashlib.sha256(canonical_json_value_bytes(identity)).hexdigest()
+
+
 class ProbeController:
     """One investigation's serialized, bounded read-only probe session."""
 
@@ -223,6 +279,8 @@ class ProbeController:
     ) -> None:
         envelope_payload = canonical_json_bytes(envelope)
         self._envelope = decode_contract(envelope_payload, ExecutionEnvelope)
+        self._envelope_sha256 = canonical_sha256(self._envelope)
+        self._session_token = object()
         registry.freeze()
         self._registry = registry
         self._clock = clock or _SystemClock()
@@ -267,15 +325,6 @@ class ProbeController:
     def _deadline_reached(self) -> bool:
         return self._clock.monotonic() >= self._deadline_monotonic
 
-    def _request_fingerprint(self, request: ProbeRequest) -> str:
-        identity = {
-            "arguments": request.arguments,
-            "capability_name": request.capability_name,
-            "capability_version": request.capability_version,
-            "relevant_effect_ids": sorted(request.relevant_effect_ids),
-        }
-        return hashlib.sha256(canonical_json_value_bytes(identity)).hexdigest()
-
     def _finish(
         self,
         *,
@@ -312,7 +361,13 @@ class ProbeController:
             ),
         )
         self._audit.append(audit)
-        execution = ProbeExecution(audit=audit, observation=observation)
+        execution = ProbeExecution(
+            envelope_sha256=self._envelope_sha256,
+            audit=audit,
+            observation=observation,
+            _controller_session=self._session_token,
+            _seal=_PROBE_EXECUTION_SEAL,
+        )
         if reason in _TERMINAL_REASONS:
             self._terminal_execution = execution
         return execution
@@ -362,7 +417,7 @@ class ProbeController:
                 request = decode_contract(canonical_json_bytes(request), ProbeRequest)
                 requested_capability_name = request.capability_name
                 requested_capability_version = request.capability_version
-                request_sha256 = self._request_fingerprint(request)
+                request_sha256 = probe_request_sha256(request)
             except (ContractError, TypeError, ValueError):
                 return self._finish(
                     sequence=sequence,
@@ -862,4 +917,5 @@ __all__ = [
     "ProbeExecution",
     "ProbeStopReason",
     "ValidatedObservation",
+    "probe_request_sha256",
 ]
