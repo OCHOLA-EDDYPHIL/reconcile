@@ -1,0 +1,297 @@
+{
+  "$defs": {
+    "ScenarioCallerObservation": {
+      "enum": [
+        "NOT_DISPATCHED",
+        "VALUE_RESPONSE",
+        "ERROR_RESPONSE",
+        "NO_RESPONSE"
+      ],
+      "title": "ScenarioCallerObservation",
+      "type": "string"
+    },
+    "ScenarioFaultAction": {
+      "enum": [
+        "NONE",
+        "SUPPRESS_DISPATCH",
+        "INTERRUPT_PROCESS",
+        "DROP_RESPONSE",
+        "DELAY_RESPONSE"
+      ],
+      "title": "ScenarioFaultAction",
+      "type": "string"
+    },
+    "ScenarioFaultInstruction": {
+      "additionalProperties": false,
+      "properties": {
+        "action": {
+          "$ref": "#/$defs/ScenarioFaultAction"
+        },
+        "delay_ms": {
+          "default": 0,
+          "maximum": 60000,
+          "minimum": 0,
+          "title": "Delay Ms",
+          "type": "integer"
+        },
+        "point": {
+          "$ref": "#/$defs/ScenarioFaultPoint"
+        }
+      },
+      "required": [
+        "point",
+        "action"
+      ],
+      "title": "ScenarioFaultInstruction",
+      "type": "object"
+    },
+    "ScenarioFaultPoint": {
+      "enum": [
+        "UNINTERRUPTED",
+        "PRE_DISPATCH",
+        "PRE_COMMIT",
+        "POST_COMMIT",
+        "POST_RESPONSE"
+      ],
+      "title": "ScenarioFaultPoint",
+      "type": "string"
+    },
+    "ScenarioRef": {
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Name",
+          "type": "string"
+        },
+        "version": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Version",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "version"
+      ],
+      "title": "ScenarioRef",
+      "type": "object"
+    },
+    "ScenarioTraceEvent": {
+      "additionalProperties": false,
+      "properties": {
+        "event": {
+          "$ref": "#/$defs/ScenarioTransportEvent"
+        },
+        "occurred_at": {
+          "format": "date-time",
+          "title": "Occurred At",
+          "type": "string"
+        },
+        "sequence": {
+          "maximum": 16,
+          "minimum": 1,
+          "title": "Sequence",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "sequence",
+        "event",
+        "occurred_at"
+      ],
+      "title": "ScenarioTraceEvent",
+      "type": "object"
+    },
+    "ScenarioTransportEvent": {
+      "enum": [
+        "RUN_STARTED",
+        "DISPATCH_SUPPRESSED",
+        "DISPATCH_STARTED",
+        "PRE_COMMIT_REACHED",
+        "POST_COMMIT_REACHED",
+        "RESPONSE_AVAILABLE",
+        "RESPONSE_DELAY_STARTED",
+        "RESPONSE_DROPPED",
+        "RESPONSE_OBSERVED",
+        "WORKER_INTERRUPTED",
+        "RUN_COMPLETED"
+      ],
+      "title": "ScenarioTransportEvent",
+      "type": "string"
+    },
+    "ScenarioWorkerTermination": {
+      "enum": [
+        "NOT_STARTED",
+        "EXITED",
+        "SIGNALED"
+      ],
+      "title": "ScenarioWorkerTermination",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "applied_delay_ms": {
+      "maximum": 60000,
+      "minimum": 0,
+      "title": "Applied Delay Ms",
+      "type": "integer"
+    },
+    "caller_observation": {
+      "$ref": "#/$defs/ScenarioCallerObservation"
+    },
+    "completed_at": {
+      "format": "date-time",
+      "title": "Completed At",
+      "type": "string"
+    },
+    "configured_fault": {
+      "$ref": "#/$defs/ScenarioFaultInstruction"
+    },
+    "events": {
+      "items": {
+        "$ref": "#/$defs/ScenarioTraceEvent"
+      },
+      "maxItems": 16,
+      "minItems": 1,
+      "title": "Events",
+      "type": "array"
+    },
+    "exit_code": {
+      "anyOf": [
+        {
+          "maximum": 255,
+          "minimum": 0,
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Exit Code"
+    },
+    "function_call_id": {
+      "anyOf": [
+        {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Function Call Id"
+    },
+    "investigation_id": {
+      "maxLength": 128,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+      "title": "Investigation Id",
+      "type": "string"
+    },
+    "invocation_id": {
+      "maxLength": 128,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+      "title": "Invocation Id",
+      "type": "string"
+    },
+    "operation_id": {
+      "maxLength": 128,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+      "title": "Operation Id",
+      "type": "string"
+    },
+    "response_byte_count": {
+      "anyOf": [
+        {
+          "maximum": 9223372036854775807,
+          "minimum": 0,
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Response Byte Count"
+    },
+    "response_sha256": {
+      "anyOf": [
+        {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Response Sha256"
+    },
+    "run_id": {
+      "maxLength": 128,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+      "title": "Run Id",
+      "type": "string"
+    },
+    "scenario": {
+      "$ref": "#/$defs/ScenarioRef"
+    },
+    "schema_version": {
+      "const": "reconcile/scenario-fault-trace/v1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "signal": {
+      "anyOf": [
+        {
+          "maximum": 127,
+          "minimum": 1,
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Signal"
+    },
+    "started_at": {
+      "format": "date-time",
+      "title": "Started At",
+      "type": "string"
+    },
+    "worker_termination": {
+      "$ref": "#/$defs/ScenarioWorkerTermination"
+    }
+  },
+  "required": [
+    "schema_version",
+    "scenario",
+    "run_id",
+    "investigation_id",
+    "operation_id",
+    "invocation_id",
+    "configured_fault",
+    "events",
+    "caller_observation",
+    "worker_termination",
+    "applied_delay_ms",
+    "started_at",
+    "completed_at"
+  ],
+  "title": "ScenarioFaultTrace",
+  "type": "object"
+}

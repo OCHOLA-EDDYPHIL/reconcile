@@ -17,6 +17,11 @@ from reconcile.contracts import (
     NormalizedEvidence,
     ObservationCapability,
     ProbeRequest,
+    ScenarioCleanupRequest,
+    ScenarioCleanupResult,
+    ScenarioFaultTrace,
+    ScenarioRunRequest,
+    ScenarioRunResult,
 )
 
 SCHEMA_DIRECTORY = Path("schemas/v1")
@@ -29,6 +34,11 @@ PUBLIC_SCHEMAS: dict[str, type[BaseModel]] = {
     "normalized-evidence": NormalizedEvidence,
     "observation-capability": ObservationCapability,
     "probe-request": ProbeRequest,
+    "scenario-cleanup-request": ScenarioCleanupRequest,
+    "scenario-cleanup-result": ScenarioCleanupResult,
+    "scenario-fault-trace": ScenarioFaultTrace,
+    "scenario-run-request": ScenarioRunRequest,
+    "scenario-run-result": ScenarioRunResult,
 }
 
 
