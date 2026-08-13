@@ -1,7 +1,8 @@
-"""Local Storage ambiguity scenario and its fixed evidence investigation."""
+"""Local Storage ambiguity scenario with fixed and adaptive investigation paths."""
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import time
 from collections.abc import Callable
@@ -19,6 +20,12 @@ from reconcile.adapters.storage import (
     build_storage_capability_registration,
     build_storage_rule_registration,
     build_storage_target,
+)
+from reconcile.adaptive import (
+    AdaptiveInvestigationPolicy,
+    AdaptiveInvestigationResult,
+    AdvisoryPlanner,
+    execute_adaptive_investigation,
 )
 from reconcile.baseline import (
     FixedBaselineResult,
@@ -94,6 +101,24 @@ STORAGE_FIXED_PROBE_PLAN = FixedProbePlan(
         Classification.COMMITTED,
         Classification.NOT_COMMITTED,
     ),
+)
+
+STORAGE_ADAPTIVE_POLICY = AdaptiveInvestigationPolicy(
+    name="storage-adaptive-investigation",
+    version="1.0.0",
+    sufficient_classifications=(
+        Classification.COMMITTED,
+        Classification.NOT_COMMITTED,
+    ),
+    required_capabilities=(
+        CapabilityRef(
+            name=STORAGE_CAPABILITY_NAME,
+            version=STORAGE_CAPABILITY_VERSION,
+        ),
+    ),
+    max_turns=1,
+    planner_timeout_ms=4_000,
+    include_explanation=True,
 )
 
 _MAX_AGE_SECONDS = 60
@@ -213,6 +238,26 @@ class StorageScenarioDefinition:
             self._read_target,
             clock=clock,
             revision=revision,
+        )
+
+    async def adaptive(
+        self,
+        envelope: ExecutionEnvelope,
+        planner: AdvisoryPlanner,
+        *,
+        clock: InvestigationClock | None = None,
+        revision: int = 1,
+        cancellation_event: asyncio.Event | None = None,
+    ) -> AdaptiveInvestigationResult:
+        """Run the canonical bounded adaptive Storage investigation."""
+
+        return await execute_storage_adaptive(
+            envelope,
+            self._read_target,
+            planner,
+            clock=clock,
+            revision=revision,
+            cancellation_event=cancellation_event,
         )
 
     def prepare(self, plan: ScenarioPlan) -> ScenarioPreparation:
@@ -443,6 +488,38 @@ async def execute_storage_baseline(
     )
 
 
+async def execute_storage_adaptive(
+    envelope: ExecutionEnvelope,
+    read_target: LocalStorageReadTarget,
+    planner: AdvisoryPlanner,
+    *,
+    clock: InvestigationClock | None = None,
+    revision: int = 1,
+    cancellation_event: asyncio.Event | None = None,
+) -> AdaptiveInvestigationResult:
+    """Execute the canonical advisory Storage investigation."""
+
+    envelope = decode_contract(canonical_json_bytes(envelope), ExecutionEnvelope)
+    if type(read_target) is not LocalStorageReadTarget:
+        raise TypeError("the Storage investigation requires the restricted read target")
+    selected_clock = clock or _SystemInvestigationClock()
+    capabilities, rules = _storage_registries(
+        envelope,
+        read_target,
+        clock=selected_clock,
+    )
+    return await execute_adaptive_investigation(
+        envelope,
+        capabilities,
+        rules,
+        planner,
+        STORAGE_ADAPTIVE_POLICY,
+        clock=selected_clock,
+        revision=revision,
+        cancellation_event=cancellation_event,
+    )
+
+
 def run_storage_baseline(
     envelope: ExecutionEnvelope,
     read_target: LocalStorageReadTarget,
@@ -509,6 +586,7 @@ def run_storage_investigation(
 
 __all__ = [
     "STORAGE_ACTION_POLICY_VERSION",
+    "STORAGE_ADAPTIVE_POLICY",
     "STORAGE_EFFECT_ID",
     "STORAGE_FIXED_PROBE_PLAN",
     "STORAGE_SCENARIO",
@@ -516,6 +594,7 @@ __all__ = [
     "STORAGE_TOOL_VERSION",
     "InvestigationClock",
     "StorageScenarioDefinition",
+    "execute_storage_adaptive",
     "execute_storage_baseline",
     "investigate_storage",
     "run_storage_baseline",

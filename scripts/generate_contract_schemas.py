@@ -10,6 +10,8 @@ from pydantic import BaseModel
 
 from reconcile.contracts import (
     ActionGateResult,
+    AdaptivePlannerInput,
+    AdaptivePlannerOutput,
     EvidenceDecision,
     ExecutionEnvelope,
     ExpectedEffect,
@@ -28,6 +30,8 @@ from reconcile.contracts import (
 SCHEMA_DIRECTORY = Path("schemas/v1")
 PUBLIC_SCHEMAS: dict[str, type[BaseModel]] = {
     "action-gate-result": ActionGateResult,
+    "adaptive-planner-input": AdaptivePlannerInput,
+    "adaptive-planner-output": AdaptivePlannerOutput,
     "evidence-decision": EvidenceDecision,
     "execution-envelope": ExecutionEnvelope,
     "expected-effect": ExpectedEffect,

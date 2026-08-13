@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import time
 from collections.abc import Callable
@@ -23,6 +24,12 @@ from reconcile.adapters.sandbox_order import (
     build_sandbox_order_ingress_rule_registration,
     build_sandbox_order_target,
 )
+from reconcile.adaptive import (
+    AdaptiveInvestigationPolicy,
+    AdaptiveInvestigationResult,
+    AdvisoryPlanner,
+    execute_adaptive_investigation,
+)
 from reconcile.baseline import (
     FixedBaselineResult,
     FixedProbePlan,
@@ -37,6 +44,7 @@ from reconcile.contracts import (
     AmbiguityKind,
     AmbiguousExecution,
     CapabilityRef,
+    Classification,
     EnvelopeContext,
     EvidenceBudget,
     ExecutionEnvelope,
@@ -84,6 +92,18 @@ SANDBOX_ORDER_INGRESS_FIRST = (
 SANDBOX_ORDER_AGGREGATE_FIRST = (
     SANDBOX_ORDER_AGGREGATE_CAPABILITY_NAME,
     SANDBOX_ORDER_INGRESS_CAPABILITY_NAME,
+)
+
+SANDBOX_ORDER_ADAPTIVE_POLICY = AdaptiveInvestigationPolicy(
+    name="sandbox-order-adaptive-investigation",
+    version="1.0.0",
+    sufficient_classifications=(
+        Classification.COMMITTED,
+        Classification.NOT_COMMITTED,
+    ),
+    max_turns=4,
+    planner_timeout_ms=4_000,
+    include_explanation=True,
 )
 
 _MAX_AGE_SECONDS = 60
@@ -232,6 +252,26 @@ class SandboxOrderScenarioDefinition:
             probe_order=probe_order,
             clock=clock,
             revision=revision,
+        )
+
+    async def adaptive(
+        self,
+        envelope: ExecutionEnvelope,
+        planner: AdvisoryPlanner,
+        *,
+        clock: SandboxOrderInvestigationClock | None = None,
+        revision: int = 1,
+        cancellation_event: asyncio.Event | None = None,
+    ) -> AdaptiveInvestigationResult:
+        """Run the canonical bounded adaptive sandbox-order investigation."""
+
+        return await execute_sandbox_order_adaptive(
+            envelope,
+            self._read_target,
+            planner,
+            clock=clock,
+            revision=revision,
+            cancellation_event=cancellation_event,
         )
 
     def prepare(self, plan: ScenarioPlan) -> ScenarioPreparation:
@@ -494,6 +534,41 @@ async def execute_sandbox_order_baseline(
     )
 
 
+async def execute_sandbox_order_adaptive(
+    envelope: ExecutionEnvelope,
+    read_target: LocalOrderReadTarget,
+    planner: AdvisoryPlanner,
+    *,
+    clock: SandboxOrderInvestigationClock | None = None,
+    revision: int = 1,
+    cancellation_event: asyncio.Event | None = None,
+) -> AdaptiveInvestigationResult:
+    """Execute the canonical advisory sandbox-order investigation."""
+
+    envelope = decode_contract(canonical_json_bytes(envelope), ExecutionEnvelope)
+    if type(read_target) is not LocalOrderReadTarget:
+        raise TypeError(
+            "the sandbox-order investigation requires the restricted read target"
+        )
+    selected_clock = clock or _SystemInvestigationClock()
+    capabilities, rules = _sandbox_order_registries(
+        envelope,
+        read_target,
+        clock=selected_clock,
+    )
+    return await execute_adaptive_investigation(
+        envelope,
+        capabilities,
+        rules,
+        planner,
+        SANDBOX_ORDER_ADAPTIVE_POLICY,
+        clock=selected_clock,
+        revision=revision,
+        cancellation_event=cancellation_event,
+        additional_limitations=_SANDBOX_ORDER_LIMITATIONS,
+    )
+
+
 def run_sandbox_order_baseline(
     envelope: ExecutionEnvelope,
     read_target: LocalOrderReadTarget,
@@ -569,6 +644,7 @@ def run_sandbox_order_investigation(
 
 __all__ = [
     "SANDBOX_ORDER_ACTION_POLICY_VERSION",
+    "SANDBOX_ORDER_ADAPTIVE_POLICY",
     "SANDBOX_ORDER_AGGREGATE_FIRST",
     "SANDBOX_ORDER_EFFECT_ID",
     "SANDBOX_ORDER_FIXED_PROBE_PLAN",
@@ -581,6 +657,7 @@ __all__ = [
     "SandboxOrderInvestigationClock",
     "SandboxOrderProbeOrder",
     "SandboxOrderScenarioDefinition",
+    "execute_sandbox_order_adaptive",
     "execute_sandbox_order_baseline",
     "investigate_sandbox_order",
     "run_sandbox_order_baseline",

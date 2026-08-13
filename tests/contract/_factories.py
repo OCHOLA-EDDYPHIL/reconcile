@@ -7,6 +7,8 @@ from datetime import UTC, datetime, timedelta
 
 from reconcile.contracts import (
     ACTION_GATE_RESULT_VERSION,
+    ADAPTIVE_PLANNER_INPUT_VERSION,
+    ADAPTIVE_PLANNER_OUTPUT_VERSION,
     EVIDENCE_DECISION_VERSION,
     EXECUTION_ENVELOPE_VERSION,
     EXPECTED_EFFECT_VERSION,
@@ -22,6 +24,9 @@ from reconcile.contracts import (
     SCENARIO_RUN_RESULT_VERSION,
     ActionGateReason,
     ActionGateResult,
+    AdaptivePlannerInput,
+    AdaptivePlannerOutput,
+    AdaptivePlannerPhase,
     AdvisoryExplanation,
     AmbiguityKind,
     AmbiguousExecution,
@@ -55,6 +60,18 @@ from reconcile.contracts import (
     ObservationCapability,
     OperationStatus,
     OriginalInvocation,
+    PlannerAcquisitionAdvice,
+    PlannerAdmittedEvidence,
+    PlannerCapability,
+    PlannerCitationRefs,
+    PlannerExplanation,
+    PlannerMissingEvidence,
+    PlannerMissingEvidenceNote,
+    PlannerRejectedEvidence,
+    PlannerRemainingBudget,
+    PlannerStopAdvice,
+    PlannerVersionMetadata,
+    PlannerWeakEvidence,
     PolicyReferences,
     PreregisteredExpectedClassification,
     ProbeAuditRecord,
@@ -735,6 +752,120 @@ def make_comparison_record(
     )
 
 
+def make_planner_input() -> AdaptivePlannerInput:
+    envelope = make_envelope()
+    capability = make_capability()
+    return AdaptivePlannerInput(
+        schema_version=ADAPTIVE_PLANNER_INPUT_VERSION,
+        phase=AdaptivePlannerPhase.ACQUIRE_EVIDENCE,
+        envelope=envelope,
+        capabilities=(
+            PlannerCapability(
+                name=capability.name,
+                version=capability.version,
+                description="Read exact target state through the bound adapter.",
+                read_only=True,
+                argument_schema=dict(capability.argument_schema),
+                cost_units=capability.cost_units,
+                remaining_invocations=2,
+            ),
+        ),
+        admitted_evidence=(
+            PlannerAdmittedEvidence(
+                evidence_id="evidence-admitted-7",
+                capability_name=capability.name,
+                capability_version=capability.version,
+                reason=EvidenceReason.AUTHORITATIVE_EXACT_CORRELATION,
+                effect_assertions=(
+                    EffectAssertion(
+                        effect_id="business-record",
+                        state=EffectAssertionState.ESTABLISHED,
+                    ),
+                ),
+                operation_status=None,
+            ),
+        ),
+        weak_evidence=(
+            PlannerWeakEvidence(
+                evidence_id="evidence-weak-7",
+                capability_name=capability.name,
+                capability_version=capability.version,
+                reason=EvidenceReason.NON_AUTHORITATIVE_LOG_ONLY,
+                relevant_effect_ids=("audit-record",),
+            ),
+        ),
+        rejected_evidence=(
+            PlannerRejectedEvidence(
+                evidence_id="evidence-rejected-7",
+                capability_name=capability.name,
+                capability_version=capability.version,
+                reason=EvidenceReason.CORRELATION_MISMATCH,
+                relevant_effect_ids=("audit-record",),
+            ),
+        ),
+        missing_evidence=(
+            PlannerMissingEvidence(
+                effect_id="audit-record",
+                reason="insufficient_authoritative_evidence",
+            ),
+        ),
+        prior_executable_request_hashes=("e" * 64,),
+        remaining_budget=PlannerRemainingBudget(
+            probes=2,
+            elapsed_ms=3_000,
+            result_bytes=32_768,
+            cost_units=2,
+            deadline_at=NOW + timedelta(seconds=5),
+        ),
+        versions=PlannerVersionMetadata(
+            provider_name="google",
+            model_name="gemini-2.5-flash",
+            adk_version="1.11.0",
+            genai_version="1.29.0",
+            prompt_version="adaptive-planner-v1",
+            capability_catalog_version="capability-catalog-v1",
+            authority_policy_version=envelope.context.policies.authority,
+            classification_policy_version=envelope.context.policies.classification,
+            action_policy_version=envelope.context.policies.action,
+            input_schema_version=ADAPTIVE_PLANNER_INPUT_VERSION,
+            output_schema_version=ADAPTIVE_PLANNER_OUTPUT_VERSION,
+        ),
+    )
+
+
+def make_planner_output() -> AdaptivePlannerOutput:
+    return AdaptivePlannerOutput(
+        schema_version=ADAPTIVE_PLANNER_OUTPUT_VERSION,
+        probe_proposals=(make_probe(),),
+        acquisition_advice=PlannerAcquisitionAdvice(
+            summary="Acquire one exact target-state observation for the missing effect.",
+        ),
+        stop_advice=PlannerStopAdvice(
+            recommend_stop=False,
+            reason="Authoritative evidence for one expected effect remains missing.",
+        ),
+        missing_evidence_notes=(
+            PlannerMissingEvidenceNote(
+                effect_ids=("audit-record",),
+                note="No admitted observation establishes the audit effect.",
+            ),
+        ),
+        explanation=PlannerExplanation(
+            summary="The available evidence leaves one expected effect unresolved.",
+            admitted_evidence="One admitted observation establishes the business effect.",
+            weak_evidence="Weak evidence does not establish the audit effect.",
+            rejected_evidence="A rejected observation failed exact correlation.",
+            missing_evidence="The audit effect still needs authoritative evidence.",
+            citations=PlannerCitationRefs(
+                admitted_evidence_ids=("evidence-admitted-7",),
+                weak_evidence_ids=("evidence-weak-7",),
+                rejected_evidence_ids=("evidence-rejected-7",),
+                missing_effect_ids=("audit-record",),
+            ),
+        ),
+    )
+
+
 def public_examples() -> tuple[object, ...]:
     envelope = make_envelope()
     capability = make_capability()
@@ -755,6 +886,8 @@ def public_examples() -> tuple[object, ...]:
         make_cleanup_request(),
         make_cleanup_result(),
         make_comparison_record(),
+        make_planner_input(),
+        make_planner_output(),
     )
 
 

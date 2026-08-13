@@ -1,0 +1,970 @@
+{
+  "$defs": {
+    "AdaptivePlannerPhase": {
+      "enum": [
+        "ACQUIRE_EVIDENCE",
+        "EXPLAIN_EVIDENCE"
+      ],
+      "title": "AdaptivePlannerPhase",
+      "type": "string"
+    },
+    "AmbiguityKind": {
+      "enum": [
+        "TIMEOUT",
+        "CONNECTION_RESET",
+        "PROCESS_INTERRUPTED",
+        "MISSING_TOOL_RESULT",
+        "PROVIDER_UNAVAILABLE",
+        "OTHER"
+      ],
+      "title": "AmbiguityKind",
+      "type": "string"
+    },
+    "AmbiguousExecution": {
+      "additionalProperties": false,
+      "properties": {
+        "detail": {
+          "anyOf": [
+            {
+              "maxLength": 512,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Detail"
+        },
+        "kind": {
+          "$ref": "#/$defs/AmbiguityKind"
+        },
+        "observed_at": {
+          "format": "date-time",
+          "title": "Observed At",
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "observed_at"
+      ],
+      "title": "AmbiguousExecution",
+      "type": "object"
+    },
+    "ArgumentsObject": {
+      "additionalProperties": {
+        "$ref": "#/$defs/JsonValue"
+      },
+      "maxProperties": 64,
+      "type": "object"
+    },
+    "CapabilityRef": {
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Name",
+          "type": "string"
+        },
+        "version": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Version",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "version"
+      ],
+      "title": "CapabilityRef",
+      "type": "object"
+    },
+    "EffectAssertion": {
+      "additionalProperties": false,
+      "properties": {
+        "effect_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Effect Id",
+          "type": "string"
+        },
+        "state": {
+          "$ref": "#/$defs/EffectAssertionState"
+        }
+      },
+      "required": [
+        "effect_id",
+        "state"
+      ],
+      "title": "EffectAssertion",
+      "type": "object"
+    },
+    "EffectAssertionState": {
+      "enum": [
+        "ESTABLISHED",
+        "NOT_ESTABLISHED",
+        "UNVERIFIED"
+      ],
+      "title": "EffectAssertionState",
+      "type": "string"
+    },
+    "EnvelopeContext": {
+      "additionalProperties": false,
+      "properties": {
+        "correlation_fields": {
+          "maxProperties": 32,
+          "patternProperties": {
+            "^[A-Za-z0-9][A-Za-z0-9._:-]*$": {
+              "maxLength": 4096,
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          "propertyNames": {
+            "maxLength": 128,
+            "minLength": 1
+          },
+          "title": "Correlation Fields",
+          "type": "object"
+        },
+        "enabled_capabilities": {
+          "items": {
+            "$ref": "#/$defs/CapabilityRef"
+          },
+          "maxItems": 64,
+          "minItems": 1,
+          "title": "Enabled Capabilities",
+          "type": "array"
+        },
+        "evidence_budget": {
+          "$ref": "#/$defs/EvidenceBudget"
+        },
+        "freshness": {
+          "$ref": "#/$defs/FreshnessPolicy"
+        },
+        "invocation": {
+          "$ref": "#/$defs/OriginalInvocation"
+        },
+        "policies": {
+          "$ref": "#/$defs/PolicyReferences"
+        }
+      },
+      "required": [
+        "invocation",
+        "enabled_capabilities",
+        "evidence_budget",
+        "freshness",
+        "policies"
+      ],
+      "title": "EnvelopeContext",
+      "type": "object"
+    },
+    "EvidenceBudget": {
+      "additionalProperties": false,
+      "properties": {
+        "max_cost_units": {
+          "maximum": 9223372036854775807,
+          "minimum": 1,
+          "title": "Max Cost Units",
+          "type": "integer"
+        },
+        "max_elapsed_ms": {
+          "maximum": 9223372036854775807,
+          "minimum": 1,
+          "title": "Max Elapsed Ms",
+          "type": "integer"
+        },
+        "max_probes": {
+          "maximum": 64,
+          "minimum": 1,
+          "title": "Max Probes",
+          "type": "integer"
+        },
+        "max_total_result_bytes": {
+          "maximum": 9223372036854775807,
+          "minimum": 1,
+          "title": "Max Total Result Bytes",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "max_probes",
+        "max_elapsed_ms",
+        "max_total_result_bytes",
+        "max_cost_units"
+      ],
+      "title": "EvidenceBudget",
+      "type": "object"
+    },
+    "EvidenceReason": {
+      "enum": [
+        "authoritative_exact_correlation",
+        "authoritative_affirmative_non_execution",
+        "authoritative_active_status",
+        "non_authoritative_log_only",
+        "not_found_absence_only",
+        "stale_observation",
+        "correlation_mismatch",
+        "scope_mismatch",
+        "unsupported_capability",
+        "malformed_observation",
+        "unverifiable_authority",
+        "conflicting_authority",
+        "budget_exhausted",
+        "probe_timeout",
+        "result_too_large",
+        "duplicate_candidates",
+        "clock_ambiguity",
+        "expected_effect_mismatch"
+      ],
+      "title": "EvidenceReason",
+      "type": "string"
+    },
+    "ExecutionEnvelope": {
+      "additionalProperties": false,
+      "properties": {
+        "ambiguity": {
+          "$ref": "#/$defs/AmbiguousExecution"
+        },
+        "context": {
+          "$ref": "#/$defs/EnvelopeContext"
+        },
+        "expected_effects": {
+          "items": {
+            "$ref": "#/$defs/ExpectedEffect"
+          },
+          "maxItems": 64,
+          "minItems": 1,
+          "title": "Expected Effects",
+          "type": "array"
+        },
+        "investigation_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Investigation Id",
+          "type": "string"
+        },
+        "invoked_at": {
+          "format": "date-time",
+          "title": "Invoked At",
+          "type": "string"
+        },
+        "operation_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Operation Id",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": "reconcile/execution-envelope/v1",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "target": {
+          "$ref": "#/$defs/TargetBinding"
+        }
+      },
+      "required": [
+        "schema_version",
+        "investigation_id",
+        "operation_id",
+        "target",
+        "invoked_at",
+        "ambiguity",
+        "expected_effects",
+        "context"
+      ],
+      "title": "ExecutionEnvelope",
+      "type": "object"
+    },
+    "ExpectedEffect": {
+      "additionalProperties": false,
+      "properties": {
+        "commit_scope": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Commit Scope",
+          "type": "string"
+        },
+        "description": {
+          "maxLength": 4096,
+          "minLength": 1,
+          "title": "Description",
+          "type": "string"
+        },
+        "effect_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Effect Id",
+          "type": "string"
+        },
+        "predicate": {
+          "$ref": "#/$defs/NonEmptySmallJsonObject"
+        },
+        "schema_version": {
+          "const": "reconcile/expected-effect/v1",
+          "title": "Schema Version",
+          "type": "string"
+        }
+      },
+      "required": [
+        "schema_version",
+        "effect_id",
+        "commit_scope",
+        "predicate",
+        "description"
+      ],
+      "title": "ExpectedEffect",
+      "type": "object"
+    },
+    "FreshnessPolicy": {
+      "additionalProperties": false,
+      "properties": {
+        "clock_skew_seconds": {
+          "maximum": 9223372036854775807,
+          "minimum": 0,
+          "title": "Clock Skew Seconds",
+          "type": "integer"
+        },
+        "max_age_seconds": {
+          "maximum": 9223372036854775807,
+          "minimum": 1,
+          "title": "Max Age Seconds",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "max_age_seconds",
+        "clock_skew_seconds"
+      ],
+      "title": "FreshnessPolicy",
+      "type": "object"
+    },
+    "JsonObject": {
+      "additionalProperties": {
+        "$ref": "#/$defs/JsonValue"
+      },
+      "maxProperties": 128,
+      "type": "object"
+    },
+    "JsonValue": {},
+    "NonEmptySmallJsonObject": {
+      "additionalProperties": {
+        "$ref": "#/$defs/JsonValue"
+      },
+      "maxProperties": 32,
+      "minProperties": 1,
+      "type": "object"
+    },
+    "OperationStatus": {
+      "enum": [
+        "ACTIVE",
+        "UNRESOLVED",
+        "TERMINAL_COMMITTED",
+        "TERMINAL_NOT_COMMITTED"
+      ],
+      "title": "OperationStatus",
+      "type": "string"
+    },
+    "OriginalInvocation": {
+      "additionalProperties": false,
+      "description": "Caller-redacted invocation identity and canonical public arguments.",
+      "properties": {
+        "arguments": {
+          "$ref": "#/$defs/ArgumentsObject"
+        },
+        "arguments_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Arguments Sha256",
+          "type": "string"
+        },
+        "function_call_id": {
+          "anyOf": [
+            {
+              "maxLength": 128,
+              "minLength": 1,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Function Call Id"
+        },
+        "invocation_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Invocation Id",
+          "type": "string"
+        },
+        "tool_name": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Tool Name",
+          "type": "string"
+        },
+        "tool_version": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Tool Version",
+          "type": "string"
+        }
+      },
+      "required": [
+        "invocation_id",
+        "tool_name",
+        "tool_version",
+        "arguments_sha256"
+      ],
+      "title": "OriginalInvocation",
+      "type": "object"
+    },
+    "PlannerAdmittedEvidence": {
+      "additionalProperties": false,
+      "properties": {
+        "capability_name": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Capability Name",
+          "type": "string"
+        },
+        "capability_version": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Capability Version",
+          "type": "string"
+        },
+        "effect_assertions": {
+          "items": {
+            "$ref": "#/$defs/EffectAssertion"
+          },
+          "maxItems": 64,
+          "title": "Effect Assertions",
+          "type": "array"
+        },
+        "evidence_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Evidence Id",
+          "type": "string"
+        },
+        "operation_status": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/OperationStatus"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "reason": {
+          "$ref": "#/$defs/EvidenceReason"
+        }
+      },
+      "required": [
+        "evidence_id",
+        "capability_name",
+        "capability_version",
+        "reason",
+        "effect_assertions",
+        "operation_status"
+      ],
+      "title": "PlannerAdmittedEvidence",
+      "type": "object"
+    },
+    "PlannerCapability": {
+      "additionalProperties": false,
+      "properties": {
+        "argument_schema": {
+          "$ref": "#/$defs/JsonObject"
+        },
+        "cost_units": {
+          "maximum": 9223372036854775807,
+          "minimum": 1,
+          "title": "Cost Units",
+          "type": "integer"
+        },
+        "description": {
+          "maxLength": 512,
+          "minLength": 1,
+          "title": "Description",
+          "type": "string"
+        },
+        "name": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Name",
+          "type": "string"
+        },
+        "read_only": {
+          "const": true,
+          "title": "Read Only",
+          "type": "boolean"
+        },
+        "remaining_invocations": {
+          "maximum": 64,
+          "minimum": 0,
+          "title": "Remaining Invocations",
+          "type": "integer"
+        },
+        "version": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Version",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "version",
+        "description",
+        "read_only",
+        "argument_schema",
+        "cost_units",
+        "remaining_invocations"
+      ],
+      "title": "PlannerCapability",
+      "type": "object"
+    },
+    "PlannerMissingEvidence": {
+      "additionalProperties": false,
+      "properties": {
+        "effect_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Effect Id",
+          "type": "string"
+        },
+        "reason": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Reason",
+          "type": "string"
+        }
+      },
+      "required": [
+        "effect_id",
+        "reason"
+      ],
+      "title": "PlannerMissingEvidence",
+      "type": "object"
+    },
+    "PlannerRejectedEvidence": {
+      "additionalProperties": false,
+      "properties": {
+        "capability_name": {
+          "anyOf": [
+            {
+              "maxLength": 128,
+              "minLength": 1,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Capability Name"
+        },
+        "capability_version": {
+          "anyOf": [
+            {
+              "maxLength": 128,
+              "minLength": 1,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Capability Version"
+        },
+        "evidence_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Evidence Id",
+          "type": "string"
+        },
+        "reason": {
+          "$ref": "#/$defs/EvidenceReason"
+        },
+        "relevant_effect_ids": {
+          "items": {
+            "maxLength": 128,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+            "type": "string"
+          },
+          "maxItems": 64,
+          "minItems": 1,
+          "title": "Relevant Effect Ids",
+          "type": "array"
+        }
+      },
+      "required": [
+        "evidence_id",
+        "capability_name",
+        "capability_version",
+        "reason",
+        "relevant_effect_ids"
+      ],
+      "title": "PlannerRejectedEvidence",
+      "type": "object"
+    },
+    "PlannerRemainingBudget": {
+      "additionalProperties": false,
+      "properties": {
+        "cost_units": {
+          "maximum": 9223372036854775807,
+          "minimum": 0,
+          "title": "Cost Units",
+          "type": "integer"
+        },
+        "deadline_at": {
+          "format": "date-time",
+          "title": "Deadline At",
+          "type": "string"
+        },
+        "elapsed_ms": {
+          "maximum": 9223372036854775807,
+          "minimum": 0,
+          "title": "Elapsed Ms",
+          "type": "integer"
+        },
+        "probes": {
+          "maximum": 64,
+          "minimum": 0,
+          "title": "Probes",
+          "type": "integer"
+        },
+        "result_bytes": {
+          "maximum": 9223372036854775807,
+          "minimum": 0,
+          "title": "Result Bytes",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "probes",
+        "elapsed_ms",
+        "result_bytes",
+        "cost_units",
+        "deadline_at"
+      ],
+      "title": "PlannerRemainingBudget",
+      "type": "object"
+    },
+    "PlannerVersionMetadata": {
+      "additionalProperties": false,
+      "properties": {
+        "action_policy_version": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Action Policy Version",
+          "type": "string"
+        },
+        "adk_version": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Adk Version",
+          "type": "string"
+        },
+        "authority_policy_version": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Authority Policy Version",
+          "type": "string"
+        },
+        "capability_catalog_version": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Capability Catalog Version",
+          "type": "string"
+        },
+        "classification_policy_version": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Classification Policy Version",
+          "type": "string"
+        },
+        "genai_version": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Genai Version",
+          "type": "string"
+        },
+        "input_schema_version": {
+          "const": "reconcile/adaptive-planner-input/v1",
+          "title": "Input Schema Version",
+          "type": "string"
+        },
+        "model_name": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Model Name",
+          "type": "string"
+        },
+        "output_schema_version": {
+          "const": "reconcile/adaptive-planner-output/v1",
+          "title": "Output Schema Version",
+          "type": "string"
+        },
+        "prompt_version": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Prompt Version",
+          "type": "string"
+        },
+        "provider_name": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Provider Name",
+          "type": "string"
+        }
+      },
+      "required": [
+        "provider_name",
+        "model_name",
+        "adk_version",
+        "genai_version",
+        "prompt_version",
+        "capability_catalog_version",
+        "authority_policy_version",
+        "classification_policy_version",
+        "action_policy_version",
+        "input_schema_version",
+        "output_schema_version"
+      ],
+      "title": "PlannerVersionMetadata",
+      "type": "object"
+    },
+    "PlannerWeakEvidence": {
+      "additionalProperties": false,
+      "properties": {
+        "capability_name": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Capability Name",
+          "type": "string"
+        },
+        "capability_version": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Capability Version",
+          "type": "string"
+        },
+        "evidence_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Evidence Id",
+          "type": "string"
+        },
+        "reason": {
+          "$ref": "#/$defs/EvidenceReason"
+        },
+        "relevant_effect_ids": {
+          "items": {
+            "maxLength": 128,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+            "type": "string"
+          },
+          "maxItems": 64,
+          "minItems": 1,
+          "title": "Relevant Effect Ids",
+          "type": "array"
+        }
+      },
+      "required": [
+        "evidence_id",
+        "capability_name",
+        "capability_version",
+        "reason",
+        "relevant_effect_ids"
+      ],
+      "title": "PlannerWeakEvidence",
+      "type": "object"
+    },
+    "PolicyReferences": {
+      "additionalProperties": false,
+      "properties": {
+        "action": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Action",
+          "type": "string"
+        },
+        "authority": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Authority",
+          "type": "string"
+        },
+        "classification": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Classification",
+          "type": "string"
+        }
+      },
+      "required": [
+        "authority",
+        "classification",
+        "action"
+      ],
+      "title": "PolicyReferences",
+      "type": "object"
+    },
+    "TargetBinding": {
+      "additionalProperties": false,
+      "properties": {
+        "resource": {
+          "$ref": "#/$defs/NonEmptySmallJsonObject"
+        },
+        "scope": {
+          "$ref": "#/$defs/NonEmptySmallJsonObject"
+        },
+        "target_kind": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Target Kind",
+          "type": "string"
+        }
+      },
+      "required": [
+        "target_kind",
+        "scope",
+        "resource"
+      ],
+      "title": "TargetBinding",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "admitted_evidence": {
+      "items": {
+        "$ref": "#/$defs/PlannerAdmittedEvidence"
+      },
+      "maxItems": 64,
+      "title": "Admitted Evidence",
+      "type": "array"
+    },
+    "capabilities": {
+      "items": {
+        "$ref": "#/$defs/PlannerCapability"
+      },
+      "maxItems": 64,
+      "minItems": 1,
+      "title": "Capabilities",
+      "type": "array"
+    },
+    "envelope": {
+      "$ref": "#/$defs/ExecutionEnvelope"
+    },
+    "missing_evidence": {
+      "items": {
+        "$ref": "#/$defs/PlannerMissingEvidence"
+      },
+      "maxItems": 64,
+      "title": "Missing Evidence",
+      "type": "array"
+    },
+    "phase": {
+      "$ref": "#/$defs/AdaptivePlannerPhase"
+    },
+    "prior_executable_request_hashes": {
+      "items": {
+        "pattern": "^[0-9a-f]{64}$",
+        "type": "string"
+      },
+      "maxItems": 64,
+      "title": "Prior Executable Request Hashes",
+      "type": "array"
+    },
+    "rejected_evidence": {
+      "items": {
+        "$ref": "#/$defs/PlannerRejectedEvidence"
+      },
+      "maxItems": 64,
+      "title": "Rejected Evidence",
+      "type": "array"
+    },
+    "remaining_budget": {
+      "$ref": "#/$defs/PlannerRemainingBudget"
+    },
+    "schema_version": {
+      "const": "reconcile/adaptive-planner-input/v1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "versions": {
+      "$ref": "#/$defs/PlannerVersionMetadata"
+    },
+    "weak_evidence": {
+      "items": {
+        "$ref": "#/$defs/PlannerWeakEvidence"
+      },
+      "maxItems": 64,
+      "title": "Weak Evidence",
+      "type": "array"
+    }
+  },
+  "required": [
+    "schema_version",
+    "phase",
+    "envelope",
+    "capabilities",
+    "admitted_evidence",
+    "weak_evidence",
+    "rejected_evidence",
+    "missing_evidence",
+    "prior_executable_request_hashes",
+    "remaining_budget",
+    "versions"
+  ],
+  "title": "AdaptivePlannerInput",
+  "type": "object"
+}

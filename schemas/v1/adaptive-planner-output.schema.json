@@ -1,0 +1,308 @@
+{
+  "$defs": {
+    "ArgumentsObject": {
+      "additionalProperties": {
+        "$ref": "#/$defs/JsonValue"
+      },
+      "maxProperties": 64,
+      "type": "object"
+    },
+    "JsonValue": {},
+    "PlannerAcquisitionAdvice": {
+      "additionalProperties": false,
+      "properties": {
+        "summary": {
+          "maxLength": 512,
+          "minLength": 1,
+          "title": "Summary",
+          "type": "string"
+        }
+      },
+      "required": [
+        "summary"
+      ],
+      "title": "PlannerAcquisitionAdvice",
+      "type": "object"
+    },
+    "PlannerCitationRefs": {
+      "additionalProperties": false,
+      "properties": {
+        "admitted_evidence_ids": {
+          "items": {
+            "maxLength": 128,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+            "type": "string"
+          },
+          "maxItems": 64,
+          "title": "Admitted Evidence Ids",
+          "type": "array"
+        },
+        "missing_effect_ids": {
+          "items": {
+            "maxLength": 128,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+            "type": "string"
+          },
+          "maxItems": 64,
+          "title": "Missing Effect Ids",
+          "type": "array"
+        },
+        "rejected_evidence_ids": {
+          "items": {
+            "maxLength": 128,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+            "type": "string"
+          },
+          "maxItems": 64,
+          "title": "Rejected Evidence Ids",
+          "type": "array"
+        },
+        "weak_evidence_ids": {
+          "items": {
+            "maxLength": 128,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+            "type": "string"
+          },
+          "maxItems": 64,
+          "title": "Weak Evidence Ids",
+          "type": "array"
+        }
+      },
+      "required": [
+        "admitted_evidence_ids",
+        "weak_evidence_ids",
+        "rejected_evidence_ids",
+        "missing_effect_ids"
+      ],
+      "title": "PlannerCitationRefs",
+      "type": "object"
+    },
+    "PlannerExplanation": {
+      "additionalProperties": false,
+      "properties": {
+        "admitted_evidence": {
+          "anyOf": [
+            {
+              "maxLength": 512,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Admitted Evidence"
+        },
+        "citations": {
+          "$ref": "#/$defs/PlannerCitationRefs"
+        },
+        "missing_evidence": {
+          "anyOf": [
+            {
+              "maxLength": 512,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Missing Evidence"
+        },
+        "rejected_evidence": {
+          "anyOf": [
+            {
+              "maxLength": 512,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Rejected Evidence"
+        },
+        "summary": {
+          "maxLength": 512,
+          "minLength": 1,
+          "title": "Summary",
+          "type": "string"
+        },
+        "weak_evidence": {
+          "anyOf": [
+            {
+              "maxLength": 512,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Weak Evidence"
+        }
+      },
+      "required": [
+        "summary",
+        "admitted_evidence",
+        "weak_evidence",
+        "rejected_evidence",
+        "missing_evidence",
+        "citations"
+      ],
+      "title": "PlannerExplanation",
+      "type": "object"
+    },
+    "PlannerMissingEvidenceNote": {
+      "additionalProperties": false,
+      "properties": {
+        "effect_ids": {
+          "items": {
+            "maxLength": 128,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+            "type": "string"
+          },
+          "maxItems": 64,
+          "minItems": 1,
+          "title": "Effect Ids",
+          "type": "array"
+        },
+        "note": {
+          "maxLength": 512,
+          "minLength": 1,
+          "title": "Note",
+          "type": "string"
+        }
+      },
+      "required": [
+        "effect_ids",
+        "note"
+      ],
+      "title": "PlannerMissingEvidenceNote",
+      "type": "object"
+    },
+    "PlannerStopAdvice": {
+      "additionalProperties": false,
+      "properties": {
+        "reason": {
+          "maxLength": 512,
+          "minLength": 1,
+          "title": "Reason",
+          "type": "string"
+        },
+        "recommend_stop": {
+          "title": "Recommend Stop",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "recommend_stop",
+        "reason"
+      ],
+      "title": "PlannerStopAdvice",
+      "type": "object"
+    },
+    "ProbeRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "arguments": {
+          "$ref": "#/$defs/ArgumentsObject"
+        },
+        "capability_name": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Capability Name",
+          "type": "string"
+        },
+        "capability_version": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Capability Version",
+          "type": "string"
+        },
+        "rationale": {
+          "maxLength": 4096,
+          "minLength": 1,
+          "title": "Rationale",
+          "type": "string"
+        },
+        "relevant_effect_ids": {
+          "items": {
+            "maxLength": 128,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+            "type": "string"
+          },
+          "maxItems": 64,
+          "minItems": 1,
+          "title": "Relevant Effect Ids",
+          "type": "array"
+        },
+        "schema_version": {
+          "const": "reconcile/probe-request/v1",
+          "title": "Schema Version",
+          "type": "string"
+        }
+      },
+      "required": [
+        "schema_version",
+        "capability_name",
+        "capability_version",
+        "relevant_effect_ids",
+        "rationale"
+      ],
+      "title": "ProbeRequest",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "acquisition_advice": {
+      "$ref": "#/$defs/PlannerAcquisitionAdvice"
+    },
+    "explanation": {
+      "$ref": "#/$defs/PlannerExplanation"
+    },
+    "missing_evidence_notes": {
+      "items": {
+        "$ref": "#/$defs/PlannerMissingEvidenceNote"
+      },
+      "maxItems": 64,
+      "title": "Missing Evidence Notes",
+      "type": "array"
+    },
+    "probe_proposals": {
+      "items": {
+        "$ref": "#/$defs/ProbeRequest"
+      },
+      "maxItems": 8,
+      "title": "Probe Proposals",
+      "type": "array"
+    },
+    "schema_version": {
+      "const": "reconcile/adaptive-planner-output/v1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "stop_advice": {
+      "$ref": "#/$defs/PlannerStopAdvice"
+    }
+  },
+  "required": [
+    "schema_version",
+    "probe_proposals",
+    "acquisition_advice",
+    "stop_advice",
+    "missing_evidence_notes",
+    "explanation"
+  ],
+  "title": "AdaptivePlannerOutput",
+  "type": "object"
+}

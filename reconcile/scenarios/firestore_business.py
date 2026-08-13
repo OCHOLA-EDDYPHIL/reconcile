@@ -1,7 +1,8 @@
-"""Local three-effect business-operation scenario and fixed investigation."""
+"""Local business-operation scenario with fixed and adaptive investigations."""
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import time
 from collections.abc import Callable
@@ -19,6 +20,12 @@ from reconcile.adapters.firestore_business import (
     build_firestore_business_capability_registration,
     build_firestore_business_rule_registration,
     build_firestore_business_target,
+)
+from reconcile.adaptive import (
+    AdaptiveInvestigationPolicy,
+    AdaptiveInvestigationResult,
+    AdvisoryPlanner,
+    execute_adaptive_investigation,
 )
 from reconcile.baseline import (
     FixedBaselineResult,
@@ -105,6 +112,25 @@ FIRESTORE_BUSINESS_FIXED_PROBE_PLAN = FixedProbePlan(
         Classification.NOT_COMMITTED,
         Classification.PARTIAL,
     ),
+)
+
+FIRESTORE_BUSINESS_ADAPTIVE_POLICY = AdaptiveInvestigationPolicy(
+    name="firestore-business-adaptive-investigation",
+    version="1.0.0",
+    sufficient_classifications=(
+        Classification.COMMITTED,
+        Classification.NOT_COMMITTED,
+        Classification.PARTIAL,
+    ),
+    required_capabilities=(
+        CapabilityRef(
+            name=FIRESTORE_BUSINESS_CAPABILITY_NAME,
+            version=FIRESTORE_BUSINESS_CAPABILITY_VERSION,
+        ),
+    ),
+    max_turns=1,
+    planner_timeout_ms=4_000,
+    include_explanation=True,
 )
 
 _FIRESTORE_BUSINESS_LIMITATIONS = (
@@ -278,6 +304,26 @@ class FirestoreBusinessScenarioDefinition:
             self._read_target,
             clock=clock,
             revision=revision,
+        )
+
+    async def adaptive(
+        self,
+        envelope: ExecutionEnvelope,
+        planner: AdvisoryPlanner,
+        *,
+        clock: BusinessInvestigationClock | None = None,
+        revision: int = 1,
+        cancellation_event: asyncio.Event | None = None,
+    ) -> AdaptiveInvestigationResult:
+        """Run the canonical bounded adaptive business investigation."""
+
+        return await execute_firestore_business_adaptive(
+            envelope,
+            self._read_target,
+            planner,
+            clock=clock,
+            revision=revision,
+            cancellation_event=cancellation_event,
         )
 
     def prepare(self, plan: ScenarioPlan) -> ScenarioPreparation:
@@ -519,6 +565,41 @@ async def execute_firestore_business_baseline(
     )
 
 
+async def execute_firestore_business_adaptive(
+    envelope: ExecutionEnvelope,
+    read_target: LocalFirestoreReadTarget,
+    planner: AdvisoryPlanner,
+    *,
+    clock: BusinessInvestigationClock | None = None,
+    revision: int = 1,
+    cancellation_event: asyncio.Event | None = None,
+) -> AdaptiveInvestigationResult:
+    """Execute the canonical advisory business-document investigation."""
+
+    envelope = decode_contract(canonical_json_bytes(envelope), ExecutionEnvelope)
+    if type(read_target) is not LocalFirestoreReadTarget:
+        raise TypeError(
+            "the business investigation requires the restricted read target"
+        )
+    selected_clock = clock or _SystemInvestigationClock()
+    capabilities, rules = _firestore_business_registries(
+        envelope,
+        read_target,
+        clock=selected_clock,
+    )
+    return await execute_adaptive_investigation(
+        envelope,
+        capabilities,
+        rules,
+        planner,
+        FIRESTORE_BUSINESS_ADAPTIVE_POLICY,
+        clock=selected_clock,
+        revision=revision,
+        cancellation_event=cancellation_event,
+        additional_limitations=_FIRESTORE_BUSINESS_LIMITATIONS,
+    )
+
+
 def run_firestore_business_baseline(
     envelope: ExecutionEnvelope,
     read_target: LocalFirestoreReadTarget,
@@ -588,6 +669,7 @@ def run_firestore_business_investigation(
 
 __all__ = [
     "FIRESTORE_BUSINESS_ACTION_POLICY_VERSION",
+    "FIRESTORE_BUSINESS_ADAPTIVE_POLICY",
     "FIRESTORE_BUSINESS_EFFECT_IDS",
     "FIRESTORE_BUSINESS_FIXED_PROBE_PLAN",
     "FIRESTORE_BUSINESS_SCENARIO",
@@ -595,6 +677,7 @@ __all__ = [
     "FIRESTORE_BUSINESS_TOOL_VERSION",
     "BusinessInvestigationClock",
     "FirestoreBusinessScenarioDefinition",
+    "execute_firestore_business_adaptive",
     "execute_firestore_business_baseline",
     "investigate_firestore_business",
     "run_firestore_business_baseline",
