@@ -1,0 +1,416 @@
+{
+  "$defs": {
+    "AmbiguityKind": {
+      "enum": [
+        "TIMEOUT",
+        "CONNECTION_RESET",
+        "PROCESS_INTERRUPTED",
+        "MISSING_TOOL_RESULT",
+        "PROVIDER_UNAVAILABLE",
+        "OTHER"
+      ],
+      "title": "AmbiguityKind",
+      "type": "string"
+    },
+    "AmbiguousExecution": {
+      "additionalProperties": false,
+      "properties": {
+        "detail": {
+          "anyOf": [
+            {
+              "maxLength": 512,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Detail"
+        },
+        "kind": {
+          "$ref": "#/$defs/AmbiguityKind"
+        },
+        "observed_at": {
+          "format": "date-time",
+          "title": "Observed At",
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "observed_at"
+      ],
+      "title": "AmbiguousExecution",
+      "type": "object"
+    },
+    "ArgumentsObject": {
+      "additionalProperties": {
+        "$ref": "#/$defs/JsonValue"
+      },
+      "maxProperties": 64,
+      "type": "object"
+    },
+    "CapabilityRef": {
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Name",
+          "type": "string"
+        },
+        "version": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Version",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "version"
+      ],
+      "title": "CapabilityRef",
+      "type": "object"
+    },
+    "EnvelopeContext": {
+      "additionalProperties": false,
+      "properties": {
+        "correlation_fields": {
+          "maxProperties": 32,
+          "patternProperties": {
+            "^[A-Za-z0-9][A-Za-z0-9._:-]*$": {
+              "maxLength": 4096,
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          "propertyNames": {
+            "maxLength": 128,
+            "minLength": 1
+          },
+          "title": "Correlation Fields",
+          "type": "object"
+        },
+        "enabled_capabilities": {
+          "items": {
+            "$ref": "#/$defs/CapabilityRef"
+          },
+          "maxItems": 64,
+          "minItems": 1,
+          "title": "Enabled Capabilities",
+          "type": "array"
+        },
+        "evidence_budget": {
+          "$ref": "#/$defs/EvidenceBudget"
+        },
+        "freshness": {
+          "$ref": "#/$defs/FreshnessPolicy"
+        },
+        "invocation": {
+          "$ref": "#/$defs/OriginalInvocation"
+        },
+        "policies": {
+          "$ref": "#/$defs/PolicyReferences"
+        }
+      },
+      "required": [
+        "invocation",
+        "enabled_capabilities",
+        "evidence_budget",
+        "freshness",
+        "policies"
+      ],
+      "title": "EnvelopeContext",
+      "type": "object"
+    },
+    "EvidenceBudget": {
+      "additionalProperties": false,
+      "properties": {
+        "max_cost_units": {
+          "maximum": 9223372036854775807,
+          "minimum": 1,
+          "title": "Max Cost Units",
+          "type": "integer"
+        },
+        "max_elapsed_ms": {
+          "maximum": 9223372036854775807,
+          "minimum": 1,
+          "title": "Max Elapsed Ms",
+          "type": "integer"
+        },
+        "max_probes": {
+          "maximum": 9223372036854775807,
+          "minimum": 1,
+          "title": "Max Probes",
+          "type": "integer"
+        },
+        "max_total_result_bytes": {
+          "maximum": 9223372036854775807,
+          "minimum": 1,
+          "title": "Max Total Result Bytes",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "max_probes",
+        "max_elapsed_ms",
+        "max_total_result_bytes",
+        "max_cost_units"
+      ],
+      "title": "EvidenceBudget",
+      "type": "object"
+    },
+    "ExpectedEffect": {
+      "additionalProperties": false,
+      "properties": {
+        "commit_scope": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Commit Scope",
+          "type": "string"
+        },
+        "description": {
+          "maxLength": 4096,
+          "minLength": 1,
+          "title": "Description",
+          "type": "string"
+        },
+        "effect_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Effect Id",
+          "type": "string"
+        },
+        "predicate": {
+          "$ref": "#/$defs/NonEmptySmallJsonObject"
+        },
+        "schema_version": {
+          "const": "reconcile/expected-effect/v1",
+          "title": "Schema Version",
+          "type": "string"
+        }
+      },
+      "required": [
+        "schema_version",
+        "effect_id",
+        "commit_scope",
+        "predicate",
+        "description"
+      ],
+      "title": "ExpectedEffect",
+      "type": "object"
+    },
+    "FreshnessPolicy": {
+      "additionalProperties": false,
+      "properties": {
+        "clock_skew_seconds": {
+          "maximum": 9223372036854775807,
+          "minimum": 0,
+          "title": "Clock Skew Seconds",
+          "type": "integer"
+        },
+        "max_age_seconds": {
+          "maximum": 9223372036854775807,
+          "minimum": 1,
+          "title": "Max Age Seconds",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "max_age_seconds",
+        "clock_skew_seconds"
+      ],
+      "title": "FreshnessPolicy",
+      "type": "object"
+    },
+    "JsonValue": {},
+    "NonEmptySmallJsonObject": {
+      "additionalProperties": {
+        "$ref": "#/$defs/JsonValue"
+      },
+      "maxProperties": 32,
+      "minProperties": 1,
+      "type": "object"
+    },
+    "OriginalInvocation": {
+      "additionalProperties": false,
+      "description": "Caller-redacted invocation identity and canonical public arguments.",
+      "properties": {
+        "arguments": {
+          "$ref": "#/$defs/ArgumentsObject"
+        },
+        "arguments_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Arguments Sha256",
+          "type": "string"
+        },
+        "function_call_id": {
+          "anyOf": [
+            {
+              "maxLength": 128,
+              "minLength": 1,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Function Call Id"
+        },
+        "invocation_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Invocation Id",
+          "type": "string"
+        },
+        "tool_name": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Tool Name",
+          "type": "string"
+        },
+        "tool_version": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Tool Version",
+          "type": "string"
+        }
+      },
+      "required": [
+        "invocation_id",
+        "tool_name",
+        "tool_version",
+        "arguments_sha256"
+      ],
+      "title": "OriginalInvocation",
+      "type": "object"
+    },
+    "PolicyReferences": {
+      "additionalProperties": false,
+      "properties": {
+        "action": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Action",
+          "type": "string"
+        },
+        "authority": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Authority",
+          "type": "string"
+        },
+        "classification": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Classification",
+          "type": "string"
+        }
+      },
+      "required": [
+        "authority",
+        "classification",
+        "action"
+      ],
+      "title": "PolicyReferences",
+      "type": "object"
+    },
+    "TargetBinding": {
+      "additionalProperties": false,
+      "properties": {
+        "resource": {
+          "$ref": "#/$defs/NonEmptySmallJsonObject"
+        },
+        "scope": {
+          "$ref": "#/$defs/NonEmptySmallJsonObject"
+        },
+        "target_kind": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Target Kind",
+          "type": "string"
+        }
+      },
+      "required": [
+        "target_kind",
+        "scope",
+        "resource"
+      ],
+      "title": "TargetBinding",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "ambiguity": {
+      "$ref": "#/$defs/AmbiguousExecution"
+    },
+    "context": {
+      "$ref": "#/$defs/EnvelopeContext"
+    },
+    "expected_effects": {
+      "items": {
+        "$ref": "#/$defs/ExpectedEffect"
+      },
+      "maxItems": 64,
+      "minItems": 1,
+      "title": "Expected Effects",
+      "type": "array"
+    },
+    "investigation_id": {
+      "maxLength": 128,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+      "title": "Investigation Id",
+      "type": "string"
+    },
+    "invoked_at": {
+      "format": "date-time",
+      "title": "Invoked At",
+      "type": "string"
+    },
+    "operation_id": {
+      "maxLength": 128,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+      "title": "Operation Id",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": "reconcile/execution-envelope/v1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "target": {
+      "$ref": "#/$defs/TargetBinding"
+    }
+  },
+  "required": [
+    "schema_version",
+    "investigation_id",
+    "operation_id",
+    "target",
+    "invoked_at",
+    "ambiguity",
+    "expected_effects",
+    "context"
+  ],
+  "title": "ExecutionEnvelope",
+  "type": "object"
+}
