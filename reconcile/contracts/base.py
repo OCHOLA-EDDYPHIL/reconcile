@@ -161,8 +161,18 @@ def reject_sensitive_keys(value: JsonValue) -> None:
             normalized = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", key).lower()
             normalized = re.sub(r"[^a-z0-9]+", "_", normalized).strip("_")
             tokens = {part for part in normalized.split("_") if part}
-            if normalized in _SENSITIVE_KEY_NAMES or tokens.intersection(
-                _SENSITIVE_KEY_TOKENS
+            wrapped_name = f"_{normalized}_"
+            contains_sensitive_name = any(
+                f"_{name}_" in wrapped_name for name in _SENSITIVE_KEY_NAMES
+            )
+            collapsed_name = normalized.replace("_", "")
+            contains_collapsed_sensitive_name = any(
+                name.replace("_", "") in collapsed_name for name in _SENSITIVE_KEY_NAMES
+            )
+            if (
+                contains_sensitive_name
+                or contains_collapsed_sensitive_name
+                or tokens.intersection(_SENSITIVE_KEY_TOKENS)
             ):
                 raise ValueError("secret-bearing fields are not allowed")
             reject_sensitive_keys(item)
