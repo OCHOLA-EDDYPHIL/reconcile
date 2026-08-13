@@ -1,1 +1,0 @@
-Route quarter-close reporting reads through the secondary copy. state-n08 remains the authoritative source for disputed-entry corrections until the closeout window ends.

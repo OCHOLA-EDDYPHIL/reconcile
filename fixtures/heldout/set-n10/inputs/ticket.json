@@ -1,5 +1,0 @@
-{
-  "intended_environment": "production",
-  "intended_effect": "delete",
-  "summary": "Remove the instance after confirming the inactive consumer record."
-}

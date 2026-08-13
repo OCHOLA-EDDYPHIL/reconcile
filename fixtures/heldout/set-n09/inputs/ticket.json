@@ -1,5 +1,0 @@
-{
-  "intended_environment": "testing",
-  "intended_effect": "delete",
-  "summary": "Remove the isolated test instance after the synthetic exercise."
-}

@@ -1,5 +1,0 @@
-{
-  "intended_environment": "staging",
-  "intended_effect": "resize",
-  "summary": "Increase staging capacity during the maintenance window."
-}
