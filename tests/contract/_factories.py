@@ -10,6 +10,7 @@ from reconcile.contracts import (
     EVIDENCE_DECISION_VERSION,
     EXECUTION_ENVELOPE_VERSION,
     EXPECTED_EFFECT_VERSION,
+    INVESTIGATION_COMPARISON_RECORD_VERSION,
     INVESTIGATION_REPORT_VERSION,
     NORMALIZED_EVIDENCE_VERSION,
     OBSERVATION_CAPABILITY_VERSION,
@@ -26,6 +27,10 @@ from reconcile.contracts import (
     AmbiguousExecution,
     CapabilityRef,
     Classification,
+    ComparisonModelUsage,
+    ComparisonModelUsageStatus,
+    ComparisonRun,
+    ComparisonStrategyKind,
     DeterministicProof,
     EffectAssertion,
     EffectAssertionState,
@@ -39,8 +44,10 @@ from reconcile.contracts import (
     EvidenceReason,
     ExecutionEnvelope,
     ExpectedEffect,
+    ExplanationCompleteness,
     FreshnessPolicy,
     FreshnessWindow,
+    InvestigationComparisonRecord,
     InvestigationReport,
     InvestigationStatus,
     MissingEvidence,
@@ -49,6 +56,7 @@ from reconcile.contracts import (
     OperationStatus,
     OriginalInvocation,
     PolicyReferences,
+    PreregisteredExpectedClassification,
     ProbeAuditRecord,
     ProbeOutcome,
     ProbeRequest,
@@ -638,6 +646,95 @@ def make_report(classification: Classification) -> InvestigationReport:
     )
 
 
+def make_comparison_record(
+    *,
+    include_adaptive: bool = False,
+) -> InvestigationComparisonRecord:
+    scenario = ScenarioRef(name="storage-object", version="1.0.0")
+    envelope_sha256 = canonical_sha256(make_envelope())
+    expectation = PreregisteredExpectedClassification(
+        registration_id="expectation-storage-committed-v1",
+        metadata_sha256="f" * 64,
+        expected_classification=Classification.COMMITTED,
+    )
+    complete_explanation = ExplanationCompleteness(
+        required_evidence_citation_count=1,
+        valid_evidence_citation_count=1,
+        missing_evidence_citation_count=0,
+        complete=True,
+    )
+    baseline = ComparisonRun(
+        scenario=scenario,
+        envelope_sha256=envelope_sha256,
+        strategy_kind=ComparisonStrategyKind.FIXED,
+        strategy_version="fixed-storage-v1",
+        plan_sha256="a" * 64,
+        report_sha256="b" * 64,
+        classification=Classification.COMMITTED,
+        matches_preregistered_expectation=True,
+        planned_probe_count=1,
+        executed_probe_count=1,
+        controller_cost_units_used=1,
+        controller_result_bytes_acquired=512,
+        total_elapsed_ms=20,
+        time_to_sufficient_evidence_ms=15,
+        stop_reason="sufficient_evidence",
+        unsupported_probe_count=0,
+        unnecessary_probe_count=0,
+        duplicate_probe_count=0,
+        explanation_completeness=complete_explanation,
+        model_usage=ComparisonModelUsage(
+            status=ComparisonModelUsageStatus.NOT_APPLICABLE,
+            model_call_count=0,
+            input_token_count=0,
+            output_token_count=0,
+            total_token_count=0,
+        ),
+    )
+    adaptive = None
+    if include_adaptive:
+        adaptive = ComparisonRun(
+            scenario=scenario,
+            envelope_sha256=envelope_sha256,
+            strategy_kind=ComparisonStrategyKind.ADAPTIVE,
+            strategy_version="adaptive-planner-v1",
+            plan_sha256="c" * 64,
+            report_sha256="d" * 64,
+            classification=Classification.COMMITTED,
+            matches_preregistered_expectation=True,
+            planned_probe_count=2,
+            executed_probe_count=1,
+            controller_cost_units_used=1,
+            controller_result_bytes_acquired=512,
+            total_elapsed_ms=35,
+            time_to_sufficient_evidence_ms=25,
+            stop_reason="sufficient_evidence",
+            unsupported_probe_count=0,
+            unnecessary_probe_count=0,
+            duplicate_probe_count=0,
+            explanation_completeness=complete_explanation,
+            model_usage=ComparisonModelUsage(
+                status=ComparisonModelUsageStatus.MEASURED,
+                provider_name="google",
+                model_name="gemini-2.5-flash",
+                model_call_count=1,
+                input_token_count=100,
+                output_token_count=20,
+                total_token_count=120,
+            ),
+        )
+    return InvestigationComparisonRecord(
+        schema_version=INVESTIGATION_COMPARISON_RECORD_VERSION,
+        comparison_id="comparison-storage-7",
+        case_id="case-storage-committed-7",
+        scenario=scenario,
+        envelope_sha256=envelope_sha256,
+        preregistered_expectation=expectation,
+        baseline=baseline,
+        adaptive=adaptive,
+    )
+
+
 def public_examples() -> tuple[object, ...]:
     envelope = make_envelope()
     capability = make_capability()
@@ -657,6 +754,7 @@ def public_examples() -> tuple[object, ...]:
         make_scenario_result(),
         make_cleanup_request(),
         make_cleanup_result(),
+        make_comparison_record(),
     )
 
 

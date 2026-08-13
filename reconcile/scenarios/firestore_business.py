@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import hashlib
 import time
 from collections.abc import Callable
@@ -21,6 +20,13 @@ from reconcile.adapters.firestore_business import (
     build_firestore_business_rule_registration,
     build_firestore_business_target,
 )
+from reconcile.baseline import (
+    FixedBaselineResult,
+    FixedProbePlan,
+    FixedProbeStep,
+    execute_fixed_plan,
+    run_fixed_plan,
+)
 from reconcile.contracts import (
     EXECUTION_ENVELOPE_VERSION,
     EXPECTED_EFFECT_VERSION,
@@ -28,6 +34,7 @@ from reconcile.contracts import (
     AmbiguityKind,
     AmbiguousExecution,
     CapabilityRef,
+    Classification,
     EnvelopeContext,
     EvidenceBudget,
     ExecutionEnvelope,
@@ -42,8 +49,8 @@ from reconcile.contracts import (
     decode_contract,
 )
 from reconcile.contracts.base import canonical_json_value_bytes
-from reconcile.controller import CapabilityRegistry, ProbeController
-from reconcile.evidence import EvidenceEngine, ProbeRun, TargetRuleRegistry
+from reconcile.controller import CapabilityRegistry
+from reconcile.evidence import TargetRuleRegistry
 from reconcile.scenarios.adk_mutation import run_adk_mutation
 from reconcile.scenarios.local_firestore import (
     BusinessDocumentCoordinate,
@@ -74,6 +81,39 @@ FIRESTORE_BUSINESS_EFFECT_IDS = (
 FIRESTORE_BUSINESS_ACTION_POLICY_VERSION = "action-v1"
 FIRESTORE_BUSINESS_TOOL_NAME = "execute_business_operation"
 FIRESTORE_BUSINESS_TOOL_VERSION = "1.0.0"
+
+FIRESTORE_BUSINESS_FIXED_PROBE_PLAN = FixedProbePlan(
+    name="firestore-business-fixed-baseline",
+    version="1.0.0",
+    steps=(
+        FixedProbeStep(
+            request=ProbeRequest(
+                schema_version=PROBE_REQUEST_VERSION,
+                capability_name=FIRESTORE_BUSINESS_CAPABILITY_NAME,
+                capability_version=FIRESTORE_BUSINESS_CAPABILITY_VERSION,
+                relevant_effect_ids=FIRESTORE_BUSINESS_EFFECT_IDS,
+                arguments={},
+                rationale=(
+                    "Read the target-native manifest and all exact business "
+                    "documents from one local snapshot."
+                ),
+            )
+        ),
+    ),
+    sufficient_classifications=(
+        Classification.COMMITTED,
+        Classification.NOT_COMMITTED,
+        Classification.PARTIAL,
+    ),
+)
+
+_FIRESTORE_BUSINESS_LIMITATIONS = (
+    (
+        "A PARTIAL result means a partial multi-step business operation; no "
+        "atomic transaction is represented."
+    ),
+    "Evidence comes from the local SQLite Firestore-shaped semantic target.",
+)
 
 _MANIFEST_COLLECTION = "operation-manifests"
 _MAX_AGE_SECONDS = 60
@@ -218,7 +258,22 @@ class FirestoreBusinessScenarioDefinition:
     ) -> InvestigationReport:
         """Run fixed evidence acquisition without exposing the manifest handle."""
 
-        return run_firestore_business_investigation(
+        return self.baseline(
+            envelope,
+            clock=clock,
+            revision=revision,
+        ).report
+
+    def baseline(
+        self,
+        envelope: ExecutionEnvelope,
+        *,
+        clock: BusinessInvestigationClock | None = None,
+        revision: int = 1,
+    ) -> FixedBaselineResult:
+        """Run the canonical fixed baseline without exposing the read handle."""
+
+        return run_firestore_business_baseline(
             envelope,
             self._read_target,
             clock=clock,
@@ -414,6 +469,87 @@ class FirestoreBusinessScenarioDefinition:
         return ScenarioCleanupOutcome(removed_resource_ids=tuple(removed))
 
 
+def _firestore_business_registries(
+    envelope: ExecutionEnvelope,
+    read_target: LocalFirestoreReadTarget,
+    *,
+    clock: BusinessInvestigationClock,
+) -> tuple[CapabilityRegistry, TargetRuleRegistry]:
+    capabilities = CapabilityRegistry()
+    capabilities.register(
+        build_firestore_business_capability_registration(
+            read_target=read_target,
+            target=envelope.target,
+            clock=clock.now,
+        )
+    )
+    rules = TargetRuleRegistry()
+    rules.register(build_firestore_business_rule_registration())
+    return capabilities, rules
+
+
+async def execute_firestore_business_baseline(
+    envelope: ExecutionEnvelope,
+    read_target: LocalFirestoreReadTarget,
+    *,
+    clock: BusinessInvestigationClock | None = None,
+    revision: int = 1,
+) -> FixedBaselineResult:
+    """Execute the canonical one-read business-document baseline."""
+
+    envelope = decode_contract(canonical_json_bytes(envelope), ExecutionEnvelope)
+    if type(read_target) is not LocalFirestoreReadTarget:
+        raise TypeError(
+            "the business investigation requires the restricted read target"
+        )
+    selected_clock = clock or _SystemInvestigationClock()
+    capabilities, rules = _firestore_business_registries(
+        envelope,
+        read_target,
+        clock=selected_clock,
+    )
+    return await execute_fixed_plan(
+        envelope,
+        capabilities,
+        rules,
+        FIRESTORE_BUSINESS_FIXED_PROBE_PLAN,
+        clock=selected_clock,
+        revision=revision,
+        additional_limitations=_FIRESTORE_BUSINESS_LIMITATIONS,
+    )
+
+
+def run_firestore_business_baseline(
+    envelope: ExecutionEnvelope,
+    read_target: LocalFirestoreReadTarget,
+    *,
+    clock: BusinessInvestigationClock | None = None,
+    revision: int = 1,
+) -> FixedBaselineResult:
+    """Synchronously execute the canonical business-document baseline."""
+
+    envelope = decode_contract(canonical_json_bytes(envelope), ExecutionEnvelope)
+    if type(read_target) is not LocalFirestoreReadTarget:
+        raise TypeError(
+            "the business investigation requires the restricted read target"
+        )
+    selected_clock = clock or _SystemInvestigationClock()
+    capabilities, rules = _firestore_business_registries(
+        envelope,
+        read_target,
+        clock=selected_clock,
+    )
+    return run_fixed_plan(
+        envelope,
+        capabilities,
+        rules,
+        FIRESTORE_BUSINESS_FIXED_PROBE_PLAN,
+        clock=selected_clock,
+        revision=revision,
+        additional_limitations=_FIRESTORE_BUSINESS_LIMITATIONS,
+    )
+
+
 async def investigate_firestore_business(
     envelope: ExecutionEnvelope,
     read_target: LocalFirestoreReadTarget,
@@ -423,56 +559,14 @@ async def investigate_firestore_business(
 ) -> InvestigationReport:
     """Run the one-probe fixed local business-document evidence path."""
 
-    envelope = decode_contract(canonical_json_bytes(envelope), ExecutionEnvelope)
-    if type(read_target) is not LocalFirestoreReadTarget:
-        raise TypeError(
-            "the business investigation requires the restricted read target"
+    return (
+        await execute_firestore_business_baseline(
+            envelope,
+            read_target,
+            clock=clock,
+            revision=revision,
         )
-    selected_clock = clock or _SystemInvestigationClock()
-
-    capabilities = CapabilityRegistry()
-    capabilities.register(
-        build_firestore_business_capability_registration(
-            read_target=read_target,
-            target=envelope.target,
-            clock=selected_clock.now,
-        )
-    )
-    rules = TargetRuleRegistry()
-    rules.register(build_firestore_business_rule_registration())
-    request = ProbeRequest(
-        schema_version=PROBE_REQUEST_VERSION,
-        capability_name=FIRESTORE_BUSINESS_CAPABILITY_NAME,
-        capability_version=FIRESTORE_BUSINESS_CAPABILITY_VERSION,
-        relevant_effect_ids=tuple(
-            effect.effect_id for effect in envelope.expected_effects
-        ),
-        arguments={},
-        rationale=(
-            "Read the target-native manifest and all exact business documents from "
-            "one local snapshot."
-        ),
-    )
-    controller = ProbeController(envelope, capabilities, clock=selected_clock)
-    engine = EvidenceEngine(envelope, rules)
-    execution = await controller.execute(request)
-    engine.process(ProbeRun(request=request, execution=execution))
-    report = engine.report(
-        controller.audit_trail,
-        created_at=envelope.ambiguity.observed_at,
-        updated_at=selected_clock.now(),
-        revision=revision,
-    )
-    payload = report.model_dump(mode="python")
-    payload["limitations"] = (
-        *report.limitations,
-        (
-            "A PARTIAL result means a partial multi-step business operation; no "
-            "atomic transaction is represented."
-        ),
-        "Evidence comes from the local SQLite Firestore-shaped semantic target.",
-    )
-    return InvestigationReport.model_validate(payload)
+    ).report
 
 
 def run_firestore_business_investigation(
@@ -484,32 +578,25 @@ def run_firestore_business_investigation(
 ) -> InvestigationReport:
     """Synchronously execute the fixed local business-document evidence path."""
 
-    try:
-        asyncio.get_running_loop()
-    except RuntimeError:
-        pass
-    else:
-        raise RuntimeError(
-            "run_firestore_business_investigation cannot run inside an active event loop"
-        )
-    return asyncio.run(
-        investigate_firestore_business(
-            envelope,
-            read_target,
-            clock=clock,
-            revision=revision,
-        )
-    )
+    return run_firestore_business_baseline(
+        envelope,
+        read_target,
+        clock=clock,
+        revision=revision,
+    ).report
 
 
 __all__ = [
     "FIRESTORE_BUSINESS_ACTION_POLICY_VERSION",
     "FIRESTORE_BUSINESS_EFFECT_IDS",
+    "FIRESTORE_BUSINESS_FIXED_PROBE_PLAN",
     "FIRESTORE_BUSINESS_SCENARIO",
     "FIRESTORE_BUSINESS_TOOL_NAME",
     "FIRESTORE_BUSINESS_TOOL_VERSION",
     "BusinessInvestigationClock",
     "FirestoreBusinessScenarioDefinition",
+    "execute_firestore_business_baseline",
     "investigate_firestore_business",
+    "run_firestore_business_baseline",
     "run_firestore_business_investigation",
 ]
