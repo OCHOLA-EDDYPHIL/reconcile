@@ -14,6 +14,11 @@ from reconcile.contracts import (
     NORMALIZED_EVIDENCE_VERSION,
     OBSERVATION_CAPABILITY_VERSION,
     PROBE_REQUEST_VERSION,
+    SCENARIO_CLEANUP_REQUEST_VERSION,
+    SCENARIO_CLEANUP_RESULT_VERSION,
+    SCENARIO_FAULT_TRACE_VERSION,
+    SCENARIO_RUN_REQUEST_VERSION,
+    SCENARIO_RUN_RESULT_VERSION,
     ActionGateReason,
     ActionGateResult,
     AdvisoryExplanation,
@@ -49,6 +54,21 @@ from reconcile.contracts import (
     ProbeRequest,
     RawObservationReference,
     RequestedAction,
+    ScenarioCallerObservation,
+    ScenarioCleanupDisposition,
+    ScenarioCleanupRequest,
+    ScenarioCleanupResult,
+    ScenarioFaultAction,
+    ScenarioFaultInstruction,
+    ScenarioFaultPoint,
+    ScenarioFaultTrace,
+    ScenarioFixtureRef,
+    ScenarioRef,
+    ScenarioRunRequest,
+    ScenarioRunResult,
+    ScenarioTraceEvent,
+    ScenarioTransportEvent,
+    ScenarioWorkerTermination,
     TargetBinding,
     TargetConstraint,
     canonical_json_bytes,
@@ -166,6 +186,158 @@ def make_probe() -> ProbeRequest:
         relevant_effect_ids=("business-record", "audit-record"),
         arguments={"order_id": "order-7"},
         rationale="Read the bound target to determine which expected effects exist.",
+    )
+
+
+def make_scenario_request() -> ScenarioRunRequest:
+    return ScenarioRunRequest(
+        schema_version=SCENARIO_RUN_REQUEST_VERSION,
+        scenario=ScenarioRef(name="storage-object", version="1.0.0"),
+        run_id="run-7",
+        investigation_id="investigation-7",
+        operation_id="operation-7",
+        invocation_id="invoke-7",
+        function_call_id="call-7",
+        seed=7,
+        fault=ScenarioFaultInstruction(
+            point=ScenarioFaultPoint.POST_RESPONSE,
+            action=ScenarioFaultAction.DROP_RESPONSE,
+        ),
+    )
+
+
+def make_scenario_trace() -> ScenarioFaultTrace:
+    request = make_scenario_request()
+    return ScenarioFaultTrace(
+        schema_version=SCENARIO_FAULT_TRACE_VERSION,
+        scenario=request.scenario,
+        run_id=request.run_id,
+        investigation_id=request.investigation_id,
+        operation_id=request.operation_id,
+        invocation_id=request.invocation_id,
+        function_call_id=request.function_call_id,
+        configured_fault=request.fault,
+        events=(
+            ScenarioTraceEvent(
+                sequence=1,
+                event=ScenarioTransportEvent.RUN_STARTED,
+                occurred_at=NOW,
+            ),
+            ScenarioTraceEvent(
+                sequence=2,
+                event=ScenarioTransportEvent.DISPATCH_STARTED,
+                occurred_at=NOW + timedelta(milliseconds=1),
+            ),
+            ScenarioTraceEvent(
+                sequence=3,
+                event=ScenarioTransportEvent.PRE_COMMIT_REACHED,
+                occurred_at=NOW + timedelta(milliseconds=2),
+            ),
+            ScenarioTraceEvent(
+                sequence=4,
+                event=ScenarioTransportEvent.POST_COMMIT_REACHED,
+                occurred_at=NOW + timedelta(milliseconds=3),
+            ),
+            ScenarioTraceEvent(
+                sequence=5,
+                event=ScenarioTransportEvent.RESPONSE_AVAILABLE,
+                occurred_at=NOW + timedelta(milliseconds=4),
+            ),
+            ScenarioTraceEvent(
+                sequence=6,
+                event=ScenarioTransportEvent.RESPONSE_DROPPED,
+                occurred_at=NOW + timedelta(milliseconds=5),
+            ),
+            ScenarioTraceEvent(
+                sequence=7,
+                event=ScenarioTransportEvent.RUN_COMPLETED,
+                occurred_at=NOW + timedelta(milliseconds=6),
+            ),
+        ),
+        caller_observation=ScenarioCallerObservation.NO_RESPONSE,
+        worker_termination=ScenarioWorkerTermination.EXITED,
+        exit_code=0,
+        applied_delay_ms=0,
+        response_sha256="a" * 64,
+        response_byte_count=128,
+        started_at=NOW,
+        completed_at=NOW + timedelta(milliseconds=6),
+    )
+
+
+def make_scenario_result() -> ScenarioRunResult:
+    request = make_scenario_request()
+    trace = make_scenario_trace()
+    base = make_envelope()
+    envelope = ExecutionEnvelope(
+        schema_version=EXECUTION_ENVELOPE_VERSION,
+        investigation_id=request.investigation_id,
+        operation_id=request.operation_id,
+        target=base.target,
+        invoked_at=base.invoked_at,
+        ambiguity=AmbiguousExecution(
+            kind=AmbiguityKind.MISSING_TOOL_RESULT,
+            observed_at=NOW + timedelta(milliseconds=5),
+            detail="The mutation result was not delivered to the caller.",
+        ),
+        expected_effects=base.expected_effects,
+        context=EnvelopeContext(
+            invocation=base.context.invocation,
+            enabled_capabilities=base.context.enabled_capabilities,
+            correlation_fields=base.context.correlation_fields,
+            evidence_budget=base.context.evidence_budget,
+            freshness=base.context.freshness,
+            policies=base.context.policies,
+        ),
+    )
+    return ScenarioRunResult(
+        schema_version=SCENARIO_RUN_RESULT_VERSION,
+        request_sha256=canonical_sha256(request),
+        scenario=request.scenario,
+        run_id=request.run_id,
+        investigation_id=envelope.investigation_id,
+        operation_id=envelope.operation_id,
+        invocation_id=base.context.invocation.invocation_id,
+        function_call_id=base.context.invocation.function_call_id,
+        fixture=ScenarioFixtureRef(
+            namespace_id="scenario-run-7",
+            cleanup_manifest_sha256="c" * 64,
+        ),
+        trace=trace,
+        execution_envelope=envelope,
+    )
+
+
+def make_cleanup_request() -> ScenarioCleanupRequest:
+    request = make_scenario_request()
+    fixture = make_scenario_result().fixture
+    return ScenarioCleanupRequest(
+        schema_version=SCENARIO_CLEANUP_REQUEST_VERSION,
+        scenario=request.scenario,
+        run_id=request.run_id,
+        investigation_id=request.investigation_id,
+        operation_id=request.operation_id,
+        invocation_id=request.invocation_id,
+        function_call_id=request.function_call_id,
+        seed=request.seed,
+        namespace_id=fixture.namespace_id,
+        cleanup_manifest_sha256=fixture.cleanup_manifest_sha256,
+    )
+
+
+def make_cleanup_result() -> ScenarioCleanupResult:
+    request = make_cleanup_request()
+    return ScenarioCleanupResult(
+        schema_version=SCENARIO_CLEANUP_RESULT_VERSION,
+        cleanup_request_sha256=canonical_sha256(request),
+        run_id=request.run_id,
+        namespace_id=request.namespace_id,
+        cleanup_manifest_sha256=request.cleanup_manifest_sha256,
+        disposition=ScenarioCleanupDisposition.CLEANED,
+        removed_count=1,
+        remaining_count=0,
+        started_at=NOW + timedelta(seconds=6),
+        completed_at=NOW + timedelta(seconds=7),
     )
 
 
@@ -480,6 +652,11 @@ def public_examples() -> tuple[object, ...]:
         decision,
         make_report(Classification.COMMITTED).action_gate[0],
         make_report(Classification.COMMITTED),
+        make_scenario_request(),
+        make_scenario_trace(),
+        make_scenario_result(),
+        make_cleanup_request(),
+        make_cleanup_result(),
     )
 
 

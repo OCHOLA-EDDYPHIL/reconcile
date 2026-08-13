@@ -1,0 +1,150 @@
+{
+  "$defs": {
+    "ScenarioFaultAction": {
+      "enum": [
+        "NONE",
+        "SUPPRESS_DISPATCH",
+        "INTERRUPT_PROCESS",
+        "DROP_RESPONSE",
+        "DELAY_RESPONSE"
+      ],
+      "title": "ScenarioFaultAction",
+      "type": "string"
+    },
+    "ScenarioFaultInstruction": {
+      "additionalProperties": false,
+      "properties": {
+        "action": {
+          "$ref": "#/$defs/ScenarioFaultAction"
+        },
+        "delay_ms": {
+          "default": 0,
+          "maximum": 60000,
+          "minimum": 0,
+          "title": "Delay Ms",
+          "type": "integer"
+        },
+        "point": {
+          "$ref": "#/$defs/ScenarioFaultPoint"
+        }
+      },
+      "required": [
+        "point",
+        "action"
+      ],
+      "title": "ScenarioFaultInstruction",
+      "type": "object"
+    },
+    "ScenarioFaultPoint": {
+      "enum": [
+        "UNINTERRUPTED",
+        "PRE_DISPATCH",
+        "PRE_COMMIT",
+        "POST_COMMIT",
+        "POST_RESPONSE"
+      ],
+      "title": "ScenarioFaultPoint",
+      "type": "string"
+    },
+    "ScenarioRef": {
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Name",
+          "type": "string"
+        },
+        "version": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Version",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "version"
+      ],
+      "title": "ScenarioRef",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "fault": {
+      "$ref": "#/$defs/ScenarioFaultInstruction"
+    },
+    "function_call_id": {
+      "anyOf": [
+        {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Function Call Id"
+    },
+    "investigation_id": {
+      "maxLength": 128,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+      "title": "Investigation Id",
+      "type": "string"
+    },
+    "invocation_id": {
+      "maxLength": 128,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+      "title": "Invocation Id",
+      "type": "string"
+    },
+    "operation_id": {
+      "maxLength": 128,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+      "title": "Operation Id",
+      "type": "string"
+    },
+    "run_id": {
+      "maxLength": 128,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+      "title": "Run Id",
+      "type": "string"
+    },
+    "scenario": {
+      "$ref": "#/$defs/ScenarioRef"
+    },
+    "schema_version": {
+      "const": "reconcile/scenario-run-request/v1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "seed": {
+      "maximum": 9223372036854775807,
+      "minimum": 0,
+      "title": "Seed",
+      "type": "integer"
+    }
+  },
+  "required": [
+    "schema_version",
+    "scenario",
+    "run_id",
+    "investigation_id",
+    "operation_id",
+    "invocation_id",
+    "seed",
+    "fault"
+  ],
+  "title": "ScenarioRunRequest",
+  "type": "object"
+}

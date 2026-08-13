@@ -1,0 +1,106 @@
+{
+  "$defs": {
+    "ScenarioCleanupDisposition": {
+      "enum": [
+        "CLEANED",
+        "ALREADY_CLEAN",
+        "FAILED"
+      ],
+      "title": "ScenarioCleanupDisposition",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "cleanup_manifest_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Cleanup Manifest Sha256",
+      "type": "string"
+    },
+    "cleanup_request_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Cleanup Request Sha256",
+      "type": "string"
+    },
+    "completed_at": {
+      "format": "date-time",
+      "title": "Completed At",
+      "type": "string"
+    },
+    "disposition": {
+      "$ref": "#/$defs/ScenarioCleanupDisposition"
+    },
+    "failure_code": {
+      "anyOf": [
+        {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Failure Code"
+    },
+    "namespace_id": {
+      "maxLength": 128,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+      "title": "Namespace Id",
+      "type": "string"
+    },
+    "remaining_count": {
+      "anyOf": [
+        {
+          "maximum": 9223372036854775807,
+          "minimum": 0,
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Remaining Count"
+    },
+    "removed_count": {
+      "maximum": 9223372036854775807,
+      "minimum": 0,
+      "title": "Removed Count",
+      "type": "integer"
+    },
+    "run_id": {
+      "maxLength": 128,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+      "title": "Run Id",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": "reconcile/scenario-cleanup-result/v1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "started_at": {
+      "format": "date-time",
+      "title": "Started At",
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema_version",
+    "cleanup_request_sha256",
+    "run_id",
+    "namespace_id",
+    "cleanup_manifest_sha256",
+    "disposition",
+    "removed_count",
+    "started_at",
+    "completed_at"
+  ],
+  "title": "ScenarioCleanupResult",
+  "type": "object"
+}
