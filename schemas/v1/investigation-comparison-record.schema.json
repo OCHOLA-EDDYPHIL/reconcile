@@ -1,0 +1,407 @@
+{
+  "$defs": {
+    "Classification": {
+      "enum": [
+        "COMMITTED",
+        "NOT_COMMITTED",
+        "PARTIAL",
+        "PENDING",
+        "UNKNOWN"
+      ],
+      "title": "Classification",
+      "type": "string"
+    },
+    "ComparisonModelUsage": {
+      "additionalProperties": false,
+      "properties": {
+        "input_token_count": {
+          "anyOf": [
+            {
+              "maximum": 9223372036854775807,
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Input Token Count"
+        },
+        "model_call_count": {
+          "maximum": 9223372036854775807,
+          "minimum": 0,
+          "title": "Model Call Count",
+          "type": "integer"
+        },
+        "model_name": {
+          "anyOf": [
+            {
+              "maxLength": 128,
+              "minLength": 1,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Model Name"
+        },
+        "output_token_count": {
+          "anyOf": [
+            {
+              "maximum": 9223372036854775807,
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Output Token Count"
+        },
+        "provider_name": {
+          "anyOf": [
+            {
+              "maxLength": 128,
+              "minLength": 1,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Provider Name"
+        },
+        "status": {
+          "$ref": "#/$defs/ComparisonModelUsageStatus"
+        },
+        "total_token_count": {
+          "anyOf": [
+            {
+              "maximum": 9223372036854775807,
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Total Token Count"
+        }
+      },
+      "required": [
+        "status",
+        "model_call_count"
+      ],
+      "title": "ComparisonModelUsage",
+      "type": "object"
+    },
+    "ComparisonModelUsageStatus": {
+      "enum": [
+        "NOT_APPLICABLE",
+        "MEASURED",
+        "UNAVAILABLE"
+      ],
+      "title": "ComparisonModelUsageStatus",
+      "type": "string"
+    },
+    "ComparisonRun": {
+      "additionalProperties": false,
+      "properties": {
+        "classification": {
+          "$ref": "#/$defs/Classification"
+        },
+        "controller_cost_units_used": {
+          "maximum": 9223372036854775807,
+          "minimum": 0,
+          "title": "Controller Cost Units Used",
+          "type": "integer"
+        },
+        "controller_result_bytes_acquired": {
+          "maximum": 9223372036854775807,
+          "minimum": 0,
+          "title": "Controller Result Bytes Acquired",
+          "type": "integer"
+        },
+        "duplicate_probe_count": {
+          "maximum": 9223372036854775807,
+          "minimum": 0,
+          "title": "Duplicate Probe Count",
+          "type": "integer"
+        },
+        "envelope_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Envelope Sha256",
+          "type": "string"
+        },
+        "executed_probe_count": {
+          "maximum": 9223372036854775807,
+          "minimum": 0,
+          "title": "Executed Probe Count",
+          "type": "integer"
+        },
+        "explanation_completeness": {
+          "$ref": "#/$defs/ExplanationCompleteness"
+        },
+        "matches_preregistered_expectation": {
+          "title": "Matches Preregistered Expectation",
+          "type": "boolean"
+        },
+        "model_usage": {
+          "$ref": "#/$defs/ComparisonModelUsage"
+        },
+        "plan_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Plan Sha256",
+          "type": "string"
+        },
+        "planned_probe_count": {
+          "maximum": 9223372036854775807,
+          "minimum": 0,
+          "title": "Planned Probe Count",
+          "type": "integer"
+        },
+        "report_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Report Sha256",
+          "type": "string"
+        },
+        "scenario": {
+          "$ref": "#/$defs/ScenarioRef"
+        },
+        "stop_reason": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Stop Reason",
+          "type": "string"
+        },
+        "strategy_kind": {
+          "$ref": "#/$defs/ComparisonStrategyKind"
+        },
+        "strategy_version": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Strategy Version",
+          "type": "string"
+        },
+        "time_to_sufficient_evidence_ms": {
+          "anyOf": [
+            {
+              "maximum": 9223372036854775807,
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Time To Sufficient Evidence Ms"
+        },
+        "total_elapsed_ms": {
+          "maximum": 9223372036854775807,
+          "minimum": 0,
+          "title": "Total Elapsed Ms",
+          "type": "integer"
+        },
+        "unnecessary_probe_count": {
+          "maximum": 9223372036854775807,
+          "minimum": 0,
+          "title": "Unnecessary Probe Count",
+          "type": "integer"
+        },
+        "unsupported_probe_count": {
+          "maximum": 9223372036854775807,
+          "minimum": 0,
+          "title": "Unsupported Probe Count",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "scenario",
+        "envelope_sha256",
+        "strategy_kind",
+        "strategy_version",
+        "plan_sha256",
+        "report_sha256",
+        "classification",
+        "matches_preregistered_expectation",
+        "planned_probe_count",
+        "executed_probe_count",
+        "controller_cost_units_used",
+        "controller_result_bytes_acquired",
+        "total_elapsed_ms",
+        "stop_reason",
+        "unsupported_probe_count",
+        "unnecessary_probe_count",
+        "duplicate_probe_count",
+        "explanation_completeness",
+        "model_usage"
+      ],
+      "title": "ComparisonRun",
+      "type": "object"
+    },
+    "ComparisonStrategyKind": {
+      "enum": [
+        "FIXED",
+        "ADAPTIVE"
+      ],
+      "title": "ComparisonStrategyKind",
+      "type": "string"
+    },
+    "ExplanationCompleteness": {
+      "additionalProperties": false,
+      "properties": {
+        "complete": {
+          "title": "Complete",
+          "type": "boolean"
+        },
+        "missing_evidence_citation_count": {
+          "maximum": 9223372036854775807,
+          "minimum": 0,
+          "title": "Missing Evidence Citation Count",
+          "type": "integer"
+        },
+        "required_evidence_citation_count": {
+          "maximum": 9223372036854775807,
+          "minimum": 0,
+          "title": "Required Evidence Citation Count",
+          "type": "integer"
+        },
+        "valid_evidence_citation_count": {
+          "maximum": 9223372036854775807,
+          "minimum": 0,
+          "title": "Valid Evidence Citation Count",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "required_evidence_citation_count",
+        "valid_evidence_citation_count",
+        "missing_evidence_citation_count",
+        "complete"
+      ],
+      "title": "ExplanationCompleteness",
+      "type": "object"
+    },
+    "PreregisteredExpectedClassification": {
+      "additionalProperties": false,
+      "properties": {
+        "expected_classification": {
+          "$ref": "#/$defs/Classification"
+        },
+        "metadata_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Metadata Sha256",
+          "type": "string"
+        },
+        "registration_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Registration Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "registration_id",
+        "metadata_sha256",
+        "expected_classification"
+      ],
+      "title": "PreregisteredExpectedClassification",
+      "type": "object"
+    },
+    "ScenarioRef": {
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Name",
+          "type": "string"
+        },
+        "version": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Version",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "version"
+      ],
+      "title": "ScenarioRef",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "adaptive": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ComparisonRun"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "baseline": {
+      "$ref": "#/$defs/ComparisonRun"
+    },
+    "case_id": {
+      "maxLength": 128,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+      "title": "Case Id",
+      "type": "string"
+    },
+    "comparison_id": {
+      "maxLength": 128,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+      "title": "Comparison Id",
+      "type": "string"
+    },
+    "envelope_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Envelope Sha256",
+      "type": "string"
+    },
+    "preregistered_expectation": {
+      "$ref": "#/$defs/PreregisteredExpectedClassification"
+    },
+    "scenario": {
+      "$ref": "#/$defs/ScenarioRef"
+    },
+    "schema_version": {
+      "const": "reconcile/investigation-comparison-record/v1",
+      "title": "Schema Version",
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema_version",
+    "comparison_id",
+    "case_id",
+    "scenario",
+    "envelope_sha256",
+    "preregistered_expectation",
+    "baseline",
+    "adaptive"
+  ],
+  "title": "InvestigationComparisonRecord",
+  "type": "object"
+}

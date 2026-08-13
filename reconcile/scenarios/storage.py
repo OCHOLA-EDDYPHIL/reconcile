@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import hashlib
 import time
 from collections.abc import Callable
@@ -21,6 +20,13 @@ from reconcile.adapters.storage import (
     build_storage_rule_registration,
     build_storage_target,
 )
+from reconcile.baseline import (
+    FixedBaselineResult,
+    FixedProbePlan,
+    FixedProbeStep,
+    execute_fixed_plan,
+    run_fixed_plan,
+)
 from reconcile.contracts import (
     EXECUTION_ENVELOPE_VERSION,
     EXPECTED_EFFECT_VERSION,
@@ -28,6 +34,7 @@ from reconcile.contracts import (
     AmbiguityKind,
     AmbiguousExecution,
     CapabilityRef,
+    Classification,
     EnvelopeContext,
     EvidenceBudget,
     ExecutionEnvelope,
@@ -42,8 +49,8 @@ from reconcile.contracts import (
     decode_contract,
 )
 from reconcile.contracts.base import canonical_json_value_bytes
-from reconcile.controller import CapabilityRegistry, ProbeController
-from reconcile.evidence import EvidenceEngine, ProbeRun, TargetRuleRegistry
+from reconcile.controller import CapabilityRegistry
+from reconcile.evidence import TargetRuleRegistry
 from reconcile.scenarios.adk_mutation import run_adk_mutation
 from reconcile.scenarios.local_storage import (
     LocalStorageCleanupTarget,
@@ -65,6 +72,29 @@ STORAGE_EFFECT_ID = "storage-object-created"
 STORAGE_ACTION_POLICY_VERSION = "action-v1"
 STORAGE_TOOL_NAME = "create_storage_object"
 STORAGE_TOOL_VERSION = "1.0.0"
+
+STORAGE_FIXED_PROBE_PLAN = FixedProbePlan(
+    name="storage-fixed-baseline",
+    version="1.0.0",
+    steps=(
+        FixedProbeStep(
+            request=ProbeRequest(
+                schema_version=PROBE_REQUEST_VERSION,
+                capability_name=STORAGE_CAPABILITY_NAME,
+                capability_version=STORAGE_CAPABILITY_VERSION,
+                relevant_effect_ids=(STORAGE_EFFECT_ID,),
+                arguments={},
+                rationale=(
+                    "Read the exact local object metadata and its immutable receipt."
+                ),
+            )
+        ),
+    ),
+    sufficient_classifications=(
+        Classification.COMMITTED,
+        Classification.NOT_COMMITTED,
+    ),
+)
 
 _MAX_AGE_SECONDS = 60
 _CLOCK_SKEW_SECONDS = 2
@@ -163,7 +193,22 @@ class StorageScenarioDefinition:
     ) -> InvestigationReport:
         """Run fixed evidence acquisition without exposing the receipt read handle."""
 
-        return run_storage_investigation(
+        return self.baseline(
+            envelope,
+            clock=clock,
+            revision=revision,
+        ).report
+
+    def baseline(
+        self,
+        envelope: ExecutionEnvelope,
+        *,
+        clock: InvestigationClock | None = None,
+        revision: int = 1,
+    ) -> FixedBaselineResult:
+        """Run the canonical fixed baseline without exposing the read handle."""
+
+        return run_storage_baseline(
             envelope,
             self._read_target,
             clock=clock,
@@ -351,6 +396,81 @@ class StorageScenarioDefinition:
         return ScenarioCleanupOutcome(removed_resource_ids=tuple(removed))
 
 
+def _storage_registries(
+    envelope: ExecutionEnvelope,
+    read_target: LocalStorageReadTarget,
+    *,
+    clock: InvestigationClock,
+) -> tuple[CapabilityRegistry, TargetRuleRegistry]:
+    capabilities = CapabilityRegistry()
+    capabilities.register(
+        build_storage_capability_registration(
+            read_target=read_target,
+            target=envelope.target,
+            clock=clock.now,
+        )
+    )
+    rules = TargetRuleRegistry()
+    rules.register(build_storage_rule_registration())
+    return capabilities, rules
+
+
+async def execute_storage_baseline(
+    envelope: ExecutionEnvelope,
+    read_target: LocalStorageReadTarget,
+    *,
+    clock: InvestigationClock | None = None,
+    revision: int = 1,
+) -> FixedBaselineResult:
+    """Execute the canonical one-read Storage baseline."""
+
+    envelope = decode_contract(canonical_json_bytes(envelope), ExecutionEnvelope)
+    if type(read_target) is not LocalStorageReadTarget:
+        raise TypeError("the Storage investigation requires the restricted read target")
+    selected_clock = clock or _SystemInvestigationClock()
+    capabilities, rules = _storage_registries(
+        envelope,
+        read_target,
+        clock=selected_clock,
+    )
+    return await execute_fixed_plan(
+        envelope,
+        capabilities,
+        rules,
+        STORAGE_FIXED_PROBE_PLAN,
+        clock=selected_clock,
+        revision=revision,
+    )
+
+
+def run_storage_baseline(
+    envelope: ExecutionEnvelope,
+    read_target: LocalStorageReadTarget,
+    *,
+    clock: InvestigationClock | None = None,
+    revision: int = 1,
+) -> FixedBaselineResult:
+    """Synchronously execute the canonical one-read Storage baseline."""
+
+    envelope = decode_contract(canonical_json_bytes(envelope), ExecutionEnvelope)
+    if type(read_target) is not LocalStorageReadTarget:
+        raise TypeError("the Storage investigation requires the restricted read target")
+    selected_clock = clock or _SystemInvestigationClock()
+    capabilities, rules = _storage_registries(
+        envelope,
+        read_target,
+        clock=selected_clock,
+    )
+    return run_fixed_plan(
+        envelope,
+        capabilities,
+        rules,
+        STORAGE_FIXED_PROBE_PLAN,
+        clock=selected_clock,
+        revision=revision,
+    )
+
+
 async def investigate_storage(
     envelope: ExecutionEnvelope,
     read_target: LocalStorageReadTarget,
@@ -360,43 +480,14 @@ async def investigate_storage(
 ) -> InvestigationReport:
     """Run the one-probe fixed local Storage evidence path."""
 
-    envelope = decode_contract(canonical_json_bytes(envelope), ExecutionEnvelope)
-    if type(read_target) is not LocalStorageReadTarget:
-        raise TypeError("the Storage investigation requires the restricted read target")
-    selected_clock = clock or _SystemInvestigationClock()
-
-    capabilities = CapabilityRegistry()
-    capabilities.register(
-        build_storage_capability_registration(
-            read_target=read_target,
-            target=envelope.target,
-            clock=selected_clock.now,
+    return (
+        await execute_storage_baseline(
+            envelope,
+            read_target,
+            clock=clock,
+            revision=revision,
         )
-    )
-    rules = TargetRuleRegistry()
-    rules.register(build_storage_rule_registration())
-
-    request = ProbeRequest(
-        schema_version=PROBE_REQUEST_VERSION,
-        capability_name=STORAGE_CAPABILITY_NAME,
-        capability_version=STORAGE_CAPABILITY_VERSION,
-        relevant_effect_ids=tuple(
-            effect.effect_id for effect in envelope.expected_effects
-        ),
-        arguments={},
-        rationale="Read the exact local object metadata and its immutable receipt.",
-    )
-    controller = ProbeController(envelope, capabilities, clock=selected_clock)
-    engine = EvidenceEngine(envelope, rules)
-    execution = await controller.execute(request)
-    engine.process(ProbeRun(request=request, execution=execution))
-    updated_at = selected_clock.now()
-    return engine.report(
-        controller.audit_trail,
-        created_at=envelope.ambiguity.observed_at,
-        updated_at=updated_at,
-        revision=revision,
-    )
+    ).report
 
 
 def run_storage_investigation(
@@ -408,32 +499,25 @@ def run_storage_investigation(
 ) -> InvestigationReport:
     """Synchronously execute the fixed local Storage evidence path."""
 
-    try:
-        asyncio.get_running_loop()
-    except RuntimeError:
-        pass
-    else:
-        raise RuntimeError(
-            "run_storage_investigation cannot run inside an active event loop"
-        )
-    return asyncio.run(
-        investigate_storage(
-            envelope,
-            read_target,
-            clock=clock,
-            revision=revision,
-        )
-    )
+    return run_storage_baseline(
+        envelope,
+        read_target,
+        clock=clock,
+        revision=revision,
+    ).report
 
 
 __all__ = [
     "STORAGE_ACTION_POLICY_VERSION",
     "STORAGE_EFFECT_ID",
+    "STORAGE_FIXED_PROBE_PLAN",
     "STORAGE_SCENARIO",
     "STORAGE_TOOL_NAME",
     "STORAGE_TOOL_VERSION",
     "InvestigationClock",
     "StorageScenarioDefinition",
+    "execute_storage_baseline",
     "investigate_storage",
+    "run_storage_baseline",
     "run_storage_investigation",
 ]

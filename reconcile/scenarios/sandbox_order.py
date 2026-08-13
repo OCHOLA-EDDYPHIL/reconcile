@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import hashlib
 import time
 from collections.abc import Callable
@@ -23,6 +22,13 @@ from reconcile.adapters.sandbox_order import (
     build_sandbox_order_ingress_capability_registration,
     build_sandbox_order_ingress_rule_registration,
     build_sandbox_order_target,
+)
+from reconcile.baseline import (
+    FixedBaselineResult,
+    FixedProbePlan,
+    FixedProbeStep,
+    execute_fixed_plan,
+    run_fixed_plan,
 )
 from reconcile.contracts import (
     EXECUTION_ENVELOPE_VERSION,
@@ -45,8 +51,8 @@ from reconcile.contracts import (
     decode_contract,
 )
 from reconcile.contracts.base import canonical_json_value_bytes
-from reconcile.controller import CapabilityRegistry, ProbeController
-from reconcile.evidence import EvidenceEngine, ProbeRun, TargetRuleRegistry
+from reconcile.controller import CapabilityRegistry
+from reconcile.evidence import TargetRuleRegistry
 from reconcile.scenarios.adk_mutation import run_adk_mutation
 from reconcile.scenarios.local_order import (
     HiddenOrderOutcome,
@@ -82,6 +88,25 @@ SANDBOX_ORDER_AGGREGATE_FIRST = (
 
 _MAX_AGE_SECONDS = 60
 _CLOCK_SKEW_SECONDS = 2
+
+_SANDBOX_ORDER_LIMITATIONS = (
+    (
+        "The local sandbox exposes no authoritative order-status lookup or "
+        "durable unique order correlation."
+    ),
+    (
+        "Ingress logs and coarse aggregate counts are weak, non-discriminating "
+        "observations and cannot establish order commitment."
+    ),
+    (
+        "A human operator may escalate the indeterminate result; deterministic "
+        "action gates deny automatic retry and compensation."
+    ),
+    (
+        "Evidence comes only from a local SQLite sandbox and does not establish "
+        "third-party API, network, latency, or hosted isolation behavior."
+    ),
+)
 
 type SandboxOrderProbeOrder = tuple[str, str]
 
@@ -184,7 +209,24 @@ class SandboxOrderScenarioDefinition:
     ) -> InvestigationReport:
         """Run bounded weak reads without exposing the private order store."""
 
-        return run_sandbox_order_investigation(
+        return self.baseline(
+            envelope,
+            probe_order=probe_order,
+            clock=clock,
+            revision=revision,
+        ).report
+
+    def baseline(
+        self,
+        envelope: ExecutionEnvelope,
+        *,
+        probe_order: SandboxOrderProbeOrder = SANDBOX_ORDER_INGRESS_FIRST,
+        clock: SandboxOrderInvestigationClock | None = None,
+        revision: int = 1,
+    ) -> FixedBaselineResult:
+        """Run a permitted fixed baseline without exposing private order state."""
+
+        return run_sandbox_order_baseline(
             envelope,
             self._read_target,
             probe_order=probe_order,
@@ -338,7 +380,6 @@ class SandboxOrderScenarioDefinition:
 
 
 def _probe_request(
-    envelope: ExecutionEnvelope,
     capability_name: str,
 ) -> ProbeRequest:
     rationale = {
@@ -353,11 +394,136 @@ def _probe_request(
         schema_version=PROBE_REQUEST_VERSION,
         capability_name=capability_name,
         capability_version=SANDBOX_ORDER_CAPABILITY_VERSION,
-        relevant_effect_ids=tuple(
-            effect.effect_id for effect in envelope.expected_effects
-        ),
+        relevant_effect_ids=(SANDBOX_ORDER_EFFECT_ID,),
         arguments={},
         rationale=rationale,
+    )
+
+
+SANDBOX_ORDER_FIXED_PROBE_PLAN = FixedProbePlan(
+    name="sandbox-order-fixed-baseline",
+    version="1.0.0",
+    steps=tuple(
+        FixedProbeStep(
+            request=_probe_request(capability_name),
+            required=False,
+        )
+        for capability_name in SANDBOX_ORDER_INGRESS_FIRST
+    ),
+)
+
+_SANDBOX_ORDER_AGGREGATE_FIRST_PLAN = FixedProbePlan(
+    name="sandbox-order-fixed-baseline",
+    version="1.0.0-aggregate-first",
+    steps=tuple(
+        FixedProbeStep(
+            request=_probe_request(capability_name),
+            required=False,
+        )
+        for capability_name in SANDBOX_ORDER_AGGREGATE_FIRST
+    ),
+)
+
+
+def _sandbox_order_plan(
+    probe_order: SandboxOrderProbeOrder,
+) -> FixedProbePlan:
+    probe_order = _validated_probe_order(probe_order)
+    if probe_order == SANDBOX_ORDER_INGRESS_FIRST:
+        return SANDBOX_ORDER_FIXED_PROBE_PLAN
+    return _SANDBOX_ORDER_AGGREGATE_FIRST_PLAN
+
+
+def _sandbox_order_registries(
+    envelope: ExecutionEnvelope,
+    read_target: LocalOrderReadTarget,
+    *,
+    clock: SandboxOrderInvestigationClock,
+) -> tuple[CapabilityRegistry, TargetRuleRegistry]:
+    capabilities = CapabilityRegistry()
+    capabilities.register(
+        build_sandbox_order_ingress_capability_registration(
+            read_target=read_target,
+            target=envelope.target,
+            clock=clock.now,
+        )
+    )
+    capabilities.register(
+        build_sandbox_order_aggregate_capability_registration(
+            read_target=read_target,
+            target=envelope.target,
+            clock=clock.now,
+        )
+    )
+    rules = TargetRuleRegistry()
+    rules.register(build_sandbox_order_ingress_rule_registration())
+    rules.register(build_sandbox_order_aggregate_rule_registration())
+    return capabilities, rules
+
+
+async def execute_sandbox_order_baseline(
+    envelope: ExecutionEnvelope,
+    read_target: LocalOrderReadTarget,
+    *,
+    probe_order: SandboxOrderProbeOrder = SANDBOX_ORDER_INGRESS_FIRST,
+    clock: SandboxOrderInvestigationClock | None = None,
+    revision: int = 1,
+) -> FixedBaselineResult:
+    """Execute a permitted two-read weak-evidence baseline."""
+
+    envelope = decode_contract(canonical_json_bytes(envelope), ExecutionEnvelope)
+    if type(read_target) is not LocalOrderReadTarget:
+        raise TypeError(
+            "the sandbox-order investigation requires the restricted read target"
+        )
+    plan = _sandbox_order_plan(probe_order)
+    selected_clock = clock or _SystemInvestigationClock()
+    capabilities, rules = _sandbox_order_registries(
+        envelope,
+        read_target,
+        clock=selected_clock,
+    )
+    return await execute_fixed_plan(
+        envelope,
+        capabilities,
+        rules,
+        plan,
+        clock=selected_clock,
+        revision=revision,
+        additional_limitations=_SANDBOX_ORDER_LIMITATIONS,
+    )
+
+
+def run_sandbox_order_baseline(
+    envelope: ExecutionEnvelope,
+    read_target: LocalOrderReadTarget,
+    *,
+    probe_order: SandboxOrderProbeOrder = SANDBOX_ORDER_INGRESS_FIRST,
+    clock: SandboxOrderInvestigationClock | None = None,
+    revision: int = 1,
+) -> FixedBaselineResult:
+    """Synchronously execute a permitted weak-evidence baseline."""
+
+    envelope = decode_contract(canonical_json_bytes(envelope), ExecutionEnvelope)
+    if type(read_target) is not LocalOrderReadTarget:
+        raise TypeError(
+            "the sandbox-order investigation requires the restricted read target"
+        )
+    plan = _sandbox_order_plan(probe_order)
+    selected_clock = clock or _SystemInvestigationClock()
+    capabilities, rules = _sandbox_order_registries(
+        envelope,
+        read_target,
+        clock=selected_clock,
+    )
+    return run_fixed_plan(
+        envelope,
+        capabilities,
+        rules,
+        plan,
+        clock=selected_clock,
+        revision=revision,
+        additional_limitations=_SANDBOX_ORDER_LIMITATIONS,
     )
 
 
@@ -371,71 +537,15 @@ async def investigate_sandbox_order(
 ) -> InvestigationReport:
     """Run both permitted weak reads through deterministic product boundaries."""
 
-    envelope = decode_contract(canonical_json_bytes(envelope), ExecutionEnvelope)
-    if type(read_target) is not LocalOrderReadTarget:
-        raise TypeError(
-            "the sandbox-order investigation requires the restricted read target"
+    return (
+        await execute_sandbox_order_baseline(
+            envelope,
+            read_target,
+            probe_order=probe_order,
+            clock=clock,
+            revision=revision,
         )
-    probe_order = _validated_probe_order(probe_order)
-    selected_clock = clock or _SystemInvestigationClock()
-
-    capabilities = CapabilityRegistry()
-    capabilities.register(
-        build_sandbox_order_ingress_capability_registration(
-            read_target=read_target,
-            target=envelope.target,
-            clock=selected_clock.now,
-        )
-    )
-    capabilities.register(
-        build_sandbox_order_aggregate_capability_registration(
-            read_target=read_target,
-            target=envelope.target,
-            clock=selected_clock.now,
-        )
-    )
-    rules = TargetRuleRegistry()
-    rules.register(build_sandbox_order_ingress_rule_registration())
-    rules.register(build_sandbox_order_aggregate_rule_registration())
-
-    controller = ProbeController(envelope, capabilities, clock=selected_clock)
-    engine = EvidenceEngine(envelope, rules)
-    processed_sequences: set[int] = set()
-    for capability_name in probe_order:
-        request = _probe_request(envelope, capability_name)
-        execution = await controller.execute(request)
-        if execution.audit.sequence in processed_sequences:
-            break
-        processed_sequences.add(execution.audit.sequence)
-        engine.process(ProbeRun(request=request, execution=execution))
-
-    report = engine.report(
-        controller.audit_trail,
-        created_at=envelope.ambiguity.observed_at,
-        updated_at=selected_clock.now(),
-        revision=revision,
-    )
-    payload = report.model_dump(mode="python")
-    payload["limitations"] = (
-        *report.limitations,
-        (
-            "The local sandbox exposes no authoritative order-status lookup or "
-            "durable unique order correlation."
-        ),
-        (
-            "Ingress logs and coarse aggregate counts are weak, non-discriminating "
-            "observations and cannot establish order commitment."
-        ),
-        (
-            "A human operator may escalate the indeterminate result; deterministic "
-            "action gates deny automatic retry and compensation."
-        ),
-        (
-            "Evidence comes only from a local SQLite sandbox and does not establish "
-            "third-party API, network, latency, or hosted isolation behavior."
-        ),
-    )
-    return InvestigationReport.model_validate(payload)
+    ).report
 
 
 def run_sandbox_order_investigation(
@@ -448,29 +558,20 @@ def run_sandbox_order_investigation(
 ) -> InvestigationReport:
     """Synchronously execute the bounded local sandbox-order investigation."""
 
-    try:
-        asyncio.get_running_loop()
-    except RuntimeError:
-        pass
-    else:
-        raise RuntimeError(
-            "run_sandbox_order_investigation cannot run inside an active event loop"
-        )
-    return asyncio.run(
-        investigate_sandbox_order(
-            envelope,
-            read_target,
-            probe_order=probe_order,
-            clock=clock,
-            revision=revision,
-        )
-    )
+    return run_sandbox_order_baseline(
+        envelope,
+        read_target,
+        probe_order=probe_order,
+        clock=clock,
+        revision=revision,
+    ).report
 
 
 __all__ = [
     "SANDBOX_ORDER_ACTION_POLICY_VERSION",
     "SANDBOX_ORDER_AGGREGATE_FIRST",
     "SANDBOX_ORDER_EFFECT_ID",
+    "SANDBOX_ORDER_FIXED_PROBE_PLAN",
     "SANDBOX_ORDER_INGRESS_FIRST",
     "SANDBOX_ORDER_ITEM_CODE",
     "SANDBOX_ORDER_QUANTITY",
@@ -480,6 +581,8 @@ __all__ = [
     "SandboxOrderInvestigationClock",
     "SandboxOrderProbeOrder",
     "SandboxOrderScenarioDefinition",
+    "execute_sandbox_order_baseline",
     "investigate_sandbox_order",
+    "run_sandbox_order_baseline",
     "run_sandbox_order_investigation",
 ]
