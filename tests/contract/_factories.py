@@ -88,6 +88,13 @@ from reconcile.contracts import (
     ProbeEventPayload,
     ProbeOutcome,
     ProbeRequest,
+    QualificationCaseResult,
+    QualificationDisposition,
+    QualificationLaneOrder,
+    QualificationProviderSettings,
+    QualificationResultSet,
+    QualificationSuiteManifest,
+    QualificationSummary,
     RawObservationReference,
     RequestedAction,
     ScenarioCallerObservation,
@@ -111,6 +118,13 @@ from reconcile.contracts import (
     canonical_sha256,
 )
 from reconcile.contracts.base import canonical_json_value_bytes
+from reconcile.qualification import (
+    build_failed_result,
+    build_qualification_manifest,
+    build_result_set,
+    derive_disposition,
+    summarize_qualification,
+)
 
 NOW = datetime(2026, 8, 13, 12, 0, tzinfo=UTC)
 
@@ -930,11 +944,59 @@ def make_planner_output() -> AdaptivePlannerOutput:
     )
 
 
+def make_qualification_examples() -> tuple[
+    QualificationSuiteManifest,
+    QualificationCaseResult,
+    QualificationResultSet,
+    QualificationSummary,
+    QualificationDisposition,
+]:
+    provider = QualificationProviderSettings(
+        provider_name="google-vertex-ai",
+        model_name="gemini-3.5-flash",
+        model_revision="ga-2026-08",
+        location="global",
+        prompt_version="adaptive-planner-v3",
+        adk_version="2.6.3",
+        genai_version="2.18.0",
+        timeout_ms=30_000,
+        max_output_tokens=2_048,
+        temperature_milli=0,
+        billing_currency="USD",
+        input_cost_nano_units_per_token=1_500,
+        output_cost_nano_units_per_token=9_000,
+    )
+    manifest = build_qualification_manifest(
+        source_revision="f" * 64,
+        registered_at=NOW,
+        provider=provider,
+        repetition_count=1,
+    )
+    result = build_failed_result(
+        manifest,
+        execution_id="qualification-example-failure",
+        case_id=manifest.cases[0].case_id,
+        repetition=1,
+        lane_order=QualificationLaneOrder.FIXED_FIRST,
+        failure_category="provider-timeout",
+    )
+    result_set = build_result_set(manifest, (result,))
+    summary = summarize_qualification(manifest, result_set, evaluated_at=NOW)
+    disposition = derive_disposition(
+        manifest,
+        result_set,
+        summary,
+        decided_at=NOW,
+    )
+    return manifest, result, result_set, summary, disposition
+
+
 def public_examples() -> tuple[object, ...]:
     envelope = make_envelope()
     capability = make_capability()
     probe = make_probe()
     evidence, decision = make_evidence(Classification.COMMITTED)
+    qualification = make_qualification_examples()
     return (
         envelope.expected_effects[0],
         envelope,
@@ -954,6 +1016,7 @@ def public_examples() -> tuple[object, ...]:
         make_planner_output(),
         make_api_error(),
         make_investigation_event(),
+        *qualification,
     )
 
 

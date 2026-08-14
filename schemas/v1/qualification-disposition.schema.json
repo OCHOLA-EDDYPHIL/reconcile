@@ -1,0 +1,97 @@
+{
+  "$defs": {
+    "QualificationDispositionKind": {
+      "enum": [
+        "ADAPTIVE_VALUE_DEMONSTRATED",
+        "NO_MEASURABLE_VALUE",
+        "UNSAFE",
+        "INCONCLUSIVE",
+        "INVALID_RUN"
+      ],
+      "title": "QualificationDispositionKind",
+      "type": "string"
+    },
+    "QualificationDispositionReason": {
+      "enum": [
+        "adaptive_benefit_threshold_met",
+        "adaptive_benefit_threshold_not_met",
+        "safety_parity_failed",
+        "classification_parity_failed",
+        "preregistered_expectation_mismatch",
+        "fail_closed_control_failed",
+        "result_set_incomplete",
+        "failed_result_present",
+        "integrity_invalid",
+        "insufficient_valid_results",
+        "cost_limit_exceeded"
+      ],
+      "title": "QualificationDispositionReason",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "decided_at": {
+      "format": "date-time",
+      "title": "Decided At",
+      "type": "string"
+    },
+    "disposition": {
+      "$ref": "#/$defs/QualificationDispositionKind"
+    },
+    "manifest_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Manifest Sha256",
+      "type": "string"
+    },
+    "reasons": {
+      "items": {
+        "$ref": "#/$defs/QualificationDispositionReason"
+      },
+      "maxItems": 11,
+      "minItems": 1,
+      "title": "Reasons",
+      "type": "array"
+    },
+    "result_set_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Result Set Sha256",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": "reconcile/qualification-disposition/v1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "source_revision": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Source Revision",
+      "type": "string"
+    },
+    "suite_id": {
+      "maxLength": 128,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+      "title": "Suite Id",
+      "type": "string"
+    },
+    "summary_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Summary Sha256",
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema_version",
+    "suite_id",
+    "manifest_sha256",
+    "result_set_sha256",
+    "summary_sha256",
+    "source_revision",
+    "decided_at",
+    "disposition",
+    "reasons"
+  ],
+  "title": "QualificationDisposition",
+  "type": "object"
+}

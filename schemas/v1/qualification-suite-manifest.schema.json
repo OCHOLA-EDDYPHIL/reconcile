@@ -1,0 +1,577 @@
+{
+  "$defs": {
+    "Classification": {
+      "enum": [
+        "COMMITTED",
+        "NOT_COMMITTED",
+        "PARTIAL",
+        "PENDING",
+        "UNKNOWN"
+      ],
+      "title": "Classification",
+      "type": "string"
+    },
+    "EvidenceBudget": {
+      "additionalProperties": false,
+      "properties": {
+        "max_cost_units": {
+          "maximum": 9223372036854775807,
+          "minimum": 1,
+          "title": "Max Cost Units",
+          "type": "integer"
+        },
+        "max_elapsed_ms": {
+          "maximum": 9223372036854775807,
+          "minimum": 1,
+          "title": "Max Elapsed Ms",
+          "type": "integer"
+        },
+        "max_probes": {
+          "maximum": 64,
+          "minimum": 1,
+          "title": "Max Probes",
+          "type": "integer"
+        },
+        "max_total_result_bytes": {
+          "maximum": 9223372036854775807,
+          "minimum": 1,
+          "title": "Max Total Result Bytes",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "max_probes",
+        "max_elapsed_ms",
+        "max_total_result_bytes",
+        "max_cost_units"
+      ],
+      "title": "EvidenceBudget",
+      "type": "object"
+    },
+    "PreregisteredExpectedClassification": {
+      "additionalProperties": false,
+      "properties": {
+        "expected_classification": {
+          "$ref": "#/$defs/Classification"
+        },
+        "metadata_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Metadata Sha256",
+          "type": "string"
+        },
+        "registration_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Registration Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "registration_id",
+        "metadata_sha256",
+        "expected_classification"
+      ],
+      "title": "PreregisteredExpectedClassification",
+      "type": "object"
+    },
+    "QualificationCaseDefinition": {
+      "additionalProperties": false,
+      "properties": {
+        "case_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Case Id",
+          "type": "string"
+        },
+        "evidence_budget": {
+          "$ref": "#/$defs/EvidenceBudget"
+        },
+        "evidence_profile": {
+          "$ref": "#/$defs/QualificationEvidenceProfile"
+        },
+        "expectation": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PreregisteredExpectedClassification"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "fixture_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Fixture Id",
+          "type": "string"
+        },
+        "opportunity": {
+          "$ref": "#/$defs/QualificationOpportunity"
+        },
+        "role": {
+          "$ref": "#/$defs/QualificationCaseRole"
+        },
+        "scenario": {
+          "$ref": "#/$defs/ScenarioRef"
+        },
+        "seed": {
+          "maximum": 9223372036854775807,
+          "minimum": 0,
+          "title": "Seed",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "case_id",
+        "scenario",
+        "fixture_id",
+        "seed",
+        "role",
+        "evidence_profile",
+        "opportunity",
+        "expectation",
+        "evidence_budget"
+      ],
+      "title": "QualificationCaseDefinition",
+      "type": "object"
+    },
+    "QualificationCaseRole": {
+      "enum": [
+        "MEASUREMENT",
+        "FAIL_CLOSED_CONTROL"
+      ],
+      "title": "QualificationCaseRole",
+      "type": "string"
+    },
+    "QualificationEvidenceProfile": {
+      "enum": [
+        "authoritative_single_lookup",
+        "heterogeneous_conditional",
+        "redundant_capabilities",
+        "weak_only",
+        "provider_failure",
+        "equal_outcome"
+      ],
+      "title": "QualificationEvidenceProfile",
+      "type": "string"
+    },
+    "QualificationLaneOrder": {
+      "enum": [
+        "FIXED_FIRST",
+        "ADAPTIVE_FIRST"
+      ],
+      "title": "QualificationLaneOrder",
+      "type": "string"
+    },
+    "QualificationMetric": {
+      "enum": [
+        "safety_parity",
+        "deterministic_classification_parity",
+        "classification_coverage",
+        "executed_probe_count",
+        "time_to_sufficient_evidence",
+        "unsupported_probe_count",
+        "unnecessary_probe_count",
+        "explanation_completeness",
+        "unknown_outcome_count",
+        "model_cost"
+      ],
+      "title": "QualificationMetric",
+      "type": "string"
+    },
+    "QualificationOpportunity": {
+      "enum": [
+        "fixed_efficiency",
+        "adaptive_efficiency",
+        "neutral",
+        "fail_closed"
+      ],
+      "title": "QualificationOpportunity",
+      "type": "string"
+    },
+    "QualificationProviderSettings": {
+      "additionalProperties": false,
+      "properties": {
+        "adk_version": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Adk Version",
+          "type": "string"
+        },
+        "billing_currency": {
+          "const": "USD",
+          "title": "Billing Currency",
+          "type": "string"
+        },
+        "genai_version": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Genai Version",
+          "type": "string"
+        },
+        "input_cost_nano_units_per_token": {
+          "maximum": 9223372036854775807,
+          "minimum": 0,
+          "title": "Input Cost Nano Units Per Token",
+          "type": "integer"
+        },
+        "location": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Location",
+          "type": "string"
+        },
+        "max_output_tokens": {
+          "maximum": 65536,
+          "minimum": 1,
+          "title": "Max Output Tokens",
+          "type": "integer"
+        },
+        "model_name": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Model Name",
+          "type": "string"
+        },
+        "model_revision": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Model Revision",
+          "type": "string"
+        },
+        "output_cost_nano_units_per_token": {
+          "maximum": 9223372036854775807,
+          "minimum": 0,
+          "title": "Output Cost Nano Units Per Token",
+          "type": "integer"
+        },
+        "prompt_version": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Prompt Version",
+          "type": "string"
+        },
+        "provider_name": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Provider Name",
+          "type": "string"
+        },
+        "temperature_milli": {
+          "maximum": 2000,
+          "minimum": 0,
+          "title": "Temperature Milli",
+          "type": "integer"
+        },
+        "timeout_ms": {
+          "maximum": 300000,
+          "minimum": 1,
+          "title": "Timeout Ms",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "provider_name",
+        "model_name",
+        "model_revision",
+        "location",
+        "prompt_version",
+        "adk_version",
+        "genai_version",
+        "timeout_ms",
+        "max_output_tokens",
+        "temperature_milli",
+        "billing_currency",
+        "input_cost_nano_units_per_token",
+        "output_cost_nano_units_per_token"
+      ],
+      "title": "QualificationProviderSettings",
+      "type": "object"
+    },
+    "QualificationStopConditions": {
+      "additionalProperties": false,
+      "properties": {
+        "maximum_failed_results": {
+          "maximum": 1024,
+          "minimum": 0,
+          "title": "Maximum Failed Results",
+          "type": "integer"
+        },
+        "maximum_total_input_tokens": {
+          "maximum": 9223372036854775807,
+          "minimum": 1,
+          "title": "Maximum Total Input Tokens",
+          "type": "integer"
+        },
+        "maximum_total_model_calls": {
+          "maximum": 9223372036854775807,
+          "minimum": 1,
+          "title": "Maximum Total Model Calls",
+          "type": "integer"
+        },
+        "maximum_total_model_cost_nano_units": {
+          "maximum": 9223372036854775807,
+          "minimum": 1,
+          "title": "Maximum Total Model Cost Nano Units",
+          "type": "integer"
+        },
+        "maximum_total_output_tokens": {
+          "maximum": 9223372036854775807,
+          "minimum": 1,
+          "title": "Maximum Total Output Tokens",
+          "type": "integer"
+        },
+        "stop_on_manifest_mismatch": {
+          "const": true,
+          "title": "Stop On Manifest Mismatch",
+          "type": "boolean"
+        },
+        "stop_on_safety_failure": {
+          "const": true,
+          "title": "Stop On Safety Failure",
+          "type": "boolean"
+        },
+        "stop_on_source_mismatch": {
+          "const": true,
+          "title": "Stop On Source Mismatch",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "stop_on_safety_failure",
+        "stop_on_source_mismatch",
+        "stop_on_manifest_mismatch",
+        "maximum_failed_results",
+        "maximum_total_model_calls",
+        "maximum_total_input_tokens",
+        "maximum_total_output_tokens",
+        "maximum_total_model_cost_nano_units"
+      ],
+      "title": "QualificationStopConditions",
+      "type": "object"
+    },
+    "QualificationThresholds": {
+      "additionalProperties": false,
+      "properties": {
+        "explanation_completeness_can_demonstrate_value": {
+          "const": false,
+          "title": "Explanation Completeness Can Demonstrate Value",
+          "type": "boolean"
+        },
+        "fallback_heterogeneous_case_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Fallback Heterogeneous Case Id",
+          "type": "string"
+        },
+        "minimum_fallback_case_successful_repetitions": {
+          "maximum": 16,
+          "minimum": 1,
+          "title": "Minimum Fallback Case Successful Repetitions",
+          "type": "integer"
+        },
+        "minimum_suite_median_probe_reduction": {
+          "maximum": 9223372036854775807,
+          "minimum": 1,
+          "title": "Minimum Suite Median Probe Reduction",
+          "type": "integer"
+        },
+        "minimum_suite_median_sufficient_time_reduction_ms": {
+          "maximum": 9223372036854775807,
+          "minimum": 1,
+          "title": "Minimum Suite Median Sufficient Time Reduction Ms",
+          "type": "integer"
+        },
+        "minimum_suite_median_time_reduction_basis_points": {
+          "maximum": 10000,
+          "minimum": 1,
+          "title": "Minimum Suite Median Time Reduction Basis Points",
+          "type": "integer"
+        },
+        "minimum_valid_measurement_results": {
+          "maximum": 1024,
+          "minimum": 1,
+          "title": "Minimum Valid Measurement Results",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "minimum_valid_measurement_results",
+        "minimum_suite_median_probe_reduction",
+        "minimum_suite_median_time_reduction_basis_points",
+        "minimum_suite_median_sufficient_time_reduction_ms",
+        "fallback_heterogeneous_case_id",
+        "minimum_fallback_case_successful_repetitions",
+        "explanation_completeness_can_demonstrate_value"
+      ],
+      "title": "QualificationThresholds",
+      "type": "object"
+    },
+    "ScenarioRef": {
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Name",
+          "type": "string"
+        },
+        "version": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Version",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "version"
+      ],
+      "title": "ScenarioRef",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "action_policy_version": {
+      "maxLength": 128,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+      "title": "Action Policy Version",
+      "type": "string"
+    },
+    "adaptive_strategy_version": {
+      "maxLength": 128,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+      "title": "Adaptive Strategy Version",
+      "type": "string"
+    },
+    "authority_policy_version": {
+      "maxLength": 128,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+      "title": "Authority Policy Version",
+      "type": "string"
+    },
+    "cases": {
+      "items": {
+        "$ref": "#/$defs/QualificationCaseDefinition"
+      },
+      "maxItems": 8,
+      "minItems": 8,
+      "title": "Cases",
+      "type": "array"
+    },
+    "classification_policy_version": {
+      "maxLength": 128,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+      "title": "Classification Policy Version",
+      "type": "string"
+    },
+    "controller_version": {
+      "maxLength": 128,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+      "title": "Controller Version",
+      "type": "string"
+    },
+    "fixed_strategy_version": {
+      "maxLength": 128,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+      "title": "Fixed Strategy Version",
+      "type": "string"
+    },
+    "lane_orders": {
+      "items": {
+        "$ref": "#/$defs/QualificationLaneOrder"
+      },
+      "maxItems": 16,
+      "minItems": 1,
+      "title": "Lane Orders",
+      "type": "array"
+    },
+    "metrics": {
+      "items": {
+        "$ref": "#/$defs/QualificationMetric"
+      },
+      "maxItems": 10,
+      "minItems": 10,
+      "title": "Metrics",
+      "type": "array"
+    },
+    "provider": {
+      "$ref": "#/$defs/QualificationProviderSettings"
+    },
+    "registered_at": {
+      "format": "date-time",
+      "title": "Registered At",
+      "type": "string"
+    },
+    "repetition_count": {
+      "maximum": 16,
+      "minimum": 1,
+      "title": "Repetition Count",
+      "type": "integer"
+    },
+    "schema_version": {
+      "const": "reconcile/qualification-suite-manifest/v1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "source_revision": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Source Revision",
+      "type": "string"
+    },
+    "stop_conditions": {
+      "$ref": "#/$defs/QualificationStopConditions"
+    },
+    "suite_id": {
+      "maxLength": 128,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+      "title": "Suite Id",
+      "type": "string"
+    },
+    "thresholds": {
+      "$ref": "#/$defs/QualificationThresholds"
+    }
+  },
+  "required": [
+    "schema_version",
+    "suite_id",
+    "source_revision",
+    "registered_at",
+    "provider",
+    "controller_version",
+    "fixed_strategy_version",
+    "adaptive_strategy_version",
+    "authority_policy_version",
+    "classification_policy_version",
+    "action_policy_version",
+    "metrics",
+    "thresholds",
+    "stop_conditions",
+    "repetition_count",
+    "lane_orders",
+    "cases"
+  ],
+  "title": "QualificationSuiteManifest",
+  "type": "object"
+}
