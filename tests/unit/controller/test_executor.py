@@ -33,6 +33,7 @@ from reconcile.controller.capabilities import (
 from reconcile.controller.executor import (
     ProbeController,
     ProbeStopReason,
+    RestoredProbe,
 )
 from tests.contract._factories import make_capability, make_envelope
 
@@ -156,6 +157,129 @@ class CancellationSuppressingHandler:
             return _observation()
         finally:
             self.active -= 1
+
+
+class _RestoringObserver:
+    def __init__(self, restored: RestoredProbe) -> None:
+        self.restored = restored
+
+    async def before_dispatch(self, request, **_kwargs):
+        del request
+        return self.restored
+
+    def elapsed_floor_ms(self, now: datetime) -> int:
+        del now
+        return 0
+
+    def remaining_elapsed_ms(self, now: datetime) -> int:
+        del now
+        return 2**63 - 1
+
+    async def after_dispatch(self, request, execution) -> None:
+        del request, execution
+        raise AssertionError("a restored probe must not be recorded again")
+
+    async def authorize_dispatch(self, request, **_kwargs) -> bool:
+        del request
+        return True
+
+    async def after_execution(self, execution) -> None:
+        del execution
+
+
+class _RestoreOnceObserver:
+    def __init__(self, restored: RestoredProbe) -> None:
+        self.restored = restored
+        self.restored_once = False
+
+    async def before_dispatch(self, request, **_kwargs):
+        del request
+        if self.restored_once:
+            return None
+        self.restored_once = True
+        return self.restored
+
+    def elapsed_floor_ms(self, now: datetime) -> int:
+        del now
+        return 0
+
+    def remaining_elapsed_ms(self, now: datetime) -> int:
+        del now
+        return 2**63 - 1
+
+    async def after_dispatch(self, request, execution) -> None:
+        del request, execution
+
+    async def authorize_dispatch(self, request, **_kwargs) -> bool:
+        del request
+        return True
+
+    async def after_execution(self, execution) -> None:
+        del execution
+
+
+class _DelayedDurabilityObserver:
+    def __init__(
+        self,
+        clock: FakeClock,
+        *,
+        delay_ms: int,
+        deadline_ms: int,
+    ) -> None:
+        self.clock = clock
+        self.delay_ms = delay_ms
+        self.deadline = NOW + timedelta(milliseconds=deadline_ms)
+        self.recorded = []
+
+    def remaining_elapsed_ms(self, now: datetime) -> int:
+        return max(0, int((self.deadline - now).total_seconds() * 1_000))
+
+    def elapsed_floor_ms(self, now: datetime) -> int:
+        return max(0, int((now - NOW).total_seconds() * 1_000))
+
+    async def before_dispatch(self, request, **_kwargs):
+        del request
+        self.clock.advance_ms(self.delay_ms)
+        return None
+
+    async def after_dispatch(self, request, execution) -> None:
+        del request
+        self.recorded.append(execution)
+
+    async def authorize_dispatch(self, request, **_kwargs) -> bool:
+        del request
+        return True
+
+    async def after_execution(self, execution) -> None:
+        del execution
+
+
+class _ElapsedFloorObserver:
+    def __init__(self, floor_ms: int) -> None:
+        self.floor_ms = floor_ms
+        self.audits = []
+
+    def elapsed_floor_ms(self, now: datetime) -> int:
+        del now
+        return self.floor_ms
+
+    def remaining_elapsed_ms(self, now: datetime) -> int:
+        del now
+        return 2**63 - 1
+
+    async def before_dispatch(self, request, **_kwargs):
+        del request
+        return None
+
+    async def after_dispatch(self, request, execution) -> None:
+        del request, execution
+
+    async def authorize_dispatch(self, request, **_kwargs) -> bool:
+        del request
+        return True
+
+    async def after_execution(self, execution) -> None:
+        self.audits.append(execution.audit)
 
 
 def _observation(
@@ -949,5 +1073,165 @@ def test_malformed_or_secret_bearing_results_never_become_observations(
         assert "must-not-pass" not in json.dumps(
             execution.audit.model_dump(mode="json")
         )
+
+    asyncio.run(scenario())
+
+
+def test_restored_probe_revalidates_models_identity_and_exact_cumulative_counters() -> (
+    None
+):
+    async def scenario() -> None:
+        envelope = _envelope()
+        request = _request()
+        original = await ProbeController(
+            envelope,
+            _registry(SpyHandler()),
+        ).execute(request)
+        assert original.observation is not None
+        observation = ProbeObservation.model_validate_json(
+            original.observation.canonical_json
+        )
+
+        forged_observation = ProbeObservation.model_construct(
+            observed_at="not-an-aware-datetime",
+            payload={"exists": True},
+        )
+        forged_cases = (
+            RestoredProbe(
+                audit=original.audit,
+                observation=forged_observation,
+            ),
+            RestoredProbe(
+                audit=original.audit.model_copy(
+                    update={"probe_count_used": 2},
+                ),
+                observation=observation,
+            ),
+            RestoredProbe(
+                audit=original.audit.model_copy(
+                    update={"target_sha256": "f" * 64},
+                ),
+                observation=observation,
+            ),
+        )
+        for restored in forged_cases:
+            handler = SpyHandler()
+            controller = ProbeController(
+                envelope,
+                _registry(handler),
+                durability_observer=_RestoringObserver(restored),
+            )
+            with pytest.raises((TypeError, ValueError)):
+                await controller.execute(request)
+            assert handler.calls == []
+
+    asyncio.run(scenario())
+
+
+def test_restored_probe_elapsed_time_remains_a_cumulative_floor() -> None:
+    async def scenario() -> None:
+        envelope = _envelope(
+            max_probes=2,
+            max_cost_units=2,
+            max_elapsed_ms=1_000,
+        )
+        request = _request()
+        original_clock = FakeClock()
+        original = await ProbeController(
+            envelope,
+            _registry(ClockAdvancingHandler(original_clock, 900)),
+            clock=original_clock,
+        ).execute(request)
+        assert original.audit.session_elapsed_ms == 900
+        assert original.observation is not None
+
+        restart_clock = FakeClock()
+        continued_handler = ClockAdvancingHandler(restart_clock, 10)
+        restarted = ProbeController(
+            envelope,
+            _registry(continued_handler),
+            clock=restart_clock,
+            durability_observer=_RestoreOnceObserver(
+                RestoredProbe(
+                    audit=original.audit,
+                    observation=ProbeObservation.model_validate_json(
+                        original.observation.canonical_json
+                    ),
+                )
+            ),
+        )
+        restored = await restarted.execute(request)
+        restart_clock.advance_ms(25)
+        continued = await restarted.execute(request)
+
+        assert restored.audit.session_elapsed_ms == 900
+        assert continued.audit.session_elapsed_ms == 935
+        assert len(continued_handler.calls) == 1
+        assert 1 <= continued_handler.calls[0].timeout_ms <= 75
+        assert tuple(item.session_elapsed_ms for item in restarted.audit_trail) == (
+            900,
+            935,
+        )
+
+    asyncio.run(scenario())
+
+
+def test_durable_checkpoint_latency_exhausts_deadline_before_handler_dispatch() -> None:
+    async def scenario() -> None:
+        clock = FakeClock()
+        handler = SpyHandler()
+        observer = _DelayedDurabilityObserver(
+            clock,
+            delay_ms=60,
+            deadline_ms=50,
+        )
+        controller = ProbeController(
+            _envelope(max_elapsed_ms=1_000),
+            _registry(handler),
+            clock=clock,
+            durability_observer=observer,
+        )
+
+        execution = await controller.execute(_request())
+
+        assert handler.calls == []
+        assert execution.audit.outcome is ProbeOutcome.BUDGET_EXHAUSTED
+        assert execution.audit.stop_reason is ProbeStopReason.ELAPSED_BUDGET_EXHAUSTED
+        assert execution.audit.session_elapsed_ms == 60
+        assert execution.audit.probe_count_used == 1
+        assert observer.recorded == [execution]
+
+    asyncio.run(scenario())
+
+
+def test_durable_elapsed_floor_is_capped_and_cannot_regress() -> None:
+    async def scenario() -> None:
+        capped_clock = FakeClock()
+        capped_handler = SpyHandler()
+        capped_observer = _ElapsedFloorObserver(1_500)
+        capped = ProbeController(
+            _envelope(max_elapsed_ms=1_000),
+            _registry(capped_handler),
+            clock=capped_clock,
+            durability_observer=capped_observer,
+        )
+        exhausted = await capped.execute(_request())
+        assert capped_handler.calls == []
+        assert exhausted.audit.stop_reason is ProbeStopReason.ELAPSED_BUDGET_EXHAUSTED
+        assert exhausted.audit.session_elapsed_ms == 1_000
+
+        monotonic_clock = FakeClock()
+        monotonic_observer = _ElapsedFloorObserver(500)
+        monotonic = ProbeController(
+            _envelope(max_elapsed_ms=2_000),
+            _registry(SpyHandler()),
+            clock=monotonic_clock,
+            durability_observer=monotonic_observer,
+        )
+        monotonic_clock.advance_ms(100)
+        monotonic_observer.floor_ms = 400
+        execution = await monotonic.execute(_request())
+        assert execution.audit.session_elapsed_ms == 600
+        assert monotonic_observer.audits == [execution.audit]
 
     asyncio.run(scenario())

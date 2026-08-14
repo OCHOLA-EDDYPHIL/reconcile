@@ -15,8 +15,10 @@ from reconcile.controller.executor import (
     ControllerAuditRecord,
     ControllerClock,
     ProbeController,
+    ProbeDurabilityObserver,
     ProbeExecution,
     ProbeStopReason,
+    RestoredProbe,
     ValidatedObservation,
     probe_request_sha256,
 )
@@ -32,10 +34,12 @@ __all__ = [
     "DuplicateCapabilityRegistration",
     "ObservationHandler",
     "ProbeController",
+    "ProbeDurabilityObserver",
     "ProbeExecution",
     "ProbeObservation",
     "ProbeStopReason",
     "RegistryFrozen",
+    "RestoredProbe",
     "ValidatedObservation",
     "probe_request_sha256",
 ]

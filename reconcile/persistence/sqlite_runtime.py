@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime
+from itertools import pairwise
 from pathlib import Path
 
 from reconcile.contracts.api import (
@@ -43,6 +45,7 @@ from reconcile.persistence.durable import (
     PROBE_CHECKPOINT_VERSION,
     BudgetExceeded,
     CleanupStatus,
+    ControllerAuditConflict,
     CorruptDurableState,
     CostLedgerEntry,
     CostLedgerSnapshot,
@@ -60,6 +63,7 @@ from reconcile.persistence.durable import (
     ProbeCheckpointState,
     ProbeReplaySafety,
     ProbeResumePlan,
+    ProviderCallReceipt,
     RuntimeCostDelta,
     RuntimeLimits,
     RuntimeTelemetryRecord,
@@ -76,7 +80,7 @@ from reconcile.persistence.events import (
     TerminalEventJournal,
 )
 
-_SQLITE_SCHEMA_VERSION = "1"
+_SQLITE_SCHEMA_VERSION = "3"
 _BUSY_TIMEOUT_MS = 5_000
 
 
@@ -183,6 +187,14 @@ class SqliteDurableRuntimeStore:
                         payload BLOB NOT NULL
                     );
 
+                    CREATE TABLE IF NOT EXISTS runtime_provenance (
+                        investigation_id TEXT PRIMARY KEY,
+                        sha256 TEXT NOT NULL,
+                        FOREIGN KEY (investigation_id)
+                            REFERENCES durable_runs(investigation_id)
+                            ON DELETE CASCADE
+                    );
+
                     CREATE TABLE IF NOT EXISTS durable_leases (
                         investigation_id TEXT PRIMARY KEY,
                         fence INTEGER NOT NULL,
@@ -199,6 +211,16 @@ class SqliteDurableRuntimeStore:
                         payload BLOB NOT NULL,
                         PRIMARY KEY (investigation_id, checkpoint_id),
                         UNIQUE (investigation_id, step_sequence),
+                        FOREIGN KEY (investigation_id)
+                            REFERENCES durable_runs(investigation_id)
+                            ON DELETE CASCADE
+                    );
+
+                    CREATE TABLE IF NOT EXISTS controller_audits (
+                        investigation_id TEXT NOT NULL,
+                        sequence INTEGER NOT NULL,
+                        payload BLOB NOT NULL,
+                        PRIMARY KEY (investigation_id, sequence),
                         FOREIGN KEY (investigation_id)
                             REFERENCES durable_runs(investigation_id)
                             ON DELETE CASCADE
@@ -248,7 +270,7 @@ class SqliteDurableRuntimeStore:
         except UnsupportedDurableSchema:
             raise
         except sqlite3.DatabaseError as error:
-            raise CorruptDurableState from error
+            raise CorruptDurableState() from error
 
     @staticmethod
     def _decode[Model](
@@ -327,12 +349,14 @@ class SqliteDurableRuntimeStore:
         *,
         created_at: datetime,
         limits: RuntimeLimits,
+        runtime_provenance_sha256: str,
     ) -> CreateDurableRunResult:
         return await asyncio.to_thread(
             self._create_run,
             envelope,
             created_at,
             limits,
+            runtime_provenance_sha256,
         )
 
     def _create_run(
@@ -340,8 +364,14 @@ class SqliteDurableRuntimeStore:
         envelope: ExecutionEnvelope,
         created_at: datetime,
         limits: RuntimeLimits,
+        runtime_provenance_sha256: str,
     ) -> CreateDurableRunResult:
         created_at = _aware_utc(created_at)
+        if (
+            not isinstance(runtime_provenance_sha256, str)
+            or re.fullmatch(r"[0-9a-f]{64}", runtime_provenance_sha256) is None
+        ):
+            raise ValueError("runtime provenance must be a SHA-256 digest")
         record = DurableRunRecord(
             schema_version=DURABLE_RUN_VERSION,
             investigation_id=envelope.investigation_id,
@@ -374,6 +404,10 @@ class SqliteDurableRuntimeStore:
                         record.envelope
                     ):
                         raise DurableRunConflict(record.investigation_id)
+                    self._runtime_provenance_locked(
+                        connection,
+                        record.investigation_id,
+                    )
                     return CreateDurableRunResult(run=current, created=False)
                 connection.execute(
                     """
@@ -384,6 +418,13 @@ class SqliteDurableRuntimeStore:
                     ) VALUES (?, ?, ?)
                     """,
                     (record.investigation_id, record.envelope_sha256, payload),
+                )
+                connection.execute(
+                    """
+                    INSERT INTO runtime_provenance (investigation_id, sha256)
+                    VALUES (?, ?)
+                    """,
+                    (record.investigation_id, runtime_provenance_sha256),
                 )
                 return CreateDurableRunResult(run=record, created=True)
         except DurableRuntimeExceptionTypes:
@@ -398,6 +439,79 @@ class SqliteDurableRuntimeStore:
         try:
             with self._connect() as connection:
                 return self._run_locked(connection, investigation_id)
+        except DurableRuntimeExceptionTypes:
+            raise
+        except sqlite3.DatabaseError as error:
+            raise CorruptDurableState(investigation_id) from error
+
+    async def list_runs(self) -> tuple[DurableRunRecord, ...]:
+        return await asyncio.to_thread(self._list_runs)
+
+    def _list_runs(self) -> tuple[DurableRunRecord, ...]:
+        try:
+            with self._connect() as connection:
+                rows = connection.execute(
+                    """
+                    SELECT investigation_id, envelope_sha256, payload
+                    FROM durable_runs
+                    ORDER BY investigation_id
+                    """
+                ).fetchall()
+                runs = tuple(
+                    self._decode(
+                        row["payload"],
+                        DurableRunRecord,
+                        row["investigation_id"],
+                    )
+                    for row in rows
+                )
+                if any(
+                    row["investigation_id"] != run.investigation_id
+                    or row["envelope_sha256"] != run.envelope_sha256
+                    for row, run in zip(rows, runs, strict=True)
+                ):
+                    raise CorruptDurableState()
+                return runs
+        except DurableRuntimeExceptionTypes:
+            raise
+        except sqlite3.DatabaseError as error:
+            raise CorruptDurableState() from error
+
+    def _runtime_provenance_locked(
+        self,
+        connection: sqlite3.Connection,
+        investigation_id: str,
+    ) -> str:
+        row = connection.execute(
+            """
+            SELECT sha256
+            FROM runtime_provenance
+            WHERE investigation_id = ?
+            """,
+            (investigation_id,),
+        ).fetchone()
+        if (
+            row is None
+            or not isinstance(row["sha256"], str)
+            or re.fullmatch(r"[0-9a-f]{64}", row["sha256"]) is None
+        ):
+            raise CorruptDurableState(investigation_id)
+        return row["sha256"]
+
+    async def runtime_provenance_sha256(self, investigation_id: str) -> str:
+        return await asyncio.to_thread(
+            self._runtime_provenance_sha256,
+            investigation_id,
+        )
+
+    def _runtime_provenance_sha256(self, investigation_id: str) -> str:
+        try:
+            with self._connect() as connection:
+                self._run_locked(connection, investigation_id)
+                return self._runtime_provenance_locked(
+                    connection,
+                    investigation_id,
+                )
         except DurableRuntimeExceptionTypes:
             raise
         except sqlite3.DatabaseError as error:
@@ -543,6 +657,24 @@ class SqliteDurableRuntimeStore:
         except sqlite3.DatabaseError as error:
             raise CorruptDurableState(lease.investigation_id) from error
 
+    async def validate_lease(
+        self,
+        lease: LeaseToken,
+        *,
+        now: datetime,
+    ) -> None:
+        await asyncio.to_thread(self._validate_lease, lease, now)
+
+    def _validate_lease(self, lease: LeaseToken, now: datetime) -> None:
+        now = _aware_utc(now)
+        try:
+            with self._connect() as connection:
+                self._validate_lease_locked(connection, lease, now)
+        except DurableRuntimeExceptionTypes:
+            raise
+        except sqlite3.DatabaseError as error:
+            raise CorruptDurableState(lease.investigation_id) from error
+
     async def release_lease(
         self,
         lease: LeaseToken,
@@ -665,6 +797,7 @@ class SqliteDurableRuntimeStore:
         request: ProbeRequest,
         replay_safety: ProbeReplaySafety,
         started_at: datetime,
+        now: datetime,
     ) -> ProbeCheckpoint:
         return await asyncio.to_thread(
             self._start_probe,
@@ -674,6 +807,7 @@ class SqliteDurableRuntimeStore:
             request,
             replay_safety,
             started_at,
+            now,
         )
 
     def _start_probe(
@@ -684,8 +818,10 @@ class SqliteDurableRuntimeStore:
         request: ProbeRequest,
         replay_safety: ProbeReplaySafety,
         started_at: datetime,
+        now: datetime,
     ) -> ProbeCheckpoint:
         started_at = _aware_utc(started_at)
+        now = _aware_utc(now)
         checkpoint = ProbeCheckpoint(
             schema_version=PROBE_CHECKPOINT_VERSION,
             investigation_id=lease.investigation_id,
@@ -699,7 +835,7 @@ class SqliteDurableRuntimeStore:
         )
         try:
             with self._write() as connection:
-                self._validate_lease_locked(connection, lease, started_at)
+                self._validate_lease_locked(connection, lease, now)
                 run = self._run_locked(connection, lease.investigation_id)
                 row = connection.execute(
                     """
@@ -725,18 +861,18 @@ class SqliteDurableRuntimeStore:
                     )
                 if run.state is not DurableRunState.ACTIVE:
                     raise DurableStateConflict(run.investigation_id, "start_probe")
-                if started_at >= run.limits.deadline_at:
+                if now >= run.limits.deadline_at:
                     raise BudgetExceeded(run.investigation_id, "deadline")
-                next_sequence = connection.execute(
+                previous_sequence = connection.execute(
                     """
-                    SELECT COALESCE(MAX(step_sequence), 0) + 1 AS next_sequence
+                    SELECT COALESCE(MAX(step_sequence), 0) AS previous_sequence
                     FROM probe_checkpoints
                     WHERE investigation_id = ?
                     """,
                     (lease.investigation_id,),
-                ).fetchone()["next_sequence"]
+                ).fetchone()["previous_sequence"]
                 if (
-                    step_sequence != next_sequence
+                    step_sequence <= previous_sequence
                     or step_sequence > run.limits.max_probe_count
                 ):
                     raise ProbeCheckpointConflict(
@@ -878,6 +1014,165 @@ class SqliteDurableRuntimeStore:
         except sqlite3.DatabaseError as error:
             raise CorruptDurableState(lease.investigation_id) from error
 
+    async def record_controller_audit(
+        self,
+        lease: LeaseToken,
+        audit: ControllerAuditRecord,
+        *,
+        recorded_at: datetime,
+    ) -> ControllerAuditRecord:
+        return await asyncio.to_thread(
+            self._record_controller_audit,
+            lease,
+            audit,
+            recorded_at,
+        )
+
+    def _record_controller_audit(
+        self,
+        lease: LeaseToken,
+        audit: ControllerAuditRecord,
+        recorded_at: datetime,
+    ) -> ControllerAuditRecord:
+        if type(audit) is not ControllerAuditRecord:
+            raise TypeError("controller audit must be exact")
+        audit = ControllerAuditRecord.model_validate_json(canonical_json_bytes(audit))
+        recorded_at = _aware_utc(recorded_at)
+        try:
+            with self._write() as connection:
+                self._validate_lease_locked(connection, lease, recorded_at)
+                run = self._run_locked(connection, lease.investigation_id)
+                existing = connection.execute(
+                    """
+                    SELECT payload
+                    FROM controller_audits
+                    WHERE investigation_id = ? AND sequence = ?
+                    """,
+                    (lease.investigation_id, audit.sequence),
+                ).fetchone()
+                if existing is not None:
+                    try:
+                        current = ControllerAuditRecord.model_validate_json(
+                            _blob(existing["payload"])
+                        )
+                    except (TypeError, ValueError) as error:
+                        raise CorruptDurableState(lease.investigation_id) from error
+                    if canonical_json_bytes(current) == canonical_json_bytes(audit):
+                        return current
+                    raise ControllerAuditConflict(
+                        lease.investigation_id,
+                        audit.sequence,
+                    )
+                if run.state is not DurableRunState.ACTIVE:
+                    raise DurableStateConflict(
+                        run.investigation_id,
+                        "record_controller_audit",
+                    )
+                next_sequence = connection.execute(
+                    """
+                    SELECT COALESCE(MAX(sequence), 0) + 1 AS next_sequence
+                    FROM controller_audits
+                    WHERE investigation_id = ?
+                    """,
+                    (lease.investigation_id,),
+                ).fetchone()["next_sequence"]
+                budget = run.envelope.context.evidence_budget
+                if (
+                    audit.sequence != next_sequence
+                    or audit.started_at < run.created_at
+                    or recorded_at < audit.completed_at
+                    or audit.target_sha256 != canonical_sha256(run.envelope.target)
+                    or audit.probe_count_used > run.limits.max_probe_count
+                    or audit.cost_units_used > run.limits.max_controller_cost_units
+                    or audit.result_bytes_acquired > run.limits.max_evidence_bytes
+                    or audit.session_elapsed_ms > budget.max_elapsed_ms
+                ):
+                    raise ControllerAuditConflict(
+                        lease.investigation_id,
+                        audit.sequence,
+                    )
+                connection.execute(
+                    """
+                    INSERT INTO controller_audits (
+                        investigation_id,
+                        sequence,
+                        payload
+                    ) VALUES (?, ?, ?)
+                    """,
+                    (
+                        lease.investigation_id,
+                        audit.sequence,
+                        canonical_json_bytes(audit),
+                    ),
+                )
+                return audit
+        except DurableRuntimeExceptionTypes:
+            raise
+        except sqlite3.IntegrityError as error:
+            raise ControllerAuditConflict(
+                lease.investigation_id,
+                audit.sequence,
+            ) from error
+        except sqlite3.DatabaseError as error:
+            raise CorruptDurableState(lease.investigation_id) from error
+
+    def _controller_audits_locked(
+        self,
+        connection: sqlite3.Connection,
+        investigation_id: str,
+    ) -> tuple[ControllerAuditRecord, ...]:
+        run = self._run_locked(connection, investigation_id)
+        rows = connection.execute(
+            """
+            SELECT sequence, payload
+            FROM controller_audits
+            WHERE investigation_id = ?
+            ORDER BY sequence
+            """,
+            (investigation_id,),
+        ).fetchall()
+        try:
+            audits = tuple(
+                ControllerAuditRecord.model_validate_json(_blob(row["payload"]))
+                for row in rows
+            )
+        except (TypeError, ValueError) as error:
+            raise CorruptDurableState(investigation_id) from error
+        budget = run.envelope.context.evidence_budget
+        if any(
+            row["sequence"] != expected
+            or audit.sequence != expected
+            or audit.target_sha256 != canonical_sha256(run.envelope.target)
+            or audit.probe_count_used > run.limits.max_probe_count
+            or audit.cost_units_used > run.limits.max_controller_cost_units
+            or audit.result_bytes_acquired > run.limits.max_evidence_bytes
+            or audit.session_elapsed_ms > budget.max_elapsed_ms
+            for expected, (row, audit) in enumerate(
+                zip(rows, audits, strict=True),
+                1,
+            )
+        ):
+            raise CorruptDurableState(investigation_id)
+        return audits
+
+    async def controller_audits(
+        self,
+        investigation_id: str,
+    ) -> tuple[ControllerAuditRecord, ...]:
+        return await asyncio.to_thread(self._controller_audits, investigation_id)
+
+    def _controller_audits(
+        self,
+        investigation_id: str,
+    ) -> tuple[ControllerAuditRecord, ...]:
+        try:
+            with self._connect() as connection:
+                return self._controller_audits_locked(connection, investigation_id)
+        except DurableRuntimeExceptionTypes:
+            raise
+        except sqlite3.DatabaseError as error:
+            raise CorruptDurableState(investigation_id) from error
+
     async def resume_plan(
         self,
         investigation_id: str,
@@ -895,30 +1190,10 @@ class SqliteDurableRuntimeStore:
         try:
             with self._connect() as connection:
                 run = self._run_locked(connection, investigation_id)
-                rows = connection.execute(
-                    """
-                    SELECT checkpoint_id, step_sequence, payload
-                    FROM probe_checkpoints
-                    WHERE investigation_id = ?
-                    ORDER BY step_sequence
-                    """,
-                    (investigation_id,),
-                ).fetchall()
-                checkpoints = tuple(
-                    self._decode(row["payload"], ProbeCheckpoint, investigation_id)
-                    for row in rows
+                checkpoints = self._probe_checkpoints_locked(
+                    connection,
+                    investigation_id,
                 )
-                if any(
-                    row["step_sequence"] != expected
-                    or checkpoint.step_sequence != expected
-                    or row["checkpoint_id"] != checkpoint.checkpoint_id
-                    or checkpoint.investigation_id != investigation_id
-                    for expected, (row, checkpoint) in enumerate(
-                        zip(rows, checkpoints, strict=True),
-                        1,
-                    )
-                ):
-                    raise CorruptDurableState(investigation_id)
                 return build_probe_resume_plan(
                     investigation_id,
                     checkpoints,
@@ -927,6 +1202,55 @@ class SqliteDurableRuntimeStore:
                         and now < run.limits.deadline_at
                     ),
                 )
+        except DurableRuntimeExceptionTypes:
+            raise
+        except sqlite3.DatabaseError as error:
+            raise CorruptDurableState(investigation_id) from error
+
+    def _probe_checkpoints_locked(
+        self,
+        connection: sqlite3.Connection,
+        investigation_id: str,
+    ) -> tuple[ProbeCheckpoint, ...]:
+        rows = connection.execute(
+            """
+            SELECT checkpoint_id, step_sequence, payload
+            FROM probe_checkpoints
+            WHERE investigation_id = ?
+            ORDER BY step_sequence
+            """,
+            (investigation_id,),
+        ).fetchall()
+        checkpoints = tuple(
+            self._decode(row["payload"], ProbeCheckpoint, investigation_id)
+            for row in rows
+        )
+        if any(
+            row["step_sequence"] != checkpoint.step_sequence
+            or row["checkpoint_id"] != checkpoint.checkpoint_id
+            or checkpoint.investigation_id != investigation_id
+            for row, checkpoint in zip(rows, checkpoints, strict=True)
+        ) or any(
+            current.step_sequence <= previous.step_sequence
+            for previous, current in pairwise(checkpoints)
+        ):
+            raise CorruptDurableState(investigation_id)
+        return checkpoints
+
+    async def probe_checkpoints(
+        self,
+        investigation_id: str,
+    ) -> tuple[ProbeCheckpoint, ...]:
+        return await asyncio.to_thread(self._probe_checkpoints, investigation_id)
+
+    def _probe_checkpoints(
+        self,
+        investigation_id: str,
+    ) -> tuple[ProbeCheckpoint, ...]:
+        try:
+            with self._connect() as connection:
+                self._run_locked(connection, investigation_id)
+                return self._probe_checkpoints_locked(connection, investigation_id)
         except DurableRuntimeExceptionTypes:
             raise
         except sqlite3.DatabaseError as error:
@@ -1379,6 +1703,28 @@ class SqliteDurableRuntimeStore:
             category,
             occurred_at,
             delta,
+            True,
+        )
+
+    async def reserve_provider_call(
+        self,
+        lease: LeaseToken,
+        *,
+        call_id: str,
+        occurred_at: datetime,
+        estimated_cost_microunits: int,
+    ) -> CostLedgerSnapshot:
+        return await asyncio.to_thread(
+            self._charge,
+            lease,
+            f"provider-{call_id}",
+            "advisory-provider-reservation",
+            occurred_at,
+            RuntimeCostDelta(
+                provider_calls=1,
+                estimated_cost_microunits=estimated_cost_microunits,
+            ),
+            False,
         )
 
     def _charge(
@@ -1388,6 +1734,7 @@ class SqliteDurableRuntimeStore:
         category: str,
         occurred_at: datetime,
         delta: RuntimeCostDelta,
+        allow_replay: bool,
     ) -> CostLedgerSnapshot:
         occurred_at = _aware_utc(occurred_at)
         try:
@@ -1410,12 +1757,13 @@ class SqliteDurableRuntimeStore:
                         run.investigation_id,
                     )
                     if (
-                        stored.category == category
-                        and stored.occurred_at == occurred_at
+                        allow_replay
+                        and stored.category == category
                         and stored.delta == delta
                     ):
                         return snapshot
-                    raise DurableStateConflict(run.investigation_id, "charge")
+                    operation = "charge" if allow_replay else "reserve_provider_call"
+                    raise DurableStateConflict(run.investigation_id, operation)
                 if occurred_at >= run.limits.deadline_at:
                     raise BudgetExceeded(run.investigation_id, "deadline")
                 proposed = {
@@ -1485,6 +1833,73 @@ class SqliteDurableRuntimeStore:
     async def cost_snapshot(self, investigation_id: str) -> CostLedgerSnapshot:
         return await asyncio.to_thread(self._cost_snapshot, investigation_id)
 
+    async def provider_call_receipts(
+        self,
+        investigation_id: str,
+    ) -> tuple[ProviderCallReceipt, ...]:
+        return await asyncio.to_thread(
+            self._provider_call_receipts,
+            investigation_id,
+        )
+
+    def _provider_call_receipts(
+        self,
+        investigation_id: str,
+    ) -> tuple[ProviderCallReceipt, ...]:
+        try:
+            with self._connect() as connection:
+                run = self._run_locked(connection, investigation_id)
+                self._cost_snapshot_locked(connection, run)
+                rows = connection.execute(
+                    """
+                    SELECT payload
+                    FROM runtime_cost_entries
+                    WHERE investigation_id = ?
+                    ORDER BY sequence
+                    """,
+                    (investigation_id,),
+                ).fetchall()
+                entries = tuple(
+                    self._decode(
+                        row["payload"],
+                        CostLedgerEntry,
+                        investigation_id,
+                    )
+                    for row in rows
+                )
+                receipts: list[ProviderCallReceipt] = []
+                for entry in entries:
+                    if entry.category != "advisory-provider-reservation":
+                        continue
+                    prefix = "provider-"
+                    call_id = entry.entry_id.removeprefix(prefix)
+                    if (
+                        not entry.entry_id.startswith(prefix)
+                        or not call_id
+                        or entry.delta.provider_calls != 1
+                        or entry.delta.probe_count != 0
+                        or entry.delta.evidence_bytes != 0
+                        or entry.delta.controller_cost_units != 0
+                    ):
+                        raise CorruptDurableState(investigation_id)
+                    receipts.append(
+                        ProviderCallReceipt(
+                            order=len(receipts) + 1,
+                            ledger_sequence=entry.sequence,
+                            call_id=call_id,
+                            estimated_cost_microunits=(
+                                entry.delta.estimated_cost_microunits
+                            ),
+                        )
+                    )
+                return tuple(receipts)
+        except DurableRuntimeExceptionTypes:
+            raise
+        except (TypeError, ValueError) as error:
+            raise CorruptDurableState(investigation_id) from error
+        except sqlite3.DatabaseError as error:
+            raise CorruptDurableState(investigation_id) from error
+
     def _cost_snapshot(self, investigation_id: str) -> CostLedgerSnapshot:
         try:
             with self._connect() as connection:
@@ -1498,6 +1913,7 @@ class SqliteDurableRuntimeStore:
 
 DurableRuntimeExceptionTypes = (
     BudgetExceeded,
+    ControllerAuditConflict,
     CorruptDurableState,
     DurableRunConflict,
     DurableRunNotFound,

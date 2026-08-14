@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from enum import StrEnum
+from itertools import pairwise
 from typing import Literal, Protocol
 
 from pydantic import Field, JsonValue, field_validator, model_validator
@@ -111,6 +112,13 @@ class ProbeCheckpointConflict(DurableRuntimeError):
         super().__init__(
             f"probe checkpoint conflicts with durable state: {checkpoint_id}"
         )
+
+
+class ControllerAuditConflict(DurableRuntimeError):
+    def __init__(self, investigation_id: str, sequence: int) -> None:
+        self.investigation_id = investigation_id
+        self.sequence = sequence
+        super().__init__(f"controller audit conflicts with durable state: {sequence}")
 
 
 class UnsupportedRecoveryState(DurableRuntimeError):
@@ -375,8 +383,8 @@ class ProbeResumePlan(StrictModel):
     @model_validator(mode="after")
     def validate_decisions(self) -> ProbeResumePlan:
         sequences = tuple(item.step_sequence for item in self.decisions)
-        if sequences != tuple(range(1, len(sequences) + 1)):
-            raise ValueError("resume decisions must be contiguous")
+        if any(current <= previous for previous, current in pairwise(sequences)):
+            raise ValueError("resume decisions must be strictly ordered")
         escalates = any(
             item.action is ProbeResumeAction.ESCALATE for item in self.decisions
         )
@@ -393,9 +401,8 @@ def build_probe_resume_plan(
 ) -> ProbeResumePlan:
     """Reuse recorded outcomes and repeat only unfinished trusted reads."""
 
-    if tuple(item.step_sequence for item in checkpoints) != tuple(
-        range(1, len(checkpoints) + 1)
-    ):
+    sequences = tuple(item.step_sequence for item in checkpoints)
+    if any(current <= previous for previous, current in pairwise(sequences)):
         raise UnsupportedRecoveryState(investigation_id)
     decisions = tuple(
         ProbeResumeDecision(
@@ -527,6 +534,13 @@ class CostLedgerSnapshot(StrictModel):
         return self
 
 
+class ProviderCallReceipt(StrictModel):
+    order: int = Field(ge=1, le=_MAX_SIGNED_64)
+    ledger_sequence: int = Field(ge=1, le=_MAX_SIGNED_64)
+    call_id: Identifier
+    estimated_cost_microunits: int = Field(ge=0, le=_MAX_SIGNED_64)
+
+
 class DurableRuntimeStore(Protocol):
     async def create_run(
         self,
@@ -534,9 +548,14 @@ class DurableRuntimeStore(Protocol):
         *,
         created_at: datetime,
         limits: RuntimeLimits,
+        runtime_provenance_sha256: str,
     ) -> CreateDurableRunResult: ...
 
     async def get_run(self, investigation_id: str) -> DurableRunRecord: ...
+
+    async def list_runs(self) -> tuple[DurableRunRecord, ...]: ...
+
+    async def runtime_provenance_sha256(self, investigation_id: str) -> str: ...
 
     async def acquire_lease(
         self,
@@ -552,6 +571,13 @@ class DurableRuntimeStore(Protocol):
         *,
         now: datetime,
     ) -> LeaseToken: ...
+
+    async def validate_lease(
+        self,
+        lease: LeaseToken,
+        *,
+        now: datetime,
+    ) -> None: ...
 
     async def release_lease(
         self,
@@ -584,6 +610,7 @@ class DurableRuntimeStore(Protocol):
         request: ProbeRequest,
         replay_safety: ProbeReplaySafety,
         started_at: datetime,
+        now: datetime,
     ) -> ProbeCheckpoint: ...
 
     async def record_probe(
@@ -596,12 +623,30 @@ class DurableRuntimeStore(Protocol):
         recorded_at: datetime,
     ) -> ProbeCheckpoint: ...
 
+    async def record_controller_audit(
+        self,
+        lease: LeaseToken,
+        audit: ControllerAuditRecord,
+        *,
+        recorded_at: datetime,
+    ) -> ControllerAuditRecord: ...
+
+    async def controller_audits(
+        self,
+        investigation_id: str,
+    ) -> tuple[ControllerAuditRecord, ...]: ...
+
     async def resume_plan(
         self,
         investigation_id: str,
         *,
         now: datetime,
     ) -> ProbeResumePlan: ...
+
+    async def probe_checkpoints(
+        self,
+        investigation_id: str,
+    ) -> tuple[ProbeCheckpoint, ...]: ...
 
     async def append_event(
         self,
@@ -658,6 +703,20 @@ class DurableRuntimeStore(Protocol):
         delta: RuntimeCostDelta,
     ) -> CostLedgerSnapshot: ...
 
+    async def reserve_provider_call(
+        self,
+        lease: LeaseToken,
+        *,
+        call_id: str,
+        occurred_at: datetime,
+        estimated_cost_microunits: int,
+    ) -> CostLedgerSnapshot: ...
+
+    async def provider_call_receipts(
+        self,
+        investigation_id: str,
+    ) -> tuple[ProviderCallReceipt, ...]: ...
+
     async def cost_snapshot(self, investigation_id: str) -> CostLedgerSnapshot: ...
 
 
@@ -673,6 +732,7 @@ __all__ = [
     "RUNTIME_TELEMETRY_VERSION",
     "BudgetExceeded",
     "CleanupStatus",
+    "ControllerAuditConflict",
     "CorruptDurableState",
     "CostLedgerEntry",
     "CostLedgerSnapshot",
@@ -694,6 +754,7 @@ __all__ = [
     "ProbeResumeAction",
     "ProbeResumeDecision",
     "ProbeResumePlan",
+    "ProviderCallReceipt",
     "RuntimeCostDelta",
     "RuntimeLimits",
     "RuntimeTelemetryKind",
