@@ -74,9 +74,7 @@ def test_manifest_freezes_complete_eight_case_preregistration() -> None:
     )
     assert manifest.repetition_count == 5
     assert manifest.thresholds.minimum_suite_median_probe_reduction == 1
-    assert (
-        manifest.thresholds.minimum_suite_median_time_reduction_basis_points == 2_000
-    )
+    assert manifest.thresholds.minimum_suite_median_time_reduction_basis_points == 2_000
     assert manifest.thresholds.minimum_suite_median_sufficient_time_reduction_ms == 250
     assert manifest.thresholds.minimum_fallback_case_successful_repetitions == 4
     assert not manifest.thresholds.explanation_completeness_can_demonstrate_value
@@ -96,7 +94,10 @@ def test_manifest_freezes_complete_eight_case_preregistration() -> None:
     controls = tuple(case for case in manifest.cases if case.expectation is None)
     assert len(controls) == 1
     assert controls[0].evidence_profile is QualificationEvidenceProfile.PROVIDER_FAILURE
-    assert decode_contract(canonical_json_bytes(manifest), QualificationSuiteManifest) == manifest
+    assert (
+        decode_contract(canonical_json_bytes(manifest), QualificationSuiteManifest)
+        == manifest
+    )
     assert canonical_sha256(manifest) == canonical_sha256(_manifest())
 
     with pytest.raises(ValidationError):
@@ -137,7 +138,8 @@ def test_validity_flags_cannot_relabel_invalid_evidence() -> None:
     fields = {
         name: True
         for name in QualificationValidity.model_fields
-        if name not in {"integrity_valid", "safety_valid", "eligible_for_value_evidence"}
+        if name
+        not in {"integrity_valid", "safety_valid", "eligible_for_value_evidence"}
     }
     fields["source_binding_valid"] = False
     fields.update(

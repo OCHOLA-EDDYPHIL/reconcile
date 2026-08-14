@@ -93,7 +93,9 @@ def _expectation(
     }
     return PreregisteredExpectedClassification(
         registration_id=f"{case_id}-expectation",
-        metadata_sha256=hashlib.sha256(canonical_json_value_bytes(metadata)).hexdigest(),
+        metadata_sha256=hashlib.sha256(
+            canonical_json_value_bytes(metadata)
+        ).hexdigest(),
         expected_classification=classification,
     )
 
@@ -255,10 +257,13 @@ def build_qualification_manifest(
             )
             for index in range(repetition_count)
         )
-    measurement_count = sum(
-        case.role is QualificationCaseRole.MEASUREMENT
-        for case in PREREGISTERED_QUALIFICATION_CASES
-    ) * repetition_count
+    measurement_count = (
+        sum(
+            case.role is QualificationCaseRole.MEASUREMENT
+            for case in PREREGISTERED_QUALIFICATION_CASES
+        )
+        * repetition_count
+    )
     if thresholds is None:
         thresholds = QualificationThresholds(
             minimum_valid_measurement_results=measurement_count,
@@ -325,7 +330,9 @@ def _validate_repetition(
     if not 1 <= repetition <= manifest.repetition_count:
         raise QualificationAccountingError("repetition is outside the frozen schedule")
     if manifest.lane_orders[repetition - 1] is not lane_order:
-        raise QualificationAccountingError("lane order differs from the frozen schedule")
+        raise QualificationAccountingError(
+            "lane order differs from the frozen schedule"
+        )
 
 
 def _within_budget(run: ComparisonRun, budget: EvidenceBudget) -> bool:
@@ -606,7 +613,9 @@ def build_result_set(
         suite_id=manifest.suite_id,
         manifest_sha256=canonical_sha256(manifest),
         source_revision=manifest.source_revision,
-        results=tuple(sorted(results, key=lambda item: (item.case_id, item.repetition))),
+        results=tuple(
+            sorted(results, key=lambda item: (item.case_id, item.repetition))
+        ),
     )
 
 
@@ -924,10 +933,13 @@ def summarize_qualification(
             > stop.maximum_total_model_cost_nano_units,
         )
     )
-    expected_control_count = sum(
-        case.role is QualificationCaseRole.FAIL_CLOSED_CONTROL
-        for case in manifest.cases
-    ) * manifest.repetition_count
+    expected_control_count = (
+        sum(
+            case.role is QualificationCaseRole.FAIL_CLOSED_CONTROL
+            for case in manifest.cases
+        )
+        * manifest.repetition_count
+    )
     expected_result_count = len(expected_keys)
     complete = observed_keys == expected_keys
     valid = all(
@@ -1003,9 +1015,7 @@ def derive_disposition(
     if summary.classification_parity_failure_count:
         reasons.add(QualificationDispositionReason.CLASSIFICATION_PARITY_FAILED)
     if summary.expectation_mismatch_count:
-        reasons.add(
-            QualificationDispositionReason.PREREGISTERED_EXPECTATION_MISMATCH
-        )
+        reasons.add(QualificationDispositionReason.PREREGISTERED_EXPECTATION_MISMATCH)
     if summary.safety_failure_count:
         reasons.add(QualificationDispositionReason.SAFETY_PARITY_FAILED)
     if summary.control_failure_count:
@@ -1020,8 +1030,10 @@ def derive_disposition(
     )
     if unsafe:
         disposition = QualificationDispositionKind.UNSAFE
-    elif summary.failed_result_count or summary.integrity_invalid_count or (
-        summary.cost_limit_exceeded
+    elif (
+        summary.failed_result_count
+        or summary.integrity_invalid_count
+        or (summary.cost_limit_exceeded)
     ):
         disposition = QualificationDispositionKind.INVALID_RUN
         if summary.failed_result_count:
@@ -1083,7 +1095,9 @@ def derive_disposition(
     )
 
 
-def artifact_identity(artifact_id: str, payload: bytes) -> QualificationArtifactIdentity:
+def artifact_identity(
+    artifact_id: str, payload: bytes
+) -> QualificationArtifactIdentity:
     """Return only bounded identity for an externally retained artifact."""
 
     if not isinstance(payload, bytes):

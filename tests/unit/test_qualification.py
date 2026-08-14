@@ -260,7 +260,9 @@ def _full_results(
         if case.role is QualificationCaseRole.FAIL_CLOSED_CONTROL:
             artifact = QualificationLaneArtifacts(
                 strategy_kind=ComparisonStrategyKind.ADAPTIVE,
-                raw_observations=artifact_identity("control-raw", b"provider-unavailable"),
+                raw_observations=artifact_identity(
+                    "control-raw", b"provider-unavailable"
+                ),
                 normalized_run=None,
                 failure_record=artifact_identity(
                     "control-failure", b"provider-unavailable-normalized"
@@ -342,8 +344,7 @@ def _five_repeat_results(
                     manifest,
                     case,
                     adaptive_better=(
-                        case.case_id == fallback_id
-                        and repetition <= fallback_successes
+                        case.case_id == fallback_id and repetition <= fallback_successes
                     ),
                     repetition=repetition,
                     lane_order=lane_order,
@@ -477,9 +478,7 @@ def test_safety_failure_dominates_efficiency_and_returns_unsafe() -> None:
     manifest = _manifest()
     result_set = build_result_set(manifest, _full_results(manifest, unsafe=True))
     summary = summarize_qualification(manifest, result_set, evaluated_at=NOW)
-    disposition = derive_disposition(
-        manifest, result_set, summary, decided_at=NOW
-    )
+    disposition = derive_disposition(manifest, result_set, summary, decided_at=NOW)
 
     assert summary.safety_failure_count == 1
     assert disposition.disposition is QualificationDispositionKind.UNSAFE
@@ -499,9 +498,7 @@ def test_failed_result_cannot_be_relabelled_as_success() -> None:
     )
     result_set = build_result_set(manifest, tuple(results))
     summary = summarize_qualification(manifest, result_set, evaluated_at=NOW)
-    disposition = derive_disposition(
-        manifest, result_set, summary, decided_at=NOW
-    )
+    disposition = derive_disposition(manifest, result_set, summary, decided_at=NOW)
 
     assert summary.failed_result_count == 1
     assert disposition.disposition is QualificationDispositionKind.INVALID_RUN
@@ -512,9 +509,7 @@ def test_incomplete_result_set_is_inconclusive_and_artifact_payload_is_absent() 
     result = _measurement_result(manifest, _measurement_case(manifest))
     result_set = build_result_set(manifest, (result,))
     summary = summarize_qualification(manifest, result_set, evaluated_at=NOW)
-    disposition = derive_disposition(
-        manifest, result_set, summary, decided_at=NOW
-    )
+    disposition = derive_disposition(manifest, result_set, summary, decided_at=NOW)
     serialized = canonical_json_bytes(result)
 
     assert disposition.disposition is QualificationDispositionKind.INCONCLUSIVE

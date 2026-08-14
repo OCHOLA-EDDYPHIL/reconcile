@@ -179,7 +179,8 @@ class QualificationCaseDefinition(StrictModel):
                 raise ValueError("measurement cases cannot be fail-closed controls")
         elif (
             self.expectation is not None
-            or self.evidence_profile is not QualificationEvidenceProfile.PROVIDER_FAILURE
+            or self.evidence_profile
+            is not QualificationEvidenceProfile.PROVIDER_FAILURE
             or self.opportunity is not QualificationOpportunity.FAIL_CLOSED
         ):
             raise ValueError("fail-closed control fields are inconsistent")
@@ -253,20 +254,22 @@ class QualificationSuiteManifest(StrictModel):
         if not required_scenarios <= {item.scenario.name for item in self.cases}:
             raise ValueError("qualification cases omit a canonical scenario")
         opportunities = {item.opportunity for item in self.cases}
-        if not {
-            QualificationOpportunity.FIXED_EFFICIENCY,
-            QualificationOpportunity.ADAPTIVE_EFFICIENCY,
-            QualificationOpportunity.NEUTRAL,
-            QualificationOpportunity.FAIL_CLOSED,
-        } <= opportunities:
+        if (
+            not {
+                QualificationOpportunity.FIXED_EFFICIENCY,
+                QualificationOpportunity.ADAPTIVE_EFFICIENCY,
+                QualificationOpportunity.NEUTRAL,
+                QualificationOpportunity.FAIL_CLOSED,
+            }
+            <= opportunities
+        ):
             raise ValueError("qualification cases omit a required opportunity")
 
-        measurement_count = sum(
-            item.role is QualificationCaseRole.MEASUREMENT for item in self.cases
-        ) * self.repetition_count
-        if (
-            self.thresholds.minimum_valid_measurement_results > measurement_count
-        ):
+        measurement_count = (
+            sum(item.role is QualificationCaseRole.MEASUREMENT for item in self.cases)
+            * self.repetition_count
+        )
+        if self.thresholds.minimum_valid_measurement_results > measurement_count:
             raise ValueError("valid result threshold exceeds measurement schedule")
         fallback = tuple(
             item
@@ -303,7 +306,9 @@ class QualificationLaneArtifacts(StrictModel):
     @model_validator(mode="after")
     def validate_artifacts(self) -> QualificationLaneArtifacts:
         if (self.normalized_run is None) is (self.failure_record is None):
-            raise ValueError("lane artifacts require one normalized run or failure record")
+            raise ValueError(
+                "lane artifacts require one normalized run or failure record"
+            )
         return self
 
 
@@ -677,7 +682,9 @@ class QualificationDisposition(StrictModel):
         if self.reasons != tuple(sorted(self.reasons, key=lambda item: item.value)) or (
             len(self.reasons) != len(set(self.reasons))
         ):
-            raise ValueError("qualification disposition reasons must be unique and sorted")
+            raise ValueError(
+                "qualification disposition reasons must be unique and sorted"
+            )
         allowed = {
             QualificationDispositionKind.ADAPTIVE_VALUE_DEMONSTRATED: {
                 QualificationDispositionReason.ADAPTIVE_BENEFIT_THRESHOLD_MET,
