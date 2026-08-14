@@ -1,0 +1,394 @@
+{
+  "$defs": {
+    "ComparisonStrategyKind": {
+      "enum": [
+        "FIXED",
+        "ADAPTIVE"
+      ],
+      "title": "ComparisonStrategyKind",
+      "type": "string"
+    },
+    "QualificationLaneMetrics": {
+      "additionalProperties": false,
+      "properties": {
+        "classification_coverage_count": {
+          "maximum": 1024,
+          "minimum": 0,
+          "title": "Classification Coverage Count",
+          "type": "integer"
+        },
+        "complete_explanation_count": {
+          "maximum": 1024,
+          "minimum": 0,
+          "title": "Complete Explanation Count",
+          "type": "integer"
+        },
+        "controller_cost_units": {
+          "maximum": 9223372036854775807,
+          "minimum": 0,
+          "title": "Controller Cost Units",
+          "type": "integer"
+        },
+        "controller_result_bytes": {
+          "maximum": 9223372036854775807,
+          "minimum": 0,
+          "title": "Controller Result Bytes",
+          "type": "integer"
+        },
+        "duplicate_probe_count": {
+          "maximum": 9223372036854775807,
+          "minimum": 0,
+          "title": "Duplicate Probe Count",
+          "type": "integer"
+        },
+        "executed_probe_count": {
+          "maximum": 9223372036854775807,
+          "minimum": 0,
+          "title": "Executed Probe Count",
+          "type": "integer"
+        },
+        "input_token_count": {
+          "maximum": 9223372036854775807,
+          "minimum": 0,
+          "title": "Input Token Count",
+          "type": "integer"
+        },
+        "measured_model_usage_count": {
+          "maximum": 1024,
+          "minimum": 0,
+          "title": "Measured Model Usage Count",
+          "type": "integer"
+        },
+        "model_call_count": {
+          "maximum": 9223372036854775807,
+          "minimum": 0,
+          "title": "Model Call Count",
+          "type": "integer"
+        },
+        "model_cost_nano_units": {
+          "maximum": 9223372036854775807,
+          "minimum": 0,
+          "title": "Model Cost Nano Units",
+          "type": "integer"
+        },
+        "output_token_count": {
+          "maximum": 9223372036854775807,
+          "minimum": 0,
+          "title": "Output Token Count",
+          "type": "integer"
+        },
+        "planned_probe_count": {
+          "maximum": 9223372036854775807,
+          "minimum": 0,
+          "title": "Planned Probe Count",
+          "type": "integer"
+        },
+        "run_count": {
+          "maximum": 1024,
+          "minimum": 0,
+          "title": "Run Count",
+          "type": "integer"
+        },
+        "strategy_kind": {
+          "$ref": "#/$defs/ComparisonStrategyKind"
+        },
+        "sufficient_time_observation_count": {
+          "maximum": 1024,
+          "minimum": 0,
+          "title": "Sufficient Time Observation Count",
+          "type": "integer"
+        },
+        "total_elapsed_ms": {
+          "maximum": 9223372036854775807,
+          "minimum": 0,
+          "title": "Total Elapsed Ms",
+          "type": "integer"
+        },
+        "total_time_to_sufficient_evidence_ms": {
+          "maximum": 9223372036854775807,
+          "minimum": 0,
+          "title": "Total Time To Sufficient Evidence Ms",
+          "type": "integer"
+        },
+        "total_token_count": {
+          "maximum": 9223372036854775807,
+          "minimum": 0,
+          "title": "Total Token Count",
+          "type": "integer"
+        },
+        "unavailable_model_usage_count": {
+          "maximum": 1024,
+          "minimum": 0,
+          "title": "Unavailable Model Usage Count",
+          "type": "integer"
+        },
+        "unknown_outcome_count": {
+          "maximum": 1024,
+          "minimum": 0,
+          "title": "Unknown Outcome Count",
+          "type": "integer"
+        },
+        "unnecessary_probe_count": {
+          "maximum": 9223372036854775807,
+          "minimum": 0,
+          "title": "Unnecessary Probe Count",
+          "type": "integer"
+        },
+        "unsupported_probe_count": {
+          "maximum": 9223372036854775807,
+          "minimum": 0,
+          "title": "Unsupported Probe Count",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "strategy_kind",
+        "run_count",
+        "classification_coverage_count",
+        "unknown_outcome_count",
+        "planned_probe_count",
+        "executed_probe_count",
+        "sufficient_time_observation_count",
+        "total_time_to_sufficient_evidence_ms",
+        "unsupported_probe_count",
+        "unnecessary_probe_count",
+        "duplicate_probe_count",
+        "complete_explanation_count",
+        "controller_cost_units",
+        "controller_result_bytes",
+        "total_elapsed_ms",
+        "measured_model_usage_count",
+        "unavailable_model_usage_count",
+        "model_call_count",
+        "input_token_count",
+        "output_token_count",
+        "total_token_count",
+        "model_cost_nano_units"
+      ],
+      "title": "QualificationLaneMetrics",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "adaptive_benefit_result_count": {
+      "maximum": 1024,
+      "minimum": 0,
+      "title": "Adaptive Benefit Result Count",
+      "type": "integer"
+    },
+    "adaptive_metrics": {
+      "$ref": "#/$defs/QualificationLaneMetrics"
+    },
+    "classification_parity_failure_count": {
+      "maximum": 1024,
+      "minimum": 0,
+      "title": "Classification Parity Failure Count",
+      "type": "integer"
+    },
+    "complete_result_set": {
+      "title": "Complete Result Set",
+      "type": "boolean"
+    },
+    "completed_measurement_count": {
+      "maximum": 1024,
+      "minimum": 0,
+      "title": "Completed Measurement Count",
+      "type": "integer"
+    },
+    "control_failure_count": {
+      "maximum": 1024,
+      "minimum": 0,
+      "title": "Control Failure Count",
+      "type": "integer"
+    },
+    "cost_limit_exceeded": {
+      "title": "Cost Limit Exceeded",
+      "type": "boolean"
+    },
+    "eligible_measurement_count": {
+      "maximum": 1024,
+      "minimum": 0,
+      "title": "Eligible Measurement Count",
+      "type": "integer"
+    },
+    "equal_efficiency_result_count": {
+      "maximum": 1024,
+      "minimum": 0,
+      "title": "Equal Efficiency Result Count",
+      "type": "integer"
+    },
+    "evaluated_at": {
+      "format": "date-time",
+      "title": "Evaluated At",
+      "type": "string"
+    },
+    "expectation_mismatch_count": {
+      "maximum": 1024,
+      "minimum": 0,
+      "title": "Expectation Mismatch Count",
+      "type": "integer"
+    },
+    "expected_control_count": {
+      "maximum": 1024,
+      "minimum": 1,
+      "title": "Expected Control Count",
+      "type": "integer"
+    },
+    "expected_result_count": {
+      "maximum": 1024,
+      "minimum": 1,
+      "title": "Expected Result Count",
+      "type": "integer"
+    },
+    "failed_result_count": {
+      "maximum": 1024,
+      "minimum": 0,
+      "title": "Failed Result Count",
+      "type": "integer"
+    },
+    "fallback_heterogeneous_success_count": {
+      "maximum": 16,
+      "minimum": 0,
+      "title": "Fallback Heterogeneous Success Count",
+      "type": "integer"
+    },
+    "fixed_efficiency_result_count": {
+      "maximum": 1024,
+      "minimum": 0,
+      "title": "Fixed Efficiency Result Count",
+      "type": "integer"
+    },
+    "fixed_metrics": {
+      "$ref": "#/$defs/QualificationLaneMetrics"
+    },
+    "integrity_invalid_count": {
+      "maximum": 1024,
+      "minimum": 0,
+      "title": "Integrity Invalid Count",
+      "type": "integer"
+    },
+    "manifest_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Manifest Sha256",
+      "type": "string"
+    },
+    "mixed_efficiency_result_count": {
+      "maximum": 1024,
+      "minimum": 0,
+      "title": "Mixed Efficiency Result Count",
+      "type": "integer"
+    },
+    "observed_result_count": {
+      "maximum": 1024,
+      "minimum": 0,
+      "title": "Observed Result Count",
+      "type": "integer"
+    },
+    "passed_control_count": {
+      "maximum": 1024,
+      "minimum": 0,
+      "title": "Passed Control Count",
+      "type": "integer"
+    },
+    "result_set_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Result Set Sha256",
+      "type": "string"
+    },
+    "safety_failure_count": {
+      "maximum": 1024,
+      "minimum": 0,
+      "title": "Safety Failure Count",
+      "type": "integer"
+    },
+    "schema_version": {
+      "const": "reconcile/qualification-summary/v1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "source_revision": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Source Revision",
+      "type": "string"
+    },
+    "suite_id": {
+      "maxLength": 128,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+      "title": "Suite Id",
+      "type": "string"
+    },
+    "suite_median_probe_reduction": {
+      "maximum": 9223372036854775807,
+      "minimum": -9223372036854775807,
+      "title": "Suite Median Probe Reduction",
+      "type": "integer"
+    },
+    "suite_median_sufficient_time_reduction_ms": {
+      "anyOf": [
+        {
+          "maximum": 9223372036854775807,
+          "minimum": -9223372036854775807,
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Suite Median Sufficient Time Reduction Ms"
+    },
+    "suite_median_time_reduction_basis_points": {
+      "anyOf": [
+        {
+          "maximum": 9223372036854775807,
+          "minimum": -9223372036854775807,
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Suite Median Time Reduction Basis Points"
+    },
+    "valid_for_value_evidence": {
+      "title": "Valid For Value Evidence",
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "schema_version",
+    "suite_id",
+    "manifest_sha256",
+    "result_set_sha256",
+    "source_revision",
+    "evaluated_at",
+    "expected_result_count",
+    "observed_result_count",
+    "completed_measurement_count",
+    "eligible_measurement_count",
+    "expected_control_count",
+    "passed_control_count",
+    "failed_result_count",
+    "integrity_invalid_count",
+    "safety_failure_count",
+    "classification_parity_failure_count",
+    "expectation_mismatch_count",
+    "control_failure_count",
+    "adaptive_benefit_result_count",
+    "fixed_efficiency_result_count",
+    "equal_efficiency_result_count",
+    "mixed_efficiency_result_count",
+    "suite_median_probe_reduction",
+    "fallback_heterogeneous_success_count",
+    "fixed_metrics",
+    "adaptive_metrics",
+    "complete_result_set",
+    "cost_limit_exceeded",
+    "valid_for_value_evidence"
+  ],
+  "title": "QualificationSummary",
+  "type": "object"
+}
