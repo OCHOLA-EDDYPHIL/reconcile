@@ -84,6 +84,7 @@ from reconcile.scenarios.storage import (
     StorageScenarioDefinition,
     execute_storage_baseline,
 )
+from reconcile.security import contains_sensitive_material
 
 _IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]*$")
 _MAX_RUN_ID_LENGTH = 128
@@ -211,6 +212,7 @@ def _validated_run_id(run_id: str | None) -> str:
         type(run_id) is not str
         or not 1 <= len(run_id) <= _MAX_RUN_ID_LENGTH
         or _IDENTIFIER.fullmatch(run_id) is None
+        or contains_sensitive_material(run_id)
     ):
         raise _workflow_error(ScenarioWorkflowErrorCategory.INVALID_CONFIGURATION)
     return run_id

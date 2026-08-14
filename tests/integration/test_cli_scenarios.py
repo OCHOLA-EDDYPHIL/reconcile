@@ -341,6 +341,25 @@ def test_adaptive_requires_one_explicit_provider_source(tmp_path: Path) -> None:
     assert str(tmp_path) not in str(captured.value)
 
 
+def test_scenario_run_identifier_rejects_secret_signatures_before_setup(
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(ScenarioWorkflowError) as captured:
+        asyncio.run(
+            run_one(
+                ScenarioName.STORAGE,
+                ScenarioMode.FIXED,
+                workspace=tmp_path,
+                run_id="token:private-marker",
+            )
+        )
+
+    assert (
+        captured.value.category is ScenarioWorkflowErrorCategory.INVALID_CONFIGURATION
+    )
+    assert list(tmp_path.iterdir()) == []
+
+
 def test_zero_call_adaptive_usage_is_never_fabricated() -> None:
     class _ZeroCallResult:
         model_invocation_count = 0

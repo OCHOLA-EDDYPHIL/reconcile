@@ -39,7 +39,7 @@ _SENSITIVE_KEY_NAMES = frozenset(
 _ASSIGNMENT_SECRET = re.compile(
     r"(?i)\b(api[ _-]?key|access[ _-]?key|authorization|credential|"
     r"password|private[ _-]?key|refresh[ _-]?token|secret|session[ _-]?key|"
-    r"token)\b(\s*[:=]\s*)([^\s,;]+)"
+    r"token)\b(\s*[:=]\s*)(?!\[REDACTED\])([^\s,;]+)"
 )
 _AUTHORIZATION_SECRET = re.compile(r"(?i)\b(bearer|basic)\s+[A-Za-z0-9._~+/=-]{8,}")
 _JWT_SECRET = re.compile(

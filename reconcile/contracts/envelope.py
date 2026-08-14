@@ -17,6 +17,7 @@ from reconcile.contracts.base import (
     JsonObject,
     NonEmptySmallJsonObject,
     NonEmptyText,
+    SanitizedText,
     StrictModel,
     canonical_json_value_bytes,
     reject_sensitive_keys,
@@ -173,12 +174,13 @@ class ProbeRequest(StrictModel):
     capability_version: Identifier
     relevant_effect_ids: tuple[Identifier, ...] = Field(min_length=1, max_length=64)
     arguments: ArgumentsObject = Field(default_factory=dict)
-    rationale: NonEmptyText
+    rationale: SanitizedText
 
     @model_validator(mode="after")
     def validate_request(self) -> ProbeRequest:
         if len(self.relevant_effect_ids) != len(set(self.relevant_effect_ids)):
             raise ValueError("relevant effect identifiers must be unique")
         reject_sensitive_keys(self.arguments)
+        reject_sensitive_values(self.arguments)
         _reject_target_coordinates(self.arguments)
         return self

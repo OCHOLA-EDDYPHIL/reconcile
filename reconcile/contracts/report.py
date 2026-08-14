@@ -10,7 +10,7 @@ from pydantic import Field, model_validator
 from reconcile.contracts.base import (
     AwareDatetime,
     Identifier,
-    NonEmptyText,
+    SanitizedText,
     Sha256Digest,
     StrictModel,
 )
@@ -258,7 +258,7 @@ class MissingEvidence(StrictModel):
 
 
 class AdvisoryExplanation(StrictModel):
-    text: NonEmptyText
+    text: SanitizedText
     cited_evidence_ids: tuple[Identifier, ...] = Field(
         min_length=1,
         max_length=64,
@@ -304,7 +304,7 @@ class InvestigationReport(StrictModel):
         default_factory=tuple,
         max_length=64,
     )
-    limitations: tuple[NonEmptyText, ...] = Field(
+    limitations: tuple[SanitizedText, ...] = Field(
         default_factory=tuple,
         max_length=64,
     )

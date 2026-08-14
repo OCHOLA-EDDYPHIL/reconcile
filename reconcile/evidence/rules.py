@@ -132,6 +132,7 @@ class RuleRequest(StrictModel):
         if len(self.relevant_effect_ids) != len(set(self.relevant_effect_ids)):
             raise ValueError("relevant effect identifiers must be unique")
         reject_sensitive_keys(self.arguments)
+        reject_sensitive_values(self.arguments)
         return self
 
 

@@ -7,7 +7,7 @@ from datetime import datetime, timedelta
 from enum import StrEnum
 from typing import Literal, Protocol
 
-from pydantic import Field, field_validator, model_validator
+from pydantic import Field, JsonValue, field_validator, model_validator
 
 from reconcile.contracts.api import InvestigationEvent
 from reconcile.contracts.base import (
@@ -170,10 +170,12 @@ class RuntimeTelemetryKind(StrEnum):
 
 
 def sanitize_runtime_telemetry_attributes(
-    attributes: SmallJsonObject,
-) -> SmallJsonObject:
+    attributes: object,
+) -> dict[str, JsonValue]:
     """Apply the repository telemetry boundary policy through one callable seam."""
 
+    if not isinstance(attributes, dict):
+        raise TypeError("telemetry attributes must be a JSON object")
     reject_sensitive_keys(attributes)
     sanitized = redact_boundary_value(attributes)
     if not isinstance(sanitized, dict):
@@ -440,9 +442,9 @@ class RuntimeTelemetryRecord(StrictModel):
     requested_action: RequestedAction | None = None
     attributes: SmallJsonObject = Field(default_factory=dict)
 
-    @field_validator("attributes")
+    @field_validator("attributes", mode="before")
     @classmethod
-    def sanitize_attributes(cls, value: SmallJsonObject) -> SmallJsonObject:
+    def sanitize_attributes(cls, value: object) -> object:
         return sanitize_runtime_telemetry_attributes(value)
 
     @model_validator(mode="after")

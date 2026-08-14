@@ -355,6 +355,8 @@ def test_provider_schema_is_minimal_and_has_no_authority_fields() -> None:
             "requested_action",
             "retry_authorized",
             "compensation",
+            "cleanup",
+            "cleanup_outcome",
             "private_reasoning",
             "thoughts",
         }.isdisjoint(_schema_property_names(provider_schema))

@@ -850,6 +850,7 @@ def test_terminal_event_is_not_yielded_when_snapshot_disagrees() -> None:
     ("investigation_id", "after", "max_reconnects"),
     (
         ("bad id", 0, 0),
+        ("token:private-marker", 0, 0),
         ("investigation-7", -1, 0),
         ("investigation-7", 1025, 0),
         ("investigation-7", True, 0),

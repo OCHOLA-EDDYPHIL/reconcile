@@ -47,6 +47,7 @@ from reconcile.progress import (
     StrategyProgress,
     StrategyProgressStage,
 )
+from reconcile.security import contains_sensitive_material
 
 _MAX_PLAN_STEPS = 64
 _IDENTIFIER_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]*$")
@@ -347,6 +348,7 @@ def _validate_identifier(value: str, label: str) -> None:
         type(value) is not str
         or not 1 <= len(value) <= 128
         or _IDENTIFIER_PATTERN.fullmatch(value) is None
+        or contains_sensitive_material(value)
     ):
         raise ValueError(f"{label} must be a bounded identifier")
 
