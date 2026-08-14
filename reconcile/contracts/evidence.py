@@ -13,6 +13,7 @@ from reconcile.contracts.base import (
     NonEmptyText,
     StrictModel,
     reject_sensitive_keys,
+    reject_sensitive_values,
 )
 from reconcile.contracts.common import (
     EvidenceProvenance,
@@ -77,6 +78,8 @@ class NormalizedEvidence(StrictModel):
         if len(effect_ids) != len(set(effect_ids)):
             raise ValueError("effect assertions must have unique identifiers")
         reject_sensitive_keys(self.correlation)
+        reject_sensitive_values(self.correlation)
+        reject_sensitive_values(self.provenance.source_record)
         if (
             not self.freshness.valid_from
             <= self.observed_at

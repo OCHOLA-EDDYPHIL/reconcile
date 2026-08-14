@@ -14,6 +14,7 @@ from reconcile.contracts.base import (
     SmallJsonObject,
     StrictModel,
     reject_sensitive_keys,
+    reject_sensitive_values,
 )
 from reconcile.contracts.common import Classification
 from reconcile.contracts.evidence import EvidenceDecision
@@ -65,6 +66,7 @@ class ApiError(StrictModel):
     @model_validator(mode="after")
     def validate_details(self) -> ApiError:
         reject_sensitive_keys(self.details)
+        reject_sensitive_values(self.details)
         _reject_internal_error_details(self.details)
         return self
 

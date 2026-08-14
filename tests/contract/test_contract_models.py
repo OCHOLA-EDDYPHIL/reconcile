@@ -206,6 +206,37 @@ def test_probe_request_rejects_top_level_target_binding() -> None:
         ProbeRequest.model_validate_json(json.dumps(payload))
 
 
+@pytest.mark.parametrize(
+    ("path", "value"),
+    [
+        (("context", "invocation", "arguments", "note"), "Bearer hidden-value"),
+        (("context", "correlation_fields", "request_id"), "token=hidden-value"),
+        (("target", "resource", "label"), "eyJabcdefgh.ijklmnop.qrstuvwx"),
+        (
+            ("expected_effects", 0, "description"),
+            "-----BEGIN PRIVATE KEY-----\nmaterial\n-----END PRIVATE KEY-----",
+        ),
+    ],
+)
+def test_execution_envelope_rejects_secret_signatures_in_innocuous_fields(
+    path: tuple[str | int, ...],
+    value: str,
+) -> None:
+    payload = _payload(make_envelope())
+    current: object = payload
+    for key in path[:-1]:
+        current = current[key]  # type: ignore[index]
+    current[path[-1]] = value  # type: ignore[index]
+    if path[-2:] == ("arguments", "note"):
+        arguments = payload["context"]["invocation"]["arguments"]
+        payload["context"]["invocation"]["arguments_sha256"] = hashlib.sha256(
+            canonical_json_value_bytes(arguments)
+        ).hexdigest()
+
+    with pytest.raises(ValidationError, match="secret-bearing values"):
+        ExecutionEnvelope.model_validate_json(json.dumps(payload))
+
+
 def test_raw_observation_reference_is_opaque_not_a_credentialed_url() -> None:
     with pytest.raises(ValidationError):
         RawObservationReference(

@@ -19,6 +19,7 @@ from reconcile.contracts import (
 )
 from reconcile.controller import ControllerAuditRecord
 from reconcile.evidence.classification import CoreEvaluation
+from reconcile.security import redact_untrusted_text
 
 
 def build_report(
@@ -95,6 +96,11 @@ def build_report(
         }
         if not set(advisory_explanation.cited_evidence_ids) <= explainable:
             advisory_explanation = None
+        else:
+            advisory_explanation = AdvisoryExplanation(
+                text=redact_untrusted_text(advisory_explanation.text),
+                cited_evidence_ids=advisory_explanation.cited_evidence_ids,
+            )
 
     limitations = ("No mutation was retried or compensated.",)
     return InvestigationReport(

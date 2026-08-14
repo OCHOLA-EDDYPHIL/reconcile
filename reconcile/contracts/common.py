@@ -18,6 +18,7 @@ from reconcile.contracts.base import (
     StrictModel,
     canonical_json_value_bytes,
     reject_sensitive_keys,
+    reject_sensitive_values,
 )
 
 
@@ -43,6 +44,12 @@ class AmbiguousExecution(StrictModel):
     observed_at: AwareDatetime
     detail: ShortText | None = None
 
+    @model_validator(mode="after")
+    def validate_no_credentials(self) -> AmbiguousExecution:
+        if self.detail is not None:
+            reject_sensitive_values(self.detail)
+        return self
+
 
 class CapabilityRef(StrictModel):
     name: Identifier
@@ -58,6 +65,8 @@ class TargetBinding(StrictModel):
     def validate_no_credentials(self) -> TargetBinding:
         reject_sensitive_keys(self.scope)
         reject_sensitive_keys(self.resource)
+        reject_sensitive_values(self.scope)
+        reject_sensitive_values(self.resource)
         return self
 
 
@@ -70,6 +79,7 @@ class TargetConstraint(StrictModel):
     @model_validator(mode="after")
     def validate_no_credentials(self) -> TargetConstraint:
         reject_sensitive_keys(self.scope)
+        reject_sensitive_values(self.scope)
         return self
 
 
@@ -86,6 +96,7 @@ class OriginalInvocation(StrictModel):
     @model_validator(mode="after")
     def validate_arguments_digest(self) -> OriginalInvocation:
         reject_sensitive_keys(self.arguments)
+        reject_sensitive_values(self.arguments)
         digest = hashlib.sha256(canonical_json_value_bytes(self.arguments)).hexdigest()
         if digest != self.arguments_sha256:
             raise ValueError("invocation argument digest does not match arguments")
@@ -127,6 +138,7 @@ class EnvelopeContext(StrictModel):
         if len(identities) != len(set(identities)):
             raise ValueError("enabled capability identities must be unique")
         reject_sensitive_keys(self.correlation_fields)
+        reject_sensitive_values(self.correlation_fields)
         return self
 
 
