@@ -33,6 +33,7 @@ from reconcile.controller import (
     probe_request_sha256,
 )
 from reconcile.persistence.events import EventJournalSnapshot
+from reconcile.security import redact_boundary_value
 
 DURABLE_RUN_VERSION = "reconcile/durable-run/v1"
 DURABLE_LEASE_VERSION = "reconcile/durable-lease/v1"
@@ -174,7 +175,10 @@ def sanitize_runtime_telemetry_attributes(
     """Apply the repository telemetry boundary policy through one callable seam."""
 
     reject_sensitive_keys(attributes)
-    return attributes
+    sanitized = redact_boundary_value(attributes)
+    if not isinstance(sanitized, dict):
+        raise TypeError("telemetry attributes must remain a JSON object")
+    return sanitized
 
 
 class RuntimeLimits(StrictModel):

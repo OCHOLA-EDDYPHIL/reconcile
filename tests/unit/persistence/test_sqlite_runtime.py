@@ -513,6 +513,20 @@ def test_structured_telemetry_is_secret_free_ordered_and_durable(
                 attributes={"access_token": "not-allowed"},
             )
 
+        redacted = RuntimeTelemetryRecord(
+            schema_version=RUNTIME_TELEMETRY_VERSION,
+            investigation_id=envelope.investigation_id,
+            telemetry_id="telemetry-3",
+            sequence=2,
+            kind=RuntimeTelemetryKind.RUN,
+            occurred_at=NOW + timedelta(seconds=2),
+            trace_id="trace-1",
+            span_id="span-3",
+            outcome="active",
+            attributes={"provider_detail": "Authorization: Bearer abcdefghijk"},
+        )
+        assert redacted.attributes == {"provider_detail": "Authorization: [REDACTED]"}
+
     asyncio.run(scenario())
 
 
