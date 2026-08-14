@@ -24,6 +24,7 @@ from reconcile.contracts import (
     ExecutionEnvelope,
     ObservationCapability,
     OperationStatus,
+    ProbeOutcome,
     ProbeRequest,
     RequestedAction,
     TargetConstraint,
@@ -46,6 +47,15 @@ from reconcile.evidence import (
     TargetRuleRegistration,
     TargetRuleRegistry,
 )
+from reconcile.progress import (
+    EvidenceProgress,
+    ProbeProgress,
+    ProbeProgressStage,
+    ProgressDeliveryError,
+    ProgressDispatcher,
+    StrategyProgress,
+    StrategyProgressStage,
+)
 from tests.contract._factories import make_envelope, make_target
 
 pytestmark = pytest.mark.unit
@@ -67,6 +77,16 @@ class _Clock:
 
     def advance_ms(self, milliseconds: int) -> None:
         self.seconds += milliseconds / 1_000
+
+
+class _TickingNowClock(_Clock):
+    def __init__(self) -> None:
+        super().__init__()
+        self.now_calls = 0
+
+    def now(self) -> datetime:
+        self.now_calls += 1
+        return super().now() + timedelta(microseconds=self.now_calls)
 
 
 class _Handler:
@@ -534,13 +554,12 @@ def test_missing_target_rule_is_counted_as_unsupported_and_fails_required_step()
 
 
 def test_pre_requested_cancellation_is_reported_without_handler_dispatch() -> None:
-    async def scenario() -> None:
+    async def execute(progress_emitter=None):
         clock = _Clock()
         handler = _Handler(clock, (_observation("committed"),))
         capabilities, rules = _registries({"read": (handler, True)})
         cancellation = asyncio.Event()
         cancellation.set()
-
         result = await execute_fixed_plan(
             _envelope(("read",)),
             capabilities,
@@ -548,12 +567,76 @@ def test_pre_requested_cancellation_is_reported_without_handler_dispatch() -> No
             _plan(("read",), sufficient=(Classification.COMMITTED,)),
             clock=clock,
             cancellation_event=cancellation,
+            progress_emitter=progress_emitter,
         )
+        return result, handler
+
+    async def scenario() -> None:
+        baseline, _ = await execute()
+        observed = []
+        result, handler = await execute(observed.append)
 
         assert result.stop_reason is FixedBaselineStopReason.CANCELLED
         assert result.classification is Classification.UNKNOWN
         assert result.probe_count_used == 0
         assert handler.calls == []
+        assert canonical_json_bytes(result.report) == canonical_json_bytes(
+            baseline.report
+        )
+        completed = next(
+            event
+            for event in observed
+            if type(event) is ProbeProgress
+            and event.stage is ProbeProgressStage.COMPLETED
+        )
+        assert completed.outcome is ProbeOutcome.CANCELLED
+        assert completed.capability_name is None
+        assert completed.capability_version is None
+        assert completed.request_sha256 is None
+
+    asyncio.run(scenario())
+
+
+def test_budget_terminal_progress_is_observational_only() -> None:
+    async def execute(progress_emitter=None):
+        clock = _Clock()
+        first = _Handler(clock, (_observation("weak", record="first"),))
+        second = _Handler(clock, (_observation("weak", record="second"),))
+        capabilities, rules = _registries(
+            {"first-read": (first, True), "second-read": (second, True)}
+        )
+        result = await execute_fixed_plan(
+            _envelope(("first-read", "second-read"), max_probes=1),
+            capabilities,
+            rules,
+            _plan(("first-read", "second-read")),
+            clock=clock,
+            progress_emitter=progress_emitter,
+        )
+        return result, first, second
+
+    async def scenario() -> None:
+        baseline, _, _ = await execute()
+        observed = []
+        result, first, second = await execute(observed.append)
+
+        assert result.stop_reason is FixedBaselineStopReason.BUDGET_EXHAUSTED
+        assert result.classification is Classification.UNKNOWN
+        assert len(first.calls) == 1
+        assert second.calls == []
+        assert canonical_json_bytes(result.report) == canonical_json_bytes(
+            baseline.report
+        )
+        completed = [
+            event
+            for event in observed
+            if type(event) is ProbeProgress
+            and event.stage is ProbeProgressStage.COMPLETED
+        ][-1]
+        assert completed.outcome is ProbeOutcome.BUDGET_EXHAUSTED
+        assert completed.capability_name is None
+        assert completed.capability_version is None
+        assert completed.request_sha256 is None
 
     asyncio.run(scenario())
 
@@ -608,3 +691,89 @@ def test_plan_is_immutable_and_unknown_cannot_be_a_sufficient_state() -> None:
             steps=(step,),
             sufficient_classifications=(Classification.UNKNOWN,),
         )
+
+
+def test_progress_is_ordered_sanitized_and_cannot_control_fixed_execution() -> None:
+    async def execute(progress_emitter=None):
+        clock = _TickingNowClock()
+        handler = _Handler(clock, (_observation("committed"),))
+        capabilities, rules = _registries({"authoritative-read": (handler, True)})
+        result = await execute_fixed_plan(
+            _envelope(("authoritative-read",)),
+            capabilities,
+            rules,
+            _plan(
+                ("authoritative-read",),
+                rationales=("Private rationale must not become progress.",),
+                sufficient=(Classification.COMMITTED,),
+            ),
+            clock=clock,
+            progress_emitter=progress_emitter,
+        )
+        return result, handler, clock
+
+    async def scenario() -> None:
+        baseline, _, baseline_clock = await execute()
+        release = asyncio.Event()
+        observed = []
+
+        async def slow_callback(event) -> None:
+            observed.append(event)
+            if len(observed) == 1:
+                await release.wait()
+
+        dispatcher = ProgressDispatcher(slow_callback, flush_timeout_seconds=0.5)
+        instrumented, handler, instrumented_clock = await asyncio.wait_for(
+            execute(dispatcher.emit),
+            timeout=0.2,
+        )
+        assert instrumented.classification is Classification.COMMITTED
+        assert len(handler.calls) == 1
+        release.set()
+        await dispatcher.finish()
+
+        assert canonical_json_bytes(instrumented.report) == canonical_json_bytes(
+            baseline.report
+        )
+        assert instrumented_clock.now_calls == baseline_clock.now_calls
+        assert [type(event) for event in observed] == [
+            StrategyProgress,
+            ProbeProgress,
+            ProbeProgress,
+            EvidenceProgress,
+            StrategyProgress,
+        ]
+        assert observed[0].stage is StrategyProgressStage.STARTED
+        assert observed[1].stage is ProbeProgressStage.REQUESTED
+        assert observed[2].stage is ProbeProgressStage.COMPLETED
+        assert observed[-1].stage is StrategyProgressStage.COMPLETED
+        assert observed[2].evidence_ids == (observed[3].evidence_id,)
+        serialized = json.dumps(
+            [event.model_dump(mode="json") for event in observed],
+            sort_keys=True,
+        )
+        for private_value in (
+            "order-7",
+            "demo-project",
+            "demo-bucket",
+            "receipts/order-7.json",
+            "Private rationale",
+        ):
+            assert private_value not in serialized
+
+        async def failing_callback(_event) -> None:
+            raise RuntimeError("private callback failure detail")
+
+        failed_dispatcher = ProgressDispatcher(failing_callback)
+        completed, failed_handler, _ = await execute(failed_dispatcher.emit)
+        assert completed.classification is Classification.COMMITTED
+        assert len(failed_handler.calls) == 1
+        with pytest.raises(
+            ProgressDeliveryError,
+            match="investigation progress delivery failed",
+        ) as captured:
+            await failed_dispatcher.finish()
+        assert captured.value.__cause__ is None
+        assert "private callback failure detail" not in str(captured.value)
+
+    asyncio.run(scenario())

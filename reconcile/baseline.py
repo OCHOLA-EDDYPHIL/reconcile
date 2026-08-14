@@ -12,12 +12,16 @@ from datetime import UTC, datetime
 from enum import StrEnum
 
 from reconcile.contracts import (
+    ActionGateResult,
     Classification,
+    ComparisonStrategyKind,
     EvidenceReason,
     ExecutionEnvelope,
     InvestigationReport,
+    MissingEvidence,
     ProbeOutcome,
     ProbeRequest,
+    RequestedAction,
     canonical_json_bytes,
     decode_contract,
 )
@@ -35,9 +39,23 @@ from reconcile.evidence import (
     ProbeRun,
     TargetRuleRegistry,
 )
+from reconcile.progress import (
+    EvidenceProgress,
+    ProbeProgress,
+    ProbeProgressStage,
+    ProgressEmitter,
+    StrategyProgress,
+    StrategyProgressStage,
+)
 
 _MAX_PLAN_STEPS = 64
 _IDENTIFIER_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]*$")
+
+
+def _progress_occurred_at() -> datetime:
+    """Timestamp observation without touching the authoritative execution clock."""
+
+    return datetime.now(UTC)
 
 
 class FixedBaselineStopReason(StrEnum):
@@ -353,6 +371,36 @@ def _progress_sha256(evaluation: CoreEvaluation) -> str:
     return hashlib.sha256(canonical_json_value_bytes(material)).hexdigest()
 
 
+def _progress_state(
+    classification: Classification | None,
+    action_gates: tuple[ActionGateResult, ...],
+    missing_evidence: tuple[MissingEvidence, ...],
+) -> tuple[Classification, bool, bool, tuple[str, ...]]:
+    if classification is None:
+        raise RuntimeError("progress requires a deterministic classification")
+    continuation = next(
+        (
+            gate
+            for gate in action_gates
+            if gate.requested_action is RequestedAction.CONTINUE
+        ),
+        None,
+    )
+    if continuation is None:
+        raise RuntimeError("progress requires a deterministic continuation gate")
+    missing_effect_ids = tuple(
+        sorted(
+            {effect_id for item in missing_evidence for effect_id in item.effect_ids}
+        )
+    )
+    return (
+        classification,
+        continuation.allowed,
+        continuation.escalation_required,
+        missing_effect_ids,
+    )
+
+
 async def _execute_with_cancellation(
     controller: ProbeController,
     request: ProbeRequest,
@@ -396,6 +444,7 @@ async def execute_fixed_plan(
     revision: int = 1,
     cancellation_event: asyncio.Event | None = None,
     additional_limitations: tuple[str, ...] = (),
+    progress_emitter: ProgressEmitter | None = None,
 ) -> FixedBaselineResult:
     """Execute one finite plan without bypassing controller or evidence policy."""
 
@@ -411,6 +460,8 @@ async def execute_fixed_plan(
         raise ValueError("report revision must be a nonnegative integer")
     if cancellation_event is not None and type(cancellation_event) is not asyncio.Event:
         raise TypeError("cancellation event must be an exact asyncio event")
+    if progress_emitter is not None and not callable(progress_emitter):
+        raise TypeError("progress emitter must be callable")
     if type(additional_limitations) is not tuple or len(additional_limitations) > 63:
         raise ValueError("additional limitations must be a bounded immutable tuple")
     for limitation in additional_limitations:
@@ -440,18 +491,81 @@ async def execute_fixed_plan(
     unavailable_sequences: set[int] = set()
     redundant_sequences: set[int] = set()
     duplicate_sequences: set[int] = set()
+    if progress_emitter is not None:
+        progress_emitter(
+            StrategyProgress(
+                occurred_at=_progress_occurred_at(),
+                investigation_id=sealed_envelope.investigation_id,
+                strategy=ComparisonStrategyKind.FIXED,
+                stage=StrategyProgressStage.STARTED,
+            )
+        )
 
-    for step in plan.steps:
+    for attempt_sequence, step in enumerate(plan.steps, start=1):
         request = step.request
         request_identity = probe_request_sha256(request)
         repeated_request = request_identity in request_progress
+        if progress_emitter is not None:
+            progress_emitter(
+                ProbeProgress(
+                    occurred_at=_progress_occurred_at(),
+                    investigation_id=sealed_envelope.investigation_id,
+                    strategy=ComparisonStrategyKind.FIXED,
+                    stage=ProbeProgressStage.REQUESTED,
+                    attempt_sequence=attempt_sequence,
+                    capability_name=request.capability_name,
+                    capability_version=request.capability_version,
+                    request_sha256=request_identity,
+                    relevant_effect_ids=request.relevant_effect_ids,
+                )
+            )
         execution = await _execute_with_cancellation(
             controller,
             request,
             cancellation_event,
         )
         audit = execution.audit
-        if audit.sequence in processed_sequences:
+        reused_sequence = audit.sequence in processed_sequences
+        if reused_sequence:
+            if progress_emitter is not None:
+                previous_attempt = next(
+                    (
+                        item
+                        for item in engine.attempts
+                        if item.probe_sequence == audit.sequence
+                    ),
+                    None,
+                )
+                if previous_attempt is None:
+                    raise RuntimeError("reused controller progress lost its evidence")
+                progress_emitter(
+                    ProbeProgress(
+                        occurred_at=_progress_occurred_at(),
+                        investigation_id=sealed_envelope.investigation_id,
+                        strategy=ComparisonStrategyKind.FIXED,
+                        stage=ProbeProgressStage.COMPLETED,
+                        attempt_sequence=attempt_sequence,
+                        capability_name=audit.capability_name,
+                        capability_version=audit.capability_version,
+                        request_sha256=audit.request_sha256,
+                        relevant_effect_ids=request.relevant_effect_ids,
+                        controller_sequence=audit.sequence,
+                        controller_sequence_reused=True,
+                        outcome=audit.outcome,
+                        controller_stop_reason=audit.stop_reason,
+                        session_elapsed_ms=audit.session_elapsed_ms,
+                        probe_count_used=audit.probe_count_used,
+                        cost_units_used=audit.cost_units_used,
+                        result_bytes_acquired=audit.result_bytes_acquired,
+                        result_sha256=audit.result_sha256,
+                        result_byte_count=(
+                            audit.result_byte_count
+                            if audit.outcome is ProbeOutcome.COMPLETED
+                            else None
+                        ),
+                        evidence_ids=(previous_attempt.decision.evidence_id,),
+                    )
+                )
             if repeated_request:
                 redundant_sequences.add(audit.sequence)
                 duplicate_sequences.add(audit.sequence)
@@ -461,6 +575,61 @@ async def execute_fixed_plan(
         engine.process(ProbeRun(request=request, execution=execution))
         evaluation = engine.evaluate(controller.audit_trail)
         decision = evaluation.attempts[-1].decision
+        if progress_emitter is not None:
+            progress_emitter(
+                ProbeProgress(
+                    occurred_at=_progress_occurred_at(),
+                    investigation_id=sealed_envelope.investigation_id,
+                    strategy=ComparisonStrategyKind.FIXED,
+                    stage=ProbeProgressStage.COMPLETED,
+                    attempt_sequence=attempt_sequence,
+                    capability_name=audit.capability_name,
+                    capability_version=audit.capability_version,
+                    request_sha256=audit.request_sha256,
+                    relevant_effect_ids=request.relevant_effect_ids,
+                    controller_sequence=audit.sequence,
+                    controller_sequence_reused=False,
+                    outcome=audit.outcome,
+                    controller_stop_reason=audit.stop_reason,
+                    session_elapsed_ms=audit.session_elapsed_ms,
+                    probe_count_used=audit.probe_count_used,
+                    cost_units_used=audit.cost_units_used,
+                    result_bytes_acquired=audit.result_bytes_acquired,
+                    result_sha256=audit.result_sha256,
+                    result_byte_count=(
+                        audit.result_byte_count
+                        if audit.outcome is ProbeOutcome.COMPLETED
+                        else None
+                    ),
+                    evidence_ids=(decision.evidence_id,),
+                )
+            )
+            (
+                classification,
+                continue_allowed,
+                escalation_required,
+                missing_effect_ids,
+            ) = _progress_state(
+                evaluation.classification,
+                evaluation.action_gates,
+                evaluation.missing_evidence,
+            )
+            progress_emitter(
+                EvidenceProgress(
+                    occurred_at=_progress_occurred_at(),
+                    investigation_id=sealed_envelope.investigation_id,
+                    strategy=ComparisonStrategyKind.FIXED,
+                    attempt_sequence=attempt_sequence,
+                    controller_sequence=audit.sequence,
+                    evidence_id=decision.evidence_id,
+                    disposition=decision.disposition,
+                    reason=decision.reason,
+                    classification=classification,
+                    continue_allowed=continue_allowed,
+                    escalation_required=escalation_required,
+                    missing_effect_ids=missing_effect_ids,
+                )
+            )
 
         if (
             audit.stop_reason in _UNSUPPORTED_REASONS
@@ -528,7 +697,7 @@ async def execute_fixed_plan(
         payload["limitations"] = (*report.limitations, *additional_limitations)
         report = InvestigationReport.model_validate(payload)
     final_audit = audit_trail[-1]
-    return FixedBaselineResult(
+    result = FixedBaselineResult(
         report=report,
         plan=plan,
         stop_reason=stop_reason,
@@ -545,6 +714,31 @@ async def execute_fixed_plan(
         duplicate_probe_count=len(duplicate_sequences),
         _seal=_BASELINE_RESULT_SEAL,
     )
+    if progress_emitter is not None:
+        (
+            classification,
+            continue_allowed,
+            escalation_required,
+            missing_effect_ids,
+        ) = _progress_state(
+            report.classification,
+            report.action_gate,
+            report.missing_evidence,
+        )
+        progress_emitter(
+            StrategyProgress(
+                occurred_at=_progress_occurred_at(),
+                investigation_id=sealed_envelope.investigation_id,
+                strategy=ComparisonStrategyKind.FIXED,
+                stage=StrategyProgressStage.COMPLETED,
+                stop_reason=stop_reason.value,
+                classification=classification,
+                continue_allowed=continue_allowed,
+                escalation_required=escalation_required,
+                missing_effect_ids=missing_effect_ids,
+            )
+        )
+    return result
 
 
 def run_fixed_plan(

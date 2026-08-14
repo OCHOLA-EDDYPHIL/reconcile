@@ -58,6 +58,7 @@ from reconcile.contracts import (
 from reconcile.contracts.base import canonical_json_value_bytes
 from reconcile.controller import CapabilityRegistry
 from reconcile.evidence import TargetRuleRegistry
+from reconcile.progress import ProgressEmitter
 from reconcile.scenarios.adk_mutation import run_adk_mutation
 from reconcile.scenarios.local_storage import (
     LocalStorageCleanupTarget,
@@ -248,6 +249,7 @@ class StorageScenarioDefinition:
         clock: InvestigationClock | None = None,
         revision: int = 1,
         cancellation_event: asyncio.Event | None = None,
+        progress_emitter: ProgressEmitter | None = None,
     ) -> AdaptiveInvestigationResult:
         """Run the canonical bounded adaptive Storage investigation."""
 
@@ -258,6 +260,7 @@ class StorageScenarioDefinition:
             clock=clock,
             revision=revision,
             cancellation_event=cancellation_event,
+            progress_emitter=progress_emitter,
         )
 
     def prepare(self, plan: ScenarioPlan) -> ScenarioPreparation:
@@ -466,6 +469,8 @@ async def execute_storage_baseline(
     *,
     clock: InvestigationClock | None = None,
     revision: int = 1,
+    cancellation_event: asyncio.Event | None = None,
+    progress_emitter: ProgressEmitter | None = None,
 ) -> FixedBaselineResult:
     """Execute the canonical one-read Storage baseline."""
 
@@ -485,6 +490,8 @@ async def execute_storage_baseline(
         STORAGE_FIXED_PROBE_PLAN,
         clock=selected_clock,
         revision=revision,
+        cancellation_event=cancellation_event,
+        progress_emitter=progress_emitter,
     )
 
 
@@ -496,6 +503,7 @@ async def execute_storage_adaptive(
     clock: InvestigationClock | None = None,
     revision: int = 1,
     cancellation_event: asyncio.Event | None = None,
+    progress_emitter: ProgressEmitter | None = None,
 ) -> AdaptiveInvestigationResult:
     """Execute the canonical advisory Storage investigation."""
 
@@ -517,6 +525,7 @@ async def execute_storage_adaptive(
         clock=selected_clock,
         revision=revision,
         cancellation_event=cancellation_event,
+        progress_emitter=progress_emitter,
     )
 
 

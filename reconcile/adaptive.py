@@ -16,15 +16,19 @@ from typing import Protocol
 from jsonschema import Draft202012Validator, validators
 
 from reconcile.contracts import (
+    ActionGateResult,
     AdvisoryExplanation,
     CapabilityRef,
     Classification,
+    ComparisonStrategyKind,
     EvidenceDisposition,
     EvidenceReason,
     ExecutionEnvelope,
     InvestigationReport,
+    MissingEvidence,
     ProbeOutcome,
     ProbeRequest,
+    RequestedAction,
     canonical_json_bytes,
     decode_contract,
 )
@@ -58,12 +62,31 @@ from reconcile.evidence import (
     ProbeRun,
     TargetRuleRegistry,
 )
+from reconcile.progress import (
+    AdvisoryProgress,
+    AdvisoryProgressStage,
+    AdvisoryProposalProgress,
+    EvidenceProgress,
+    ProbeProgress,
+    ProbeProgressStage,
+    ProgressEmitter,
+    ProgressPlannerFailure,
+    ProgressProposalDisposition,
+    StrategyProgress,
+    StrategyProgressStage,
+)
 
 _IDENTIFIER_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]*$")
 _SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 _MAX_TURNS = 64
 _NON_PROGRESS_LIMIT = 2
 _CAPABILITY_CATALOG_VERSION = "adaptive-catalog-v1"
+
+
+def _progress_occurred_at() -> datetime:
+    """Timestamp observation without touching the authoritative execution clock."""
+
+    return datetime.now(UTC)
 
 
 def _validate_identifier(value: str, label: str) -> None:
@@ -837,6 +860,36 @@ def _progress_sha256(evaluation: CoreEvaluation) -> str:
     return hashlib.sha256(canonical_json_value_bytes(material)).hexdigest()
 
 
+def _progress_state(
+    classification: Classification | None,
+    action_gates: tuple[ActionGateResult, ...],
+    missing_evidence: tuple[MissingEvidence, ...],
+) -> tuple[Classification, bool, bool, tuple[str, ...]]:
+    if classification is None:
+        raise RuntimeError("progress requires a deterministic classification")
+    continuation = next(
+        (
+            gate
+            for gate in action_gates
+            if gate.requested_action is RequestedAction.CONTINUE
+        ),
+        None,
+    )
+    if continuation is None:
+        raise RuntimeError("progress requires a deterministic continuation gate")
+    missing_effect_ids = tuple(
+        sorted(
+            {effect_id for item in missing_evidence for effect_id in item.effect_ids}
+        )
+    )
+    return (
+        classification,
+        continuation.allowed,
+        continuation.escalation_required,
+        missing_effect_ids,
+    )
+
+
 def _catalog(
     envelope: ExecutionEnvelope,
     registry: CapabilityRegistry,
@@ -1489,6 +1542,76 @@ def _validated_turn(
     return turn, turn.failure, False
 
 
+def _emit_advisory_requested(
+    progress_emitter: ProgressEmitter | None,
+    *,
+    occurred_at: datetime,
+    investigation_id: str,
+    phase: AdaptivePlannerPhase,
+    turn_sequence: int,
+    input_sha256: str,
+) -> None:
+    if progress_emitter is None:
+        return
+    progress_emitter(
+        AdvisoryProgress(
+            occurred_at=occurred_at,
+            investigation_id=investigation_id,
+            strategy=ComparisonStrategyKind.ADAPTIVE,
+            stage=AdvisoryProgressStage.REQUESTED,
+            phase=phase,
+            turn_sequence=turn_sequence,
+            input_sha256=input_sha256,
+        )
+    )
+
+
+def _emit_advisory_completed(
+    progress_emitter: ProgressEmitter | None,
+    *,
+    occurred_at: datetime,
+    investigation_id: str,
+    turn: AdaptiveTurnRecord,
+    proposal_requests: tuple[ProbeRequest, ...] = (),
+) -> None:
+    if progress_emitter is None:
+        return
+    if len(proposal_requests) != len(turn.proposals):
+        raise RuntimeError("advisory progress lost its sanitized proposals")
+    proposals = tuple(
+        AdvisoryProposalProgress(
+            proposal_sequence=record.proposal_sequence,
+            capability_name=record.capability_name,
+            capability_version=record.capability_version,
+            request_sha256=record.request_sha256,
+            relevant_effect_ids=request.relevant_effect_ids,
+            disposition=ProgressProposalDisposition(record.disposition.value),
+        )
+        for record, request in zip(turn.proposals, proposal_requests, strict=True)
+    )
+    progress_emitter(
+        AdvisoryProgress(
+            occurred_at=occurred_at,
+            investigation_id=investigation_id,
+            strategy=ComparisonStrategyKind.ADAPTIVE,
+            stage=AdvisoryProgressStage.COMPLETED,
+            phase=turn.phase,
+            turn_sequence=turn.turn_sequence,
+            input_sha256=turn.input_sha256,
+            output_sha256=turn.output_sha256,
+            failure=(
+                None
+                if turn.failure is None
+                else ProgressPlannerFailure(turn.failure.value)
+            ),
+            cancelled=turn.cancelled,
+            proposals=proposals,
+            selected_request_sha256=turn.selected_request_sha256,
+            planner_recommended_stop=turn.planner_recommended_stop,
+        )
+    )
+
+
 async def execute_adaptive_investigation(
     envelope: ExecutionEnvelope,
     capabilities: CapabilityRegistry,
@@ -1500,6 +1623,7 @@ async def execute_adaptive_investigation(
     revision: int = 1,
     cancellation_event: asyncio.Event | None = None,
     additional_limitations: tuple[str, ...] = (),
+    progress_emitter: ProgressEmitter | None = None,
 ) -> AdaptiveInvestigationResult:
     """Run bounded advisory acquisition through deterministic safety boundaries."""
 
@@ -1526,6 +1650,8 @@ async def execute_adaptive_investigation(
         raise ValueError("report revision must be a nonnegative integer")
     if cancellation_event is not None and type(cancellation_event) is not asyncio.Event:
         raise TypeError("cancellation event must be an exact asyncio event")
+    if progress_emitter is not None and not callable(progress_emitter):
+        raise TypeError("progress emitter must be callable")
     if type(additional_limitations) is not tuple or len(additional_limitations) > 63:
         raise ValueError("additional limitations must be a bounded immutable tuple")
     for limitation in additional_limitations:
@@ -1573,6 +1699,15 @@ async def execute_adaptive_investigation(
     explanation: AdvisoryExplanation | None = None
     explanation_valid: bool | None = None
     planner_failed = False
+    if progress_emitter is not None:
+        progress_emitter(
+            StrategyProgress(
+                occurred_at=_progress_occurred_at(),
+                investigation_id=sealed_envelope.investigation_id,
+                strategy=ComparisonStrategyKind.ADAPTIVE,
+                stage=StrategyProgressStage.STARTED,
+            )
+        )
 
     if cancellation_event is not None and cancellation_event.is_set():
         controller.cancel()
@@ -1633,6 +1768,15 @@ async def execute_adaptive_investigation(
             planner_failed = True
             break
         input_sha256 = hashlib.sha256(canonical_json_bytes(planner_input)).hexdigest()
+        sequence = len(turns) + 1
+        _emit_advisory_requested(
+            progress_emitter,
+            occurred_at=_progress_occurred_at(),
+            investigation_id=sealed_envelope.investigation_id,
+            phase=AdaptivePlannerPhase.ACQUIRE_EVIDENCE,
+            turn_sequence=sequence,
+            input_sha256=input_sha256,
+        )
         call = await _call_planner(
             planner,
             planner_input,
@@ -1644,18 +1788,22 @@ async def execute_adaptive_investigation(
             configured_metadata=configured_metadata,
             input_sha256=input_sha256,
         )
-        sequence = len(turns) + 1
         if cancelled:
             controller.cancel()
-            turns.append(
-                _failure_turn_record(
-                    sequence=sequence,
-                    phase=AdaptivePlannerPhase.ACQUIRE_EVIDENCE,
-                    input_sha256=input_sha256,
-                    metadata=configured_metadata,
-                    failure=None,
-                    cancelled=True,
-                )
+            record = _failure_turn_record(
+                sequence=sequence,
+                phase=AdaptivePlannerPhase.ACQUIRE_EVIDENCE,
+                input_sha256=input_sha256,
+                metadata=configured_metadata,
+                failure=None,
+                cancelled=True,
+            )
+            turns.append(record)
+            _emit_advisory_completed(
+                progress_emitter,
+                occurred_at=_progress_occurred_at(),
+                investigation_id=sealed_envelope.investigation_id,
+                turn=record,
             )
             stop_reason = AdaptiveStopReason.CANCELLED
             break
@@ -1667,19 +1815,24 @@ async def execute_adaptive_investigation(
                 and _metadata_matches(configured_metadata, returned.metadata)
                 else configured_metadata
             )
-            turns.append(
-                _failure_turn_record(
-                    sequence=sequence,
-                    phase=AdaptivePlannerPhase.ACQUIRE_EVIDENCE,
-                    input_sha256=input_sha256,
-                    metadata=metadata,
-                    failure=failure,
-                    cancelled=False,
-                    output_sha256=(
-                        returned.output_sha256 if returned is not None else None
-                    ),
-                    usage=returned.usage if returned is not None else None,
-                )
+            record = _failure_turn_record(
+                sequence=sequence,
+                phase=AdaptivePlannerPhase.ACQUIRE_EVIDENCE,
+                input_sha256=input_sha256,
+                metadata=metadata,
+                failure=failure,
+                cancelled=False,
+                output_sha256=(
+                    returned.output_sha256 if returned is not None else None
+                ),
+                usage=returned.usage if returned is not None else None,
+            )
+            turns.append(record)
+            _emit_advisory_completed(
+                progress_emitter,
+                occurred_at=_progress_occurred_at(),
+                investigation_id=sealed_envelope.investigation_id,
+                turn=record,
             )
             stop_reason = _failure_stop_reason(failure)
             planner_failed = True
@@ -1701,20 +1854,26 @@ async def execute_adaptive_investigation(
             if selection.request is None
             else probe_request_sha256(selection.request)
         )
-        turns.append(
-            AdaptiveTurnRecord(
-                turn_sequence=sequence,
-                phase=AdaptivePlannerPhase.ACQUIRE_EVIDENCE,
-                input_sha256=input_sha256,
-                output_sha256=turn.output_sha256,
-                failure=None,
-                cancelled=False,
-                metadata=turn.metadata,
-                usage=turn.usage,
-                proposals=selection.records,
-                selected_request_sha256=selected_request_sha256,
-                planner_recommended_stop=output.stop_advice.recommend_stop,
-            )
+        record = AdaptiveTurnRecord(
+            turn_sequence=sequence,
+            phase=AdaptivePlannerPhase.ACQUIRE_EVIDENCE,
+            input_sha256=input_sha256,
+            output_sha256=turn.output_sha256,
+            failure=None,
+            cancelled=False,
+            metadata=turn.metadata,
+            usage=turn.usage,
+            proposals=selection.records,
+            selected_request_sha256=selected_request_sha256,
+            planner_recommended_stop=output.stop_advice.recommend_stop,
+        )
+        turns.append(record)
+        _emit_advisory_completed(
+            progress_emitter,
+            occurred_at=_progress_occurred_at(),
+            investigation_id=sealed_envelope.investigation_id,
+            turn=record,
+            proposal_requests=output.probe_proposals,
         )
         if selection.request is None:
             stop_reason = (
@@ -1730,17 +1889,72 @@ async def execute_adaptive_investigation(
 
         request = selection.request
         request_sha256 = probe_request_sha256(request)
+        attempt_sequence = len(prior_request_hashes) + 1
         identity = (request.capability_name, request.capability_version)
         prior_request_hashes.append(request_sha256)
         selected_counts[identity] = selected_counts.get(identity, 0) + 1
         previous_progress = _progress_sha256(evaluation)
+        if progress_emitter is not None:
+            progress_emitter(
+                ProbeProgress(
+                    occurred_at=_progress_occurred_at(),
+                    investigation_id=sealed_envelope.investigation_id,
+                    strategy=ComparisonStrategyKind.ADAPTIVE,
+                    stage=ProbeProgressStage.REQUESTED,
+                    attempt_sequence=attempt_sequence,
+                    capability_name=request.capability_name,
+                    capability_version=request.capability_version,
+                    request_sha256=request_sha256,
+                    relevant_effect_ids=request.relevant_effect_ids,
+                )
+            )
         execution = await _execute_with_cancellation(
             controller,
             request,
             cancellation_event,
         )
         audit = execution.audit
-        if audit.sequence in processed_sequences:
+        reused_sequence = audit.sequence in processed_sequences
+        if reused_sequence:
+            if progress_emitter is not None:
+                previous_attempt = next(
+                    (
+                        item
+                        for item in engine.attempts
+                        if item.probe_sequence == audit.sequence
+                    ),
+                    None,
+                )
+                if previous_attempt is None:
+                    raise RuntimeError("reused controller progress lost its evidence")
+                progress_emitter(
+                    ProbeProgress(
+                        occurred_at=_progress_occurred_at(),
+                        investigation_id=sealed_envelope.investigation_id,
+                        strategy=ComparisonStrategyKind.ADAPTIVE,
+                        stage=ProbeProgressStage.COMPLETED,
+                        attempt_sequence=attempt_sequence,
+                        capability_name=audit.capability_name,
+                        capability_version=audit.capability_version,
+                        request_sha256=audit.request_sha256,
+                        relevant_effect_ids=request.relevant_effect_ids,
+                        controller_sequence=audit.sequence,
+                        controller_sequence_reused=True,
+                        outcome=audit.outcome,
+                        controller_stop_reason=audit.stop_reason,
+                        session_elapsed_ms=audit.session_elapsed_ms,
+                        probe_count_used=audit.probe_count_used,
+                        cost_units_used=audit.cost_units_used,
+                        result_bytes_acquired=audit.result_bytes_acquired,
+                        result_sha256=audit.result_sha256,
+                        result_byte_count=(
+                            audit.result_byte_count
+                            if audit.outcome is ProbeOutcome.COMPLETED
+                            else None
+                        ),
+                        evidence_ids=(previous_attempt.decision.evidence_id,),
+                    )
+                )
             redundant_sequences.add(audit.sequence)
             stop_reason = AdaptiveStopReason.NON_PROGRESS
             break
@@ -1749,6 +1963,61 @@ async def execute_adaptive_investigation(
         engine.process(ProbeRun(request=request, execution=execution))
         evaluation = engine.evaluate(controller.audit_trail)
         decision = evaluation.attempts[-1].decision
+        if progress_emitter is not None:
+            progress_emitter(
+                ProbeProgress(
+                    occurred_at=_progress_occurred_at(),
+                    investigation_id=sealed_envelope.investigation_id,
+                    strategy=ComparisonStrategyKind.ADAPTIVE,
+                    stage=ProbeProgressStage.COMPLETED,
+                    attempt_sequence=attempt_sequence,
+                    capability_name=audit.capability_name,
+                    capability_version=audit.capability_version,
+                    request_sha256=audit.request_sha256,
+                    relevant_effect_ids=request.relevant_effect_ids,
+                    controller_sequence=audit.sequence,
+                    controller_sequence_reused=False,
+                    outcome=audit.outcome,
+                    controller_stop_reason=audit.stop_reason,
+                    session_elapsed_ms=audit.session_elapsed_ms,
+                    probe_count_used=audit.probe_count_used,
+                    cost_units_used=audit.cost_units_used,
+                    result_bytes_acquired=audit.result_bytes_acquired,
+                    result_sha256=audit.result_sha256,
+                    result_byte_count=(
+                        audit.result_byte_count
+                        if audit.outcome is ProbeOutcome.COMPLETED
+                        else None
+                    ),
+                    evidence_ids=(decision.evidence_id,),
+                )
+            )
+            (
+                classification,
+                continue_allowed,
+                escalation_required,
+                missing_effect_ids,
+            ) = _progress_state(
+                evaluation.classification,
+                evaluation.action_gates,
+                evaluation.missing_evidence,
+            )
+            progress_emitter(
+                EvidenceProgress(
+                    occurred_at=_progress_occurred_at(),
+                    investigation_id=sealed_envelope.investigation_id,
+                    strategy=ComparisonStrategyKind.ADAPTIVE,
+                    attempt_sequence=attempt_sequence,
+                    controller_sequence=audit.sequence,
+                    evidence_id=decision.evidence_id,
+                    disposition=decision.disposition,
+                    reason=decision.reason,
+                    classification=classification,
+                    continue_allowed=continue_allowed,
+                    escalation_required=escalation_required,
+                    missing_effect_ids=missing_effect_ids,
+                )
+            )
         if audit.stop_reason is ProbeStopReason.CAPABILITY_UNAVAILABLE:
             unavailable_sequences.add(audit.sequence)
         if decision.reason is EvidenceReason.DUPLICATE_CANDIDATES:
@@ -1834,6 +2103,15 @@ async def execute_adaptive_investigation(
                 input_sha256 = hashlib.sha256(
                     canonical_json_bytes(explanation_input)
                 ).hexdigest()
+                sequence = len(turns) + 1
+                _emit_advisory_requested(
+                    progress_emitter,
+                    occurred_at=_progress_occurred_at(),
+                    investigation_id=sealed_envelope.investigation_id,
+                    phase=AdaptivePlannerPhase.EXPLAIN_EVIDENCE,
+                    turn_sequence=sequence,
+                    input_sha256=input_sha256,
+                )
                 call = await _call_planner(
                     planner,
                     explanation_input,
@@ -1845,17 +2123,21 @@ async def execute_adaptive_investigation(
                     configured_metadata=configured_metadata,
                     input_sha256=input_sha256,
                 )
-                sequence = len(turns) + 1
                 if cancelled:
-                    turns.append(
-                        _failure_turn_record(
-                            sequence=sequence,
-                            phase=AdaptivePlannerPhase.EXPLAIN_EVIDENCE,
-                            input_sha256=input_sha256,
-                            metadata=configured_metadata,
-                            failure=None,
-                            cancelled=True,
-                        )
+                    record = _failure_turn_record(
+                        sequence=sequence,
+                        phase=AdaptivePlannerPhase.EXPLAIN_EVIDENCE,
+                        input_sha256=input_sha256,
+                        metadata=configured_metadata,
+                        failure=None,
+                        cancelled=True,
+                    )
+                    turns.append(record)
+                    _emit_advisory_completed(
+                        progress_emitter,
+                        occurred_at=_progress_occurred_at(),
+                        investigation_id=sealed_envelope.investigation_id,
+                        turn=record,
                     )
                     explanation_valid = False
                 elif failure is not None:
@@ -1866,19 +2148,24 @@ async def execute_adaptive_investigation(
                         and _metadata_matches(configured_metadata, returned.metadata)
                         else configured_metadata
                     )
-                    turns.append(
-                        _failure_turn_record(
-                            sequence=sequence,
-                            phase=AdaptivePlannerPhase.EXPLAIN_EVIDENCE,
-                            input_sha256=input_sha256,
-                            metadata=metadata,
-                            failure=failure,
-                            cancelled=False,
-                            output_sha256=(
-                                returned.output_sha256 if returned is not None else None
-                            ),
-                            usage=returned.usage if returned is not None else None,
-                        )
+                    record = _failure_turn_record(
+                        sequence=sequence,
+                        phase=AdaptivePlannerPhase.EXPLAIN_EVIDENCE,
+                        input_sha256=input_sha256,
+                        metadata=metadata,
+                        failure=failure,
+                        cancelled=False,
+                        output_sha256=(
+                            returned.output_sha256 if returned is not None else None
+                        ),
+                        usage=returned.usage if returned is not None else None,
+                    )
+                    turns.append(record)
+                    _emit_advisory_completed(
+                        progress_emitter,
+                        occurred_at=_progress_occurred_at(),
+                        investigation_id=sealed_envelope.investigation_id,
+                        turn=record,
                     )
                     explanation_valid = False
                 else:
@@ -1898,22 +2185,26 @@ async def execute_adaptive_investigation(
                             start=1,
                         )
                     )
-                    turns.append(
-                        AdaptiveTurnRecord(
-                            turn_sequence=sequence,
-                            phase=AdaptivePlannerPhase.EXPLAIN_EVIDENCE,
-                            input_sha256=input_sha256,
-                            output_sha256=turn.output_sha256,
-                            failure=None,
-                            cancelled=False,
-                            metadata=turn.metadata,
-                            usage=turn.usage,
-                            proposals=ignored,
-                            selected_request_sha256=None,
-                            planner_recommended_stop=(
-                                output.stop_advice.recommend_stop
-                            ),
-                        )
+                    record = AdaptiveTurnRecord(
+                        turn_sequence=sequence,
+                        phase=AdaptivePlannerPhase.EXPLAIN_EVIDENCE,
+                        input_sha256=input_sha256,
+                        output_sha256=turn.output_sha256,
+                        failure=None,
+                        cancelled=False,
+                        metadata=turn.metadata,
+                        usage=turn.usage,
+                        proposals=ignored,
+                        selected_request_sha256=None,
+                        planner_recommended_stop=(output.stop_advice.recommend_stop),
+                    )
+                    turns.append(record)
+                    _emit_advisory_completed(
+                        progress_emitter,
+                        occurred_at=_progress_occurred_at(),
+                        investigation_id=sealed_envelope.investigation_id,
+                        turn=record,
+                        proposal_requests=output.probe_proposals,
                     )
                     explanation, explanation_valid = _advisory_explanation(
                         output,
@@ -1979,7 +2270,7 @@ async def execute_adaptive_investigation(
         item.disposition is ProposalDisposition.DUPLICATE for item in proposal_records
     )
     policies = sealed_envelope.context.policies
-    return AdaptiveInvestigationResult(
+    result = AdaptiveInvestigationResult(
         report=report,
         policy=policy,
         capability_catalog_sha256=catalog_sha256,
@@ -2011,6 +2302,31 @@ async def execute_adaptive_investigation(
         transcript_sha256=_transcript_sha256(turn_tuple),
         _seal=_ADAPTIVE_RESULT_SEAL,
     )
+    if progress_emitter is not None:
+        (
+            classification,
+            continue_allowed,
+            escalation_required,
+            missing_effect_ids,
+        ) = _progress_state(
+            report.classification,
+            report.action_gate,
+            report.missing_evidence,
+        )
+        progress_emitter(
+            StrategyProgress(
+                occurred_at=_progress_occurred_at(),
+                investigation_id=sealed_envelope.investigation_id,
+                strategy=ComparisonStrategyKind.ADAPTIVE,
+                stage=StrategyProgressStage.COMPLETED,
+                stop_reason=stop_reason.value,
+                classification=classification,
+                continue_allowed=continue_allowed,
+                escalation_required=escalation_required,
+                missing_effect_ids=missing_effect_ids,
+            )
+        )
+    return result
 
 
 def run_adaptive_investigation(

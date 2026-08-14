@@ -61,6 +61,7 @@ from reconcile.contracts import (
 from reconcile.contracts.base import canonical_json_value_bytes
 from reconcile.controller import CapabilityRegistry
 from reconcile.evidence import TargetRuleRegistry
+from reconcile.progress import ProgressEmitter
 from reconcile.scenarios.adk_mutation import run_adk_mutation
 from reconcile.scenarios.local_order import (
     HiddenOrderOutcome,
@@ -262,6 +263,7 @@ class SandboxOrderScenarioDefinition:
         clock: SandboxOrderInvestigationClock | None = None,
         revision: int = 1,
         cancellation_event: asyncio.Event | None = None,
+        progress_emitter: ProgressEmitter | None = None,
     ) -> AdaptiveInvestigationResult:
         """Run the canonical bounded adaptive sandbox-order investigation."""
 
@@ -272,6 +274,7 @@ class SandboxOrderScenarioDefinition:
             clock=clock,
             revision=revision,
             cancellation_event=cancellation_event,
+            progress_emitter=progress_emitter,
         )
 
     def prepare(self, plan: ScenarioPlan) -> ScenarioPreparation:
@@ -508,6 +511,8 @@ async def execute_sandbox_order_baseline(
     probe_order: SandboxOrderProbeOrder = SANDBOX_ORDER_INGRESS_FIRST,
     clock: SandboxOrderInvestigationClock | None = None,
     revision: int = 1,
+    cancellation_event: asyncio.Event | None = None,
+    progress_emitter: ProgressEmitter | None = None,
 ) -> FixedBaselineResult:
     """Execute a permitted two-read weak-evidence baseline."""
 
@@ -530,6 +535,8 @@ async def execute_sandbox_order_baseline(
         plan,
         clock=selected_clock,
         revision=revision,
+        cancellation_event=cancellation_event,
+        progress_emitter=progress_emitter,
         additional_limitations=_SANDBOX_ORDER_LIMITATIONS,
     )
 
@@ -542,6 +549,7 @@ async def execute_sandbox_order_adaptive(
     clock: SandboxOrderInvestigationClock | None = None,
     revision: int = 1,
     cancellation_event: asyncio.Event | None = None,
+    progress_emitter: ProgressEmitter | None = None,
 ) -> AdaptiveInvestigationResult:
     """Execute the canonical advisory sandbox-order investigation."""
 
@@ -565,6 +573,7 @@ async def execute_sandbox_order_adaptive(
         clock=selected_clock,
         revision=revision,
         cancellation_event=cancellation_event,
+        progress_emitter=progress_emitter,
         additional_limitations=_SANDBOX_ORDER_LIMITATIONS,
     )
 

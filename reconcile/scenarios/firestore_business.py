@@ -58,6 +58,7 @@ from reconcile.contracts import (
 from reconcile.contracts.base import canonical_json_value_bytes
 from reconcile.controller import CapabilityRegistry
 from reconcile.evidence import TargetRuleRegistry
+from reconcile.progress import ProgressEmitter
 from reconcile.scenarios.adk_mutation import run_adk_mutation
 from reconcile.scenarios.local_firestore import (
     BusinessDocumentCoordinate,
@@ -314,6 +315,7 @@ class FirestoreBusinessScenarioDefinition:
         clock: BusinessInvestigationClock | None = None,
         revision: int = 1,
         cancellation_event: asyncio.Event | None = None,
+        progress_emitter: ProgressEmitter | None = None,
     ) -> AdaptiveInvestigationResult:
         """Run the canonical bounded adaptive business investigation."""
 
@@ -324,6 +326,7 @@ class FirestoreBusinessScenarioDefinition:
             clock=clock,
             revision=revision,
             cancellation_event=cancellation_event,
+            progress_emitter=progress_emitter,
         )
 
     def prepare(self, plan: ScenarioPlan) -> ScenarioPreparation:
@@ -540,6 +543,8 @@ async def execute_firestore_business_baseline(
     *,
     clock: BusinessInvestigationClock | None = None,
     revision: int = 1,
+    cancellation_event: asyncio.Event | None = None,
+    progress_emitter: ProgressEmitter | None = None,
 ) -> FixedBaselineResult:
     """Execute the canonical one-read business-document baseline."""
 
@@ -561,6 +566,8 @@ async def execute_firestore_business_baseline(
         FIRESTORE_BUSINESS_FIXED_PROBE_PLAN,
         clock=selected_clock,
         revision=revision,
+        cancellation_event=cancellation_event,
+        progress_emitter=progress_emitter,
         additional_limitations=_FIRESTORE_BUSINESS_LIMITATIONS,
     )
 
@@ -573,6 +580,7 @@ async def execute_firestore_business_adaptive(
     clock: BusinessInvestigationClock | None = None,
     revision: int = 1,
     cancellation_event: asyncio.Event | None = None,
+    progress_emitter: ProgressEmitter | None = None,
 ) -> AdaptiveInvestigationResult:
     """Execute the canonical advisory business-document investigation."""
 
@@ -596,6 +604,7 @@ async def execute_firestore_business_adaptive(
         clock=selected_clock,
         revision=revision,
         cancellation_event=cancellation_event,
+        progress_emitter=progress_emitter,
         additional_limitations=_FIRESTORE_BUSINESS_LIMITATIONS,
     )
 
