@@ -46,6 +46,10 @@ _SENSITIVE_KEY_NAMES = frozenset(
 type EffectDeclaration = tuple[str, str, str, str]
 
 
+def _utc_now() -> datetime:
+    return datetime.now(UTC)
+
+
 class LocalFirestoreError(RuntimeError):
     """Base error for the local business-document target."""
 
@@ -1556,7 +1560,7 @@ class LocalFirestoreMutationTarget:
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         self._database = _LocalFirestoreDatabase(database_path)
-        self._clock = clock or (lambda: datetime.now(UTC))
+        self._clock = clock or _utc_now
 
     @property
     def database_path(self) -> Path:
@@ -1693,7 +1697,7 @@ class LocalFirestoreHarness:
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         self._database = _LocalFirestoreDatabase(database_path)
-        self._clock = clock or (lambda: datetime.now(UTC))
+        self._clock = clock or _utc_now
 
     @property
     def database_path(self) -> Path:

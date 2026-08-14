@@ -40,6 +40,7 @@ from reconcile.evidence import TargetRuleRegistry
 from reconcile.scenarios.local_storage import LocalStorageReadTarget
 from reconcile.scenarios.runner import ScenarioRunner
 from reconcile.scenarios.storage import STORAGE_SCENARIO, StorageScenarioDefinition
+from tests._clocks import ConstantClock
 
 pytestmark = pytest.mark.acceptance
 
@@ -99,7 +100,7 @@ def test_one_real_gemini_turn_commits_only_through_deterministic_storage_evidenc
     definition = StorageScenarioDefinition(
         database_path,
         invoked_at=invoked_at,
-        target_clock=lambda: invoked_at,
+        target_clock=ConstantClock(invoked_at),
     )
     scenario_result = ScenarioRunner().run(
         ScenarioRunRequest(

@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import io
 import json
+import logging
 from collections.abc import AsyncGenerator
 from dataclasses import dataclass
 from typing import Any
@@ -21,6 +23,8 @@ from reconcile.adk_planner import (
     ADK_PLANNER_PROMPT_VERSION,
     AdkGeminiPlanner,
     VertexAdcPlannerConfig,
+    _begin_provider_log_suppression,
+    _end_provider_log_suppression,
 )
 from reconcile.contracts import canonical_json_bytes
 from reconcile.contracts.planning import AdaptivePlannerInput, AdaptivePlannerOutput
@@ -581,7 +585,14 @@ def test_final_event_must_be_exactly_one_unambiguous_json_part(
     asyncio.run(scenario())
 
 
-def test_provider_unavailable_is_sanitized_and_never_retried() -> None:
+def test_provider_unavailable_is_sanitized_and_never_retried(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(
+        logging.DEBUG,
+        logger="google_adk.google.adk.models.google_llm",
+    )
+
     async def scenario() -> None:
         secret_error = "provider failed with secret-access-token-and-raw-response"
         service = _TrackingSessionService()
@@ -604,6 +615,63 @@ def test_provider_unavailable_is_sanitized_and_never_retried() -> None:
         assert secret_error not in repr(planner)
 
     asyncio.run(scenario())
+    assert "secret-access-token-and-raw-response" not in caplog.text
+    assert not any(record.name.startswith("google_adk") for record in caplog.records)
+
+
+def test_provider_log_suppression_covers_last_resort_and_late_handlers() -> None:
+    provider_logger = logging.getLogger("google_genai.reconcile_lazy_boundary")
+    control_logger = logging.getLogger("reconcile.logging_control")
+    original_provider_state = (
+        provider_logger.level,
+        provider_logger.propagate,
+        list(provider_logger.handlers),
+    )
+    original_control_state = (
+        control_logger.level,
+        control_logger.propagate,
+        list(control_logger.handlers),
+    )
+    original_last_resort = logging.lastResort
+    original_factory = logging.getLogRecordFactory()
+    last_resort_output = io.StringIO()
+    late_handler_output = io.StringIO()
+    last_resort = logging.StreamHandler(last_resort_output)
+    last_resort.setLevel(logging.WARNING)
+    late_handler = logging.StreamHandler(late_handler_output)
+    provider_logger.handlers.clear()
+    provider_logger.setLevel(logging.DEBUG)
+    provider_logger.propagate = False
+    control_logger.handlers.clear()
+    control_logger.setLevel(logging.DEBUG)
+    control_logger.propagate = False
+    logging.lastResort = last_resort
+
+    try:
+        _begin_provider_log_suppression()
+        provider_logger.error("provider-secret-through-last-resort")
+        provider_logger.addHandler(late_handler)
+        provider_logger.error("provider-secret-through-late-handler")
+        control_logger.error("control-remains-visible")
+        _end_provider_log_suppression()
+        provider_logger.error("provider-visible-after-context")
+    finally:
+        if logging.getLogRecordFactory() is not original_factory:
+            while logging.getLogRecordFactory() is not original_factory:
+                _end_provider_log_suppression()
+        logging.lastResort = original_last_resort
+        provider_logger.handlers[:] = original_provider_state[2]
+        provider_logger.setLevel(original_provider_state[0])
+        provider_logger.propagate = original_provider_state[1]
+        control_logger.handlers[:] = original_control_state[2]
+        control_logger.setLevel(original_control_state[0])
+        control_logger.propagate = original_control_state[1]
+
+    assert "provider-secret" not in last_resort_output.getvalue()
+    assert "provider-secret" not in late_handler_output.getvalue()
+    assert "control-remains-visible" in last_resort_output.getvalue()
+    assert "provider-visible-after-context" in late_handler_output.getvalue()
+    assert logging.getLogRecordFactory() is original_factory
 
 
 def test_provider_error_event_is_unavailable_and_sanitized() -> None:

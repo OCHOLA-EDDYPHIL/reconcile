@@ -38,6 +38,7 @@ from reconcile.scenarios.local_firestore import (
     LocalFirestoreReadTarget,
 )
 from reconcile.scenarios.runner import ScenarioRunner
+from tests._clocks import ConstantClock
 
 pytestmark = pytest.mark.integration
 
@@ -97,7 +98,7 @@ def _run(
     definition = FirestoreBusinessScenarioDefinition(
         database_path,
         invoked_at=NOW,
-        target_clock=lambda: NOW,
+        target_clock=ConstantClock(NOW),
     )
     runner = ScenarioRunner(clock=_StepClock(NOW + timedelta(seconds=1)))
     request = _request(mask, suffix=suffix)
@@ -302,7 +303,7 @@ def test_precommit_interruption_remains_unknown(tmp_path: Path) -> None:
     definition = FirestoreBusinessScenarioDefinition(
         database_path,
         invoked_at=NOW,
-        target_clock=lambda: NOW,
+        target_clock=ConstantClock(NOW),
     )
     runner = ScenarioRunner(clock=_StepClock(NOW + timedelta(seconds=1)))
     request = _request(

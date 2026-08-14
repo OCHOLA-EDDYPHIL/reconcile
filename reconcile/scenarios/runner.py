@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import multiprocessing
 import time
+import warnings
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -215,7 +216,17 @@ def _worker_main(
         connection.send((_CHILD_READY, None))
         if connection.recv() != _CONTINUE:
             raise RuntimeError("scenario runner did not dispatch the mutation")
-        response = mutation(MutationBoundary(connection), prepared)
+        with warnings.catch_warnings():
+            warnings.filterwarnings(
+                "ignore",
+                message=(
+                    r"\[EXPERIMENTAL\] feature "
+                    r"FeatureName\.JSON_SCHEMA_FOR_FUNC_DECL is enabled\."
+                ),
+                category=UserWarning,
+                module=r"google\.adk\.models\.llm_request",
+            )
+            response = mutation(MutationBoundary(connection), prepared)
         if type(response) is not ScenarioMutationResponse:
             raise TypeError("scenario mutation returned an invalid response")
         response_bytes = canonical_json_value_bytes(response.payload)
@@ -400,6 +411,29 @@ class ScenarioRunner:
             cleanup_manifest_sha256=result.fixture.cleanup_manifest_sha256,
         )
 
+    def build_cleanup_request_for_attempt(
+        self,
+        request: ScenarioRunRequest,
+        definition: ScenarioDefinition,
+    ) -> ScenarioCleanupRequest:
+        """Re-derive cleanup authority when an attempted run produced no result."""
+
+        request = decode_contract(canonical_json_bytes(request), ScenarioRunRequest)
+        prepared = self._prepare_run(request, definition)
+        identifiers = prepared.plan.identifiers
+        return ScenarioCleanupRequest(
+            schema_version=SCENARIO_CLEANUP_REQUEST_VERSION,
+            scenario=request.scenario,
+            run_id=identifiers.run_id,
+            investigation_id=identifiers.investigation_id,
+            operation_id=identifiers.operation_id,
+            invocation_id=identifiers.invocation_id,
+            function_call_id=identifiers.function_call_id,
+            seed=request.seed,
+            namespace_id=prepared.plan.namespace_id,
+            cleanup_manifest_sha256=prepared.cleanup_manifest_sha256,
+        )
+
     def cleanup(
         self,
         request: ScenarioCleanupRequest,
@@ -576,7 +610,7 @@ class ScenarioRunner:
                 ambiguity=None,
             )
 
-        context = multiprocessing.get_context("fork")
+        context = multiprocessing.get_context("spawn")
         parent_connection, child_connection = context.Pipe(duplex=True)
         process = context.Process(
             target=_worker_main,

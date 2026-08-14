@@ -20,6 +20,10 @@ _SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 _INGRESS_KIND = "REQUEST_SEEN"
 
 
+def _utc_now() -> datetime:
+    return datetime.now(UTC)
+
+
 class LocalOrderError(RuntimeError):
     """Base error for the local order sandbox."""
 
@@ -1022,7 +1026,7 @@ class LocalOrderMutationTarget:
             observation_database_path,
         )
         self._hidden_outcome = hidden_outcome
-        self._clock = clock or (lambda: datetime.now(UTC))
+        self._clock = clock or _utc_now
 
     def initialize(self) -> None:
         self._database.initialize()
@@ -1102,7 +1106,7 @@ class LocalOrderHarness:
             private_database_path,
             observation_database_path,
         )
-        self._clock = clock or (lambda: datetime.now(UTC))
+        self._clock = clock or _utc_now
 
     def initialize(self) -> None:
         self._database.initialize()

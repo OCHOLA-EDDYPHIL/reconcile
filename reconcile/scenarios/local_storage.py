@@ -42,6 +42,10 @@ _SENSITIVE_KEY_NAMES = frozenset(
 )
 
 
+def _utc_now() -> datetime:
+    return datetime.now(UTC)
+
+
 class LocalStorageError(RuntimeError):
     """Base error for the local object target."""
 
@@ -987,7 +991,7 @@ class LocalStorageMutationTarget:
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         self._database = _LocalStorageDatabase(database_path)
-        self._clock = clock or (lambda: datetime.now(UTC))
+        self._clock = clock or _utc_now
 
     @property
     def database_path(self) -> Path:

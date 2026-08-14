@@ -800,6 +800,23 @@ def test_cleanup_is_idempotent_and_cannot_rewrite_the_run_result(
     assert canonical_json_bytes(result) == result_bytes
 
 
+def test_cleanup_authority_can_be_rederived_for_an_attempt_without_a_result(
+    tmp_path: Path,
+) -> None:
+    definition = _FileScenario(tmp_path)
+    runner = ScenarioRunner(clock=_StepClock())
+    request = _request(
+        _fault(ScenarioFaultPoint.UNINTERRUPTED, ScenarioFaultAction.NONE)
+    )
+    attempted_cleanup = runner.build_cleanup_request_for_attempt(request, definition)
+    result = runner.run(request, definition)
+
+    assert attempted_cleanup == runner.build_cleanup_request(request, result)
+    cleanup = runner.cleanup(attempted_cleanup, definition)
+    assert cleanup.disposition is ScenarioCleanupDisposition.CLEANED
+    assert cleanup.remaining_count == 0
+
+
 @pytest.mark.parametrize(
     ("field", "value"),
     (
