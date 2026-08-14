@@ -26,6 +26,7 @@ from reconcile.contracts.base import (
     NonEmptyText,
     StrictModel,
     reject_sensitive_keys,
+    reject_sensitive_values,
 )
 from reconcile.contracts.evidence import (
     EffectAssertion,
@@ -82,6 +83,8 @@ class RuleObservation(StrictModel):
     @model_validator(mode="after")
     def validate_verdict(self) -> RuleObservation:
         reject_sensitive_keys(self.correlation)
+        reject_sensitive_values(self.correlation)
+        reject_sensitive_values(self.source_record)
         effect_ids = [item.effect_id for item in self.effect_assertions]
         if len(effect_ids) != len(set(effect_ids)):
             raise ValueError("rule effect assertions must be unique")

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import math
-import re
 from datetime import UTC, datetime
 from typing import Annotated
 
@@ -16,6 +15,8 @@ from pydantic import (
     JsonValue,
     StringConstraints,
 )
+
+from reconcile.security import contains_sensitive_material, is_sensitive_key
 
 
 def _validate_unicode_text(value: str) -> str:
@@ -128,57 +129,31 @@ type ArgumentsObject = Annotated[
     AfterValidator(_validate_json_object),
 ]
 
-_SENSITIVE_KEY_TOKENS = frozenset(
-    {
-        "authorization",
-        "cookie",
-        "credential",
-        "credentials",
-        "header",
-        "headers",
-        "password",
-        "secret",
-        "token",
-    }
-)
-_SENSITIVE_KEY_NAMES = frozenset(
-    {
-        "access_key",
-        "api_key",
-        "private_key",
-        "refresh_key",
-        "session_key",
-        "signing_key",
-    }
-)
-
-
 def reject_sensitive_keys(value: JsonValue) -> None:
     """Reject credential-shaped fields from secret-free public objects."""
 
     if isinstance(value, dict):
         for key, item in value.items():
-            normalized = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", key).lower()
-            normalized = re.sub(r"[^a-z0-9]+", "_", normalized).strip("_")
-            tokens = {part for part in normalized.split("_") if part}
-            wrapped_name = f"_{normalized}_"
-            contains_sensitive_name = any(
-                f"_{name}_" in wrapped_name for name in _SENSITIVE_KEY_NAMES
-            )
-            collapsed_name = normalized.replace("_", "")
-            contains_collapsed_sensitive_name = any(
-                name.replace("_", "") in collapsed_name for name in _SENSITIVE_KEY_NAMES
-            )
-            if (
-                contains_sensitive_name
-                or contains_collapsed_sensitive_name
-                or tokens.intersection(_SENSITIVE_KEY_TOKENS)
-            ):
+            if is_sensitive_key(key):
                 raise ValueError("secret-bearing fields are not allowed")
             reject_sensitive_keys(item)
     elif isinstance(value, list):
         for item in value:
             reject_sensitive_keys(item)
+
+
+def reject_sensitive_values(value: JsonValue) -> None:
+    """Reject strong credential signatures from secret-free public objects."""
+
+    if isinstance(value, str):
+        if contains_sensitive_material(value):
+            raise ValueError("secret-bearing values are not allowed")
+    elif isinstance(value, dict):
+        for item in value.values():
+            reject_sensitive_values(item)
+    elif isinstance(value, list):
+        for item in value:
+            reject_sensitive_values(item)
 
 
 class StrictModel(BaseModel):
