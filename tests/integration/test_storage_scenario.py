@@ -35,6 +35,7 @@ from reconcile.scenarios.storage import (
     STORAGE_SCENARIO,
     StorageScenarioDefinition,
 )
+from tests._clocks import ConstantClock
 
 pytestmark = pytest.mark.integration
 
@@ -93,7 +94,7 @@ def _committed_run(
     definition = StorageScenarioDefinition(
         database_path,
         invoked_at=NOW,
-        target_clock=lambda: NOW,
+        target_clock=ConstantClock(NOW),
     )
     runner = ScenarioRunner(clock=_StepClock(NOW + timedelta(seconds=1)))
     request = _request(suffix=suffix)
@@ -177,7 +178,7 @@ def test_precommit_interruption_never_becomes_noncommitment_claim(
     definition = StorageScenarioDefinition(
         tmp_path / "precommit.sqlite3",
         invoked_at=NOW,
-        target_clock=lambda: NOW,
+        target_clock=ConstantClock(NOW),
     )
     runner = ScenarioRunner(clock=_StepClock(NOW + timedelta(seconds=1)))
     request = _request(
@@ -404,7 +405,7 @@ def test_target_records_commit_time_instead_of_constructor_time(
     definition = StorageScenarioDefinition(
         database_path,
         invoked_at=NOW,
-        target_clock=lambda: committed_at,
+        target_clock=ConstantClock(committed_at),
     )
     runner = ScenarioRunner(clock=_StepClock(committed_at + timedelta(seconds=1)))
     request = _request(suffix="delayed-commit")

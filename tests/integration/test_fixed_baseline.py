@@ -58,6 +58,7 @@ from reconcile.scenarios.storage import (
     StorageScenarioDefinition,
     execute_storage_baseline,
 )
+from tests._clocks import ConstantClock
 
 pytestmark = pytest.mark.integration
 
@@ -110,7 +111,7 @@ def _run_storage(
     definition = StorageScenarioDefinition(
         database_path,
         invoked_at=NOW,
-        target_clock=lambda: NOW,
+        target_clock=ConstantClock(NOW),
     )
     result = ScenarioRunner(clock=_StepClock(NOW + timedelta(seconds=1))).run(
         _request(STORAGE_SCENARIO, suffix=suffix, seed=39),
@@ -128,7 +129,7 @@ def _run_firestore(
     definition = FirestoreBusinessScenarioDefinition(
         tmp_path / f"{suffix}-firestore.sqlite3",
         invoked_at=NOW,
-        target_clock=lambda: NOW,
+        target_clock=ConstantClock(NOW),
     )
     result = ScenarioRunner(clock=_StepClock(NOW + timedelta(seconds=1))).run(
         _request(FIRESTORE_BUSINESS_SCENARIO, suffix=suffix, seed=0b011),
@@ -158,7 +159,7 @@ def _run_sandbox(
         observation_path,
         hidden_outcome=HiddenOrderOutcome.COMMIT,
         invoked_at=NOW,
-        target_clock=lambda: NOW,
+        target_clock=ConstantClock(NOW),
     )
     result = ScenarioRunner(clock=_StepClock(NOW + timedelta(seconds=1))).run(
         _request(SANDBOX_ORDER_SCENARIO, suffix=suffix, seed=41),

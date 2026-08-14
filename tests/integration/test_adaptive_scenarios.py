@@ -62,6 +62,7 @@ from reconcile.scenarios.storage import (
     STORAGE_SCENARIO,
     StorageScenarioDefinition,
 )
+from tests._clocks import ConstantClock
 
 pytestmark = pytest.mark.integration
 
@@ -237,7 +238,7 @@ def test_canonical_adaptive_paths_resolve_storage_and_partial_business_operation
     storage_definition = StorageScenarioDefinition(
         tmp_path / "storage.sqlite3",
         invoked_at=NOW,
-        target_clock=lambda: NOW,
+        target_clock=ConstantClock(NOW),
     )
     storage_run = ScenarioRunner(clock=_StepClock(NOW + timedelta(seconds=1))).run(
         _request(STORAGE_SCENARIO, suffix="storage", seed=39),
@@ -260,7 +261,7 @@ def test_canonical_adaptive_paths_resolve_storage_and_partial_business_operation
     firestore_definition = FirestoreBusinessScenarioDefinition(
         tmp_path / "firestore.sqlite3",
         invoked_at=NOW,
-        target_clock=lambda: NOW,
+        target_clock=ConstantClock(NOW),
     )
     firestore_run = ScenarioRunner(clock=_StepClock(NOW + timedelta(seconds=1))).run(
         _request(FIRESTORE_BUSINESS_SCENARIO, suffix="firestore", seed=0b011),
@@ -323,7 +324,7 @@ def _sandbox_run(
         observation_path,
         hidden_outcome=outcome,
         invoked_at=NOW,
-        target_clock=lambda: NOW + timedelta(seconds=1),
+        target_clock=ConstantClock(NOW + timedelta(seconds=1)),
     )
     result = ScenarioRunner(clock=_StepClock(NOW + timedelta(seconds=2))).run(
         request,

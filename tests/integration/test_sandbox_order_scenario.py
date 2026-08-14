@@ -49,6 +49,7 @@ from reconcile.scenarios.sandbox_order import (
     SandboxOrderProbeOrder,
     SandboxOrderScenarioDefinition,
 )
+from tests._clocks import ConstantClock
 
 pytestmark = pytest.mark.integration
 
@@ -128,7 +129,7 @@ def _completed_run(
         observation_path,
         hidden_outcome=outcome,
         invoked_at=NOW,
-        target_clock=lambda: NOW + timedelta(seconds=1),
+        target_clock=ConstantClock(NOW + timedelta(seconds=1)),
     )
     runner = ScenarioRunner(clock=_StepClock(NOW + timedelta(seconds=2)))
     selected_request = request or _request(suffix=name)
