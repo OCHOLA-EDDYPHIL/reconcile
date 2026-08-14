@@ -7,7 +7,7 @@ import hashlib
 import io
 import json
 import logging
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -21,10 +21,15 @@ from pydantic import ConfigDict, Field
 from reconcile.adaptive import PlannerFailureKind
 from reconcile.adk_planner import (
     ADK_PLANNER_PROMPT_VERSION,
+    QUALIFICATION_INPUT_TOKEN_CEILING,
+    QUALIFICATION_REQUEST_BYTE_CEILING,
     AdkGeminiPlanner,
+    QualificationDispatchContext,
     VertexAdcPlannerConfig,
     _begin_provider_log_suppression,
     _end_provider_log_suppression,
+    _qualification_reported_model_revision,
+    qualification_request_byte_count,
 )
 from reconcile.contracts import canonical_json_bytes
 from reconcile.contracts.planning import AdaptivePlannerInput, AdaptivePlannerOutput
@@ -45,6 +50,98 @@ class _FakeAsyncClient:
 class _FakeClient:
     aio: _FakeAsyncClient
     closed: bool = False
+
+    def close(self) -> None:
+        self.closed = True
+
+
+@dataclass(slots=True)
+class _FakeEffectiveVertexClient:
+    project: str
+    location: str
+    _credentials: object
+    vertexai: bool = True
+    api_key: str | None = None
+
+
+class _FakeQualificationModels:
+    def __init__(
+        self,
+        *,
+        total_tokens: int = 321,
+        count_callback: Callable[[], Awaitable[None] | None] | None = None,
+    ) -> None:
+        self.total_tokens = total_tokens
+        self.count_callback = count_callback
+        self.operations: list[str] = []
+        self.count_requests: list[tuple[str, list[types.Content], object]] = []
+        self.generation_requests: list[
+            tuple[str, list[types.Content], types.GenerateContentConfig]
+        ] = []
+
+    async def count_tokens(
+        self,
+        *,
+        model: str,
+        contents: list[types.Content],
+        config: object,
+    ) -> types.CountTokensResponse:
+        self.operations.append("count")
+        self.count_requests.append(
+            (model, [item.model_copy(deep=True) for item in contents], config)
+        )
+        if self.count_callback is not None:
+            result = self.count_callback()
+            if isinstance(result, Awaitable):
+                await result
+        return types.CountTokensResponse(total_tokens=self.total_tokens)
+
+    async def generate_content(
+        self,
+        *,
+        model: str,
+        contents: list[types.Content],
+        config: types.GenerateContentConfig,
+    ) -> types.GenerateContentResponse:
+        self.operations.append("generate")
+        self.generation_requests.append(
+            (
+                model,
+                [item.model_copy(deep=True) for item in contents],
+                config.model_copy(deep=True),
+            )
+        )
+        return _raw_response()
+
+
+@dataclass(slots=True)
+class _FakeQualificationAsyncClient:
+    models: _FakeQualificationModels
+    closed: bool = False
+
+    async def aclose(self) -> None:
+        self.closed = True
+
+
+class _FakeQualificationClient:
+    def __init__(
+        self,
+        *,
+        project: str,
+        location: str,
+        credentials: object,
+        models: _FakeQualificationModels | None = None,
+    ) -> None:
+        self.vertexai = True
+        self._api_client = _FakeEffectiveVertexClient(
+            project=project,
+            location=location,
+            _credentials=credentials,
+        )
+        self.aio = _FakeQualificationAsyncClient(
+            models=models or _FakeQualificationModels()
+        )
+        self.closed = False
 
     def close(self) -> None:
         self.closed = True
@@ -161,6 +258,26 @@ def _response(
     )
 
 
+def _raw_response() -> types.GenerateContentResponse:
+    return types.GenerateContentResponse(
+        candidates=[
+            types.Candidate(
+                content=types.Content(
+                    role="model",
+                    parts=[types.Part(text=_valid_text())],
+                ),
+                finish_reason=types.FinishReason.STOP,
+            )
+        ],
+        model_version=("publishers/google/models/gemini-3.5-flash-001@default"),
+        usage_metadata=types.GenerateContentResponseUsageMetadata(
+            prompt_token_count=11,
+            total_token_count=29,
+            candidates_token_count=18,
+        ),
+    )
+
+
 def _provider_payload(output: AdaptivePlannerOutput) -> dict[str, object]:
     explanation = output.explanation
     citations = explanation.citations
@@ -269,6 +386,30 @@ def _planner(
     )
 
 
+def _qualification_planner(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    models: _FakeQualificationModels | None = None,
+) -> tuple[AdkGeminiPlanner, _FakeQualificationClient]:
+    credentials = AnonymousCredentials()
+    config = VertexAdcPlannerConfig(
+        project="reconcile-qualification",
+        location="global",
+        model="gemini-3.5-flash",
+        timeout_seconds=30,
+        max_output_tokens=1_024,
+        credentials=credentials,
+    )
+    client = _FakeQualificationClient(
+        project=config.project,
+        location=config.location,
+        credentials=credentials,
+        models=models,
+    )
+    monkeypatch.setattr("google.genai.Client", lambda **kwargs: client)
+    return AdkGeminiPlanner.from_vertex_adc_qualification(config), client
+
+
 def test_structured_success_uses_one_stateless_tool_free_adk_turn() -> None:
     async def scenario() -> None:
         service = _TrackingSessionService()
@@ -313,6 +454,7 @@ def test_structured_success_uses_one_stateless_tool_free_adk_turn() -> None:
             assert request.config.max_output_tokens == 512
             assert request.config.thinking_config is not None
             assert request.config.thinking_config.include_thoughts is False
+            assert request.config.automatic_function_calling is None
             assert request.config.http_options is not None
             assert request.config.http_options.timeout == 1_000
             assert request.config.http_options.retry_options is not None
@@ -325,6 +467,413 @@ def test_structured_success_uses_one_stateless_tool_free_adk_turn() -> None:
         assert model.closed is True
         assert model.api_client.aio.closed is True
         assert model.api_client.closed is True
+
+    asyncio.run(scenario())
+
+
+def test_qualification_facade_intercepts_and_seals_the_final_sdk_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def scenario() -> None:
+        planner, client = _qualification_planner(monkeypatch)
+        planner_input = _planner_input(planner)
+        observed: dict[str, object] = {}
+
+        async def dispatch(
+            context: QualificationDispatchContext,
+        ) -> types.GenerateContentResponse:
+            observed["model"] = context.model
+            observed["request_byte_count"] = context.request_byte_count
+            observed["sealed_sha256"] = context.sealed_generation_request_sha256
+            observed["provider_sha256"] = context.provider_request_sha256
+            with pytest.raises(AttributeError):
+                context.model = "changed"  # type: ignore[misc]
+            observed["count"] = await context.count_tokens()
+            return await context.generate_content()
+
+        async with planner:
+            planner.bind_qualification_dispatch_hook(dispatch)
+            try:
+                turn = await planner.plan(planner_input)
+            finally:
+                consumed = planner.clear_qualification_dispatch_hook(dispatch)
+
+            assert turn.failure is None
+            assert turn.metadata.reported_model == "gemini-3.5-flash-001"
+            assert (
+                turn.metadata.reported_model_raw_sha256
+                == hashlib.sha256(
+                    b"publishers/google/models/gemini-3.5-flash-001@default"
+                ).hexdigest()
+            )
+            assert consumed is True
+
+        models = client.aio.models
+        assert models.operations == ["count", "generate"]
+        assert len(models.count_requests) == 1
+        assert len(models.generation_requests) == 1
+        assert observed["model"] == "gemini-3.5-flash"
+        assert observed["count"] == 321
+        assert (
+            0 < observed["request_byte_count"] <= (QUALIFICATION_REQUEST_BYTE_CEILING)
+        )
+        assert len(observed["sealed_sha256"]) == 64
+        assert len(observed["provider_sha256"]) == 64
+        assert observed["sealed_sha256"] != observed["provider_sha256"]
+
+        counted_model, counted_contents, count_config = models.count_requests[0]
+        generated_model, generated_contents, generation_config = (
+            models.generation_requests[0]
+        )
+        assert counted_model == generated_model == "gemini-3.5-flash"
+        assert counted_contents == generated_contents
+        assert isinstance(count_config, types.CountTokensConfig)
+        assert count_config.system_instruction == generation_config.system_instruction
+        assert count_config.tools == generation_config.tools
+        assert count_config.generation_config is not None
+        assert count_config.generation_config.max_output_tokens == 1_024
+        assert count_config.generation_config.temperature == 0
+        assert generation_config.labels == {
+            "adk_agent_name": "reconcile_advisory_planner_agent"
+        }
+        assert generation_config.automatic_function_calling is not None
+        assert generation_config.automatic_function_calling.disable is True
+        assert generation_config.http_options is not None
+        assert generation_config.http_options.headers is not None
+        assert set(generation_config.http_options.headers) == {
+            "user-agent",
+            "x-goog-api-client",
+        }
+        intercepted = LlmRequest(
+            model=generated_model,
+            contents=generated_contents,
+            config=generation_config,
+        )
+        assert (
+            qualification_request_byte_count(intercepted)
+            == observed["request_byte_count"]
+        )
+        assert client.aio.closed is True
+        assert client.closed is True
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    "reported",
+    (
+        "gemini-3.5-flash-001",
+        "gemini-3.5-flash-999@default",
+        "models/gemini-3.5-flash-002",
+        "publishers/google/models/gemini-3.5-flash-003@default",
+        (
+            "projects/reconcile-qualification/locations/global/"
+            "publishers/google/models/gemini-3.5-flash-004"
+        ),
+    ),
+)
+def test_qualification_model_revision_accepts_only_concrete_vertex_forms(
+    reported: str,
+) -> None:
+    config = VertexAdcPlannerConfig(
+        project="reconcile-qualification",
+        location="global",
+        model="gemini-3.5-flash",
+    )
+
+    normalized = _qualification_reported_model_revision(reported, config)
+
+    assert normalized is not None
+    assert normalized[0].startswith("gemini-3.5-flash-")
+    assert normalized[0][-3:].isdigit()
+    assert normalized[1] == hashlib.sha256(reported.encode()).hexdigest()
+
+
+@pytest.mark.parametrize(
+    "reported",
+    (
+        "gemini-3.5-flash",
+        "gemini-3.5-flash@default",
+        "gemini-3.5-flash-latest",
+        "gemini-3.5-flash-preview",
+        "gemini-3.5-flash-20260814",
+        "gemini-3.5-flash-001@stable",
+        "gemini-3.5-flash-001@default@default",
+        "models/gemini-3.5-flash",
+        "publishers/google/models/gemini-3.5-flash-abc",
+        "projects/foreign/locations/global/publishers/google/models/"
+        "gemini-3.5-flash-001",
+        "projects/reconcile-qualification/locations/us-central1/"
+        "publishers/google/models/gemini-3.5-flash-001",
+        "other/gemini-3.5-flash-001",
+        "",
+    ),
+)
+def test_qualification_model_revision_rejects_alias_or_foreign_forms(
+    reported: str,
+) -> None:
+    config = VertexAdcPlannerConfig(
+        project="reconcile-qualification",
+        location="global",
+        model="gemini-3.5-flash",
+    )
+
+    assert _qualification_reported_model_revision(reported, config) is None
+
+
+def test_qualification_facade_rejects_unarmed_direct_and_stream_calls(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def scenario() -> None:
+        planner, client = _qualification_planner(monkeypatch)
+        model = planner._model
+        facade_models = model.api_client.aio.models
+        config = types.GenerateContentConfig()
+
+        with pytest.raises(RuntimeError, match="direct qualification"):
+            await facade_models.count_tokens(
+                model="gemini-3.5-flash",
+                contents=[],
+                config=types.CountTokensConfig(),
+            )
+        with pytest.raises(RuntimeError, match="not armed"):
+            await facade_models.generate_content(
+                model="gemini-3.5-flash",
+                contents=[],
+                config=config,
+            )
+        with pytest.raises(RuntimeError, match="streaming"):
+            await facade_models.generate_content_stream(
+                model="gemini-3.5-flash",
+                contents=[],
+                config=config,
+            )
+
+        request = LlmRequest(model="gemini-3.5-flash")
+        stream = model.generate_content_async(request, stream=True)
+        with pytest.raises(RuntimeError, match="forbidden transport"):
+            await anext(stream)
+        request.cache_config = object()  # type: ignore[assignment]
+        cached = model.generate_content_async(request, stream=False)
+        with pytest.raises(RuntimeError, match="forbidden transport"):
+            await anext(cached)
+        await planner.aclose()
+        assert client.aio.models.operations == []
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    ("misuse", "operations"),
+    (
+        ("generate-before-count", []),
+        ("double-count", ["count"]),
+        ("fabricated-response", []),
+        ("count-without-generation", ["count"]),
+        ("replaced-generation-response", ["count", "generate"]),
+    ),
+)
+def test_qualification_context_rejects_lifecycle_bypass(
+    monkeypatch: pytest.MonkeyPatch,
+    misuse: str,
+    operations: list[str],
+) -> None:
+    async def scenario() -> None:
+        planner, client = _qualification_planner(monkeypatch)
+
+        async def dispatch(
+            context: QualificationDispatchContext,
+        ) -> types.GenerateContentResponse:
+            if misuse == "generate-before-count":
+                return await context.generate_content()
+            if misuse == "double-count":
+                await context.count_tokens()
+                await context.count_tokens()
+                raise AssertionError("unreachable")
+            if misuse == "count-without-generation":
+                await context.count_tokens()
+                return _raw_response()
+            if misuse == "replaced-generation-response":
+                await context.count_tokens()
+                response = await context.generate_content()
+                return response.model_copy(deep=True)
+            return _raw_response()
+
+        async with planner:
+            planner.bind_qualification_dispatch_hook(dispatch)
+            try:
+                turn = await planner.plan(_planner_input(planner))
+            finally:
+                consumed = planner.clear_qualification_dispatch_hook(dispatch)
+
+        assert turn.failure is PlannerFailureKind.UNAVAILABLE
+        assert consumed is True
+        assert client.aio.models.operations == operations
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("total_tokens", (0, -1, True, 12_001))
+def test_qualification_count_must_be_positive_and_bounded(
+    monkeypatch: pytest.MonkeyPatch,
+    total_tokens: int,
+) -> None:
+    async def scenario() -> None:
+        models = _FakeQualificationModels(total_tokens=total_tokens)
+        planner, client = _qualification_planner(monkeypatch, models=models)
+
+        async def dispatch(
+            context: QualificationDispatchContext,
+        ) -> types.GenerateContentResponse:
+            await context.count_tokens()
+            raise AssertionError("unreachable")
+
+        async with planner:
+            planner.bind_qualification_dispatch_hook(dispatch)
+            try:
+                turn = await planner.plan(_planner_input(planner))
+            finally:
+                consumed = planner.clear_qualification_dispatch_hook(dispatch)
+
+        assert turn.failure is PlannerFailureKind.UNAVAILABLE
+        assert consumed is True
+        assert client.aio.models.operations == ["count"]
+        assert not 1 <= total_tokens <= QUALIFICATION_INPUT_TOKEN_CEILING or (
+            type(total_tokens) is not int
+        )
+
+    asyncio.run(scenario())
+
+
+def test_qualification_rejects_reentrant_and_cross_task_dispatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def scenario() -> None:
+        planner, client = _qualification_planner(monkeypatch)
+        facade_models = planner._model.api_client.aio.models
+
+        async def dispatch(
+            context: QualificationDispatchContext,
+        ) -> types.GenerateContentResponse:
+            with pytest.raises(RuntimeError, match="one-shot"):
+                await facade_models.generate_content(
+                    model=context.model,
+                    contents=[],
+                    config=types.GenerateContentConfig(),
+                )
+            cross_task = asyncio.create_task(context.count_tokens())
+            with pytest.raises(RuntimeError, match="changed async tasks"):
+                await cross_task
+            assert await context.count_tokens() == 321
+            return await context.generate_content()
+
+        async with planner:
+            planner.bind_qualification_dispatch_hook(dispatch)
+            try:
+                turn = await planner.plan(_planner_input(planner))
+            finally:
+                consumed = planner.clear_qualification_dispatch_hook(dispatch)
+
+        assert turn.failure is None
+        assert consumed is True
+        assert client.aio.models.operations == ["count", "generate"]
+
+    asyncio.run(scenario())
+
+
+def test_qualification_revalidates_effective_client_after_count(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def scenario() -> None:
+        client: _FakeQualificationClient
+
+        def mutate_client() -> None:
+            client._api_client.location = "us-central1"
+
+        models = _FakeQualificationModels(count_callback=mutate_client)
+        planner, client = _qualification_planner(monkeypatch, models=models)
+
+        async def dispatch(
+            context: QualificationDispatchContext,
+        ) -> types.GenerateContentResponse:
+            await context.count_tokens()
+            raise AssertionError("unreachable")
+
+        async with planner:
+            planner.bind_qualification_dispatch_hook(dispatch)
+            try:
+                turn = await planner.plan(_planner_input(planner))
+            finally:
+                consumed = planner.clear_qualification_dispatch_hook(dispatch)
+
+        assert turn.failure is PlannerFailureKind.UNAVAILABLE
+        assert consumed is True
+        assert models.operations == ["count"]
+
+    asyncio.run(scenario())
+
+
+def test_qualification_rejects_final_request_mutation_during_count(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def scenario() -> None:
+        planner: AdkGeminiPlanner
+
+        def mutate_request() -> None:
+            arm = planner._model.api_client._arm_state
+            assert arm is not None
+            assert arm.request is not None
+            arm.request.config.top_p = 0.75
+
+        models = _FakeQualificationModels(count_callback=mutate_request)
+        planner, _ = _qualification_planner(monkeypatch, models=models)
+
+        async def dispatch(
+            context: QualificationDispatchContext,
+        ) -> types.GenerateContentResponse:
+            await context.count_tokens()
+            raise AssertionError("unreachable")
+
+        async with planner:
+            planner.bind_qualification_dispatch_hook(dispatch)
+            try:
+                turn = await planner.plan(_planner_input(planner))
+            finally:
+                consumed = planner.clear_qualification_dispatch_hook(dispatch)
+
+        assert turn.failure is PlannerFailureKind.UNAVAILABLE
+        assert consumed is True
+        assert models.operations == ["count"]
+
+    asyncio.run(scenario())
+
+
+def test_qualification_rejects_agent_or_callback_drift_before_provider(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def scenario() -> None:
+        planner, client = _qualification_planner(monkeypatch)
+
+        async def dispatch(
+            context: QualificationDispatchContext,
+        ) -> types.GenerateContentResponse:
+            return await context.generate_content()
+
+        planner.bind_qualification_dispatch_hook(dispatch)
+        planner._agent.generate_content_config.top_p = 0.75
+        with pytest.raises(RuntimeError, match="settings drifted"):
+            await planner.plan(_planner_input(planner))
+        assert planner.clear_qualification_dispatch_hook(dispatch) is False
+        assert client.aio.models.operations == []
+
+        planner._agent.generate_content_config.top_p = None
+        planner.bind_qualification_dispatch_hook(dispatch)
+        planner._agent.before_model_callback = lambda *_: None
+        with pytest.raises(RuntimeError, match="settings drifted"):
+            await planner.plan(_planner_input(planner))
+        assert planner.clear_qualification_dispatch_hook(dispatch) is False
+        assert client.aio.models.operations == []
+        await planner.aclose()
 
     asyncio.run(scenario())
 
@@ -862,7 +1411,10 @@ def test_vertex_adc_constructor_is_explicit_and_does_not_retain_credentials() ->
         )
         planner = AdkGeminiPlanner.from_vertex_adc(config)
 
-        assert isinstance(planner._model, Gemini)
+        assert type(planner._model) is Gemini
+        assert planner._vertex_config is None
+        assert planner._agent.generate_content_config is not None
+        assert planner._agent.generate_content_config.automatic_function_calling is None
         assert planner.metadata.provider_name == "google-vertex-ai"
         assert planner.metadata.configured_model == "gemini-2.5-flash"
         assert planner._model.retry_options is not None

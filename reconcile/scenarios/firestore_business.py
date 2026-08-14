@@ -265,15 +265,32 @@ class FirestoreBusinessScenarioDefinition:
         self,
         database_path: str | Path,
         *,
+        selected_effect_ids: tuple[str, ...] | None = None,
         invoked_at: datetime | None = None,
         target_clock: Callable[[], datetime] | None = None,
     ) -> None:
+        if selected_effect_ids is not None:
+            if (
+                type(selected_effect_ids) is not tuple
+                or not selected_effect_ids
+                or len(selected_effect_ids) != len(set(selected_effect_ids))
+                or not set(selected_effect_ids) <= set(FIRESTORE_BUSINESS_EFFECT_IDS)
+            ):
+                raise ValueError(
+                    "selected business effects must be a nonempty unique subset"
+                )
+            selected_effect_ids = tuple(
+                effect_id
+                for effect_id in FIRESTORE_BUSINESS_EFFECT_IDS
+                if effect_id in selected_effect_ids
+            )
         self._mutation_target = LocalFirestoreMutationTarget(
             database_path,
             clock=target_clock,
         )
         self._read_target = LocalFirestoreReadTarget(database_path)
         self._cleanup_target = LocalFirestoreCleanupTarget(database_path)
+        self._selected_effect_ids = selected_effect_ids
         self._invoked_at = _aware_utc(invoked_at or datetime.now(UTC))
 
     def investigate(
@@ -440,7 +457,9 @@ class FirestoreBusinessScenarioDefinition:
                 "the business ADK scenario requires a function-call identifier"
             )
         documents = _document_writes(prepared.plan)
-        selected_effect_ids = _selected_effect_ids(prepared.plan)
+        selected_effect_ids = self._selected_effect_ids or _selected_effect_ids(
+            prepared.plan
+        )
         correlation = _correlation(prepared.plan)
 
         def execute_business_operation(
