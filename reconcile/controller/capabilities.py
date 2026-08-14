@@ -25,6 +25,7 @@ from reconcile.contracts.base import (
     JsonObject,
     StrictModel,
     reject_sensitive_keys,
+    reject_sensitive_values,
 )
 
 _MAX_SIGNED_64 = 2**63 - 1
@@ -63,6 +64,7 @@ class BoundProbe(StrictModel):
         if len(self.relevant_effect_ids) != len(set(self.relevant_effect_ids)):
             raise ValueError("relevant effect identifiers must be unique")
         reject_sensitive_keys(self.arguments)
+        reject_sensitive_values(self.arguments)
         return self
 
 
@@ -73,6 +75,7 @@ class ProbeObservation(StrictModel):
     @model_validator(mode="after")
     def validate_secret_free_payload(self) -> ProbeObservation:
         reject_sensitive_keys(self.payload)
+        reject_sensitive_values(self.payload)
         return self
 
 

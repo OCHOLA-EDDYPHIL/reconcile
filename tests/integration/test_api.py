@@ -514,7 +514,7 @@ def test_missing_investigation_is_a_canonical_404() -> None:
     assert _error(response).code is ApiErrorCode.INVESTIGATION_NOT_FOUND
 
 
-@pytest.mark.parametrize("path", ("bad id", "x" * 129))
+@pytest.mark.parametrize("path", ("bad id", "x" * 129, "token:private-marker"))
 def test_invalid_path_identifier_is_rejected_before_service_access(path: str) -> None:
     service = _FakeService()
     with TestClient(create_app(service)) as client:

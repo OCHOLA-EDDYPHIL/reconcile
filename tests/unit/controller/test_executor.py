@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import gzip
 import hashlib
 import json
 from copy import deepcopy
@@ -925,6 +926,7 @@ def test_unavailable_handlers_return_sanitized_stable_audit(error: Exception) ->
     (
         {"observed_at": "2026-08-13T12:00:00Z", "payload": {}},
         object(),
+        gzip.compress(b"x" * 1_000_000),
         ProbeObservation.model_construct(
             observed_at=NOW,
             payload={"access_token": "must-not-pass"},

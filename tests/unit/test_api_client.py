@@ -464,6 +464,7 @@ def test_get_does_not_follow_redirects() -> None:
     ("investigation_id", "after", "max_reconnects"),
     (
         ("bad id", 0, 0),
+        ("token:private-marker", 0, 0),
         ("investigation-7", -1, 0),
         ("investigation-7", 138, 0),
         ("investigation-7", True, 0),

@@ -64,6 +64,7 @@ from reconcile.persistence import (
     WriteOutcomeUnknown,
 )
 from reconcile.scenarios.service import ScenarioName, scenario_investigation_id
+from reconcile.security import contains_sensitive_material
 
 _MAX_REQUEST_BYTES = 1_048_576
 _IDENTIFIER_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
@@ -206,7 +207,11 @@ def _build_default_operator_service() -> _OperatorService:
 
 
 def _validated_investigation_id(value: object) -> str | None:
-    if not isinstance(value, str) or _IDENTIFIER_PATTERN.fullmatch(value) is None:
+    if (
+        not isinstance(value, str)
+        or _IDENTIFIER_PATTERN.fullmatch(value) is None
+        or contains_sensitive_material(value)
+    ):
         return None
     return value
 

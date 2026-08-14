@@ -348,6 +348,23 @@ def test_bound_probe_and_observation_are_strict_secret_free_models() -> None:
             observed_at=NOW,
             payload={"result": {"access_token": "not-stored"}},
         )
+    with pytest.raises(ValidationError, match="secret-bearing"):
+        ProbeObservation(
+            observed_at=NOW,
+            payload={"provider_detail": "Bearer private-marker-value"},
+        )
+    with pytest.raises(ValidationError, match="secret-bearing"):
+        BoundProbe(
+            investigation_id="investigation-7",
+            operation_id="operation-7",
+            capability_name="gcs-object-readback",
+            capability_version="1.0.0",
+            target=make_target(),
+            relevant_effect_ids=("business-record",),
+            arguments={"provider_detail": "Bearer private-marker-value"},
+            timeout_ms=2_000,
+            result_byte_ceiling=65_536,
+        )
 
 
 @pytest.mark.parametrize("sensitive_key", ("apikey", "accesskey", "privatekey"))

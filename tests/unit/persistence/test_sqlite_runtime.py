@@ -526,6 +526,71 @@ def test_structured_telemetry_is_secret_free_ordered_and_durable(
             attributes={"provider_detail": "Authorization: Bearer abcdefghijk"},
         )
         assert redacted.attributes == {"provider_detail": "Authorization: [REDACTED]"}
+        control_marker = "private-marker-telemetry"
+        controlled = RuntimeTelemetryRecord(
+            schema_version=RUNTIME_TELEMETRY_VERSION,
+            investigation_id=envelope.investigation_id,
+            telemetry_id="telemetry-4",
+            sequence=2,
+            kind=RuntimeTelemetryKind.RUN,
+            occurred_at=NOW + timedelta(seconds=2),
+            trace_id="trace-1",
+            span_id="span-4",
+            outcome="active",
+            attributes={
+                "nested": {
+                    "message": (f"token={control_marker}\n\x1b[31m forged\u202e")
+                }
+            },
+        )
+        await store.append_telemetry(
+            lease,
+            controlled,
+            now=NOW + timedelta(seconds=2),
+        )
+        persisted = await _store(tmp_path).telemetry_records(envelope.investigation_id)
+        encoded = b"".join(canonical_json_bytes(item) for item in persisted)
+        assert persisted == (telemetry, controlled)
+        assert control_marker.encode() not in encoded
+        assert b"\x1b" not in encoded
+        assert "\u202e".encode() not in encoded
+        assert b"[REDACTED]" in encoded
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.unit
+def test_probe_checkpoint_persists_only_sanitized_rationale(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        store, envelope = await _created_store(tmp_path)
+        lease = await store.acquire_lease(
+            envelope.investigation_id,
+            "worker-a",
+            now=NOW,
+        )
+        await store.mark_active(lease, occurred_at=NOW)
+        marker = "private-marker-rationale"
+        request_payload = make_probe().model_dump(mode="python")
+        request_payload["rationale"] = f"token={marker}\n\x1b[31m\u202e"
+        request = type(make_probe()).model_validate(request_payload)
+        await store.start_probe(
+            lease,
+            checkpoint_id="read-sanitized",
+            step_sequence=1,
+            request=request,
+            replay_safety=ProbeReplaySafety.SAFE_READ,
+            started_at=NOW + timedelta(seconds=1),
+        )
+
+        with sqlite3.connect(tmp_path / "runtime.sqlite3") as connection:
+            payload = connection.execute(
+                "SELECT payload FROM probe_checkpoints WHERE checkpoint_id = ?",
+                ("read-sanitized",),
+            ).fetchone()[0]
+        assert marker.encode() not in payload
+        assert b"\x1b" not in payload
+        assert "\u202e".encode() not in payload
+        assert b"[REDACTED]" in payload
 
     asyncio.run(scenario())
 

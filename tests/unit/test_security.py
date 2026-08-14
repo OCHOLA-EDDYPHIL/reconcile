@@ -75,6 +75,16 @@ def test_text_redaction_removes_assignment_authorization_jwt_and_pem_forms() -> 
 
 
 @pytest.mark.unit
+def test_boundary_sanitization_is_idempotent_after_control_escaping() -> None:
+    value = "token=private-marker\n\x1b[31m forged\u202e"
+
+    first = terminal_safe_text(value)
+    second = terminal_safe_text(first)
+
+    assert second == first
+
+
+@pytest.mark.unit
 def test_boundary_sanitizer_is_bounded_for_depth_and_collection_width() -> None:
     deep: object = "leaf"
     for _ in range(20):

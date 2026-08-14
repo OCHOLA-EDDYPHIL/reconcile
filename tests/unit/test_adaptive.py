@@ -1042,6 +1042,29 @@ async def test_non_read_only_enabled_catalog_fails_closed_before_model_call() ->
 
 
 @_async_test
+async def test_planner_capability_descriptions_are_synthesized_by_controller_code() -> (
+    None
+):
+    clock = _Clock()
+    handler = _Handler(clock, (_observation("committed", "record-1"),))
+    capabilities, rules = _registries({"safe-read": (handler, 1)})
+    planner = _FakePlanner([_output((_request("safe-read"),))])
+
+    await execute_adaptive_investigation(
+        _envelope(("safe-read",)),
+        capabilities,
+        rules,
+        planner,
+        _policy(),
+        clock=clock,
+    )
+
+    assert planner.calls[0].capabilities[0].description == (
+        "Read-only observation capability safe-read."
+    )
+
+
+@_async_test
 async def test_required_unavailable_or_rejected_capability_stops_deterministically() -> (
     None
 ):

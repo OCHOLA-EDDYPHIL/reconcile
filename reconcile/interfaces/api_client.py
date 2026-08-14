@@ -25,6 +25,7 @@ from reconcile.contracts import (
     canonical_sha256,
     decode_contract,
 )
+from reconcile.security import contains_sensitive_material
 
 DEFAULT_API_BASE_URL = "http://127.0.0.1:8000"
 
@@ -158,7 +159,11 @@ def _validated_base_url(value: str) -> httpx.URL:
 
 
 def _validated_investigation_id(value: str) -> str:
-    if not isinstance(value, str) or _IDENTIFIER_PATTERN.fullmatch(value) is None:
+    if (
+        not isinstance(value, str)
+        or _IDENTIFIER_PATTERN.fullmatch(value) is None
+        or contains_sensitive_material(value)
+    ):
         raise _invalid_request() from None
     return value
 

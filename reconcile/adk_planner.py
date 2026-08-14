@@ -38,6 +38,7 @@ from reconcile.contracts.planning import (
     AdaptivePlannerInput,
     AdaptivePlannerOutput,
 )
+from reconcile.security import contains_sensitive_material
 
 ADK_PLANNER_PROMPT_VERSION = "adaptive-planner-v3"
 
@@ -118,6 +119,7 @@ def _validate_resource_value(value: str, label: str, *, maximum: int = 128) -> s
         type(value) is not str
         or not 1 <= len(value) <= maximum
         or _RESOURCE_VALUE.fullmatch(value) is None
+        or contains_sensitive_material(value)
     ):
         raise ValueError(f"{label} must be a bounded identifier")
     return value

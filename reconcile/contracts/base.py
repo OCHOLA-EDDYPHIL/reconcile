@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import math
+import unicodedata
 from datetime import UTC, datetime
 from typing import Annotated
 
@@ -16,15 +17,43 @@ from pydantic import (
     StringConstraints,
 )
 
-from reconcile.security import contains_sensitive_material, is_sensitive_key
+from reconcile.security import (
+    contains_sensitive_material,
+    is_sensitive_key,
+    terminal_safe_text,
+)
 
 
-def _validate_unicode_text(value: str) -> str:
+def _validate_unicode_scalars(value: str) -> str:
     try:
         value.encode("utf-8")
     except UnicodeEncodeError as error:
         raise ValueError("text must contain Unicode scalar values") from error
     return value
+
+
+def _validate_unicode_text(value: str) -> str:
+    _validate_unicode_scalars(value)
+    if any(
+        unicodedata.category(character).startswith("C")
+        or unicodedata.category(character) in {"Zl", "Zp"}
+        for character in value
+    ):
+        raise ValueError("text contains an unsafe rendering control")
+    return value
+
+
+def _validate_secret_free_identifier(value: str) -> str:
+    if contains_sensitive_material(value):
+        raise ValueError("identifier contains secret-bearing material")
+    return value
+
+
+def _sanitize_boundary_text(value: str) -> str:
+    sanitized = terminal_safe_text(value)
+    if not 1 <= len(sanitized) <= 4096:
+        raise ValueError("sanitized text exceeds the public boundary limit")
+    return sanitized
 
 
 Identifier = Annotated[
@@ -35,11 +64,18 @@ Identifier = Annotated[
         pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]*$",
     ),
     AfterValidator(_validate_unicode_text),
+    AfterValidator(_validate_secret_free_identifier),
 ]
 NonEmptyText = Annotated[
     str,
     StringConstraints(min_length=1, max_length=4096),
     AfterValidator(_validate_unicode_text),
+]
+SanitizedText = Annotated[
+    str,
+    StringConstraints(min_length=1, max_length=4096),
+    AfterValidator(_validate_unicode_scalars),
+    AfterValidator(_sanitize_boundary_text),
 ]
 ShortText = Annotated[
     str,
@@ -68,7 +104,7 @@ def _validate_json(value: JsonValue, *, depth: int = 0) -> JsonValue:
         return value
     if isinstance(value, str):
         try:
-            value.encode("utf-8")
+            _validate_unicode_text(value)
         except UnicodeEncodeError as error:
             raise ValueError(
                 "JSON strings must contain Unicode scalar values"
@@ -93,7 +129,7 @@ def _validate_json(value: JsonValue, *, depth: int = 0) -> JsonValue:
             if not key or len(key) > 128:
                 raise ValueError("JSON object keys must be bounded and nonempty")
             try:
-                key.encode("utf-8")
+                _validate_unicode_text(key)
             except UnicodeEncodeError as error:
                 raise ValueError(
                     "JSON object keys must contain Unicode scalar values"

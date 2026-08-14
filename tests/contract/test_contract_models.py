@@ -233,7 +233,10 @@ def test_execution_envelope_rejects_secret_signatures_in_innocuous_fields(
             canonical_json_value_bytes(arguments)
         ).hexdigest()
 
-    with pytest.raises(ValidationError, match="secret-bearing values"):
+    with pytest.raises(
+        ValidationError,
+        match=r"secret-bearing values|unsafe rendering control",
+    ):
         ExecutionEnvelope.model_validate_json(json.dumps(payload))
 
 
@@ -244,6 +247,83 @@ def test_raw_observation_reference_is_opaque_not_a_credentialed_url() -> None:
             reference="https://example.test/read?access_token=secret",
             byte_count=1,
         )
+
+    with pytest.raises(ValidationError, match="secret-bearing"):
+        RawObservationReference(
+            sha256="a" * 64,
+            reference="AIzaabcdefghijklmnopqrstuvwxyz",
+            byte_count=1,
+        )
+
+
+def test_report_and_probe_text_is_sanitized_at_the_contract_boundary() -> None:
+    marker = "private-marker-6b12"
+    control_text = f"provider token={marker}\n\x1b[31m\u202e"
+    payload = _payload(make_report(Classification.COMMITTED))
+    payload["limitations"] = [control_text]
+    payload["advisory_explanation"]["text"] = control_text  # type: ignore[index]
+
+    report = InvestigationReport.model_validate_json(json.dumps(payload))
+    probe_payload = _payload(
+        ProbeRequest(
+            schema_version=PROBE_REQUEST_VERSION,
+            capability_name="gcs-object-readback",
+            capability_version="1.0.0",
+            relevant_effect_ids=("business-record",),
+            arguments={},
+            rationale="Read only.",
+        )
+    )
+    probe_payload["rationale"] = control_text
+    request = ProbeRequest.model_validate_json(json.dumps(probe_payload))
+
+    assert marker.encode() not in canonical_json_bytes(report)
+    assert marker.encode() not in canonical_json_bytes(request)
+    assert "[REDACTED]" in report.limitations[0]
+    assert "\\u000a" in report.limitations[0]
+    assert "\\u001b" in report.limitations[0]
+    assert "\\u202e" in report.limitations[0]
+    assert report.advisory_explanation is not None
+    assert report.advisory_explanation.text == report.limitations[0]
+    assert request.rationale == report.limitations[0]
+
+
+def test_rendering_controls_fail_closed_outside_sanitized_text_fields() -> None:
+    payload = _payload(make_envelope())
+    payload["target"]["resource"]["label"] = "safe\u202edirection"
+
+    with pytest.raises(ValidationError, match="rendering control"):
+        ExecutionEnvelope.model_validate_json(json.dumps(payload))
+
+
+def test_probe_request_rejects_secret_values_under_innocuous_argument_keys() -> None:
+    payload = _payload(
+        ProbeRequest(
+            schema_version=PROBE_REQUEST_VERSION,
+            capability_name="gcs-object-readback",
+            capability_version="1.0.0",
+            relevant_effect_ids=("business-record",),
+            arguments={},
+            rationale="Read only.",
+        )
+    )
+    payload["arguments"] = {"provider_detail": "Bearer private-marker-value"}
+
+    with pytest.raises(ValidationError, match="secret-bearing"):
+        ProbeRequest.model_validate_json(json.dumps(payload))
+
+
+def test_canonical_boundary_revalidates_model_copy_bypass_attempts() -> None:
+    marker = "private-marker-copy"
+    bypassed = make_report(Classification.COMMITTED).model_copy(
+        update={"limitations": (f"token={marker}\n\x1b[31m\u202e",)}
+    )
+
+    encoded = canonical_json_bytes(bypassed)
+    assert marker.encode() not in encoded
+    assert b"[REDACTED]" in encoded
+    assert b"\x1b" not in encoded
+    assert "\u202e".encode() not in encoded
 
 
 def test_probe_audit_retains_hashes_and_counters_without_planner_content() -> None:
