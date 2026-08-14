@@ -129,6 +129,7 @@ type ArgumentsObject = Annotated[
     AfterValidator(_validate_json_object),
 ]
 
+
 def reject_sensitive_keys(value: JsonValue) -> None:
     """Reject credential-shaped fields from secret-free public objects."""
 
