@@ -53,6 +53,7 @@ from reconcile.controller import (
     CapabilitySemantics,
     ControllerClock,
     ProbeController,
+    ProbeDurabilityObserver,
     ProbeStopReason,
     probe_request_sha256,
 )
@@ -1642,6 +1643,7 @@ async def execute_adaptive_investigation(
     cancellation_event: asyncio.Event | None = None,
     additional_limitations: tuple[str, ...] = (),
     progress_emitter: ProgressEmitter | None = None,
+    durability_observer: ProbeDurabilityObserver | None = None,
 ) -> AdaptiveInvestigationResult:
     """Run bounded advisory acquisition through deterministic safety boundaries."""
 
@@ -1693,6 +1695,7 @@ async def execute_adaptive_investigation(
         sealed_envelope,
         capabilities,
         clock=selected_clock,
+        durability_observer=durability_observer,
     )
     engine = EvidenceEngine(sealed_envelope, rules)
     evaluation = engine.evaluate(())

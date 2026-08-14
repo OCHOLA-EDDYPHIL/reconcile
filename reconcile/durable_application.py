@@ -6,7 +6,7 @@ import asyncio
 import hashlib
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
-from contextlib import asynccontextmanager, suppress
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
@@ -762,9 +762,16 @@ class DurableInvestigationApplicationService:
         self._event_poll_interval = event_poll_interval
         self._tasks: dict[str, asyncio.Task[None]] = {}
         self._cancellation_events: dict[str, asyncio.Event] = {}
+        self._task_exits: dict[str, Exception] = {}
         self._task_lock = asyncio.Lock()
         self._closed = False
         self._startup_error: Exception | None = None
+
+    @property
+    def runtime_provenance_sha256(self) -> str:
+        """Return the resolved executable provenance bound to new runs."""
+
+        return self._runtime_provenance_sha256
 
     def _now(self, *, not_before: datetime | None = None) -> datetime:
         value = _aware_utc(self._clock())
@@ -849,6 +856,7 @@ class DurableInvestigationApplicationService:
             current = self._tasks.get(investigation_id)
             if current is not None and not current.done():
                 return
+            self._task_exits.pop(investigation_id, None)
             cancellation_event = asyncio.Event()
             task = asyncio.create_task(
                 self._run(investigation_id, cancellation_event, recovering),
@@ -861,11 +869,18 @@ class DurableInvestigationApplicationService:
             )
 
     def _task_done(self, investigation_id: str, task: asyncio.Task[None]) -> None:
+        if task.cancelled():
+            failure = RuntimeError(
+                "durable child task was cancelled before the waiter observed terminal state"
+            )
+        else:
+            failure = task.exception() or RuntimeError(
+                "durable child task exited before the waiter observed terminal state"
+            )
+        self._task_exits[investigation_id] = failure
         if self._tasks.get(investigation_id) is task:
             self._tasks.pop(investigation_id, None)
             self._cancellation_events.pop(investigation_id, None)
-        with suppress(asyncio.CancelledError):
-            task.exception()
 
     @staticmethod
     def _report_for(run: DurableRunRecord) -> InvestigationReport:
@@ -911,6 +926,7 @@ class DurableInvestigationApplicationService:
     ) -> EventJournalSnapshot:
         self._assert_available()
         while True:
+            self._assert_available()
             self._report_for(await self._store.get_run(investigation_id))
             snapshot = await self._store.snapshot_events(
                 investigation_id,
@@ -918,6 +934,9 @@ class DurableInvestigationApplicationService:
             )
             if snapshot.events or snapshot.terminal:
                 return snapshot
+            task_exit = self._task_exits.get(investigation_id)
+            if task_exit is not None:
+                raise DurableServiceUnavailable from task_exit
             if cancellation_event is not None and cancellation_event.is_set():
                 raise asyncio.CancelledError
             await asyncio.sleep(self._event_poll_interval)

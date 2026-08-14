@@ -61,6 +61,13 @@ from reconcile.contracts.report import (
     InvestigationStatus,
     ProbeOutcome,
 )
+from reconcile.persistence import (
+    CreateScenarioWorkResult,
+    ScenarioInvestigationState,
+    ScenarioWorkConflict,
+    ScenarioWorkItem,
+    SqliteScenarioStore,
+)
 from reconcile.progress import (
     AdvisoryProgress,
     AdvisoryProgressStage,
@@ -79,6 +86,7 @@ from reconcile.scenarios.service import (
     ScenarioWorkflowError,
     ScenarioWorkflowErrorCategory,
     ScenarioWorkflowResult,
+    _envelope_summary,
     run_one,
     scenario_investigation_id,
 )
@@ -93,6 +101,16 @@ class OperatorServiceError(Exception):
 
 class OperatorServiceClosed(OperatorServiceError):
     """New scenario launches are not accepted after service shutdown."""
+
+
+class OperatorServiceUnavailable(OperatorServiceError):
+    """An owned run exited before it durably terminalized."""
+
+    def __init__(self, investigation_id: str) -> None:
+        self.investigation_id = investigation_id
+        super().__init__(
+            f"operator scenario service is unavailable: {investigation_id}"
+        )
 
 
 class OperatorCapacityExceeded(OperatorServiceError):
@@ -169,6 +187,21 @@ class ScenarioWorkflowRunner(Protocol):
     ) -> Awaitable[ScenarioWorkflowResult]: ...
 
 
+class DurableScenarioCoordinator(Protocol):
+    @property
+    def provider_available(self) -> bool: ...
+
+    async def bind_launch(
+        self,
+        launch: ScenarioLaunchRequest,
+        *,
+        snapshot: ScenarioRunSnapshot,
+        accepted_event: ScenarioRunEvent,
+    ) -> CreateScenarioWorkResult: ...
+
+    async def audit_terminal_projection(self, investigation_id: str) -> None: ...
+
+
 @dataclass(frozen=True, slots=True)
 class LaunchScenarioResult:
     """Current snapshot plus whether this call first bound the launch ID."""
@@ -197,6 +230,10 @@ class _RunState:
     terminal: bool = False
     task: asyncio.Task[None] | None = None
     request_sequence: int = 0
+    advisory_turn_sequence: int = 0
+    advisory_turn_open: AdvisoryTurnSummary | None = None
+    task_exit: Exception | None = None
+    task_exit_notifier: asyncio.Task[None] | None = None
 
 
 def _sealed[Model](value: Model, model_type: type[Model]) -> tuple[Model, bytes]:
@@ -394,6 +431,7 @@ class OperatorApplicationService:
         runner: ScenarioWorkflowRunner = run_one,
         vertex_config: VertexAdcPlannerConfig | None = None,
         clock: Callable[[], datetime] | None = None,
+        projection_store: SqliteScenarioStore | None = None,
     ) -> None:
         if not callable(runner):
             raise TypeError("operator scenario runner must be callable")
@@ -405,11 +443,174 @@ class OperatorApplicationService:
         self._runner = runner
         self._vertex_config = vertex_config
         self._clock = clock or (lambda: datetime.now(UTC))
+        self._projection_store = projection_store
+        coordinator = getattr(runner, "bind_launch", None)
+        if projection_store is not None and not callable(coordinator):
+            raise TypeError("durable operator runner must bind scenario launches")
+        if projection_store is None and callable(coordinator):
+            raise ValueError("durable operator runner requires a projection store")
+        self._coordinator: DurableScenarioCoordinator | None = (
+            None if projection_store is None else runner  # type: ignore[assignment]
+        )
         self._registry_lock = asyncio.Lock()
         self._by_launch_id: dict[str, _RunState] = {}
         self._by_investigation_id: dict[str, _RunState] = {}
         self._closed = False
         self._close_task: asyncio.Task[None] | None = None
+
+    @staticmethod
+    def _terminal_projection_matches_authority(
+        snapshot: ScenarioRunSnapshot,
+        work: ScenarioWorkItem,
+    ) -> bool:
+        scenario_result = work.scenario_result
+        workflow_result = work.workflow_result
+        if (
+            scenario_result is None
+            or scenario_result.execution_envelope is None
+            or workflow_result is None
+            or snapshot.envelope_summary
+            != _envelope_summary(scenario_result.execution_envelope)
+        ):
+            return False
+        if type(workflow_result) is InvestigationReport:
+            return (
+                snapshot.report == sanitize_report(workflow_result)
+                and snapshot.comparison is None
+            )
+        if type(workflow_result) is InvestigationComparisonRecord:
+            return (
+                snapshot.comparison == sanitize_comparison(workflow_result)
+                and snapshot.report is None
+            )
+        return False
+
+    @staticmethod
+    def _journal_counters(
+        events: tuple[ScenarioRunEvent, ...],
+    ) -> tuple[int, int, AdvisoryTurnSummary | None]:
+        request_sequence = 0
+        advisory_turn_sequence = 0
+        advisory_turn_open: AdvisoryTurnSummary | None = None
+        for event in events:
+            if isinstance(event.payload, ProbeRequestEventPayload):
+                request_sequence += 1
+                if event.payload.request.request_sequence != request_sequence:
+                    raise RuntimeError("scenario request journal sequence is invalid")
+            elif isinstance(event.payload, AdvisoryTurnEventPayload):
+                turn = event.payload.turn
+                if turn.status is AdvisoryTurnStatus.STARTED:
+                    if (
+                        advisory_turn_open is not None
+                        or turn.turn_sequence != advisory_turn_sequence + 1
+                    ):
+                        raise RuntimeError(
+                            "scenario advisory journal sequence is invalid"
+                        )
+                    advisory_turn_sequence = turn.turn_sequence
+                    advisory_turn_open = turn
+                elif (
+                    advisory_turn_open is None
+                    or turn.turn_sequence != advisory_turn_sequence
+                    or turn.phase is not advisory_turn_open.phase
+                    or turn.input_sha256 != advisory_turn_open.input_sha256
+                ):
+                    raise RuntimeError("scenario advisory journal sequence is invalid")
+                else:
+                    advisory_turn_open = None
+        return (
+            request_sequence,
+            advisory_turn_sequence,
+            advisory_turn_open,
+        )
+
+    async def start(self) -> None:
+        """Reconnect durable snapshots and resume every nonterminal work item."""
+
+        if self._projection_store is None:
+            return
+        work_items = await self._projection_store.list_work()
+        async with self._registry_lock:
+            if self._closed:
+                raise OperatorServiceClosed
+            for work in work_items:
+                launch_id = work.launch_request.launch_id
+                investigation_id = work.scenario_request.investigation_id
+                if (
+                    launch_id in self._by_launch_id
+                    or investigation_id in self._by_investigation_id
+                ):
+                    raise RuntimeError("durable operator registry contains a collision")
+                projection = await self._projection_store.snapshot_projection(
+                    investigation_id
+                )
+                if projection.snapshot.envelope_summary is not None and (
+                    work.scenario_result is None
+                    or work.scenario_result.execution_envelope is None
+                    or projection.snapshot.envelope_summary
+                    != _envelope_summary(work.scenario_result.execution_envelope)
+                ):
+                    raise RuntimeError(
+                        "scenario envelope projection contradicts private authority"
+                    )
+                (
+                    request_sequence,
+                    advisory_turn_sequence,
+                    advisory_turn_open,
+                ) = self._journal_counters(projection.events)
+                if projection.terminal and advisory_turn_open is not None:
+                    raise RuntimeError(
+                        "terminal scenario has an unfinished advisory turn"
+                    )
+                state = _RunState(
+                    launch_bytes=canonical_json_bytes(work.launch_request),
+                    condition=asyncio.Condition(),
+                    snapshot_bytes=canonical_json_bytes(projection.snapshot),
+                    events=[canonical_json_bytes(event) for event in projection.events],
+                    cancellation_event=asyncio.Event(),
+                    generation=projection.cursor,
+                    terminal=projection.terminal,
+                    request_sequence=request_sequence,
+                    advisory_turn_sequence=advisory_turn_sequence,
+                    advisory_turn_open=advisory_turn_open,
+                )
+                self._by_launch_id[launch_id] = state
+                self._by_investigation_id[investigation_id] = state
+                if state.terminal:
+                    await self._coordinator.audit_terminal_projection(investigation_id)  # type: ignore[union-attr]
+                    audited = await self._projection_store.get_work(investigation_id)
+                    if (
+                        audited.investigation_state
+                        is ScenarioInvestigationState.RECORDED
+                        and projection.snapshot.lifecycle
+                        is not ScenarioRunLifecycle.COMPLETED
+                    ) or (
+                        audited.investigation_state
+                        is ScenarioInvestigationState.ESCALATION_REQUIRED
+                        and projection.snapshot.lifecycle
+                        is not ScenarioRunLifecycle.FAILED
+                    ):
+                        raise RuntimeError(
+                            "terminal scenario projection contradicts private authority"
+                        )
+                    if (
+                        audited.investigation_state
+                        is ScenarioInvestigationState.RECORDED
+                        and not self._terminal_projection_matches_authority(
+                            projection.snapshot,
+                            audited,
+                        )
+                    ):
+                        raise RuntimeError(
+                            "terminal scenario projection contradicts private result"
+                        )
+                else:
+                    self._start_task(
+                        state,
+                        work.launch_request,
+                        _scenario_name(work.launch_request.scenario),
+                        _scenario_mode(work.launch_request.mode),
+                    )
 
     async def __aenter__(self) -> OperatorApplicationService:
         if self._closed:
@@ -510,15 +711,37 @@ class OperatorApplicationService:
                     cancellation_event=asyncio.Event(),
                     generation=1,
                 )
+                if self._coordinator is not None:
+                    try:
+                        bound = await self._coordinator.bind_launch(
+                            request,
+                            snapshot=snapshot,
+                            accepted_event=event,
+                        )
+                    except ScenarioWorkConflict as error:
+                        raise ScenarioLaunchConflict(
+                            error.launch_id,
+                            error.investigation_id,
+                        ) from error
+                    if not bound.created:
+                        projection = await self._projection_store.snapshot_projection(
+                            investigation_id
+                        )  # type: ignore[union-attr]
+                        snapshot = projection.snapshot
+                        state.snapshot_bytes = canonical_json_bytes(snapshot)
+                        state.events = [
+                            canonical_json_bytes(item) for item in projection.events
+                        ]
+                        state.generation = projection.cursor
+                        state.terminal = projection.terminal
                 self._by_launch_id[request.launch_id] = state
                 self._by_investigation_id[investigation_id] = state
-                task = asyncio.create_task(
-                    self._execute(state, request, scenario, mode),
-                    name=f"reconcile-scenario-{investigation_id}",
+                if not state.terminal:
+                    self._start_task(state, request, scenario, mode)
+                return LaunchScenarioResult(
+                    snapshot=snapshot,
+                    created=(bound.created if self._coordinator is not None else True),
                 )
-                state.task = task
-                task.add_done_callback(partial(self._task_done, state))
-                return LaunchScenarioResult(snapshot=snapshot, created=True)
 
         if existing is None:  # pragma: no cover - protected by the registry lock.
             raise RuntimeError("operator launch registry lost its state")
@@ -527,11 +750,53 @@ class OperatorApplicationService:
             created=False,
         )
 
+    def _start_task(
+        self,
+        state: _RunState,
+        request: ScenarioLaunchRequest,
+        scenario: ScenarioName,
+        mode: ScenarioMode,
+    ) -> None:
+        if state.task is not None and not state.task.done():
+            return
+        state.task_exit = None
+        task = asyncio.create_task(
+            self._execute(state, request, scenario, mode),
+            name=f"reconcile-scenario-{scenario_investigation_id(scenario, request.launch_id)}",
+        )
+        state.task = task
+        task.add_done_callback(partial(self._task_done, state))
+
     def _task_done(self, state: _RunState, task: asyncio.Task[None]) -> None:
         if state.task is task:
             state.task = None
-        with suppress(asyncio.CancelledError):
-            task.exception()
+        if task.cancelled():
+            failure = RuntimeError(
+                "operator task was cancelled before durable terminal state"
+            )
+        else:
+            failure = task.exception() or RuntimeError(
+                "operator task exited before durable terminal state"
+            )
+        if not self._closed and not state.terminal:
+            state.task_exit = failure
+            state.task_exit_notifier = asyncio.create_task(
+                self._notify_task_exit(state)
+            )
+
+    @staticmethod
+    async def _notify_task_exit(state: _RunState) -> None:
+        async with state.condition:
+            state.generation += 1
+            state.condition.notify_all()
+
+    @staticmethod
+    def _raise_if_task_exited(
+        state: _RunState,
+        investigation_id: str,
+    ) -> None:
+        if not state.terminal and state.task_exit is not None:
+            raise OperatorServiceUnavailable(investigation_id) from state.task_exit
 
     async def _lookup(self, investigation_id: str) -> _RunState:
         async with self._registry_lock:
@@ -546,10 +811,39 @@ class OperatorApplicationService:
             payload = state.snapshot_bytes
         return decode_contract(payload, ScenarioRunSnapshot)
 
+    async def _refresh_durable_state(
+        self,
+        state: _RunState,
+        investigation_id: str,
+    ) -> None:
+        if self._projection_store is None:
+            return
+        projection = await self._projection_store.snapshot_projection(investigation_id)
+        async with state.condition:
+            snapshot_bytes = canonical_json_bytes(projection.snapshot)
+            event_bytes = [canonical_json_bytes(event) for event in projection.events]
+            if projection.cursor < len(state.events):
+                return
+            if projection.cursor == len(state.events) and state.events != event_bytes:
+                raise RuntimeError("durable operator projection diverged")
+            changed = (
+                state.snapshot_bytes != snapshot_bytes
+                or state.terminal != projection.terminal
+            )
+            state.snapshot_bytes = snapshot_bytes
+            state.events = event_bytes
+            state.terminal = projection.terminal
+            if changed:
+                state.generation += 1
+                state.condition.notify_all()
+
     async def get(self, investigation_id: str) -> ScenarioRunSnapshot:
         """Return one isolated snapshot coherent with its event cursor."""
 
-        return await self._current_snapshot(await self._lookup(investigation_id))
+        state = await self._lookup(investigation_id)
+        await self._refresh_durable_state(state, investigation_id)
+        self._raise_if_task_exited(state, investigation_id)
+        return await self._current_snapshot(state)
 
     async def get_envelope_summary(
         self,
@@ -608,8 +902,12 @@ class OperatorApplicationService:
         """Return accepted events strictly after an exclusive cursor."""
 
         state = await self._lookup(investigation_id)
+        await self._refresh_durable_state(state, investigation_id)
         async with state.condition:
-            return self._event_snapshot_locked(state, investigation_id, after)
+            snapshot = self._event_snapshot_locked(state, investigation_id, after)
+            if not snapshot.events and not snapshot.terminal:
+                self._raise_if_task_exited(state, investigation_id)
+            return snapshot
 
     @staticmethod
     async def _wait_for_change(
@@ -663,6 +961,7 @@ class OperatorApplicationService:
             raise TypeError("scenario event cancellation must be an asyncio event")
         state = await self._lookup(investigation_id)
         while True:
+            await self._refresh_durable_state(state, investigation_id)
             async with state.condition:
                 snapshot = self._event_snapshot_locked(
                     state,
@@ -671,10 +970,20 @@ class OperatorApplicationService:
                 )
                 if snapshot.events or snapshot.terminal:
                     return snapshot
+                self._raise_if_task_exited(state, investigation_id)
                 if cancellation_event is not None and cancellation_event.is_set():
                     raise asyncio.CancelledError
                 generation = state.generation
-            await self._wait_for_change(state, generation, cancellation_event)
+            if self._projection_store is None:
+                await self._wait_for_change(state, generation, cancellation_event)
+            else:
+                try:
+                    await asyncio.wait_for(
+                        asyncio.sleep(0.05),
+                        timeout=0.1,
+                    )
+                except TimeoutError:  # pragma: no cover - defensive timeout.
+                    pass
 
     async def _append_transition(
         self,
@@ -718,6 +1027,12 @@ class OperatorApplicationService:
                 ScenarioRunSnapshot,
             )
             _, event_bytes = _sealed(event, ScenarioRunEvent)
+            if self._projection_store is not None:
+                await self._projection_store.append_projection(
+                    replacement,
+                    event,
+                    terminal=terminal,
+                )
             state.snapshot_bytes = snapshot_bytes
             state.events.append(event_bytes)
             state.generation += 1
@@ -788,9 +1103,7 @@ class OperatorApplicationService:
         raise TypeError("operator received an unknown progress record")
 
     async def _next_request_sequence(self, state: _RunState) -> int:
-        next_sequence = state.request_sequence + 1
-        state.request_sequence = next_sequence
-        return next_sequence
+        return state.request_sequence + 1
 
     async def _project_advisory_progress(
         self,
@@ -810,36 +1123,52 @@ class OperatorApplicationService:
             if progress.failure is None
             else AdvisoryTurnFailureCategory(progress.failure.value)
         )
+        turn = AdvisoryTurnSummary(
+            turn_sequence=progress.turn_sequence,
+            phase=progress.phase,
+            status=status,
+            input_sha256=progress.input_sha256,
+            output_sha256=progress.output_sha256,
+            proposal_count=len(progress.proposals),
+            selected_proposal_count=sum(
+                proposal.disposition.value == "selected"
+                for proposal in progress.proposals
+            ),
+            failure_category=failure,
+        )
+        if status is AdvisoryTurnStatus.STARTED:
+            if (
+                state.advisory_turn_open is not None
+                or turn.turn_sequence != state.advisory_turn_sequence + 1
+            ):
+                raise ValueError("scenario advisory progress sequence is invalid")
+        elif (
+            state.advisory_turn_open is None
+            or turn.turn_sequence != state.advisory_turn_sequence
+            or turn.phase is not state.advisory_turn_open.phase
+            or turn.input_sha256 != state.advisory_turn_open.input_sha256
+        ):
+            raise ValueError("scenario advisory progress sequence is invalid")
         await self._append_transition(
             state,
             event_type=ScenarioRunEventType.ADVISORY_TURN,
-            payload=AdvisoryTurnEventPayload(
-                turn=AdvisoryTurnSummary(
-                    turn_sequence=progress.turn_sequence,
-                    phase=progress.phase,
-                    status=status,
-                    input_sha256=progress.input_sha256,
-                    output_sha256=progress.output_sha256,
-                    proposal_count=len(progress.proposals),
-                    selected_proposal_count=sum(
-                        proposal.disposition.value == "selected"
-                        for proposal in progress.proposals
-                    ),
-                    failure_category=failure,
-                )
-            ),
+            payload=AdvisoryTurnEventPayload(turn=turn),
             occurred_at=progress.occurred_at,
         )
-        if progress.stage is AdvisoryProgressStage.REQUESTED:
+        if status is AdvisoryTurnStatus.STARTED:
+            state.advisory_turn_sequence = turn.turn_sequence
+            state.advisory_turn_open = turn
             return
+        state.advisory_turn_open = None
         for proposal in progress.proposals:
+            request_sequence = await self._next_request_sequence(state)
             await self._append_transition(
                 state,
                 event_type=ScenarioRunEventType.PROBE_REQUEST,
                 payload=ProbeRequestEventPayload(
                     strategy=ComparisonStrategyKind.ADAPTIVE,
                     request=SanitizedProbeRequest(
-                        request_sequence=await self._next_request_sequence(state),
+                        request_sequence=request_sequence,
                         advisory_turn_sequence=progress.turn_sequence,
                         proposal_sequence=proposal.proposal_sequence,
                         capability_name=proposal.capability_name,
@@ -851,6 +1180,7 @@ class OperatorApplicationService:
                 ),
                 occurred_at=progress.occurred_at,
             )
+            state.request_sequence = request_sequence
 
     async def _project_probe_progress(
         self,
@@ -860,13 +1190,14 @@ class OperatorApplicationService:
         if progress.stage is ProbeProgressStage.REQUESTED:
             if progress.strategy is ComparisonStrategyKind.ADAPTIVE:
                 return
+            request_sequence = await self._next_request_sequence(state)
             await self._append_transition(
                 state,
                 event_type=ScenarioRunEventType.PROBE_REQUEST,
                 payload=ProbeRequestEventPayload(
                     strategy=progress.strategy,
                     request=SanitizedProbeRequest(
-                        request_sequence=await self._next_request_sequence(state),
+                        request_sequence=request_sequence,
                         advisory_turn_sequence=None,
                         proposal_sequence=None,
                         capability_name=progress.capability_name,
@@ -878,6 +1209,7 @@ class OperatorApplicationService:
                 ),
                 occurred_at=progress.occurred_at,
             )
+            state.request_sequence = request_sequence
             return
         if progress.controller_sequence_reused:
             return
@@ -909,8 +1241,19 @@ class OperatorApplicationService:
         mode: ScenarioMode,
     ) -> None:
         try:
-            await self._mark_running(state)
-            if mode is not ScenarioMode.FIXED and self._vertex_config is None:
+            current = await self._current_snapshot(state)
+            if current.lifecycle is ScenarioRunLifecycle.ACCEPTED:
+                await self._mark_running(state)
+            elif current.lifecycle is not ScenarioRunLifecycle.RUNNING:
+                return
+            if (
+                mode is not ScenarioMode.FIXED
+                and self._vertex_config is None
+                and (
+                    self._coordinator is None
+                    or not self._coordinator.provider_available
+                )
+            ):
                 await self._terminal_failure(
                     state,
                     ScenarioRunFailureCategory.MODEL_UNAVAILABLE,
@@ -931,7 +1274,8 @@ class OperatorApplicationService:
                 return
             await self._terminal_completed(state, result)
         except asyncio.CancelledError:
-            await asyncio.shield(self._terminal_cancelled(state))
+            if self._projection_store is None:
+                await asyncio.shield(self._terminal_cancelled(state))
             raise
         except ProgressDeliveryError:
             await self._terminal_failure(
@@ -974,6 +1318,8 @@ class OperatorApplicationService:
         result: ScenarioWorkflowResult,
     ) -> None:
         current = await self._current_snapshot(state)
+        if state.advisory_turn_open is not None:
+            raise ValueError("completed scenario has an unfinished advisory turn")
         if current.envelope_summary is None:
             raise ValueError("completed scenario omitted its envelope summary")
         if type(result) is InvestigationReport:
@@ -1057,6 +1403,11 @@ class OperatorApplicationService:
             ScenarioRunLifecycle.CANCELLED,
         }:
             return
+        await self._close_open_advisory(
+            state,
+            status=AdvisoryTurnStatus.FAILED,
+        )
+        current = await self._current_snapshot(state)
         await self._append_transition(
             state,
             event_type=ScenarioRunEventType.TERMINAL,
@@ -1090,6 +1441,11 @@ class OperatorApplicationService:
             ScenarioRunLifecycle.CANCELLED,
         }:
             return
+        await self._close_open_advisory(
+            state,
+            status=AdvisoryTurnStatus.CANCELLED,
+        )
+        current = await self._current_snapshot(state)
         await self._append_transition(
             state,
             event_type=ScenarioRunEventType.TERMINAL,
@@ -1115,6 +1471,43 @@ class OperatorApplicationService:
             terminal=True,
         )
 
+    async def _close_open_advisory(
+        self,
+        state: _RunState,
+        *,
+        status: AdvisoryTurnStatus,
+    ) -> None:
+        opened = state.advisory_turn_open
+        if opened is None:
+            return
+        if status not in {
+            AdvisoryTurnStatus.FAILED,
+            AdvisoryTurnStatus.CANCELLED,
+        }:
+            raise ValueError("open advisory requires a failure or cancellation")
+        current = await self._current_snapshot(state)
+        turn = AdvisoryTurnSummary(
+            turn_sequence=opened.turn_sequence,
+            phase=opened.phase,
+            status=status,
+            input_sha256=opened.input_sha256,
+            output_sha256=None,
+            proposal_count=0,
+            selected_proposal_count=0,
+            failure_category=(
+                AdvisoryTurnFailureCategory.UNAVAILABLE
+                if status is AdvisoryTurnStatus.FAILED
+                else None
+            ),
+        )
+        await self._append_transition(
+            state,
+            event_type=ScenarioRunEventType.ADVISORY_TURN,
+            payload=AdvisoryTurnEventPayload(turn=turn),
+            occurred_at=self._now(not_before=current.updated_at),
+        )
+        state.advisory_turn_open = None
+
     async def _finish_close(
         self,
         active: tuple[tuple[_RunState, asyncio.Task[None]], ...],
@@ -1125,8 +1518,9 @@ class OperatorApplicationService:
             *(task for _, task in active),
             return_exceptions=True,
         )
-        for state, _ in active:
-            await self._terminal_cancelled(state)
+        if self._projection_store is None:
+            for state, _ in active:
+                await self._terminal_cancelled(state)
 
     @staticmethod
     async def _join_close_task(task: asyncio.Task[None]) -> None:
@@ -1175,6 +1569,7 @@ __all__ = [
     "OperatorCapacityExceeded",
     "OperatorServiceClosed",
     "OperatorServiceError",
+    "OperatorServiceUnavailable",
     "ScenarioEnvelopeUnavailable",
     "ScenarioEventJournalFull",
     "ScenarioEventJournalTerminal",

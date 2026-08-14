@@ -56,7 +56,7 @@ from reconcile.contracts import (
     decode_contract,
 )
 from reconcile.contracts.base import canonical_json_value_bytes
-from reconcile.controller import CapabilityRegistry
+from reconcile.controller import CapabilityRegistry, ProbeDurabilityObserver
 from reconcile.evidence import TargetRuleRegistry
 from reconcile.progress import ProgressEmitter
 from reconcile.scenarios.adk_mutation import run_adk_mutation
@@ -250,6 +250,7 @@ class StorageScenarioDefinition:
         revision: int = 1,
         cancellation_event: asyncio.Event | None = None,
         progress_emitter: ProgressEmitter | None = None,
+        durability_observer: ProbeDurabilityObserver | None = None,
     ) -> AdaptiveInvestigationResult:
         """Run the canonical bounded adaptive Storage investigation."""
 
@@ -261,6 +262,7 @@ class StorageScenarioDefinition:
             revision=revision,
             cancellation_event=cancellation_event,
             progress_emitter=progress_emitter,
+            durability_observer=durability_observer,
         )
 
     def prepare(self, plan: ScenarioPlan) -> ScenarioPreparation:
@@ -471,6 +473,7 @@ async def execute_storage_baseline(
     revision: int = 1,
     cancellation_event: asyncio.Event | None = None,
     progress_emitter: ProgressEmitter | None = None,
+    durability_observer: ProbeDurabilityObserver | None = None,
 ) -> FixedBaselineResult:
     """Execute the canonical one-read Storage baseline."""
 
@@ -492,6 +495,7 @@ async def execute_storage_baseline(
         revision=revision,
         cancellation_event=cancellation_event,
         progress_emitter=progress_emitter,
+        durability_observer=durability_observer,
     )
 
 
@@ -504,6 +508,7 @@ async def execute_storage_adaptive(
     revision: int = 1,
     cancellation_event: asyncio.Event | None = None,
     progress_emitter: ProgressEmitter | None = None,
+    durability_observer: ProbeDurabilityObserver | None = None,
 ) -> AdaptiveInvestigationResult:
     """Execute the canonical advisory Storage investigation."""
 
@@ -526,6 +531,7 @@ async def execute_storage_adaptive(
         revision=revision,
         cancellation_event=cancellation_event,
         progress_emitter=progress_emitter,
+        durability_observer=durability_observer,
     )
 
 

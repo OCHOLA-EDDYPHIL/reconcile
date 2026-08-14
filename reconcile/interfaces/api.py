@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import os
 import re
+import stat
 from collections.abc import AsyncIterator, Awaitable
 from contextlib import asynccontextmanager
 from http import HTTPStatus
@@ -51,6 +52,7 @@ from reconcile.operator import (
     OperatorCapacityExceeded,
     OperatorServiceClosed,
     OperatorServiceError,
+    OperatorServiceUnavailable,
     ScenarioEnvelopeUnavailable,
     ScenarioEventJournalFull,
     ScenarioEventJournalTerminal,
@@ -198,6 +200,45 @@ class _UnavailableInvestigationService:
         return None
 
 
+class _UnavailableOperatorService:
+    async def start(self) -> None:
+        return None
+
+    async def launch(self, _request: ScenarioLaunchRequest) -> _LaunchScenarioResult:
+        raise _DependencyUnavailable
+
+    async def get(self, _investigation_id: str) -> ScenarioRunSnapshot:
+        raise _DependencyUnavailable
+
+    async def get_envelope_summary(
+        self,
+        _investigation_id: str,
+    ) -> ExecutionEnvelopeSummary:
+        raise _DependencyUnavailable
+
+    async def snapshot(
+        self,
+        _investigation_id: str,
+        *,
+        after: int = 0,
+    ) -> ScenarioRunEventSnapshot:
+        del after
+        raise _DependencyUnavailable
+
+    async def wait_for_events(
+        self,
+        _investigation_id: str,
+        *,
+        after: int = 0,
+        cancellation_event: asyncio.Event | None = None,
+    ) -> ScenarioRunEventSnapshot:
+        del after, cancellation_event
+        raise _DependencyUnavailable
+
+    async def aclose(self) -> None:
+        return None
+
+
 def _validated_runtime_database(value: str) -> Path:
     candidate = Path(value)
     if not candidate.is_absolute() or not candidate.name:
@@ -232,6 +273,25 @@ def _semantic_config_sha256() -> str:
     return configured
 
 
+def _ensure_private_workspace_root(path: Path) -> Path:
+    try:
+        path.mkdir(mode=0o700)
+    except FileExistsError:
+        pass
+    if path.is_symlink():
+        raise ValueError("scenario workspace root cannot be a symbolic link")
+    resolved = path.resolve(strict=True)
+    metadata = path.stat()
+    if (
+        resolved != path
+        or not stat.S_ISDIR(metadata.st_mode)
+        or metadata.st_uid != os.geteuid()
+        or metadata.st_mode & 0o077
+    ):
+        raise ValueError("scenario workspace root must be user-owned and private")
+    return resolved
+
+
 def _build_default_service() -> _InvestigationService:
     configured_path = os.environ.get("RECONCILE_RUNTIME_DATABASE")
     if configured_path is None or not configured_path:
@@ -248,7 +308,9 @@ def _build_default_service() -> _InvestigationService:
 
 def _build_default_operator_service() -> _OperatorService:
     from reconcile.adk_planner import VertexAdcPlannerConfig
+    from reconcile.durable_scenarios import DurableScenarioWorkflow
     from reconcile.operator import OperatorApplicationService
+    from reconcile.persistence import SqliteScenarioStore
 
     values = tuple(
         os.environ.get(name)
@@ -270,7 +332,29 @@ def _build_default_operator_service() -> _OperatorService:
             timeout_seconds=3.75,
             max_output_tokens=1_024,
         )
-    return OperatorApplicationService(vertex_config=vertex_config)
+    configured_path = os.environ.get("RECONCILE_RUNTIME_DATABASE")
+    if configured_path is None or not configured_path:
+        return OperatorApplicationService(vertex_config=vertex_config)
+    try:
+        database = _validated_runtime_database(configured_path)
+        semantic_config_sha256 = _semantic_config_sha256()
+        workspace_root = _ensure_private_workspace_root(
+            database.parent / "scenario-workspaces"
+        )
+        store = SqliteScenarioStore(database)
+        runner = DurableScenarioWorkflow(
+            store,
+            workspace_root,
+            semantic_config_sha256=semantic_config_sha256,
+            vertex_config=vertex_config,
+        )
+        return OperatorApplicationService(
+            runner=runner,
+            vertex_config=vertex_config,
+            projection_store=store,
+        )
+    except (OSError, RuntimeError, ValueError, DurableRuntimeError):
+        return _UnavailableOperatorService()
 
 
 def _validated_investigation_id(value: object) -> str | None:
@@ -455,6 +539,7 @@ def _install_error_handlers(application: FastAPI) -> None:
     for exception_type in (
         OperatorCapacityExceeded,
         OperatorServiceClosed,
+        OperatorServiceUnavailable,
         ScenarioEnvelopeUnavailable,
     ):
         _register_error_handler(
@@ -828,6 +913,9 @@ def create_app(
         starter = getattr(application.state.investigation_service, "start", None)
         if callable(starter):
             await starter()
+        operator_starter = getattr(application.state.operator_service, "start", None)
+        if callable(operator_starter):
+            await operator_starter()
         try:
             yield
         finally:

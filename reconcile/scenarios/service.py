@@ -52,6 +52,7 @@ from reconcile.contracts import (
     decode_contract,
 )
 from reconcile.contracts.base import canonical_json_value_bytes
+from reconcile.controller import ProbeDurabilityObserver
 from reconcile.progress import (
     EnvelopeProgress,
     ProgressCallback,
@@ -156,6 +157,7 @@ class _InvestigableScenario(Protocol):
         revision: int = 1,
         cancellation_event: asyncio.Event | None = None,
         progress_emitter: ProgressEmitter | None = None,
+        durability_observer: ProbeDurabilityObserver | None = None,
     ) -> AdaptiveInvestigationResult: ...
 
 
@@ -344,6 +346,7 @@ def _definition(
     workspace: Path,
     *,
     invoked_at: datetime,
+    seed_sandbox: bool = True,
 ) -> _InvestigableScenario:
     if scenario is ScenarioName.STORAGE:
         return StorageScenarioDefinition(
@@ -360,20 +363,25 @@ def _definition(
 
     private_path = workspace / "sandbox-private.sqlite3"
     observation_path = workspace / "sandbox-observations.sqlite3"
-    LocalOrderHarness(
-        private_path,
-        observation_path,
-        clock=_utc_now,
-    ).seed_duplicate_looking_order(
-        item_code=SANDBOX_ORDER_ITEM_CODE,
-        quantity=SANDBOX_ORDER_QUANTITY,
-    )
+    if seed_sandbox:
+        _seed_sandbox_fixture(workspace)
     return SandboxOrderScenarioDefinition(
         private_path,
         observation_path,
         hidden_outcome=HiddenOrderOutcome.COMMIT,
         invoked_at=invoked_at,
         target_clock=_utc_now,
+    )
+
+
+def _seed_sandbox_fixture(workspace: Path) -> None:
+    LocalOrderHarness(
+        workspace / "sandbox-private.sqlite3",
+        workspace / "sandbox-observations.sqlite3",
+        clock=_utc_now,
+    ).seed_duplicate_looking_order(
+        item_code=SANDBOX_ORDER_ITEM_CODE,
+        quantity=SANDBOX_ORDER_QUANTITY,
     )
 
 
@@ -542,6 +550,8 @@ async def _fixed_investigation(
     *,
     cancellation_event: asyncio.Event | None,
     progress_emitter: ProgressEmitter | None,
+    revision: int = 1,
+    durability_observer: ProbeDurabilityObserver | None = None,
 ) -> FixedBaselineResult:
     if scenario is ScenarioName.STORAGE:
         return await execute_storage_baseline(
@@ -549,6 +559,8 @@ async def _fixed_investigation(
             LocalStorageReadTarget(workspace / "storage.sqlite3"),
             cancellation_event=cancellation_event,
             progress_emitter=progress_emitter,
+            revision=revision,
+            durability_observer=durability_observer,
         )
     if scenario is ScenarioName.FIRESTORE_BUSINESS:
         return await execute_firestore_business_baseline(
@@ -556,12 +568,16 @@ async def _fixed_investigation(
             LocalFirestoreReadTarget(workspace / "firestore.sqlite3"),
             cancellation_event=cancellation_event,
             progress_emitter=progress_emitter,
+            revision=revision,
+            durability_observer=durability_observer,
         )
     return await execute_sandbox_order_baseline(
         envelope,
         LocalOrderReadTarget(workspace / "sandbox-observations.sqlite3"),
         cancellation_event=cancellation_event,
         progress_emitter=progress_emitter,
+        revision=revision,
+        durability_observer=durability_observer,
     )
 
 
@@ -577,6 +593,8 @@ async def _investigate(
     run_digest: str,
     cancellation_event: asyncio.Event | None,
     progress_emitter: ProgressEmitter | None,
+    revision: int = 1,
+    durability_observer: ProbeDurabilityObserver | None = None,
 ) -> ScenarioWorkflowResult:
     sealed_envelope = canonical_json_bytes(envelope)
     if mode is ScenarioMode.FIXED:
@@ -588,6 +606,8 @@ async def _investigate(
                 fixed_envelope,
                 cancellation_event=cancellation_event,
                 progress_emitter=progress_emitter,
+                revision=revision,
+                durability_observer=durability_observer,
             )
         ).report
     if planner is None:
@@ -603,6 +623,8 @@ async def _investigate(
                 planner,
                 cancellation_event=cancellation_event,
                 progress_emitter=progress_emitter,
+                revision=revision,
+                durability_observer=durability_observer,
             )
         ).report
 
@@ -613,6 +635,8 @@ async def _investigate(
         fixed_envelope,
         cancellation_event=cancellation_event,
         progress_emitter=progress_emitter,
+        revision=revision,
+        durability_observer=durability_observer,
     )
     adaptive_envelope = decode_contract(sealed_envelope, ExecutionEnvelope)
     adaptive = await definition.adaptive(
@@ -620,6 +644,8 @@ async def _investigate(
         planner,
         cancellation_event=cancellation_event,
         progress_emitter=progress_emitter,
+        revision=revision,
+        durability_observer=durability_observer,
     )
     envelope_sha256 = canonical_sha256(fixed_envelope)
     try:

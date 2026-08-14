@@ -319,6 +319,37 @@ def test_explicit_default_runtime_database_fails_closed_without_executor(
 
     assert response.status_code == 503
     assert _error(response).code is ApiErrorCode.DEPENDENCY_UNAVAILABLE
+    # The envelope-only service remains unavailable, while the real operator
+    # now owns the shared private schema-v4 scenario authority.
+    assert database.is_file()
+    assert database.stat().st_mode & 0o077 == 0
+
+
+def test_default_operator_rejects_workspace_symlink_without_chmod_target(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database = tmp_path / "api-runtime.sqlite3"
+    target = tmp_path / "workspace-target"
+    target.mkdir(mode=0o755)
+    target_mode = target.stat().st_mode & 0o777
+    (tmp_path / "scenario-workspaces").symlink_to(
+        target,
+        target_is_directory=True,
+    )
+    monkeypatch.setenv("RECONCILE_RUNTIME_DATABASE", str(database))
+    monkeypatch.setenv("RECONCILE_SEMANTIC_CONFIG_SHA256", "a" * 64)
+    for name in (
+        "RECONCILE_VERTEX_PROJECT",
+        "RECONCILE_VERTEX_LOCATION",
+        "RECONCILE_VERTEX_MODEL",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+    with TestClient(create_app()) as client:
+        assert client.get("/health").status_code == 200
+
+    assert target.stat().st_mode & 0o777 == target_mode
     assert not database.exists()
 
 

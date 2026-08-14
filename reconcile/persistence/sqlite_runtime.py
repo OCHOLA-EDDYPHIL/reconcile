@@ -80,7 +80,7 @@ from reconcile.persistence.events import (
     TerminalEventJournal,
 )
 
-_SQLITE_SCHEMA_VERSION = "3"
+_SQLITE_SCHEMA_VERSION = "4"
 _BUSY_TIMEOUT_MS = 5_000
 
 
@@ -263,6 +263,44 @@ class SqliteDurableRuntimeStore:
                         UNIQUE (investigation_id, sequence),
                         FOREIGN KEY (investigation_id)
                             REFERENCES durable_runs(investigation_id)
+                            ON DELETE CASCADE
+                    );
+
+                    CREATE TABLE IF NOT EXISTS scenario_work_items (
+                        investigation_id TEXT PRIMARY KEY,
+                        launch_id TEXT NOT NULL UNIQUE,
+                        launch_sha256 TEXT NOT NULL,
+                        payload BLOB NOT NULL
+                    );
+
+                    CREATE TABLE IF NOT EXISTS scenario_leases (
+                        investigation_id TEXT PRIMARY KEY,
+                        fence INTEGER NOT NULL,
+                        payload BLOB,
+                        FOREIGN KEY (investigation_id)
+                            REFERENCES scenario_work_items(investigation_id)
+                            ON DELETE CASCADE
+                    );
+
+                    CREATE TABLE IF NOT EXISTS scenario_events (
+                        investigation_id TEXT NOT NULL,
+                        cursor INTEGER NOT NULL,
+                        terminal INTEGER NOT NULL CHECK (terminal IN (0, 1)),
+                        payload BLOB NOT NULL,
+                        PRIMARY KEY (investigation_id, cursor),
+                        FOREIGN KEY (investigation_id)
+                            REFERENCES scenario_work_items(investigation_id)
+                            ON DELETE CASCADE
+                    );
+
+                    CREATE TABLE IF NOT EXISTS scenario_lane_results (
+                        investigation_id TEXT NOT NULL,
+                        lane TEXT NOT NULL,
+                        sha256 TEXT NOT NULL,
+                        payload BLOB NOT NULL,
+                        PRIMARY KEY (investigation_id, lane),
+                        FOREIGN KEY (investigation_id)
+                            REFERENCES scenario_work_items(investigation_id)
                             ON DELETE CASCADE
                     );
                     """
