@@ -8,6 +8,7 @@ import inspect
 import json
 import re
 import time
+from collections.abc import Awaitable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import StrEnum
@@ -161,6 +162,60 @@ class ValidatedObservation:
     byte_count: int
 
 
+@dataclass(frozen=True, slots=True)
+class RestoredProbe:
+    """One validated durable read result restored without target dispatch."""
+
+    audit: ControllerAuditRecord
+    observation: ProbeObservation | None
+
+
+class ProbeDurabilityObserver(Protocol):
+    """Fenced persistence callbacks around an allowlisted read dispatch."""
+
+    def elapsed_floor_ms(self, now: datetime) -> int:
+        """Return trusted elapsed wall time since durable run creation."""
+
+        ...
+
+    def remaining_elapsed_ms(self, now: datetime) -> int:
+        """Return the absolute durable time remaining before external work."""
+
+        ...
+
+    async def before_dispatch(
+        self,
+        request: ProbeRequest,
+        *,
+        sequence: int,
+        controller_cost_units: int,
+        evidence_byte_reservation: int,
+        started_at: datetime,
+    ) -> RestoredProbe | None: ...
+
+    async def after_dispatch(
+        self,
+        request: ProbeRequest,
+        execution: ProbeExecution,
+    ) -> None: ...
+
+    async def authorize_dispatch(
+        self,
+        request: ProbeRequest,
+        *,
+        sequence: int,
+        dispatched_at: datetime,
+    ) -> bool:
+        """Revalidate durable authority at the handler invocation boundary."""
+
+        ...
+
+    async def after_execution(self, execution: ProbeExecution) -> None:
+        """Persist every controller audit, including non-dispatched outcomes."""
+
+        ...
+
+
 _PROBE_EXECUTION_SEAL = object()
 _PROBE_EXECUTION_LOCK = RLock()
 _VALID_PROBE_EXECUTIONS: WeakSet[ProbeExecution] = WeakSet()
@@ -209,9 +264,20 @@ class ProbeExecution:
 class _InvocationState(StrEnum):
     COMPLETED = "COMPLETED"
     CANCELLED = "CANCELLED"
+    ELAPSED_EXHAUSTED = "ELAPSED_EXHAUSTED"
     TIMED_OUT = "TIMED_OUT"
     UNAVAILABLE = "UNAVAILABLE"
     MALFORMED = "MALFORMED"
+
+
+class _DispatchAuthorizationFailed(Exception):
+    def __init__(self, error: Exception) -> None:
+        self.error = error
+        super().__init__("durable dispatch authorization failed")
+
+
+class _DispatchDeadlineExhausted(Exception):
+    pass
 
 
 _TARGET_VALUE_PREFIXES = (
@@ -276,6 +342,7 @@ class ProbeController:
         registry: CapabilityRegistry,
         *,
         clock: ControllerClock | None = None,
+        durability_observer: ProbeDurabilityObserver | None = None,
     ) -> None:
         envelope_payload = canonical_json_bytes(envelope)
         self._envelope = decode_contract(envelope_payload, ExecutionEnvelope)
@@ -284,11 +351,11 @@ class ProbeController:
         registry.freeze()
         self._registry = registry
         self._clock = clock or _SystemClock()
+        self._durability_observer = durability_observer
         self._started_monotonic = self._clock.monotonic()
-        self._deadline_monotonic = (
-            self._started_monotonic
-            + self._envelope.context.evidence_budget.max_elapsed_ms / 1000
-        )
+        self._elapsed_offset_ms = 0
+        if durability_observer is not None:
+            self._elapsed_offset_ms = self._durable_elapsed_floor_ms()
         self._target_sha256 = hashlib.sha256(
             canonical_json_bytes(self._envelope.target)
         ).hexdigest()
@@ -309,6 +376,146 @@ class ProbeController:
         self._audit: list[ControllerAuditRecord] = []
         self._terminal_execution: ProbeExecution | None = None
 
+    def _restore(
+        self,
+        restored: RestoredProbe,
+        *,
+        sequence: int,
+        request: ProbeRequest,
+        identity: tuple[str, str],
+        invocation_count: int,
+        controller_cost_units: int,
+    ) -> ProbeExecution:
+        if type(restored) is not RestoredProbe:
+            raise TypeError("durability observer returned an invalid restored probe")
+        audit = ControllerAuditRecord.model_validate_json(
+            canonical_json_bytes(restored.audit)
+        )
+        observation = restored.observation
+        result_increment = audit.result_byte_count or 0
+        budget = self._envelope.context.evidence_budget
+        if (
+            audit.sequence != sequence
+            or audit.capability_name != request.capability_name
+            or audit.capability_version != request.capability_version
+            or audit.request_sha256 != probe_request_sha256(request)
+            or audit.target_sha256 != self._target_sha256
+            or audit.probe_count_used != self._probe_count_used
+            or audit.cost_units_used != self._cost_units_used + controller_cost_units
+            or audit.result_bytes_acquired
+            != min(self._result_bytes_acquired + result_increment, 2**63 - 1)
+            or audit.probe_count_used > budget.max_probes
+            or audit.cost_units_used > budget.max_cost_units
+            or audit.result_bytes_acquired > budget.max_total_result_bytes
+            or audit.session_elapsed_ms > budget.max_elapsed_ms
+            or (
+                self._audit
+                and audit.session_elapsed_ms < self._audit[-1].session_elapsed_ms
+            )
+        ):
+            raise ValueError("restored probe does not match the active controller")
+        completed = audit.outcome is ProbeOutcome.COMPLETED
+        if completed is not (observation is not None):
+            raise ValueError("restored probe outcome and observation do not agree")
+        validated: ValidatedObservation | None = None
+        if observation is not None:
+            payload = canonical_json_bytes(observation)
+            decoded_observation = ProbeObservation.model_validate_json(payload)
+            payload = canonical_json_bytes(decoded_observation)
+            validated = ValidatedObservation(
+                canonical_json=payload,
+                sha256=hashlib.sha256(payload).hexdigest(),
+                byte_count=len(payload),
+            )
+            if (
+                audit.result_sha256 != validated.sha256
+                or audit.result_byte_count != validated.byte_count
+            ):
+                raise ValueError("restored observation does not match its audit")
+        self._probe_count_used = audit.probe_count_used
+        self._cost_units_used = audit.cost_units_used
+        self._result_bytes_acquired = audit.result_bytes_acquired
+        local_elapsed_ms = self._local_elapsed_ms()
+        self._elapsed_offset_ms = max(
+            self._elapsed_offset_ms,
+            max(0, audit.session_elapsed_ms - local_elapsed_ms),
+        )
+        self._capability_invocations[identity] = invocation_count + 1
+        self._audit.append(audit)
+        execution = ProbeExecution(
+            envelope_sha256=self._envelope_sha256,
+            audit=audit,
+            observation=validated,
+            _controller_session=self._session_token,
+            _seal=_PROBE_EXECUTION_SEAL,
+        )
+        if audit.stop_reason in _TERMINAL_REASONS:
+            self._terminal_execution = execution
+        return execution
+
+    async def _await_observer_operation(
+        self,
+        operation: Awaitable[None],
+        *,
+        name: str,
+    ) -> None:
+        recording = asyncio.create_task(operation, name=name)
+        interrupted = False
+        while True:
+            try:
+                await asyncio.shield(recording)
+                break
+            except asyncio.CancelledError:
+                if recording.done():
+                    await recording
+                    raise
+                interrupted = True
+        if interrupted:
+            raise asyncio.CancelledError
+
+    async def _finish_dispatched(
+        self,
+        request: ProbeRequest,
+        **values: object,
+    ) -> ProbeExecution:
+        execution = self._finish(**values)  # type: ignore[arg-type]
+        observer = self._durability_observer
+        if observer is not None:
+
+            async def persist() -> None:
+                await observer.after_dispatch(request, execution)
+                await observer.after_execution(execution)
+
+            await self._await_observer_operation(
+                persist(),
+                name=f"reconcile-record-probe-{execution.audit.sequence}",
+            )
+        return execution
+
+    async def _finish_observed(self, **values: object) -> ProbeExecution:
+        execution = self._finish(**values)  # type: ignore[arg-type]
+        observer = self._durability_observer
+        if observer is not None:
+            await self._await_observer_operation(
+                observer.after_execution(execution),
+                name=f"reconcile-record-audit-{execution.audit.sequence}",
+            )
+        return execution
+
+    async def _restore_observed(
+        self,
+        restored: RestoredProbe,
+        **values: object,
+    ) -> ProbeExecution:
+        execution = self._restore(restored, **values)  # type: ignore[arg-type]
+        observer = self._durability_observer
+        if observer is not None:
+            await self._await_observer_operation(
+                observer.after_execution(execution),
+                name=f"reconcile-restore-audit-{execution.audit.sequence}",
+            )
+        return execution
+
     @property
     def audit_trail(self) -> tuple[ControllerAuditRecord, ...]:
         return tuple(self._audit)
@@ -318,12 +525,43 @@ class ProbeController:
 
         self._cancelled.set()
 
-    def _session_elapsed_ms(self) -> int:
+    def _local_elapsed_ms(self) -> int:
         elapsed = max(0.0, self._clock.monotonic() - self._started_monotonic)
-        return min(int(elapsed * 1000), 2**63 - 1)
+        return min(int(elapsed * 1_000), 2**63 - 1)
+
+    def _durable_elapsed_floor_ms(self) -> int:
+        observer = self._durability_observer
+        if observer is None:
+            return 0
+        floor = observer.elapsed_floor_ms(self._clock.now())
+        if type(floor) is not int or not 0 <= floor <= 2**63 - 1:
+            raise ValueError("durability observer returned an invalid elapsed floor")
+        return floor
+
+    def _session_elapsed_ms(self) -> int:
+        local_elapsed_ms = self._local_elapsed_ms()
+        observer = self._durability_observer
+        if observer is None:
+            return local_elapsed_ms
+        floor = self._durable_elapsed_floor_ms()
+        self._elapsed_offset_ms = max(
+            self._elapsed_offset_ms,
+            max(0, floor - local_elapsed_ms),
+        )
+        elapsed_ms = min(
+            max(floor, self._elapsed_offset_ms + local_elapsed_ms),
+            2**63 - 1,
+        )
+        return min(
+            elapsed_ms,
+            self._envelope.context.evidence_budget.max_elapsed_ms,
+        )
 
     def _deadline_reached(self) -> bool:
-        return self._clock.monotonic() >= self._deadline_monotonic
+        return (
+            self._session_elapsed_ms()
+            >= self._envelope.context.evidence_budget.max_elapsed_ms
+        )
 
     def _finish(
         self,
@@ -388,7 +626,7 @@ class ProbeController:
             request_sha256: str | None = None
 
             if self._cancelled.is_set():
-                return self._finish(
+                return await self._finish_observed(
                     sequence=sequence,
                     started_at=started_at,
                     outcome=ProbeOutcome.CANCELLED,
@@ -400,7 +638,7 @@ class ProbeController:
 
             budget = self._envelope.context.evidence_budget
             if self._probe_count_used >= budget.max_probes:
-                return self._finish(
+                return await self._finish_observed(
                     sequence=sequence,
                     started_at=started_at,
                     outcome=ProbeOutcome.BUDGET_EXHAUSTED,
@@ -419,7 +657,7 @@ class ProbeController:
                 requested_capability_version = request.capability_version
                 request_sha256 = probe_request_sha256(request)
             except (ContractError, TypeError, ValueError):
-                return self._finish(
+                return await self._finish_observed(
                     sequence=sequence,
                     started_at=started_at,
                     outcome=ProbeOutcome.REJECTED,
@@ -430,7 +668,7 @@ class ProbeController:
                 )
 
             if self._deadline_reached():
-                return self._finish(
+                return await self._finish_observed(
                     sequence=sequence,
                     started_at=started_at,
                     outcome=ProbeOutcome.BUDGET_EXHAUSTED,
@@ -445,7 +683,7 @@ class ProbeController:
                 requested_capability_version,
             )
             if registration is None:
-                return self._finish(
+                return await self._finish_observed(
                     sequence=sequence,
                     started_at=started_at,
                     outcome=ProbeOutcome.REJECTED,
@@ -456,7 +694,7 @@ class ProbeController:
                 )
             capability_name, capability_version = registration.identity
             if not registration.enabled:
-                return self._finish(
+                return await self._finish_observed(
                     sequence=sequence,
                     started_at=started_at,
                     outcome=ProbeOutcome.REJECTED,
@@ -466,7 +704,7 @@ class ProbeController:
                     request_sha256=request_sha256,
                 )
             if registration.semantics is CapabilitySemantics.MUTATING:
-                return self._finish(
+                return await self._finish_observed(
                     sequence=sequence,
                     started_at=started_at,
                     outcome=ProbeOutcome.REJECTED,
@@ -476,7 +714,7 @@ class ProbeController:
                     request_sha256=request_sha256,
                 )
             if registration.semantics is CapabilitySemantics.AMBIGUOUS:
-                return self._finish(
+                return await self._finish_observed(
                     sequence=sequence,
                     started_at=started_at,
                     outcome=ProbeOutcome.REJECTED,
@@ -489,7 +727,7 @@ class ProbeController:
                 capability_name,
                 capability_version,
             ) not in self._enabled_capabilities:
-                return self._finish(
+                return await self._finish_observed(
                     sequence=sequence,
                     started_at=started_at,
                     outcome=ProbeOutcome.REJECTED,
@@ -505,7 +743,7 @@ class ProbeController:
                 if constraint.target_kind == self._envelope.target.target_kind
             )
             if not matching_kind:
-                return self._finish(
+                return await self._finish_observed(
                     sequence=sequence,
                     started_at=started_at,
                     outcome=ProbeOutcome.REJECTED,
@@ -519,7 +757,7 @@ class ProbeController:
                 canonical_json_value_bytes(constraint.scope) == target_scope
                 for constraint in matching_kind
             ):
-                return self._finish(
+                return await self._finish_observed(
                     sequence=sequence,
                     started_at=started_at,
                     outcome=ProbeOutcome.REJECTED,
@@ -529,7 +767,7 @@ class ProbeController:
                     request_sha256=request_sha256,
                 )
             if not set(request.relevant_effect_ids) <= self._effect_ids:
-                return self._finish(
+                return await self._finish_observed(
                     sequence=sequence,
                     started_at=started_at,
                     outcome=ProbeOutcome.REJECTED,
@@ -541,7 +779,7 @@ class ProbeController:
 
             arguments_payload = canonical_json_value_bytes(request.arguments)
             if len(arguments_payload) > registration.argument_byte_ceiling:
-                return self._finish(
+                return await self._finish_observed(
                     sequence=sequence,
                     started_at=started_at,
                     outcome=ProbeOutcome.REJECTED,
@@ -554,7 +792,7 @@ class ProbeController:
                 registration.capability.argument_schema
             )
             if not validator.is_valid(request.arguments):
-                return self._finish(
+                return await self._finish_observed(
                     sequence=sequence,
                     started_at=started_at,
                     outcome=ProbeOutcome.REJECTED,
@@ -564,7 +802,7 @@ class ProbeController:
                     request_sha256=request_sha256,
                 )
             if _contains_target_coordinate_value(request.arguments):
-                return self._finish(
+                return await self._finish_observed(
                     sequence=sequence,
                     started_at=started_at,
                     outcome=ProbeOutcome.REJECTED,
@@ -580,7 +818,7 @@ class ProbeController:
                 if key in request.arguments and canonical_json_value_bytes(
                     request.arguments[key]
                 ) != canonical_json_value_bytes(expected_value):
-                    return self._finish(
+                    return await self._finish_observed(
                         sequence=sequence,
                         started_at=started_at,
                         outcome=ProbeOutcome.REJECTED,
@@ -592,7 +830,7 @@ class ProbeController:
             identity = (capability_name, capability_version)
             invocation_count = self._capability_invocations.get(identity, 0)
             if invocation_count >= registration.max_invocations:
-                return self._finish(
+                return await self._finish_observed(
                     sequence=sequence,
                     started_at=started_at,
                     outcome=ProbeOutcome.BUDGET_EXHAUSTED,
@@ -605,7 +843,7 @@ class ProbeController:
                 self._cost_units_used + registration.capability.cost_units
                 > budget.max_cost_units
             ):
-                return self._finish(
+                return await self._finish_observed(
                     sequence=sequence,
                     started_at=started_at,
                     outcome=ProbeOutcome.BUDGET_EXHAUSTED,
@@ -615,7 +853,7 @@ class ProbeController:
                     request_sha256=request_sha256,
                 )
             if self._result_bytes_acquired >= budget.max_total_result_bytes:
-                return self._finish(
+                return await self._finish_observed(
                     sequence=sequence,
                     started_at=started_at,
                     outcome=ProbeOutcome.BUDGET_EXHAUSTED,
@@ -627,7 +865,7 @@ class ProbeController:
 
             handler = registration.handler
             if handler is None:
-                return self._finish(
+                return await self._finish_observed(
                     sequence=sequence,
                     started_at=started_at,
                     outcome=ProbeOutcome.UNAVAILABLE,
@@ -637,27 +875,63 @@ class ProbeController:
                     request_sha256=request_sha256,
                 )
 
+            observer = self._durability_observer
+            durably_started = False
+            if observer is not None:
+                restored = await observer.before_dispatch(
+                    request,
+                    sequence=sequence,
+                    controller_cost_units=registration.capability.cost_units,
+                    evidence_byte_reservation=(
+                        registration.capability.result_byte_ceiling
+                    ),
+                    started_at=started_at,
+                )
+                if restored is not None:
+                    return await self._restore_observed(
+                        restored,
+                        sequence=sequence,
+                        request=request,
+                        identity=identity,
+                        invocation_count=invocation_count,
+                        controller_cost_units=(registration.capability.cost_units),
+                    )
+                durably_started = True
+                self._capability_invocations[identity] = invocation_count + 1
+                self._cost_units_used += registration.capability.cost_units
+
             dispatch_started = self._clock.monotonic()
             capability_deadline = (
                 dispatch_started + registration.capability.timeout_ms / 1000
             )
-            invocation_deadline = min(
-                self._deadline_monotonic,
-                capability_deadline,
+            controller_elapsed_ms = self._session_elapsed_ms()
+            remaining_elapsed_ms = max(
+                0,
+                budget.max_elapsed_ms - controller_elapsed_ms,
             )
+            if observer is not None:
+                remaining_elapsed_ms = min(
+                    remaining_elapsed_ms,
+                    observer.remaining_elapsed_ms(self._clock.now()),
+                )
+            elapsed_deadline = dispatch_started + remaining_elapsed_ms / 1_000
+            invocation_deadline = min(elapsed_deadline, capability_deadline)
             timeout_seconds = invocation_deadline - dispatch_started
             if timeout_seconds <= 0:
-                return self._finish(
-                    sequence=sequence,
-                    started_at=started_at,
-                    outcome=ProbeOutcome.BUDGET_EXHAUSTED,
-                    reason=ProbeStopReason.ELAPSED_BUDGET_EXHAUSTED,
-                    capability_name=capability_name,
-                    capability_version=capability_version,
-                    request_sha256=request_sha256,
-                )
-            elapsed_limited = self._deadline_monotonic <= capability_deadline
-            timeout_ms = max(1, int(timeout_seconds * 1000))
+                values = {
+                    "sequence": sequence,
+                    "started_at": started_at,
+                    "outcome": ProbeOutcome.BUDGET_EXHAUSTED,
+                    "reason": ProbeStopReason.ELAPSED_BUDGET_EXHAUSTED,
+                    "capability_name": capability_name,
+                    "capability_version": capability_version,
+                    "request_sha256": request_sha256,
+                }
+                if durably_started:
+                    return await self._finish_dispatched(request, **values)
+                return await self._finish_observed(**values)
+            elapsed_limited = elapsed_deadline <= capability_deadline
+            timeout_ms = max(1, int(timeout_seconds * 1_000))
             bound_probe = BoundProbe(
                 investigation_id=self._envelope.investigation_id,
                 operation_id=self._envelope.operation_id,
@@ -673,34 +947,57 @@ class ProbeController:
             )
             timeout_seconds = invocation_deadline - self._clock.monotonic()
             if timeout_seconds <= 0:
-                return self._finish(
-                    sequence=sequence,
-                    started_at=started_at,
-                    outcome=(
+                values = {
+                    "sequence": sequence,
+                    "started_at": started_at,
+                    "outcome": (
                         ProbeOutcome.BUDGET_EXHAUSTED
                         if elapsed_limited
                         else ProbeOutcome.TIMED_OUT
                     ),
-                    reason=(
+                    "reason": (
                         ProbeStopReason.ELAPSED_BUDGET_EXHAUSTED
                         if elapsed_limited
                         else ProbeStopReason.PROBE_TIMEOUT
                     ),
-                    capability_name=capability_name,
-                    capability_version=capability_version,
-                    request_sha256=request_sha256,
-                )
+                    "capability_name": capability_name,
+                    "capability_version": capability_version,
+                    "request_sha256": request_sha256,
+                }
+                if durably_started:
+                    return await self._finish_dispatched(request, **values)
+                return await self._finish_observed(**values)
 
-            self._capability_invocations[identity] = invocation_count + 1
-            self._cost_units_used += registration.capability.cost_units
+            if not durably_started:
+                self._capability_invocations[identity] = invocation_count + 1
+                self._cost_units_used += registration.capability.cost_units
             try:
                 invocation_state, raw_observation = await self._invoke_once(
                     handler,
                     bound_probe,
                     timeout_seconds,
+                    request=request,
+                    sequence=sequence,
                 )
             except asyncio.CancelledError:
-                self._finish(
+                values = {
+                    "sequence": sequence,
+                    "started_at": started_at,
+                    "outcome": ProbeOutcome.CANCELLED,
+                    "reason": ProbeStopReason.PROBE_CANCELLED,
+                    "capability_name": capability_name,
+                    "capability_version": capability_version,
+                    "request_sha256": request_sha256,
+                }
+                if durably_started:
+                    await self._finish_dispatched(request, **values)
+                else:
+                    await self._finish_observed(**values)
+                raise
+
+            if invocation_state is _InvocationState.CANCELLED:
+                return await self._finish_dispatched(
+                    request,
                     sequence=sequence,
                     started_at=started_at,
                     outcome=ProbeOutcome.CANCELLED,
@@ -709,20 +1006,20 @@ class ProbeController:
                     capability_version=capability_version,
                     request_sha256=request_sha256,
                 )
-                raise
-
-            if invocation_state is _InvocationState.CANCELLED:
-                return self._finish(
+            if invocation_state is _InvocationState.ELAPSED_EXHAUSTED:
+                return await self._finish_dispatched(
+                    request,
                     sequence=sequence,
                     started_at=started_at,
-                    outcome=ProbeOutcome.CANCELLED,
-                    reason=ProbeStopReason.PROBE_CANCELLED,
+                    outcome=ProbeOutcome.BUDGET_EXHAUSTED,
+                    reason=ProbeStopReason.ELAPSED_BUDGET_EXHAUSTED,
                     capability_name=capability_name,
                     capability_version=capability_version,
                     request_sha256=request_sha256,
                 )
             if invocation_state is _InvocationState.TIMED_OUT:
-                return self._finish(
+                return await self._finish_dispatched(
+                    request,
                     sequence=sequence,
                     started_at=started_at,
                     outcome=(
@@ -740,7 +1037,8 @@ class ProbeController:
                     request_sha256=request_sha256,
                 )
             if invocation_state is _InvocationState.UNAVAILABLE:
-                return self._finish(
+                return await self._finish_dispatched(
+                    request,
                     sequence=sequence,
                     started_at=started_at,
                     outcome=ProbeOutcome.UNAVAILABLE,
@@ -750,7 +1048,8 @@ class ProbeController:
                     request_sha256=request_sha256,
                 )
             if invocation_state is _InvocationState.MALFORMED:
-                return self._finish(
+                return await self._finish_dispatched(
+                    request,
                     sequence=sequence,
                     started_at=started_at,
                     outcome=ProbeOutcome.MALFORMED,
@@ -761,7 +1060,8 @@ class ProbeController:
                 )
 
             if self._clock.monotonic() >= invocation_deadline:
-                return self._finish(
+                return await self._finish_dispatched(
+                    request,
                     sequence=sequence,
                     started_at=started_at,
                     outcome=(
@@ -781,8 +1081,9 @@ class ProbeController:
 
             if raw_observation is None:
                 raise RuntimeError("completed invocation omitted its observation")
-            if self._deadline_reached():
-                return self._finish(
+            if self._clock.monotonic() >= elapsed_deadline:
+                return await self._finish_dispatched(
+                    request,
                     sequence=sequence,
                     started_at=started_at,
                     outcome=ProbeOutcome.BUDGET_EXHAUSTED,
@@ -795,7 +1096,8 @@ class ProbeController:
                 observation_payload = canonical_json_bytes(raw_observation)
                 ProbeObservation.model_validate_json(observation_payload)
             except (ContractError, TypeError, ValueError):
-                return self._finish(
+                return await self._finish_dispatched(
+                    request,
                     sequence=sequence,
                     started_at=started_at,
                     outcome=ProbeOutcome.MALFORMED,
@@ -810,8 +1112,9 @@ class ProbeController:
                 self._result_bytes_acquired + byte_count,
                 2**63 - 1,
             )
-            if self._deadline_reached():
-                return self._finish(
+            if self._clock.monotonic() >= elapsed_deadline:
+                return await self._finish_dispatched(
+                    request,
                     sequence=sequence,
                     started_at=started_at,
                     outcome=ProbeOutcome.BUDGET_EXHAUSTED,
@@ -822,7 +1125,8 @@ class ProbeController:
                     rejected_result_bytes=byte_count,
                 )
             if byte_count > registration.capability.result_byte_ceiling:
-                return self._finish(
+                return await self._finish_dispatched(
+                    request,
                     sequence=sequence,
                     started_at=started_at,
                     outcome=ProbeOutcome.BUDGET_EXHAUSTED,
@@ -833,7 +1137,8 @@ class ProbeController:
                     rejected_result_bytes=byte_count,
                 )
             if self._result_bytes_acquired > budget.max_total_result_bytes:
-                return self._finish(
+                return await self._finish_dispatched(
+                    request,
                     sequence=sequence,
                     started_at=started_at,
                     outcome=ProbeOutcome.BUDGET_EXHAUSTED,
@@ -849,7 +1154,8 @@ class ProbeController:
                 sha256=hashlib.sha256(observation_payload).hexdigest(),
                 byte_count=byte_count,
             )
-            return self._finish(
+            return await self._finish_dispatched(
+                request,
                 sequence=sequence,
                 started_at=started_at,
                 outcome=ProbeOutcome.COMPLETED,
@@ -865,8 +1171,31 @@ class ProbeController:
         handler: ObservationHandler,
         probe: BoundProbe,
         timeout_seconds: float,
+        *,
+        request: ProbeRequest,
+        sequence: int,
     ) -> tuple[_InvocationState, ProbeObservation | None]:
         async def call_handler() -> ProbeObservation:
+            observer = self._durability_observer
+            if observer is not None:
+                try:
+                    authorized = await observer.authorize_dispatch(
+                        request,
+                        sequence=sequence,
+                        dispatched_at=self._clock.now(),
+                    )
+                except Exception as error:
+                    raise _DispatchAuthorizationFailed(error) from error
+                if type(authorized) is not bool:
+                    raise _DispatchAuthorizationFailed(
+                        TypeError("durable dispatch authorization must be boolean")
+                    )
+                if not authorized:
+                    raise _DispatchDeadlineExhausted
+            # Deliberately no await separates persisted authorization from the
+            # handler call. Remote systems do not consume the SQLite fence, so
+            # this closes already-acquired takeover dispatch, not distributed
+            # exactly-once delivery; only SAFE_READ is eligible for replay.
             result = handler(probe)
             if not inspect.isawaitable(result):
                 raise TypeError("observation handler is not asynchronous")
@@ -897,6 +1226,10 @@ class ProbeController:
         _discard_task(cancellation_task)
         try:
             observation = handler_task.result()
+        except _DispatchDeadlineExhausted:
+            return _InvocationState.ELAPSED_EXHAUSTED, None
+        except _DispatchAuthorizationFailed as failure:
+            raise failure.error from failure
         except asyncio.CancelledError:
             return _InvocationState.CANCELLED, None
         except CapabilityUnavailable:
@@ -914,8 +1247,10 @@ __all__ = [
     "ControllerAuditRecord",
     "ControllerClock",
     "ProbeController",
+    "ProbeDurabilityObserver",
     "ProbeExecution",
     "ProbeStopReason",
+    "RestoredProbe",
     "ValidatedObservation",
     "probe_request_sha256",
 ]

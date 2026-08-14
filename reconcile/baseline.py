@@ -30,6 +30,7 @@ from reconcile.controller import (
     CapabilityRegistry,
     ControllerClock,
     ProbeController,
+    ProbeDurabilityObserver,
     ProbeStopReason,
     probe_request_sha256,
 )
@@ -447,6 +448,7 @@ async def execute_fixed_plan(
     cancellation_event: asyncio.Event | None = None,
     additional_limitations: tuple[str, ...] = (),
     progress_emitter: ProgressEmitter | None = None,
+    durability_observer: ProbeDurabilityObserver | None = None,
 ) -> FixedBaselineResult:
     """Execute one finite plan without bypassing controller or evidence policy."""
 
@@ -482,6 +484,7 @@ async def execute_fixed_plan(
         sealed_envelope,
         capabilities,
         clock=selected_clock,
+        durability_observer=durability_observer,
     )
     engine = EvidenceEngine(sealed_envelope, rules)
     stop_reason: FixedBaselineStopReason | None = None

@@ -8,6 +8,7 @@ import re
 from collections.abc import AsyncIterator, Awaitable
 from contextlib import asynccontextmanager
 from http import HTTPStatus
+from pathlib import Path
 from typing import Protocol, cast
 
 import uvicorn
@@ -39,6 +40,12 @@ from reconcile.contracts import (
     canonical_sha256,
     decode_contract,
 )
+from reconcile.durable_application import (
+    DurableApplicationError,
+    DurableDependencyDrift,
+    DurableEscalationRequired,
+    DurableServiceUnavailable,
+)
 from reconcile.operator import (
     InvalidScenarioEventCursor,
     OperatorCapacityExceeded,
@@ -53,10 +60,11 @@ from reconcile.operator import (
 )
 from reconcile.persistence import (
     DuplicateInvestigationId,
+    DurableRunConflict,
+    DurableRunNotFound,
+    DurableRuntimeError,
     EventJournalError,
     EventJournalSnapshot,
-    InMemoryInvestigationEventJournal,
-    InMemoryInvestigationRepository,
     InvalidCursor,
     InvestigationNotFound,
     JournalNotFound,
@@ -137,18 +145,6 @@ class _OperatorService(Protocol):
     async def aclose(self) -> None: ...
 
 
-class _FailClosedExecutor:
-    async def __call__(
-        self,
-        _envelope: ExecutionEnvelope,
-        *,
-        revision: int,
-        cancellation_event: asyncio.Event,
-    ) -> InvestigationReport:
-        del revision, cancellation_event
-        raise RuntimeError("no investigation executor is configured")
-
-
 class _ApiBoundaryError(Exception):
     pass
 
@@ -169,14 +165,85 @@ class _InternalApiFailure(_ApiBoundaryError):
     pass
 
 
-def _build_default_service() -> _InvestigationService:
-    from reconcile.application import InvestigationApplicationService
+class _UnavailableInvestigationService:
+    async def start(self) -> None:
+        return None
 
-    return InvestigationApplicationService(
-        InMemoryInvestigationRepository(),
-        InMemoryInvestigationEventJournal(),
-        _FailClosedExecutor(),
-    )
+    async def create(self, _envelope: ExecutionEnvelope) -> _CreateResult:
+        raise _DependencyUnavailable
+
+    async def get(self, _investigation_id: str) -> InvestigationReport:
+        raise _DependencyUnavailable
+
+    async def snapshot(
+        self,
+        _investigation_id: str,
+        *,
+        after: int = 0,
+    ) -> EventJournalSnapshot:
+        del after
+        raise _DependencyUnavailable
+
+    async def wait_for_events(
+        self,
+        _investigation_id: str,
+        *,
+        after: int = 0,
+        cancellation_event: asyncio.Event | None = None,
+    ) -> EventJournalSnapshot:
+        del after, cancellation_event
+        raise _DependencyUnavailable
+
+    async def aclose(self) -> None:
+        return None
+
+
+def _validated_runtime_database(value: str) -> Path:
+    candidate = Path(value)
+    if not candidate.is_absolute() or not candidate.name:
+        raise ValueError("runtime database path must be absolute")
+    if candidate.is_symlink() or candidate.parent.is_symlink():
+        raise ValueError("runtime database path cannot use a symbolic link")
+    resolved_parent = candidate.parent.resolve(strict=True)
+    if resolved_parent != candidate.parent:
+        raise ValueError("runtime database parent must be canonical")
+    parent_metadata = resolved_parent.stat()
+    if parent_metadata.st_uid != os.getuid() or parent_metadata.st_mode & 0o077:
+        raise ValueError("runtime database parent must be user-owned and private")
+    resolved = resolved_parent / candidate.name
+    for ancestor in (resolved_parent, *resolved_parent.parents):
+        if (ancestor / ".git").exists():
+            raise ValueError("runtime database cannot be stored in a repository")
+    if resolved.exists():
+        metadata = resolved.stat()
+        if not resolved.is_file() or metadata.st_uid != os.getuid():
+            raise ValueError("runtime database must be a user-owned file")
+        if metadata.st_mode & 0o077:
+            raise ValueError("runtime database permissions must be private")
+    return resolved
+
+
+def _semantic_config_sha256() -> str:
+    configured = os.environ.get("RECONCILE_SEMANTIC_CONFIG_SHA256")
+    if configured is None:
+        raise ValueError("semantic configuration attestation is not configured")
+    if re.fullmatch(r"[0-9a-f]{64}", configured) is None:
+        raise ValueError("semantic configuration attestation is invalid")
+    return configured
+
+
+def _build_default_service() -> _InvestigationService:
+    configured_path = os.environ.get("RECONCILE_RUNTIME_DATABASE")
+    if configured_path is None or not configured_path:
+        return _UnavailableInvestigationService()
+    try:
+        _validated_runtime_database(configured_path)
+        _semantic_config_sha256()
+    except (OSError, RuntimeError, ValueError, DurableRuntimeError):
+        return _UnavailableInvestigationService()
+    # An envelope alone cannot reconstruct the private scenario read target.
+    # A caller must inject a trusted, durably metered investigation service.
+    return _UnavailableInvestigationService()
 
 
 def _build_default_operator_service() -> _OperatorService:
@@ -318,6 +385,13 @@ def _install_error_handlers(application: FastAPI) -> None:
     )
     _register_error_handler(
         application,
+        DurableRunNotFound,
+        code=ApiErrorCode.INVESTIGATION_NOT_FOUND,
+        status_code=HTTPStatus.NOT_FOUND,
+        message="The investigation was not found.",
+    )
+    _register_error_handler(
+        application,
         JournalNotFound,
         code=ApiErrorCode.INVESTIGATION_NOT_FOUND,
         status_code=HTTPStatus.NOT_FOUND,
@@ -333,6 +407,13 @@ def _install_error_handlers(application: FastAPI) -> None:
     _register_error_handler(
         application,
         DuplicateInvestigationId,
+        code=ApiErrorCode.DUPLICATE_INVESTIGATION_ID,
+        status_code=HTTPStatus.CONFLICT,
+        message="The investigation identity conflicts with an existing envelope.",
+    )
+    _register_error_handler(
+        application,
+        DurableRunConflict,
         code=ApiErrorCode.DUPLICATE_INVESTIGATION_ID,
         status_code=HTTPStatus.CONFLICT,
         message="The investigation identity conflicts with an existing envelope.",
@@ -358,6 +439,19 @@ def _install_error_handlers(application: FastAPI) -> None:
         status_code=HTTPStatus.SERVICE_UNAVAILABLE,
         message="A required dependency is unavailable.",
     )
+    for exception_type in (
+        DurableDependencyDrift,
+        DurableEscalationRequired,
+        DurableRuntimeError,
+        DurableServiceUnavailable,
+    ):
+        _register_error_handler(
+            application,
+            exception_type,
+            code=ApiErrorCode.DEPENDENCY_UNAVAILABLE,
+            status_code=HTTPStatus.SERVICE_UNAVAILABLE,
+            message="A required dependency is unavailable.",
+        )
     for exception_type in (
         OperatorCapacityExceeded,
         OperatorServiceClosed,
@@ -493,6 +587,8 @@ async def _call_service[Result](operation: Awaitable[Result]) -> Result:
         return await operation
     except (
         _ApiBoundaryError,
+        DurableApplicationError,
+        DurableRuntimeError,
         RepositoryError,
         EventJournalError,
         OperatorServiceError,
@@ -729,6 +825,9 @@ def create_app(
             application.state.investigation_service = _build_default_service()
         if application.state.operator_service is None:
             application.state.operator_service = _build_default_operator_service()
+        starter = getattr(application.state.investigation_service, "start", None)
+        if callable(starter):
+            await starter()
         try:
             yield
         finally:

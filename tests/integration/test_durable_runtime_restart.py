@@ -32,6 +32,8 @@ from reconcile.persistence.durable import (
 from reconcile.persistence.sqlite_runtime import SqliteDurableRuntimeStore
 from tests.contract._factories import NOW, make_envelope, make_probe, make_report
 
+_RUNTIME_PROVENANCE = "f" * 64
+
 
 def _recorded_read(sequence: int, completed_at):
     request = make_probe()
@@ -78,6 +80,7 @@ def test_reopen_resumes_without_repeating_recorded_reads_and_preserves_result(
             envelope,
             created_at=NOW,
             limits=limits,
+            runtime_provenance_sha256=_RUNTIME_PROVENANCE,
         )
         first_lease = await first_process.acquire_lease(
             envelope.investigation_id,
@@ -106,6 +109,7 @@ def test_reopen_resumes_without_repeating_recorded_reads_and_preserves_result(
             request=request,
             replay_safety=ProbeReplaySafety.SAFE_READ,
             started_at=NOW + timedelta(milliseconds=500),
+            now=NOW + timedelta(milliseconds=500),
         )
         first_audit, first_observation = _recorded_read(
             1,
@@ -136,6 +140,7 @@ def test_reopen_resumes_without_repeating_recorded_reads_and_preserves_result(
             request=request,
             replay_safety=ProbeReplaySafety.SAFE_READ,
             started_at=NOW + timedelta(seconds=2),
+            now=NOW + timedelta(seconds=2),
         )
         await first_process.release_lease(
             first_lease,
@@ -165,6 +170,7 @@ def test_reopen_resumes_without_repeating_recorded_reads_and_preserves_result(
                 request=request,
                 replay_safety=ProbeReplaySafety.SAFE_READ,
                 started_at=NOW + timedelta(milliseconds=2_300),
+                now=NOW + timedelta(milliseconds=2_300),
             )
 
         second_audit, second_observation = _recorded_read(
@@ -246,6 +252,7 @@ def test_expired_deadline_escalates_unrecorded_safe_read_after_crash(
                 max_provider_calls=1,
                 max_estimated_cost_microunits=50,
             ),
+            runtime_provenance_sha256=_RUNTIME_PROVENANCE,
         )
         lease = await store.acquire_lease(
             envelope.investigation_id,
@@ -260,6 +267,7 @@ def test_expired_deadline_escalates_unrecorded_safe_read_after_crash(
             request=make_probe(),
             replay_safety=ProbeReplaySafety.SAFE_READ,
             started_at=NOW + timedelta(seconds=1),
+            now=NOW + timedelta(seconds=1),
         )
 
         restarted = SqliteDurableRuntimeStore(database)

@@ -6,6 +6,7 @@ import json
 from collections import deque
 from dataclasses import dataclass
 from datetime import timedelta
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -283,32 +284,59 @@ def test_exact_create_replay_is_http_200_with_the_existing_report() -> None:
     assert response.content == canonical_json_bytes(service.report)
 
 
-def test_default_service_returns_created_then_terminal_unknown_without_provider() -> (
-    None
-):
+def test_default_service_requires_an_explicit_durable_database(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("RECONCILE_RUNTIME_DATABASE", raising=False)
     envelope = make_envelope()
     with TestClient(create_app()) as client:
-        created = client.post(
+        response = client.post(
             "/api/v1/investigations",
             content=canonical_json_bytes(envelope),
             headers={"content-type": "application/json"},
         )
-        created_report = decode_contract(created.content, InvestigationReport)
-        for _ in range(32):
-            retrieved = client.get("/api/v1/investigations/investigation-7")
-            report = decode_contract(retrieved.content, InvestigationReport)
-            if report.status is InvestigationStatus.COMPLETED:
-                break
-        else:
-            pytest.fail("default investigation did not reach a terminal report")
-        streamed = client.get("/api/v1/investigations/investigation-7/events")
 
-    events = _parse_sse(streamed)
-    assert created.status_code == 201
-    assert created_report.status is InvestigationStatus.CREATED
-    assert retrieved.status_code == 200
-    assert report.classification is Classification.UNKNOWN
-    assert events[-1].payload.status is InvestigationStatus.COMPLETED  # type: ignore[union-attr]
+    assert response.status_code == 503
+    assert _error(response).code is ApiErrorCode.DEPENDENCY_UNAVAILABLE
+
+
+def test_explicit_default_runtime_database_fails_closed_without_executor(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database = tmp_path / "api-runtime.sqlite3"
+    monkeypatch.setenv("RECONCILE_RUNTIME_DATABASE", str(database))
+    monkeypatch.setenv("RECONCILE_SEMANTIC_CONFIG_SHA256", "a" * 64)
+    envelope = make_envelope()
+
+    with TestClient(create_app()) as client:
+        assert client.get("/health").status_code == 200
+        response = client.post(
+            "/api/v1/investigations",
+            content=canonical_json_bytes(envelope),
+            headers={"content-type": "application/json"},
+        )
+
+    assert response.status_code == 503
+    assert _error(response).code is ApiErrorCode.DEPENDENCY_UNAVAILABLE
+    assert not database.exists()
+
+
+def test_relative_default_runtime_path_is_rejected_without_creating_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    relative = Path("runtime-must-not-exist.sqlite3")
+    monkeypatch.setenv("RECONCILE_RUNTIME_DATABASE", str(relative))
+
+    with TestClient(create_app()) as client:
+        response = client.post(
+            "/api/v1/investigations",
+            content=canonical_json_bytes(make_envelope()),
+            headers={"content-type": "application/json"},
+        )
+
+    assert response.status_code == 503
+    assert not relative.exists()
 
 
 @pytest.mark.parametrize(
