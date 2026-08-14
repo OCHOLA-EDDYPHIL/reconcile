@@ -68,11 +68,11 @@ def test_fresh_runtime_records_current_schema_version(tmp_path: Path) -> None:
             """
         ).fetchone()[0]
 
-    assert version == "3"
+    assert version == "4"
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize("version", ("1", "2", "4"))
+@pytest.mark.parametrize("version", ("1", "2", "3", "5"))
 def test_backward_and_forward_runtime_schemas_fail_closed(
     tmp_path: Path,
     version: str,

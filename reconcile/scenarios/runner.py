@@ -344,8 +344,50 @@ class ScenarioRunner:
         request: ScenarioRunRequest,
         definition: ScenarioDefinition,
     ) -> ScenarioRunResult:
+        """Prepare and execute one scenario in the legacy single-call path."""
+
+        prepared = self.prepare(request, definition)
+        return self.run_prepared(request, definition, prepared)
+
+    def prepare(
+        self,
+        request: ScenarioRunRequest,
+        definition: ScenarioDefinition,
+    ) -> PreparedScenario:
+        """Seal mutation and cleanup authority without setup or dispatch."""
+
         request = decode_contract(canonical_json_bytes(request), ScenarioRunRequest)
-        prepared = self._prepare_run(request, definition)
+        return self._prepare_run(request, definition)
+
+    def run_prepared(
+        self,
+        request: ScenarioRunRequest,
+        definition: ScenarioDefinition,
+        prepared: PreparedScenario,
+    ) -> ScenarioRunResult:
+        """Run a previously sealed scenario after its STARTED state is durable."""
+
+        request = decode_contract(canonical_json_bytes(request), ScenarioRunRequest)
+        if type(prepared) is not PreparedScenario:
+            raise TypeError("prepared scenario must be exact")
+        expected_plan = self._run_plan(request)
+        if definition.scenario != request.scenario or prepared.plan != expected_plan:
+            raise ValueError("prepared scenario does not match the run request")
+        envelope = decode_contract(
+            prepared.execution_envelope_bytes,
+            ExecutionEnvelope,
+        )
+        identifiers = prepared.plan.identifiers
+        invocation_identity = envelope.context.invocation
+        if (
+            envelope.investigation_id != identifiers.investigation_id
+            or envelope.operation_id != identifiers.operation_id
+            or invocation_identity.invocation_id != identifiers.invocation_id
+            or invocation_identity.function_call_id != identifiers.function_call_id
+            or hashlib.sha256(prepared.cleanup_manifest_bytes).hexdigest()
+            != prepared.cleanup_manifest_sha256
+        ):
+            raise ValueError("prepared scenario authority is invalid")
         definition.setup(prepared)
         invocation = self._invoke(request, definition, prepared)
         envelope = None
@@ -514,7 +556,11 @@ class ScenarioRunner:
         request: ScenarioRunRequest,
         definition: ScenarioDefinition,
     ) -> PreparedScenario:
-        plan = ScenarioPlan(
+        return self._seal(self._run_plan(request), definition)
+
+    @staticmethod
+    def _run_plan(request: ScenarioRunRequest) -> ScenarioPlan:
+        return ScenarioPlan(
             scenario=request.scenario,
             identifiers=ScenarioIdentifiers(
                 run_id=request.run_id,
@@ -526,7 +572,6 @@ class ScenarioRunner:
             seed=request.seed,
             namespace_id=_namespace_id(request.scenario, request.run_id),
         )
-        return self._seal(plan, definition)
 
     def _prepare_cleanup(
         self,
