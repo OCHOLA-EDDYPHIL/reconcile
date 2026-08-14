@@ -62,6 +62,16 @@ from reconcile.evidence import (
     TargetRuleRegistration,
     TargetRuleRegistry,
 )
+from reconcile.progress import (
+    AdvisoryProgress,
+    AdvisoryProgressStage,
+    EvidenceProgress,
+    ProbeProgress,
+    ProbeProgressStage,
+    ProgressProposalDisposition,
+    StrategyProgress,
+    StrategyProgressStage,
+)
 from tests.contract._factories import make_envelope, make_target
 
 pytestmark = pytest.mark.unit
@@ -92,6 +102,16 @@ class _Clock:
 
     def advance_ms(self, milliseconds: int) -> None:
         self.seconds += milliseconds / 1_000
+
+
+class _TickingNowClock(_Clock):
+    def __init__(self) -> None:
+        super().__init__()
+        self.now_calls = 0
+
+    def now(self) -> datetime:
+        self.now_calls += 1
+        return super().now() + timedelta(microseconds=self.now_calls)
 
 
 class _Handler:
@@ -1088,3 +1108,79 @@ async def test_probe_budget_exhaustion_stops_before_another_planner_call() -> No
 
     assert result.stop_reason is AdaptiveStopReason.BUDGET_EXHAUSTED
     assert len(planner.calls) == 1
+
+
+@_async_test
+async def test_adaptive_progress_is_ordered_sanitized_and_observational() -> None:
+    async def execute(progress_emitter=None):
+        clock = _TickingNowClock()
+        strong = _Handler(clock, (_observation("committed", "strong-1"),))
+        capabilities, rules = _registries({"strong-read": (strong, 1)})
+        planner = _FakePlanner(
+            [
+                _output(
+                    (
+                        _request(
+                            "strong-read",
+                            rationale="Private adaptive rationale.",
+                        ),
+                    )
+                )
+            ]
+        )
+        result = await execute_adaptive_investigation(
+            _envelope(("strong-read",)),
+            capabilities,
+            rules,
+            planner,
+            _policy(max_turns=1),
+            clock=clock,
+            progress_emitter=progress_emitter,
+        )
+        return result, planner, strong, clock
+
+    baseline, _, _, baseline_clock = await execute()
+    observed = []
+    instrumented, planner, handler, instrumented_clock = await execute(observed.append)
+
+    assert canonical_json_bytes(instrumented.report) == canonical_json_bytes(
+        baseline.report
+    )
+    assert instrumented.transcript_sha256 == baseline.transcript_sha256
+    assert instrumented_clock.now_calls == baseline_clock.now_calls
+    assert len(planner.calls) == 1
+    assert len(handler.calls) == 1
+    assert [type(event) for event in observed] == [
+        StrategyProgress,
+        AdvisoryProgress,
+        AdvisoryProgress,
+        ProbeProgress,
+        ProbeProgress,
+        EvidenceProgress,
+        StrategyProgress,
+    ]
+    assert observed[0].stage is StrategyProgressStage.STARTED
+    assert observed[1].stage is AdvisoryProgressStage.REQUESTED
+    assert observed[2].stage is AdvisoryProgressStage.COMPLETED
+    assert observed[3].stage is ProbeProgressStage.REQUESTED
+    assert observed[4].stage is ProbeProgressStage.COMPLETED
+    assert observed[-1].stage is StrategyProgressStage.COMPLETED
+    proposal = observed[2].proposals[0]
+    assert proposal.disposition is ProgressProposalDisposition.SELECTED
+    assert proposal.request_sha256 == observed[3].request_sha256
+    assert proposal.relevant_effect_ids == EFFECT_IDS
+    assert observed[4].evidence_ids == (observed[5].evidence_id,)
+
+    serialized = json.dumps(
+        [event.model_dump(mode="json") for event in observed],
+        sort_keys=True,
+    )
+    for private_value in (
+        "order-7",
+        "demo-project",
+        "demo-bucket",
+        "receipts/order-7.json",
+        "Private adaptive rationale",
+        "Advisory summary",
+    ):
+        assert private_value not in serialized
