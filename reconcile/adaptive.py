@@ -126,6 +126,7 @@ class AdvisoryPlannerMetadata:
     prompt_sha256: str
     input_schema_version: str
     output_schema_version: str
+    reported_model_raw_sha256: str | None = None
 
     def __post_init__(self) -> None:
         for value, label in (
@@ -138,6 +139,21 @@ class AdvisoryPlannerMetadata:
             _validate_identifier(value, label)
         if self.reported_model is not None:
             _validate_identifier(self.reported_model, "reported planner model")
+            if self.reported_model_raw_sha256 is None:
+                object.__setattr__(
+                    self,
+                    "reported_model_raw_sha256",
+                    hashlib.sha256(self.reported_model.encode("utf-8")).hexdigest(),
+                )
+        if self.reported_model_raw_sha256 is not None:
+            _validate_sha256(
+                self.reported_model_raw_sha256,
+                "raw reported planner model digest",
+            )
+        if self.reported_model is None and self.reported_model_raw_sha256 is not None:
+            raise ValueError(
+                "reported planner model and its raw digest must appear together"
+            )
         _validate_sha256(self.prompt_sha256, "planner prompt digest")
         if self.input_schema_version != ADAPTIVE_PLANNER_INPUT_VERSION:
             raise ValueError("planner input schema version is unsupported")

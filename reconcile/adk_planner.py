@@ -7,22 +7,26 @@ import hashlib
 import inspect
 import json
 import logging
+import math
+import platform
 import re
 import threading
-from collections.abc import AsyncGenerator, Callable
+from collections.abc import AsyncGenerator, Awaitable, Callable
 from dataclasses import dataclass, field, replace
+from enum import Enum
+from functools import cached_property
 from importlib.metadata import version
 from typing import Any, Self
 
 from google.adk.agents import LlmAgent
 from google.adk.agents.run_config import RunConfig, StreamingMode
 from google.adk.events import Event
-from google.adk.models import BaseLlm, Gemini
+from google.adk.models import BaseLlm, Gemini, LlmRequest, LlmResponse
 from google.adk.runners import Runner
 from google.adk.sessions import InMemorySessionService
 from google.auth.credentials import Credentials
 from google.genai import types
-from pydantic import BaseModel, ConfigDict, JsonValue, model_validator
+from pydantic import BaseModel, ConfigDict, JsonValue, PrivateAttr, model_validator
 
 from reconcile.adaptive import (
     AdvisoryPlannerMetadata,
@@ -53,6 +57,8 @@ _MAX_PROVIDER_COLLECTION = 8
 _MAX_PROVIDER_IDENTIFIER = 128
 _MAX_PROVIDER_TEXT = 512
 _MAX_PROVIDER_ARGUMENT_BYTES = 65_536
+QUALIFICATION_REQUEST_BYTE_CEILING = 12_000
+QUALIFICATION_INPUT_TOKEN_CEILING = 12_000
 _RESOURCE_VALUE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]*$")
 
 _PROVIDER_LOG_PREFIXES = ("google_adk", "google_genai", "google.genai")
@@ -111,6 +117,13 @@ fully bound scalar or scalar-array arguments allowed by the supplied capability.
 Use the empty string for an explanation category exactly when its citation
 array is empty. Never emit private reasoning or fields outside the schema.
 """
+_ASSEMBLED_SYSTEM_INSTRUCTION = (
+    _PLANNER_INSTRUCTION
+    + '\n\nYou are an agent. Your internal name is "'
+    + _AGENT_NAME
+    + '". The description about you is "Produces one strict advisory '
+    'evidence-planning payload.".'
+)
 _PROMPT_SHA256 = hashlib.sha256(_PLANNER_INSTRUCTION.encode("utf-8")).hexdigest()
 
 
@@ -339,6 +352,639 @@ class _ProviderPlannerOutput(_ProviderModel):
         return self
 
 
+def _normalize_provider_value(value: object) -> JsonValue:
+    if isinstance(value, Enum):
+        return _normalize_provider_value(value.value)
+    if value is None or type(value) in {bool, int, str}:
+        return value
+    if type(value) is float:
+        if not math.isfinite(value):
+            raise ValueError("provider request cannot contain non-finite numbers")
+        return value
+    if isinstance(value, type) and issubclass(value, BaseModel):
+        return _normalize_provider_value(value.model_json_schema())
+    if isinstance(value, BaseModel):
+        return _normalize_provider_value(
+            value.model_dump(mode="python", exclude_none=True)
+        )
+    if type(value) in {list, tuple}:
+        return [_normalize_provider_value(item) for item in value]
+    if type(value) is dict:
+        normalized: dict[str, JsonValue] = {}
+        for key, item in value.items():
+            if type(key) is not str:
+                raise ValueError("provider request object keys must be strings")
+            normalized[key] = _normalize_provider_value(item)
+        return normalized
+    raise ValueError("provider request contains an unsupported value")
+
+
+def _canonical_provider_bytes(value: object) -> bytes:
+    try:
+        return json.dumps(
+            _normalize_provider_value(value),
+            allow_nan=False,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+    except (RecursionError, TypeError, UnicodeEncodeError, ValueError) as error:
+        raise ValueError(
+            "qualification request cannot be bounded canonically"
+        ) from error
+
+
+def _generation_request_bytes(
+    model: str,
+    contents: list[types.Content],
+    config: types.GenerateContentConfig,
+) -> bytes:
+    if type(model) is not str or type(contents) is not list:
+        raise TypeError("qualification generation request types drifted")
+    if type(config) is not types.GenerateContentConfig:
+        raise TypeError("qualification generation config type drifted")
+    return _canonical_provider_bytes(
+        {
+            "model": model,
+            "contents": contents,
+            "config": config,
+        }
+    )
+
+
+def qualification_request_byte_count(llm_request: LlmRequest) -> int:
+    """Return the canonical byte size of one assembled ADK request."""
+
+    if type(llm_request) is not LlmRequest or llm_request.model is None:
+        raise TypeError("qualification request must be an exact ADK LlmRequest")
+    request_bytes = _generation_request_bytes(
+        llm_request.model,
+        llm_request.contents,
+        llm_request.config,
+    )
+    request_byte_count = len(request_bytes)
+    if request_byte_count > QUALIFICATION_REQUEST_BYTE_CEILING:
+        raise ValueError("qualification provider request exceeds its byte guard")
+    return request_byte_count
+
+
+def _count_tokens_config(
+    request: LlmRequest | types.GenerateContentConfig,
+) -> types.CountTokensConfig:
+    if type(request) is LlmRequest:
+        config = request.config
+    elif type(request) is types.GenerateContentConfig:
+        config = request
+    else:
+        raise TypeError("qualification token count config source drifted")
+    generation_payload = {
+        name: getattr(config, name)
+        for name in types.GenerationConfig.model_fields
+        if name not in {"response_json_schema", "response_schema"}
+        and getattr(config, name, None) is not None
+    }
+    response_schema = config.response_schema
+    if isinstance(response_schema, type) and issubclass(response_schema, BaseModel):
+        generation_payload["response_json_schema"] = response_schema.model_json_schema()
+    elif config.response_json_schema is not None:
+        generation_payload["response_json_schema"] = config.response_json_schema
+    elif response_schema is not None:
+        generation_payload["response_schema"] = response_schema
+    return types.CountTokensConfig(
+        http_options=(
+            None
+            if config.http_options is None
+            else config.http_options.model_copy(deep=True)
+        ),
+        system_instruction=config.system_instruction,
+        tools=config.tools,
+        generation_config=types.GenerationConfig(**generation_payload),
+    )
+
+
+def _count_request_bytes(
+    model: str,
+    contents: list[types.Content],
+    config: types.CountTokensConfig,
+) -> bytes:
+    return _canonical_provider_bytes(
+        {
+            "model": model,
+            "contents": contents,
+            "config": config,
+        }
+    )
+
+
+_QualificationDispatchValidator = Callable[
+    [LlmRequest, str, list[types.Content], types.GenerateContentConfig, bytes],
+    None,
+]
+
+
+class _QualificationDispatchState:
+    __slots__ = (
+        "_config",
+        "_contents",
+        "_count_config",
+        "_count_request_bytes",
+        "_count_started",
+        "_counted_tokens",
+        "_expected_input",
+        "_generation_request_bytes",
+        "_generation_response",
+        "_generation_started",
+        "_model",
+        "_owner_task",
+        "_raw_models",
+        "_request",
+        "_sealed_config",
+        "_sealed_contents",
+        "_validator",
+    )
+
+    def __init__(
+        self,
+        *,
+        request: LlmRequest,
+        model: str,
+        contents: list[types.Content],
+        config: types.GenerateContentConfig,
+        expected_input: bytes,
+        raw_models: object,
+        validator: _QualificationDispatchValidator,
+    ) -> None:
+        owner_task = asyncio.current_task()
+        if owner_task is None:
+            raise RuntimeError("qualification dispatch requires an async task")
+        validator(request, model, contents, config, expected_input)
+        generation_request_bytes = _generation_request_bytes(model, contents, config)
+        if len(generation_request_bytes) > QUALIFICATION_REQUEST_BYTE_CEILING:
+            raise RuntimeError("qualification provider request exceeds its byte guard")
+        sealed_contents = [content.model_copy(deep=True) for content in contents]
+        sealed_config = config.model_copy(deep=True)
+        if (
+            _generation_request_bytes(model, sealed_contents, sealed_config)
+            != generation_request_bytes
+        ):
+            raise RuntimeError("qualification request could not be sealed exactly")
+        count_config = _count_tokens_config(sealed_config)
+
+        self._request = request
+        self._model = model
+        self._contents = contents
+        self._config = config
+        self._expected_input = expected_input
+        self._raw_models = raw_models
+        self._validator = validator
+        self._owner_task = owner_task
+        self._generation_request_bytes = generation_request_bytes
+        self._sealed_contents = sealed_contents
+        self._sealed_config = sealed_config
+        self._count_config = count_config
+        self._count_request_bytes = _count_request_bytes(
+            model, sealed_contents, count_config
+        )
+        self._count_started = False
+        self._counted_tokens: int | None = None
+        self._generation_started = False
+        self._generation_response: types.GenerateContentResponse | None = None
+
+    @property
+    def model(self) -> str:
+        return self._model
+
+    @property
+    def request_byte_count(self) -> int:
+        return len(self._generation_request_bytes)
+
+    @property
+    def sealed_generation_request_sha256(self) -> str:
+        return hashlib.sha256(self._generation_request_bytes).hexdigest()
+
+    @property
+    def provider_request_sha256(self) -> str:
+        return hashlib.sha256(self._count_request_bytes).hexdigest()
+
+    @property
+    def generation_response(self) -> types.GenerateContentResponse | None:
+        return self._generation_response
+
+    def _revalidate(self) -> None:
+        if asyncio.current_task() is not self._owner_task:
+            raise RuntimeError("qualification dispatch changed async tasks")
+        if (
+            self._request.model != self._model
+            or self._request.contents is not self._contents
+            or self._request.config is not self._config
+        ):
+            raise RuntimeError("qualification request object was replaced")
+        self._validator(
+            self._request,
+            self._model,
+            self._contents,
+            self._config,
+            self._expected_input,
+        )
+        if (
+            _generation_request_bytes(self._model, self._contents, self._config)
+            != self._generation_request_bytes
+            or _generation_request_bytes(
+                self._model, self._sealed_contents, self._sealed_config
+            )
+            != self._generation_request_bytes
+            or _count_request_bytes(
+                self._model, self._sealed_contents, self._count_config
+            )
+            != self._count_request_bytes
+        ):
+            raise RuntimeError("qualification request changed after sealing")
+
+    async def count_tokens(self) -> int:
+        self._revalidate()
+        if self._count_started:
+            raise RuntimeError("qualification token count was already attempted")
+        if self._generation_started:
+            raise RuntimeError("qualification generation already started")
+        self._count_started = True
+        response = await self._raw_models.count_tokens(
+            model=self._model,
+            contents=[item.model_copy(deep=True) for item in self._sealed_contents],
+            config=self._count_config.model_copy(deep=True),
+        )
+        self._revalidate()
+        if type(response) is not types.CountTokensResponse:
+            raise RuntimeError("qualification token count response type drifted")
+        total_tokens = response.total_tokens
+        if (
+            type(total_tokens) is not int
+            or not 1 <= total_tokens <= QUALIFICATION_INPUT_TOKEN_CEILING
+        ):
+            raise RuntimeError("qualification token count response is invalid")
+        self._counted_tokens = total_tokens
+        return total_tokens
+
+    async def generate_content(self) -> types.GenerateContentResponse:
+        self._revalidate()
+        if self._counted_tokens is None:
+            raise RuntimeError("qualification generation requires a token count")
+        if self._generation_started:
+            raise RuntimeError("qualification generation was already attempted")
+        self._generation_started = True
+        response = await self._raw_models.generate_content(
+            model=self._model,
+            contents=[item.model_copy(deep=True) for item in self._sealed_contents],
+            config=self._sealed_config.model_copy(deep=True),
+        )
+        if type(response) is not types.GenerateContentResponse:
+            raise RuntimeError("qualification generation response type drifted")
+        self._generation_response = response
+        return response
+
+
+class QualificationDispatchContext:
+    """Immutable one-shot access to a sealed qualification provider request."""
+
+    __slots__ = ("_state",)
+    _CONSTRUCTION_TOKEN = object()
+
+    def __init__(
+        self,
+        construction_token: object,
+        state: _QualificationDispatchState,
+    ) -> None:
+        if construction_token is not self._CONSTRUCTION_TOKEN:
+            raise TypeError("qualification dispatch contexts are facade-owned")
+        object.__setattr__(self, "_state", state)
+
+    def __setattr__(self, name: str, value: object) -> None:
+        del name, value
+        raise AttributeError("qualification dispatch context is immutable")
+
+    @property
+    def model(self) -> str:
+        return self._state.model
+
+    @property
+    def request_byte_count(self) -> int:
+        return self._state.request_byte_count
+
+    @property
+    def sealed_generation_request_sha256(self) -> str:
+        return self._state.sealed_generation_request_sha256
+
+    @property
+    def provider_request_sha256(self) -> str:
+        return self._state.provider_request_sha256
+
+    async def count_tokens(self) -> int:
+        return await self._state.count_tokens()
+
+    async def generate_content(self) -> types.GenerateContentResponse:
+        return await self._state.generate_content()
+
+
+QualificationDispatchHook = Callable[
+    [QualificationDispatchContext],
+    Awaitable[types.GenerateContentResponse],
+]
+
+
+@dataclass(frozen=True, slots=True)
+class _QualificationClientConfiguration:
+    project: str
+    location: str
+    credentials: Credentials | None = field(repr=False, compare=False)
+
+
+@dataclass(slots=True)
+class _QualificationArm:
+    token: object
+    hook: QualificationDispatchHook
+    expected_input: bytes
+    validator: _QualificationDispatchValidator
+    owner_task: asyncio.Task[object]
+    request: LlmRequest | None = None
+    request_task: asyncio.Task[object] | None = None
+    consumed: bool = False
+    dispatching: bool = False
+
+
+class _QualificationModelsFacade:
+    __slots__ = ("_client", "_raw_models")
+
+    def __init__(self, client: _QualificationClientFacade, raw_models: object) -> None:
+        self._client = client
+        self._raw_models = raw_models
+
+    async def count_tokens(self, **kwargs: object) -> types.CountTokensResponse:
+        del kwargs
+        raise RuntimeError("direct qualification token counting is forbidden")
+
+    async def generate_content(
+        self,
+        *,
+        model: str,
+        contents: list[types.Content],
+        config: types.GenerateContentConfig,
+    ) -> types.GenerateContentResponse:
+        arm = self._client._claim_dispatch(model, contents, config)
+        try:
+            state = _QualificationDispatchState(
+                request=arm.request,
+                model=model,
+                contents=contents,
+                config=config,
+                expected_input=arm.expected_input,
+                raw_models=self._raw_models,
+                validator=arm.validator,
+            )
+            context = QualificationDispatchContext(
+                QualificationDispatchContext._CONSTRUCTION_TOKEN,
+                state,
+            )
+            response = await arm.hook(context)
+            state._revalidate()
+            if (
+                type(response) is not types.GenerateContentResponse
+                or response is not state.generation_response
+            ):
+                raise RuntimeError(
+                    "qualification hook did not return the delegated response"
+                )
+            return response
+        finally:
+            self._client._finish_dispatch(arm)
+
+    async def generate_content_stream(self, **kwargs: object) -> object:
+        del kwargs
+        raise RuntimeError("qualification streaming is forbidden")
+
+
+class _QualificationAsyncClientFacade:
+    __slots__ = ("_models", "_raw_async_client")
+
+    def __init__(
+        self,
+        client: _QualificationClientFacade,
+        raw_async_client: object,
+    ) -> None:
+        self._raw_async_client = raw_async_client
+        self._models = _QualificationModelsFacade(
+            client,
+            raw_async_client.models,
+        )
+
+    @property
+    def models(self) -> _QualificationModelsFacade:
+        return self._models
+
+    async def aclose(self) -> None:
+        await self._raw_async_client.aclose()
+
+    def matches(self, raw_async_client: object) -> bool:
+        return (
+            raw_async_client is self._raw_async_client
+            and getattr(raw_async_client, "models", None) is self._models._raw_models
+        )
+
+
+class _QualificationClientFacade:
+    __slots__ = (
+        "_aio",
+        "_arm_state",
+        "_configuration",
+        "_raw_client",
+    )
+
+    def __init__(
+        self,
+        raw_client: object,
+        configuration: _QualificationClientConfiguration,
+    ) -> None:
+        if getattr(raw_client, "vertexai", None) is not True:
+            raise RuntimeError("qualification requires a Vertex AI client")
+        self._raw_client = raw_client
+        self._configuration = configuration
+        self._arm_state: _QualificationArm | None = None
+        self._aio = _QualificationAsyncClientFacade(self, raw_client.aio)
+
+    @property
+    def vertexai(self) -> bool:
+        return True
+
+    @property
+    def aio(self) -> _QualificationAsyncClientFacade:
+        return self._aio
+
+    def close(self) -> None:
+        self._raw_client.close()
+
+    def matches(self, config: VertexAdcPlannerConfig) -> bool:
+        api_client = getattr(self._raw_client, "_api_client", None)
+        return (
+            self._configuration.project == config.project
+            and self._configuration.location == config.location
+            and self._configuration.credentials is config.credentials
+            and getattr(self._raw_client, "vertexai", None) is True
+            and api_client is not None
+            and getattr(api_client, "vertexai", None) is True
+            and getattr(api_client, "project", None) == config.project
+            and getattr(api_client, "location", None) == config.location
+            and getattr(api_client, "api_key", None) is None
+            and (
+                config.credentials is None
+                or getattr(api_client, "_credentials", None) is config.credentials
+            )
+            and self._aio.matches(getattr(self._raw_client, "aio", None))
+        )
+
+    def arm(
+        self,
+        hook: QualificationDispatchHook,
+        expected_input: bytes,
+        validator: _QualificationDispatchValidator,
+    ) -> object:
+        owner_task = asyncio.current_task()
+        if owner_task is None:
+            raise RuntimeError("qualification dispatch requires an async task")
+        if self._arm_state is not None:
+            raise RuntimeError("qualification dispatch is already armed")
+        if not callable(hook) or type(expected_input) is not bytes:
+            raise TypeError("qualification dispatch arm is invalid")
+        token = object()
+        self._arm_state = _QualificationArm(
+            token=token,
+            hook=hook,
+            expected_input=expected_input,
+            validator=validator,
+            owner_task=owner_task,
+        )
+        return token
+
+    def disarm(self, token: object) -> bool:
+        arm = self._arm_state
+        if arm is None or arm.token is not token:
+            raise RuntimeError("qualification dispatch arm identity changed")
+        if asyncio.current_task() is not arm.owner_task:
+            raise RuntimeError("qualification arm changed async tasks")
+        if arm.request is not None or arm.dispatching:
+            raise RuntimeError("qualification dispatch remained active")
+        self._arm_state = None
+        return arm.consumed
+
+    def begin_request(self, request: LlmRequest) -> None:
+        arm = self._arm_state
+        if arm is None:
+            raise RuntimeError("qualification provider request was not armed")
+        request_task = asyncio.current_task()
+        if request_task is None:
+            raise RuntimeError("qualification request requires an async task")
+        if arm.request is not None or arm.consumed or arm.dispatching:
+            raise RuntimeError("qualification request is not one-shot")
+        if type(request) is not LlmRequest:
+            raise TypeError("qualification requires an exact ADK request")
+        arm.request = request
+        arm.request_task = request_task
+
+    def end_request(self, request: LlmRequest) -> None:
+        arm = self._arm_state
+        if arm is None or arm.request is not request:
+            raise RuntimeError("qualification request identity changed")
+        if asyncio.current_task() is not arm.request_task:
+            raise RuntimeError("qualification request changed async tasks")
+        if arm.dispatching:
+            raise RuntimeError("qualification dispatch did not finish")
+        arm.request = None
+        arm.request_task = None
+
+    def _claim_dispatch(
+        self,
+        model: str,
+        contents: list[types.Content],
+        config: types.GenerateContentConfig,
+    ) -> _QualificationArm:
+        arm = self._arm_state
+        if arm is None:
+            raise RuntimeError("qualification provider request was not armed")
+        if asyncio.current_task() is not arm.request_task:
+            raise RuntimeError("qualification dispatch changed async tasks")
+        request = arm.request
+        if request is None:
+            raise RuntimeError("qualification request bypassed the ADK model")
+        if arm.consumed or arm.dispatching:
+            raise RuntimeError("qualification dispatch is not one-shot")
+        if (
+            request.model != model
+            or request.contents is not contents
+            or request.config is not config
+        ):
+            raise RuntimeError("qualification SDK request identity changed")
+        arm.consumed = True
+        arm.dispatching = True
+        return arm
+
+    def _finish_dispatch(self, arm: _QualificationArm) -> None:
+        if self._arm_state is not arm or not arm.dispatching:
+            raise RuntimeError("qualification dispatch state changed")
+        arm.dispatching = False
+
+
+class _QualificationGemini(Gemini):
+    _qualification_client_configuration: _QualificationClientConfiguration = (
+        PrivateAttr()
+    )
+
+    @cached_property
+    def api_client(self) -> _QualificationClientFacade:
+        return _QualificationClientFacade(
+            super().api_client,
+            self._qualification_client_configuration,
+        )
+
+    async def generate_content_async(
+        self,
+        llm_request: LlmRequest,
+        stream: bool = False,
+    ) -> AsyncGenerator[LlmResponse, None]:
+        if (
+            stream is not False
+            or self.use_interactions_api
+            or type(llm_request) is not LlmRequest
+            or llm_request.cache_config is not None
+            or llm_request.cache_metadata is not None
+            or llm_request.cacheable_contents_token_count is not None
+            or llm_request.previous_interaction_id is not None
+            or llm_request.tools_dict != {}
+        ):
+            raise RuntimeError("qualification request uses a forbidden transport")
+        client = self.api_client
+        client.begin_request(llm_request)
+        try:
+            async for response in super().generate_content_async(
+                llm_request,
+                stream=False,
+            ):
+                yield response
+        finally:
+            client.end_request(llm_request)
+
+
+def qualification_request_static_byte_counts() -> tuple[int, int]:
+    return (
+        len(_PLANNER_INSTRUCTION.encode("utf-8")),
+        len(
+            json.dumps(
+                _ProviderPlannerOutput.model_json_schema(),
+                allow_nan=False,
+                ensure_ascii=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            ).encode("utf-8")
+        ),
+    )
+
+
 def _translate_provider_output(
     provider_output: _ProviderPlannerOutput,
 ) -> AdaptivePlannerOutput:
@@ -425,6 +1071,38 @@ def _reported_model_name(value: object) -> str | None:
     return candidate
 
 
+def _qualification_reported_model_revision(
+    value: object,
+    config: VertexAdcPlannerConfig,
+) -> tuple[str, str] | None:
+    if type(value) is not str or not 1 <= len(value) <= 512:
+        return None
+    expected_prefixes = (
+        (
+            f"projects/{config.project}/locations/{config.location}/"
+            "publishers/google/models/"
+        ),
+        "publishers/google/models/",
+        "models/",
+        "",
+    )
+    leaf_with_alias = None
+    for prefix in expected_prefixes:
+        if value.startswith(prefix):
+            leaf_with_alias = value[len(prefix) :]
+            break
+    if leaf_with_alias is None or "/" in leaf_with_alias:
+        return None
+    leaf = (
+        leaf_with_alias[: -len("@default")]
+        if leaf_with_alias.endswith("@default")
+        else leaf_with_alias
+    )
+    if re.fullmatch(rf"{re.escape(config.model)}-[0-9]{{3}}", leaf) is None:
+        return None
+    return leaf, hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
 def _extract_final_text(event: Event) -> str | None:
     content = event.content
     if content is None or content.role != "model" or not content.parts:
@@ -487,6 +1165,7 @@ class AdkGeminiPlanner:
         timeout_seconds: float = 30.0,
         max_output_tokens: int = 4_096,
         session_service: InMemorySessionService | None = None,
+        vertex_config: VertexAdcPlannerConfig | None = None,
     ) -> None:
         if not isinstance(model, BaseLlm):
             raise TypeError("ADK planner requires a BaseLlm model")
@@ -505,6 +1184,11 @@ class AdkGeminiPlanner:
 
         self._model = model
         self._timeout_seconds = timeout_seconds
+        self._max_output_tokens = max_output_tokens
+        self._vertex_config = vertex_config
+        self._qualification_dispatch_hook: QualificationDispatchHook | None = None
+        self._qualification_dispatch_active = False
+        self._qualification_last_dispatch_consumed: bool | None = None
         self._session_service = session_service or InMemorySessionService()
         self._metadata = AdvisoryPlannerMetadata(
             provider_name=provider_name,
@@ -528,6 +1212,11 @@ class AdkGeminiPlanner:
                 max_output_tokens=max_output_tokens,
                 temperature=0,
                 thinking_config=types.ThinkingConfig(include_thoughts=False),
+                automatic_function_calling=(
+                    types.AutomaticFunctionCallingConfig(disable=True)
+                    if vertex_config is not None
+                    else None
+                ),
             ),
             mode="chat",
             include_contents="none",
@@ -553,6 +1242,16 @@ class AdkGeminiPlanner:
             streaming_mode=StreamingMode.NONE,
             max_llm_calls=1,
             include_thoughts_from_other_agents=False,
+        )
+        self._qualification_agent_configuration = _canonical_provider_bytes(
+            self._agent.model_dump(
+                mode="python",
+                exclude={"model"},
+                exclude_none=False,
+            )
+        )
+        self._qualification_run_configuration = _canonical_provider_bytes(
+            self._run_config.model_dump(mode="python", exclude_none=False)
         )
         self._closed = False
 
@@ -586,11 +1285,262 @@ class AdkGeminiPlanner:
         finally:
             _end_provider_log_suppression()
 
+    @classmethod
+    def from_vertex_adc_qualification(
+        cls,
+        config: VertexAdcPlannerConfig,
+    ) -> AdkGeminiPlanner:
+        """Configure the guarded no-stream Vertex qualification transport."""
+
+        if type(config) is not VertexAdcPlannerConfig:
+            raise TypeError("Vertex planner configuration must be exact")
+        client_kwargs: dict[str, object] = {
+            "vertexai": True,
+            "project": config.project,
+            "location": config.location,
+        }
+        if config.credentials is not None:
+            client_kwargs["credentials"] = config.credentials
+        _begin_provider_log_suppression()
+        try:
+            model = _QualificationGemini(
+                model=config.model,
+                client_kwargs=client_kwargs,
+                retry_options=types.HttpRetryOptions(attempts=1),
+            )
+            model._qualification_client_configuration = (
+                _QualificationClientConfiguration(
+                    project=config.project,
+                    location=config.location,
+                    credentials=config.credentials,
+                )
+            )
+            return cls(
+                model,
+                provider_name="google-vertex-ai",
+                prompt_version=config.prompt_version,
+                timeout_seconds=config.timeout_seconds,
+                max_output_tokens=config.max_output_tokens,
+                vertex_config=config,
+            )
+        finally:
+            _end_provider_log_suppression()
+
     @property
     def metadata(self) -> AdvisoryPlannerMetadata:
         """Return immutable configuration metadata for typed planner inputs."""
 
         return self._metadata
+
+    def bind_qualification_dispatch_hook(
+        self,
+        hook: QualificationDispatchHook,
+    ) -> None:
+        if self._vertex_config is None or type(self._model) is not _QualificationGemini:
+            raise RuntimeError("qualification dispatch requires sealed Vertex settings")
+        if not callable(hook):
+            raise TypeError("qualification dispatch hook must be callable")
+        if (
+            self._qualification_dispatch_hook is not None
+            or self._qualification_dispatch_active
+        ):
+            raise RuntimeError("qualification dispatch hook is already bound")
+        self._qualification_last_dispatch_consumed = None
+        self._qualification_dispatch_hook = hook
+
+    def clear_qualification_dispatch_hook(
+        self,
+        hook: QualificationDispatchHook,
+    ) -> bool:
+        if self._qualification_dispatch_hook is not hook:
+            raise RuntimeError("qualification dispatch hook identity changed")
+        if self._qualification_dispatch_active:
+            raise RuntimeError("qualification dispatch hook is active")
+        consumed = self._qualification_last_dispatch_consumed
+        if consumed is None:
+            raise RuntimeError("qualification dispatch outcome is unavailable")
+        self._qualification_dispatch_hook = None
+        self._qualification_last_dispatch_consumed = None
+        return consumed
+
+    def validate_qualification_runtime_configuration(self) -> None:
+        config = self._vertex_config
+        if config is None or type(self._model) is not _QualificationGemini:
+            raise RuntimeError(
+                "qualification dispatch requires the sealed Vertex model"
+            )
+        model = self._model
+        client_kwargs = model.client_kwargs
+        retry = model.retry_options
+        if (
+            model.model != config.model
+            or type(client_kwargs) is not dict
+            or set(client_kwargs)
+            != (
+                {"vertexai", "project", "location", "credentials"}
+                if config.credentials is not None
+                else {"vertexai", "project", "location"}
+            )
+            or client_kwargs.get("vertexai") is not True
+            or client_kwargs.get("project") != config.project
+            or client_kwargs.get("location") != config.location
+            or (
+                config.credentials is not None
+                and client_kwargs.get("credentials") is not config.credentials
+            )
+            or model.base_url is not None
+            or model.speech_config is not None
+            or model.use_interactions_api
+            or retry is None
+            or retry.model_dump(exclude_none=True) != {"attempts": 1}
+        ):
+            raise RuntimeError("qualification Vertex model configuration drifted")
+        _begin_provider_log_suppression()
+        try:
+            try:
+                client = model.api_client
+            except Exception:
+                raise RuntimeError(
+                    "qualification Vertex client initialization failed"
+                ) from None
+        finally:
+            _end_provider_log_suppression()
+        try:
+            client_matches = type(
+                client
+            ) is _QualificationClientFacade and client.matches(config)
+        except Exception:
+            client_matches = False
+        if not client_matches:
+            raise RuntimeError("qualification Vertex client configuration drifted")
+        agent_config = self._agent.generate_content_config
+        run_http = self._run_config.http_options
+        try:
+            agent_configuration = _canonical_provider_bytes(
+                self._agent.model_dump(
+                    mode="python",
+                    exclude={"model"},
+                    exclude_none=False,
+                )
+            )
+            run_configuration = _canonical_provider_bytes(
+                self._run_config.model_dump(mode="python", exclude_none=False)
+            )
+        except ValueError as error:
+            raise RuntimeError("qualification ADK request settings drifted") from error
+        if (
+            self._agent.model is not model
+            or agent_configuration != self._qualification_agent_configuration
+            or run_configuration != self._qualification_run_configuration
+            or agent_config is None
+            or self._agent.before_model_callback is not None
+            or self._agent.after_model_callback is not None
+            or self._agent.on_model_error_callback is not None
+            or self._agent.tools != []
+            or self._agent.output_schema is not _ProviderPlannerOutput
+            or self._runner.agent is not self._agent
+            or self._runner.app_name != _APP_NAME
+            or self._runner.session_service is not self._session_service
+            or self._runner.artifact_service is not None
+            or self._runner.memory_service is not None
+            or self._runner.credential_service is not None
+            or self._runner.auto_create_session is not False
+            or self._runner.context_cache_config is not None
+            or self._run_config.max_llm_calls != 1
+            or self._run_config.streaming_mode is not StreamingMode.NONE
+            or run_http is None
+            or run_http.timeout != config.timeout_seconds * 1_000
+            or run_http.retry_options is None
+            or run_http.retry_options.model_dump(exclude_none=True) != {"attempts": 1}
+        ):
+            raise RuntimeError("qualification ADK request settings drifted")
+
+    def validate_qualification_dispatch(
+        self,
+        llm_request: LlmRequest,
+        model: str,
+        contents: list[types.Content],
+        request_config: types.GenerateContentConfig,
+        expected_input: bytes,
+    ) -> None:
+        self.validate_qualification_runtime_configuration()
+        config = self._vertex_config
+        assert config is not None
+        if (
+            type(llm_request) is not LlmRequest
+            or type(model) is not str
+            or model != config.model
+            or llm_request.model != model
+            or llm_request.contents is not contents
+            or llm_request.config is not request_config
+            or llm_request.tools_dict != {}
+            or llm_request.cache_config is not None
+            or llm_request.cache_metadata is not None
+            or llm_request.cacheable_contents_token_count is not None
+            or llm_request.previous_interaction_id is not None
+        ):
+            raise RuntimeError("qualification assembled request model drifted")
+        request_payload = request_config.model_dump(mode="python", exclude_none=True)
+        request_http = request_config.http_options
+        expected_tracking_header = (
+            f"google-adk/{self._metadata.adk_version} "
+            f"gl-python/{platform.python_version()}"
+        )
+        if (
+            set(request_payload)
+            != {
+                "automatic_function_calling",
+                "candidate_count",
+                "http_options",
+                "labels",
+                "max_output_tokens",
+                "response_mime_type",
+                "response_schema",
+                "system_instruction",
+                "temperature",
+                "thinking_config",
+            }
+            or len(contents) != 1
+            or request_config.system_instruction != _ASSEMBLED_SYSTEM_INSTRUCTION
+            or request_config.response_schema is not _ProviderPlannerOutput
+            or request_config.response_mime_type != "application/json"
+            or request_config.candidate_count != 1
+            or request_config.max_output_tokens != config.max_output_tokens
+            or request_config.temperature != 0
+            or request_config.thinking_config is None
+            or request_config.thinking_config.model_dump(exclude_none=True)
+            != {"include_thoughts": False}
+            or request_config.automatic_function_calling is None
+            or request_config.automatic_function_calling.model_dump(exclude_none=True)
+            != {"disable": True, "maximum_remote_calls": 10}
+            or request_config.tools is not None
+            or request_config.cached_content is not None
+            or request_config.labels != {"adk_agent_name": _AGENT_NAME}
+            or request_http is None
+            or request_http.timeout != config.timeout_seconds * 1_000
+            or request_http.retry_options is None
+            or request_http.retry_options.model_dump(exclude_none=True)
+            != {"attempts": 1}
+            or request_http.model_dump(exclude_none=True).keys()
+            != {"headers", "timeout", "retry_options"}
+            or request_http.headers
+            != {
+                "user-agent": expected_tracking_header,
+                "x-goog-api-client": expected_tracking_header,
+            }
+        ):
+            raise RuntimeError("qualification assembled request settings drifted")
+        content = contents[0]
+        if (
+            type(content) is not types.Content
+            or content.role != "user"
+            or content.parts is None
+            or len(content.parts) != 1
+            or type(content.parts[0]) is not types.Part
+            or content.parts[0].text != expected_input.decode("utf-8")
+            or set(content.parts[0].model_dump(exclude_none=True)) != {"text"}
+        ):
+            raise RuntimeError("qualification assembled request content drifted")
 
     def _validate_input_versions(self, planner_input: AdaptivePlannerInput) -> None:
         versions = planner_input.versions
@@ -606,8 +1556,16 @@ class AdkGeminiPlanner:
         ):
             raise ValueError("planner input versions do not match the adapter")
 
-    def _turn_metadata(self, reported_model: str | None) -> AdvisoryPlannerMetadata:
-        return replace(self._metadata, reported_model=reported_model)
+    def _turn_metadata(
+        self,
+        reported_model: str | None,
+        reported_model_raw_sha256: str | None = None,
+    ) -> AdvisoryPlannerMetadata:
+        return replace(
+            self._metadata,
+            reported_model=reported_model,
+            reported_model_raw_sha256=reported_model_raw_sha256,
+        )
 
     def _failure_turn(
         self,
@@ -615,13 +1573,14 @@ class AdkGeminiPlanner:
         failure: PlannerFailureKind,
         input_sha256: str,
         reported_model: str | None = None,
+        reported_model_raw_sha256: str | None = None,
         output_sha256: str | None = None,
         usage: AdvisoryPlannerUsage | None = None,
     ) -> AdvisoryPlannerTurn:
         return AdvisoryPlannerTurn(
             output=None,
             failure=failure,
-            metadata=self._turn_metadata(reported_model),
+            metadata=self._turn_metadata(reported_model, reported_model_raw_sha256),
             input_sha256=input_sha256,
             output_sha256=output_sha256,
             usage=usage,
@@ -664,10 +1623,30 @@ class AdkGeminiPlanner:
             raise ValueError("ADK planner input exceeds the bounded payload size")
         input_sha256 = hashlib.sha256(input_bytes).hexdigest()
 
+        qualification_client: _QualificationClientFacade | None = None
+        qualification_arm: object | None = None
+        _begin_provider_log_suppression()
+        try:
+            if self._vertex_config is not None:
+                self._qualification_last_dispatch_consumed = False
+                self.validate_qualification_runtime_configuration()
+                hook = self._qualification_dispatch_hook
+                if hook is None or type(self._model) is not _QualificationGemini:
+                    raise RuntimeError("qualification dispatch hook is not bound")
+                qualification_client = self._model.api_client
+                qualification_arm = qualification_client.arm(
+                    hook,
+                    input_bytes,
+                    self.validate_qualification_dispatch,
+                )
+                self._qualification_dispatch_active = True
+        except BaseException:
+            _end_provider_log_suppression()
+            raise
+
         session_id: str | None = None
         events: AsyncGenerator[Event, None] | None = None
         turn: AdvisoryPlannerTurn
-        _begin_provider_log_suppression()
         try:
             session = await self._session_service.create_session(
                 app_name=_APP_NAME,
@@ -690,17 +1669,35 @@ class AdkGeminiPlanner:
             invalid_finish = False
             usage_values: list[types.GenerateContentResponseUsageMetadata] = []
             reported_models: set[str] = set()
+            reported_model_raw_sha256s: set[str] = set()
             invalid_reported_model = False
             async with asyncio.timeout(self._timeout_seconds):
                 async for event in events:
                     if event.usage_metadata is not None:
                         usage_values.append(event.usage_metadata)
                     if event.model_version is not None:
-                        reported = _reported_model_name(event.model_version)
-                        if reported is None:
+                        if self._vertex_config is None:
+                            reported = _reported_model_name(event.model_version)
+                            normalized = (
+                                None
+                                if reported is None
+                                else (
+                                    reported,
+                                    hashlib.sha256(
+                                        event.model_version.encode("utf-8")
+                                    ).hexdigest(),
+                                )
+                            )
+                        else:
+                            normalized = _qualification_reported_model_revision(
+                                event.model_version, self._vertex_config
+                            )
+                        if normalized is None:
                             invalid_reported_model = True
                         else:
+                            reported, raw_sha256 = normalized
                             reported_models.add(reported)
+                            reported_model_raw_sha256s.add(raw_sha256)
                     if (
                         event.error_code is not None
                         or event.error_message is not None
@@ -718,7 +1715,14 @@ class AdkGeminiPlanner:
 
             reported_model = (
                 next(iter(reported_models))
-                if len(reported_models) == 1 and not invalid_reported_model
+                if len(reported_models) == 1
+                and len(reported_model_raw_sha256s) == 1
+                and not invalid_reported_model
+                else None
+            )
+            reported_model_raw_sha256 = (
+                next(iter(reported_model_raw_sha256s))
+                if reported_model is not None
                 else None
             )
             usage = _measured_usage(usage_values)
@@ -727,6 +1731,7 @@ class AdkGeminiPlanner:
                     failure=PlannerFailureKind.UNAVAILABLE,
                     input_sha256=input_sha256,
                     reported_model=reported_model,
+                    reported_model_raw_sha256=reported_model_raw_sha256,
                     usage=usage,
                 )
             elif (
@@ -740,6 +1745,7 @@ class AdkGeminiPlanner:
                     failure=PlannerFailureKind.SCHEMA_INVALID,
                     input_sha256=input_sha256,
                     reported_model=reported_model,
+                    reported_model_raw_sha256=reported_model_raw_sha256,
                     usage=usage,
                 )
             else:
@@ -756,6 +1762,7 @@ class AdkGeminiPlanner:
                         failure=PlannerFailureKind.SCHEMA_INVALID,
                         input_sha256=input_sha256,
                         reported_model=reported_model,
+                        reported_model_raw_sha256=reported_model_raw_sha256,
                         output_sha256=raw_output_sha256,
                         usage=usage,
                     )
@@ -767,13 +1774,17 @@ class AdkGeminiPlanner:
                             failure=PlannerFailureKind.SCHEMA_INVALID,
                             input_sha256=input_sha256,
                             reported_model=reported_model,
+                            reported_model_raw_sha256=(reported_model_raw_sha256),
                             output_sha256=output_sha256,
                         )
                     else:
                         turn = AdvisoryPlannerTurn(
                             output=output,
                             failure=None,
-                            metadata=self._turn_metadata(reported_model),
+                            metadata=self._turn_metadata(
+                                reported_model,
+                                reported_model_raw_sha256,
+                            ),
                             input_sha256=input_sha256,
                             output_sha256=output_sha256,
                             usage=usage,
@@ -794,7 +1805,17 @@ class AdkGeminiPlanner:
             try:
                 cleanup_ok = await self._cleanup_turn(events, session_id)
             finally:
-                _end_provider_log_suppression()
+                try:
+                    if (
+                        qualification_client is not None
+                        and qualification_arm is not None
+                    ):
+                        self._qualification_last_dispatch_consumed = (
+                            qualification_client.disarm(qualification_arm)
+                        )
+                finally:
+                    self._qualification_dispatch_active = False
+                    _end_provider_log_suppression()
 
         if not cleanup_ok:
             return self._failure_turn(
@@ -852,6 +1873,12 @@ class AdkGeminiPlanner:
 
 __all__ = [
     "ADK_PLANNER_PROMPT_VERSION",
+    "QUALIFICATION_INPUT_TOKEN_CEILING",
+    "QUALIFICATION_REQUEST_BYTE_CEILING",
     "AdkGeminiPlanner",
+    "QualificationDispatchContext",
+    "QualificationDispatchHook",
     "VertexAdcPlannerConfig",
+    "qualification_request_byte_count",
+    "qualification_request_static_byte_counts",
 ]

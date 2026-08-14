@@ -245,6 +245,7 @@ def build_qualification_manifest(
     action_policy_version: str = "action-v1",
     thresholds: QualificationThresholds | None = None,
     stop_conditions: QualificationStopConditions | None = None,
+    cases: tuple[QualificationCaseDefinition, ...] = PREREGISTERED_QUALIFICATION_CASES,
 ) -> QualificationSuiteManifest:
     """Build the immutable suite before any qualification execution."""
 
@@ -258,19 +259,28 @@ def build_qualification_manifest(
             for index in range(repetition_count)
         )
     measurement_count = (
-        sum(
-            case.role is QualificationCaseRole.MEASUREMENT
-            for case in PREREGISTERED_QUALIFICATION_CASES
-        )
+        sum(case.role is QualificationCaseRole.MEASUREMENT for case in cases)
         * repetition_count
     )
     if thresholds is None:
+        fallback_cases = tuple(
+            case
+            for case in cases
+            if case.role is QualificationCaseRole.MEASUREMENT
+            and case.evidence_profile
+            is QualificationEvidenceProfile.HETEROGENEOUS_CONDITIONAL
+            and case.opportunity is QualificationOpportunity.ADAPTIVE_EFFICIENCY
+        )
+        if not fallback_cases:
+            raise QualificationAccountingError(
+                "qualification cases omit a heterogeneous fallback"
+            )
         thresholds = QualificationThresholds(
             minimum_valid_measurement_results=measurement_count,
             minimum_suite_median_probe_reduction=1,
             minimum_suite_median_time_reduction_basis_points=2_000,
             minimum_suite_median_sufficient_time_reduction_ms=250,
-            fallback_heterogeneous_case_id="q02-firestore-canonical-partial",
+            fallback_heterogeneous_case_id=fallback_cases[0].case_id,
             minimum_fallback_case_successful_repetitions=max(
                 1,
                 (4 * repetition_count + 4) // 5,
@@ -308,7 +318,7 @@ def build_qualification_manifest(
         stop_conditions=stop_conditions,
         repetition_count=repetition_count,
         lane_orders=lane_orders,
-        cases=PREREGISTERED_QUALIFICATION_CASES,
+        cases=cases,
     )
 
 
