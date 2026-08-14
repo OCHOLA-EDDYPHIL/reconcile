@@ -1,0 +1,766 @@
+{
+  "$defs": {
+    "Classification": {
+      "enum": [
+        "COMMITTED",
+        "NOT_COMMITTED",
+        "PARTIAL",
+        "PENDING",
+        "UNKNOWN"
+      ],
+      "title": "Classification",
+      "type": "string"
+    },
+    "ComparisonModelUsage": {
+      "additionalProperties": false,
+      "properties": {
+        "input_token_count": {
+          "anyOf": [
+            {
+              "maximum": 9223372036854775807,
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Input Token Count"
+        },
+        "model_call_count": {
+          "maximum": 9223372036854775807,
+          "minimum": 0,
+          "title": "Model Call Count",
+          "type": "integer"
+        },
+        "model_name": {
+          "anyOf": [
+            {
+              "maxLength": 128,
+              "minLength": 1,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Model Name"
+        },
+        "output_token_count": {
+          "anyOf": [
+            {
+              "maximum": 9223372036854775807,
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Output Token Count"
+        },
+        "provider_name": {
+          "anyOf": [
+            {
+              "maxLength": 128,
+              "minLength": 1,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Provider Name"
+        },
+        "status": {
+          "$ref": "#/$defs/ComparisonModelUsageStatus"
+        },
+        "total_token_count": {
+          "anyOf": [
+            {
+              "maximum": 9223372036854775807,
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Total Token Count"
+        }
+      },
+      "required": [
+        "status",
+        "model_call_count"
+      ],
+      "title": "ComparisonModelUsage",
+      "type": "object"
+    },
+    "ComparisonModelUsageStatus": {
+      "enum": [
+        "NOT_APPLICABLE",
+        "MEASURED",
+        "UNAVAILABLE"
+      ],
+      "title": "ComparisonModelUsageStatus",
+      "type": "string"
+    },
+    "ComparisonRun": {
+      "additionalProperties": false,
+      "properties": {
+        "classification": {
+          "$ref": "#/$defs/Classification"
+        },
+        "controller_cost_units_used": {
+          "maximum": 9223372036854775807,
+          "minimum": 0,
+          "title": "Controller Cost Units Used",
+          "type": "integer"
+        },
+        "controller_result_bytes_acquired": {
+          "maximum": 9223372036854775807,
+          "minimum": 0,
+          "title": "Controller Result Bytes Acquired",
+          "type": "integer"
+        },
+        "duplicate_probe_count": {
+          "maximum": 9223372036854775807,
+          "minimum": 0,
+          "title": "Duplicate Probe Count",
+          "type": "integer"
+        },
+        "envelope_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Envelope Sha256",
+          "type": "string"
+        },
+        "executed_probe_count": {
+          "maximum": 9223372036854775807,
+          "minimum": 0,
+          "title": "Executed Probe Count",
+          "type": "integer"
+        },
+        "explanation_completeness": {
+          "$ref": "#/$defs/ExplanationCompleteness"
+        },
+        "matches_preregistered_expectation": {
+          "title": "Matches Preregistered Expectation",
+          "type": "boolean"
+        },
+        "model_usage": {
+          "$ref": "#/$defs/ComparisonModelUsage"
+        },
+        "plan_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Plan Sha256",
+          "type": "string"
+        },
+        "planned_probe_count": {
+          "maximum": 9223372036854775807,
+          "minimum": 0,
+          "title": "Planned Probe Count",
+          "type": "integer"
+        },
+        "report_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Report Sha256",
+          "type": "string"
+        },
+        "scenario": {
+          "$ref": "#/$defs/ScenarioRef"
+        },
+        "stop_reason": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Stop Reason",
+          "type": "string"
+        },
+        "strategy_kind": {
+          "$ref": "#/$defs/ComparisonStrategyKind"
+        },
+        "strategy_version": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Strategy Version",
+          "type": "string"
+        },
+        "time_to_sufficient_evidence_ms": {
+          "anyOf": [
+            {
+              "maximum": 9223372036854775807,
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Time To Sufficient Evidence Ms"
+        },
+        "total_elapsed_ms": {
+          "maximum": 9223372036854775807,
+          "minimum": 0,
+          "title": "Total Elapsed Ms",
+          "type": "integer"
+        },
+        "unnecessary_probe_count": {
+          "maximum": 9223372036854775807,
+          "minimum": 0,
+          "title": "Unnecessary Probe Count",
+          "type": "integer"
+        },
+        "unsupported_probe_count": {
+          "maximum": 9223372036854775807,
+          "minimum": 0,
+          "title": "Unsupported Probe Count",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "scenario",
+        "envelope_sha256",
+        "strategy_kind",
+        "strategy_version",
+        "plan_sha256",
+        "report_sha256",
+        "classification",
+        "matches_preregistered_expectation",
+        "planned_probe_count",
+        "executed_probe_count",
+        "controller_cost_units_used",
+        "controller_result_bytes_acquired",
+        "total_elapsed_ms",
+        "stop_reason",
+        "unsupported_probe_count",
+        "unnecessary_probe_count",
+        "duplicate_probe_count",
+        "explanation_completeness",
+        "model_usage"
+      ],
+      "title": "ComparisonRun",
+      "type": "object"
+    },
+    "ComparisonStrategyKind": {
+      "enum": [
+        "FIXED",
+        "ADAPTIVE"
+      ],
+      "title": "ComparisonStrategyKind",
+      "type": "string"
+    },
+    "ExplanationCompleteness": {
+      "additionalProperties": false,
+      "properties": {
+        "complete": {
+          "title": "Complete",
+          "type": "boolean"
+        },
+        "missing_evidence_citation_count": {
+          "maximum": 9223372036854775807,
+          "minimum": 0,
+          "title": "Missing Evidence Citation Count",
+          "type": "integer"
+        },
+        "required_evidence_citation_count": {
+          "maximum": 9223372036854775807,
+          "minimum": 0,
+          "title": "Required Evidence Citation Count",
+          "type": "integer"
+        },
+        "valid_evidence_citation_count": {
+          "maximum": 9223372036854775807,
+          "minimum": 0,
+          "title": "Valid Evidence Citation Count",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "required_evidence_citation_count",
+        "valid_evidence_citation_count",
+        "missing_evidence_citation_count",
+        "complete"
+      ],
+      "title": "ExplanationCompleteness",
+      "type": "object"
+    },
+    "InvestigationComparisonRecord": {
+      "additionalProperties": false,
+      "properties": {
+        "adaptive": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ComparisonRun"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "baseline": {
+          "$ref": "#/$defs/ComparisonRun"
+        },
+        "case_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Case Id",
+          "type": "string"
+        },
+        "comparison_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Comparison Id",
+          "type": "string"
+        },
+        "envelope_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Envelope Sha256",
+          "type": "string"
+        },
+        "preregistered_expectation": {
+          "$ref": "#/$defs/PreregisteredExpectedClassification"
+        },
+        "scenario": {
+          "$ref": "#/$defs/ScenarioRef"
+        },
+        "schema_version": {
+          "const": "reconcile/investigation-comparison-record/v1",
+          "title": "Schema Version",
+          "type": "string"
+        }
+      },
+      "required": [
+        "schema_version",
+        "comparison_id",
+        "case_id",
+        "scenario",
+        "envelope_sha256",
+        "preregistered_expectation",
+        "baseline",
+        "adaptive"
+      ],
+      "title": "InvestigationComparisonRecord",
+      "type": "object"
+    },
+    "PreregisteredExpectedClassification": {
+      "additionalProperties": false,
+      "properties": {
+        "expected_classification": {
+          "$ref": "#/$defs/Classification"
+        },
+        "metadata_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Metadata Sha256",
+          "type": "string"
+        },
+        "registration_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Registration Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "registration_id",
+        "metadata_sha256",
+        "expected_classification"
+      ],
+      "title": "PreregisteredExpectedClassification",
+      "type": "object"
+    },
+    "QualificationArtifactIdentity": {
+      "additionalProperties": false,
+      "properties": {
+        "artifact_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Artifact Id",
+          "type": "string"
+        },
+        "byte_count": {
+          "maximum": 9223372036854775807,
+          "minimum": 0,
+          "title": "Byte Count",
+          "type": "integer"
+        },
+        "sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Sha256",
+          "type": "string"
+        }
+      },
+      "required": [
+        "artifact_id",
+        "sha256",
+        "byte_count"
+      ],
+      "title": "QualificationArtifactIdentity",
+      "type": "object"
+    },
+    "QualificationCaseResultStatus": {
+      "enum": [
+        "COMPLETED",
+        "CONTROL_PASSED",
+        "CONTROL_FAILED",
+        "FAILED",
+        "INVALID"
+      ],
+      "title": "QualificationCaseResultStatus",
+      "type": "string"
+    },
+    "QualificationControlOutcome": {
+      "additionalProperties": false,
+      "properties": {
+        "classification_emitted": {
+          "title": "Classification Emitted",
+          "type": "boolean"
+        },
+        "consequential_action_allowed": {
+          "title": "Consequential Action Allowed",
+          "type": "boolean"
+        },
+        "failure_artifact_retained": {
+          "title": "Failure Artifact Retained",
+          "type": "boolean"
+        },
+        "model_mutation_attempted": {
+          "title": "Model Mutation Attempted",
+          "type": "boolean"
+        },
+        "passed": {
+          "title": "Passed",
+          "type": "boolean"
+        },
+        "provider_failure_observed": {
+          "title": "Provider Failure Observed",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "provider_failure_observed",
+        "classification_emitted",
+        "consequential_action_allowed",
+        "model_mutation_attempted",
+        "failure_artifact_retained",
+        "passed"
+      ],
+      "title": "QualificationControlOutcome",
+      "type": "object"
+    },
+    "QualificationLaneArtifacts": {
+      "additionalProperties": false,
+      "properties": {
+        "failure_record": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/QualificationArtifactIdentity"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "normalized_run": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/QualificationArtifactIdentity"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "raw_observations": {
+          "$ref": "#/$defs/QualificationArtifactIdentity"
+        },
+        "strategy_kind": {
+          "$ref": "#/$defs/ComparisonStrategyKind"
+        }
+      },
+      "required": [
+        "strategy_kind",
+        "raw_observations",
+        "normalized_run",
+        "failure_record"
+      ],
+      "title": "QualificationLaneArtifacts",
+      "type": "object"
+    },
+    "QualificationLaneOrder": {
+      "enum": [
+        "FIXED_FIRST",
+        "ADAPTIVE_FIRST"
+      ],
+      "title": "QualificationLaneOrder",
+      "type": "string"
+    },
+    "QualificationValidity": {
+      "additionalProperties": false,
+      "properties": {
+        "action_gates_match": {
+          "title": "Action Gates Match",
+          "type": "boolean"
+        },
+        "adaptive_matches_expectation": {
+          "title": "Adaptive Matches Expectation",
+          "type": "boolean"
+        },
+        "artifact_binding_valid": {
+          "title": "Artifact Binding Valid",
+          "type": "boolean"
+        },
+        "classifications_match": {
+          "title": "Classifications Match",
+          "type": "boolean"
+        },
+        "eligible_for_value_evidence": {
+          "title": "Eligible For Value Evidence",
+          "type": "boolean"
+        },
+        "envelope_binding_valid": {
+          "title": "Envelope Binding Valid",
+          "type": "boolean"
+        },
+        "fixed_matches_expectation": {
+          "title": "Fixed Matches Expectation",
+          "type": "boolean"
+        },
+        "fixture_binding_valid": {
+          "title": "Fixture Binding Valid",
+          "type": "boolean"
+        },
+        "integrity_valid": {
+          "title": "Integrity Valid",
+          "type": "boolean"
+        },
+        "manifest_binding_valid": {
+          "title": "Manifest Binding Valid",
+          "type": "boolean"
+        },
+        "model_cost_measured": {
+          "title": "Model Cost Measured",
+          "type": "boolean"
+        },
+        "model_has_no_classification_or_action_authority": {
+          "title": "Model Has No Classification Or Action Authority",
+          "type": "boolean"
+        },
+        "policy_versions_match": {
+          "title": "Policy Versions Match",
+          "type": "boolean"
+        },
+        "probes_allowlisted_and_read_only": {
+          "title": "Probes Allowlisted And Read Only",
+          "type": "boolean"
+        },
+        "provider_settings_match": {
+          "title": "Provider Settings Match",
+          "type": "boolean"
+        },
+        "safety_valid": {
+          "title": "Safety Valid",
+          "type": "boolean"
+        },
+        "scenario_binding_valid": {
+          "title": "Scenario Binding Valid",
+          "type": "boolean"
+        },
+        "source_binding_valid": {
+          "title": "Source Binding Valid",
+          "type": "boolean"
+        },
+        "strategy_versions_match": {
+          "title": "Strategy Versions Match",
+          "type": "boolean"
+        },
+        "within_preregistered_budget": {
+          "title": "Within Preregistered Budget",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "manifest_binding_valid",
+        "source_binding_valid",
+        "provider_settings_match",
+        "fixture_binding_valid",
+        "scenario_binding_valid",
+        "envelope_binding_valid",
+        "artifact_binding_valid",
+        "model_cost_measured",
+        "within_preregistered_budget",
+        "strategy_versions_match",
+        "policy_versions_match",
+        "classifications_match",
+        "fixed_matches_expectation",
+        "adaptive_matches_expectation",
+        "action_gates_match",
+        "model_has_no_classification_or_action_authority",
+        "probes_allowlisted_and_read_only",
+        "integrity_valid",
+        "safety_valid",
+        "eligible_for_value_evidence"
+      ],
+      "title": "QualificationValidity",
+      "type": "object"
+    },
+    "ScenarioRef": {
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Name",
+          "type": "string"
+        },
+        "version": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Version",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "version"
+      ],
+      "title": "ScenarioRef",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "artifacts": {
+      "items": {
+        "$ref": "#/$defs/QualificationLaneArtifacts"
+      },
+      "maxItems": 2,
+      "title": "Artifacts",
+      "type": "array"
+    },
+    "case_id": {
+      "maxLength": 128,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+      "title": "Case Id",
+      "type": "string"
+    },
+    "comparison": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/InvestigationComparisonRecord"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "control_outcome": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/QualificationControlOutcome"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "execution_id": {
+      "maxLength": 128,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+      "title": "Execution Id",
+      "type": "string"
+    },
+    "failure_category": {
+      "anyOf": [
+        {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Failure Category"
+    },
+    "lane_order": {
+      "$ref": "#/$defs/QualificationLaneOrder"
+    },
+    "manifest_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Manifest Sha256",
+      "type": "string"
+    },
+    "repetition": {
+      "maximum": 16,
+      "minimum": 1,
+      "title": "Repetition",
+      "type": "integer"
+    },
+    "schema_version": {
+      "const": "reconcile/qualification-case-result/v1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "source_revision": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Source Revision",
+      "type": "string"
+    },
+    "status": {
+      "$ref": "#/$defs/QualificationCaseResultStatus"
+    },
+    "suite_id": {
+      "maxLength": 128,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+      "title": "Suite Id",
+      "type": "string"
+    },
+    "validity": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/QualificationValidity"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    }
+  },
+  "required": [
+    "schema_version",
+    "execution_id",
+    "suite_id",
+    "manifest_sha256",
+    "source_revision",
+    "case_id",
+    "repetition",
+    "lane_order",
+    "status",
+    "comparison",
+    "validity",
+    "control_outcome",
+    "artifacts",
+    "failure_category"
+  ],
+  "title": "QualificationCaseResult",
+  "type": "object"
+}

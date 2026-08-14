@@ -767,6 +767,30 @@ def test_advisory_cannot_override_core_and_invalid_citations_are_dropped() -> No
     assert invalid.advisory_explanation is None
 
 
+def test_advisory_secrets_are_redacted_before_report_persistence() -> None:
+    run = _run_pipeline(
+        make_envelope(),
+        (_observation("effects", ALL_EFFECTS),),
+    )
+    evaluation = run.evaluate()
+    evidence_id = evaluation.proof.admitted_evidence_ids[0]
+    marker = "must-not-cross-boundary"
+
+    report = _build_committed_report(
+        run,
+        evaluation,
+        AdvisoryExplanation(
+            text=f"provider token={marker}",
+            cited_evidence_ids=(evidence_id,),
+        ),
+    )
+
+    encoded = canonical_json_bytes(report)
+    assert marker.encode() not in encoded
+    assert b"[REDACTED]" in encoded
+    assert report.classification is Classification.COMMITTED
+
+
 def test_report_audit_is_safe_canonical_and_persists_exactly() -> None:
     run = _run_pipeline(
         make_envelope(),

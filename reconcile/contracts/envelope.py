@@ -20,6 +20,7 @@ from reconcile.contracts.base import (
     StrictModel,
     canonical_json_value_bytes,
     reject_sensitive_keys,
+    reject_sensitive_values,
 )
 from reconcile.contracts.common import (
     AmbiguousExecution,
@@ -99,6 +100,13 @@ class ExpectedEffect(StrictModel):
     commit_scope: Identifier
     predicate: NonEmptySmallJsonObject
     description: NonEmptyText
+
+    @model_validator(mode="after")
+    def validate_no_credentials(self) -> ExpectedEffect:
+        reject_sensitive_keys(self.predicate)
+        reject_sensitive_values(self.predicate)
+        reject_sensitive_values(self.description)
+        return self
 
 
 class ExecutionEnvelope(StrictModel):
