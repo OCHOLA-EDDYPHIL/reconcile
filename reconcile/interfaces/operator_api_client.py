@@ -23,6 +23,7 @@ from reconcile.contracts import (
     ExecutionEnvelopeSummary,
     ScenarioLaunchRequest,
     ScenarioLifecycleEventPayload,
+    ScenarioOperationalStatus,
     ScenarioRunEvent,
     ScenarioRunEventType,
     ScenarioRunLifecycle,
@@ -562,6 +563,34 @@ class OperatorApiClient:
         if snapshot.investigation_id != validated_id:
             raise _protocol_error() from None
         return snapshot
+
+    async def get_operational_status(
+        self,
+        investigation_id: str,
+    ) -> ScenarioOperationalStatus:
+        """Retrieve one path-bound canonical operational-status projection."""
+
+        self._ensure_open()
+        validated_id = _validated_investigation_id(investigation_id)
+        try:
+            async with self._client.stream(
+                "GET",
+                f"/api/v2/scenario-runs/{validated_id}/operational-status",
+                headers={"Accept": "application/json"},
+            ) as response:
+                if response.status_code != HTTPStatus.OK:
+                    await _raise_api_error(response)
+                status = await _decode_json_response(
+                    response,
+                    ScenarioOperationalStatus,
+                )
+        except InvestigationApiClientError:
+            raise
+        except Exception:
+            raise TransportError() from None
+        if status.investigation_id != validated_id:
+            raise _protocol_error() from None
+        return status
 
     async def get_envelope_summary(
         self,

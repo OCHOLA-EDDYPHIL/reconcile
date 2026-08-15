@@ -27,6 +27,7 @@ from reconcile.contracts import (
     SCENARIO_LAUNCH_REQUEST_VERSION,
     ScenarioLaunchName,
     ScenarioLaunchRequest,
+    ScenarioOperationalStatus,
     ScenarioRunEvent,
     ScenarioRunLifecycle,
     ScenarioRunMode,
@@ -67,6 +68,11 @@ class _OperatorClient(Protocol):
         self,
         investigation_id: str,
     ) -> ScenarioRunSnapshot: ...
+
+    async def get_operational_status(
+        self,
+        investigation_id: str,
+    ) -> ScenarioOperationalStatus: ...
 
     def events(
         self,
@@ -287,6 +293,9 @@ class ReconcileApp(App[None]):
                             id="outcome-panel", classes="section", markup=False
                         )
                         yield Static(
+                            id="operations-panel", classes="section", markup=False
+                        )
+                        yield Static(
                             id="transport-panel", classes="section", markup=False
                         )
                         yield Static(
@@ -350,6 +359,7 @@ class ReconcileApp(App[None]):
         self.query_one("#identity-strip", Static).update(f"{connection} | {identity}")
         for widget_id, content in (
             ("#outcome-panel", self._view_state.render_outcome()),
+            ("#operations-panel", self._view_state.render_operations()),
             ("#transport-panel", self._view_state.render_transport()),
             ("#envelope-panel", self._view_state.render_envelope()),
             ("#advisory-panel", self._view_state.render_advisory()),
@@ -513,6 +523,10 @@ class ReconcileApp(App[None]):
                 else "[REPLAY] Exact launch replay; rebuilding the server timeline."
             )
             self._render_state()
+            await self._refresh_operational_status(
+                client,
+                launched.snapshot.investigation_id,
+            )
             await self._watch(launched.snapshot.investigation_id, after=0)
 
     async def _attach_and_watch(self, investigation_id: str) -> None:
@@ -540,6 +554,7 @@ class ReconcileApp(App[None]):
                 "[ATTACHED] Rebuilding the bounded timeline from cursor 0."
             )
             self._render_state()
+            await self._refresh_operational_status(client, snapshot.investigation_id)
             await self._watch(snapshot.investigation_id, after=0)
 
     async def _reconnect_and_watch(self, investigation_id: str | None) -> None:
@@ -574,6 +589,7 @@ class ReconcileApp(App[None]):
             except Exception as error:
                 self._show_client_failure(error)
                 return
+            await self._refresh_operational_status(client, investigation_id)
             await self._watch(
                 investigation_id,
                 after=self._view_state.last_cursor,
@@ -598,6 +614,7 @@ class ReconcileApp(App[None]):
             self._view_state = self._view_state.apply_snapshot(snapshot).set_connection(
                 ConnectionPhase.LIVE
             )
+            await self._refresh_operational_status(client, investigation_id)
         except asyncio.CancelledError:
             raise
         except ViewStateProtocolError:
@@ -621,6 +638,24 @@ class ReconcileApp(App[None]):
             self._operator_message = (
                 "[LIVE] Snapshot refreshed; decision remains pending."
             )
+        self._render_state()
+
+    async def _refresh_operational_status(
+        self,
+        client: _OperatorClient,
+        investigation_id: str,
+    ) -> None:
+        try:
+            status = await client.get_operational_status(investigation_id)
+            self._view_state = self._view_state.apply_operational_status(status)
+        except asyncio.CancelledError:
+            raise
+        except (RemoteProtocolError, ViewStateProtocolError):
+            self._view_state = self._view_state.mark_operational_status_unavailable(
+                invalid=True
+            )
+        except Exception:
+            self._view_state = self._view_state.mark_operational_status_unavailable()
         self._render_state()
 
     def _show_protocol_failure(self) -> None:

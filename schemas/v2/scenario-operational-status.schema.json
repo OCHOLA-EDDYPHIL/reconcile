@@ -1,0 +1,125 @@
+{
+  "$defs": {
+    "ScenarioLaunchName": {
+      "enum": [
+        "storage",
+        "firestore-business",
+        "sandbox-order"
+      ],
+      "title": "ScenarioLaunchName",
+      "type": "string"
+    },
+    "ScenarioOperationalCleanupState": {
+      "enum": [
+        "NOT_REQUESTED",
+        "PENDING",
+        "SUCCEEDED",
+        "FAILED"
+      ],
+      "title": "ScenarioOperationalCleanupState",
+      "type": "string"
+    },
+    "ScenarioOperationalInvestigationState": {
+      "enum": [
+        "NOT_STARTED",
+        "STARTED",
+        "RECORDED",
+        "ESCALATION_REQUIRED"
+      ],
+      "title": "ScenarioOperationalInvestigationState",
+      "type": "string"
+    },
+    "ScenarioOperationalMutationState": {
+      "enum": [
+        "NOT_STARTED",
+        "STARTED",
+        "RECORDED"
+      ],
+      "title": "ScenarioOperationalMutationState",
+      "type": "string"
+    },
+    "ScenarioOperationalRecoveryState": {
+      "enum": [
+        "NOT_ESCALATED",
+        "HUMAN_ESCALATION_REQUIRED"
+      ],
+      "title": "ScenarioOperationalRecoveryState",
+      "type": "string"
+    },
+    "ScenarioRunMode": {
+      "enum": [
+        "fixed",
+        "adaptive",
+        "compare"
+      ],
+      "title": "ScenarioRunMode",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "cleanup_state": {
+      "$ref": "#/$defs/ScenarioOperationalCleanupState"
+    },
+    "investigation_id": {
+      "maxLength": 128,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+      "title": "Investigation Id",
+      "type": "string"
+    },
+    "investigation_state": {
+      "$ref": "#/$defs/ScenarioOperationalInvestigationState"
+    },
+    "launch_id": {
+      "maxLength": 128,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+      "title": "Launch Id",
+      "type": "string"
+    },
+    "mode": {
+      "$ref": "#/$defs/ScenarioRunMode"
+    },
+    "mutation_state": {
+      "$ref": "#/$defs/ScenarioOperationalMutationState"
+    },
+    "recovery_state": {
+      "$ref": "#/$defs/ScenarioOperationalRecoveryState"
+    },
+    "revision": {
+      "maximum": 9223372036854775807,
+      "minimum": 0,
+      "title": "Revision",
+      "type": "integer"
+    },
+    "scenario": {
+      "$ref": "#/$defs/ScenarioLaunchName"
+    },
+    "schema_version": {
+      "const": "reconcile/scenario-operational-status/v2",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "updated_at": {
+      "format": "date-time",
+      "title": "Updated At",
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema_version",
+    "launch_id",
+    "investigation_id",
+    "scenario",
+    "mode",
+    "revision",
+    "mutation_state",
+    "investigation_state",
+    "cleanup_state",
+    "recovery_state",
+    "updated_at"
+  ],
+  "title": "ScenarioOperationalStatus",
+  "type": "object"
+}

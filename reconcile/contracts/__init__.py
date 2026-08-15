@@ -69,6 +69,14 @@ from reconcile.contracts.evidence import (
     NormalizedEvidence,
     OperationStatus,
 )
+from reconcile.contracts.operational import (
+    SCENARIO_OPERATIONAL_STATUS_VERSION,
+    ScenarioOperationalCleanupState,
+    ScenarioOperationalInvestigationState,
+    ScenarioOperationalMutationState,
+    ScenarioOperationalRecoveryState,
+    ScenarioOperationalStatus,
+)
 from reconcile.contracts.operator import (
     EXECUTION_ENVELOPE_SUMMARY_VERSION,
     MAX_SCENARIO_RUN_EVENTS,
@@ -228,6 +236,7 @@ __all__ = [
     "SCENARIO_CLEANUP_RESULT_VERSION",
     "SCENARIO_FAULT_TRACE_VERSION",
     "SCENARIO_LAUNCH_REQUEST_VERSION",
+    "SCENARIO_OPERATIONAL_STATUS_VERSION",
     "SCENARIO_RUN_EVENT_VERSION",
     "SCENARIO_RUN_REQUEST_VERSION",
     "SCENARIO_RUN_RESULT_VERSION",
@@ -355,6 +364,11 @@ __all__ = [
     "ScenarioLaunchName",
     "ScenarioLaunchRequest",
     "ScenarioLifecycleEventPayload",
+    "ScenarioOperationalCleanupState",
+    "ScenarioOperationalInvestigationState",
+    "ScenarioOperationalMutationState",
+    "ScenarioOperationalRecoveryState",
+    "ScenarioOperationalStatus",
     "ScenarioRef",
     "ScenarioRunEvent",
     "ScenarioRunEventPayload",

@@ -18,6 +18,7 @@ from reconcile.contracts.comparison import (
     InvestigationComparisonRecord,
 )
 from reconcile.contracts.evidence import EVIDENCE_DECISION_VERSION, EvidenceDecision
+from reconcile.contracts.operational import ScenarioOperationalStatus
 from reconcile.contracts.operator import (
     MAX_SCENARIO_RUN_EVENTS,
     SCENARIO_RUN_EVENT_VERSION,
@@ -200,6 +201,11 @@ class DurableScenarioCoordinator(Protocol):
     ) -> CreateScenarioWorkResult: ...
 
     async def audit_terminal_projection(self, investigation_id: str) -> None: ...
+
+    async def get_operational_status(
+        self,
+        investigation_id: str,
+    ) -> ScenarioOperationalStatus: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -844,6 +850,39 @@ class OperatorApplicationService:
         await self._refresh_durable_state(state, investigation_id)
         self._raise_if_task_exited(state, investigation_id)
         return await self._current_snapshot(state)
+
+    async def get_operational_status(
+        self,
+        investigation_id: str,
+    ) -> ScenarioOperationalStatus:
+        """Return read-only durable state coherent with the v1 run identity."""
+
+        state = await self._lookup(investigation_id)
+        if self._coordinator is None:
+            raise OperatorServiceUnavailable(investigation_id)
+        try:
+            await self._refresh_durable_state(state, investigation_id)
+            snapshot = await self._current_snapshot(state)
+            status = await self._coordinator.get_operational_status(investigation_id)
+            if type(status) is not ScenarioOperationalStatus:
+                raise TypeError("operational status must use the exact contract")
+            status = decode_contract(
+                canonical_json_bytes(status),
+                ScenarioOperationalStatus,
+            )
+            if (
+                status.launch_id != snapshot.launch_id
+                or status.investigation_id != snapshot.investigation_id
+                or status.scenario is not snapshot.scenario
+                or status.mode is not snapshot.mode
+                or status.updated_at < snapshot.updated_at
+            ):
+                raise ValueError("operational status contradicts the v1 identity")
+            return status
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            raise OperatorServiceUnavailable(investigation_id) from error
 
     async def get_envelope_summary(
         self,
