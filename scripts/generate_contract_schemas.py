@@ -1,4 +1,4 @@
-"""Generate the checked-in JSON Schema artifacts for public v1 contracts."""
+"""Generate the checked-in JSON Schema artifacts for public contracts."""
 
 from __future__ import annotations
 
@@ -30,11 +30,13 @@ from reconcile.contracts import (
     ScenarioCleanupRequest,
     ScenarioCleanupResult,
     ScenarioFaultTrace,
+    ScenarioOperationalStatus,
     ScenarioRunRequest,
     ScenarioRunResult,
 )
 
 SCHEMA_DIRECTORY = Path("schemas/v1")
+V2_SCHEMA_DIRECTORY = Path("schemas/v2")
 PUBLIC_SCHEMAS: dict[str, type[BaseModel]] = {
     "action-gate-result": ActionGateResult,
     "adaptive-planner-input": AdaptivePlannerInput,
@@ -60,6 +62,9 @@ PUBLIC_SCHEMAS: dict[str, type[BaseModel]] = {
     "scenario-run-request": ScenarioRunRequest,
     "scenario-run-result": ScenarioRunResult,
 }
+V2_PUBLIC_SCHEMAS: dict[str, type[BaseModel]] = {
+    "scenario-operational-status": ScenarioOperationalStatus,
+}
 
 
 def render_schema(model: type[BaseModel]) -> str:
@@ -75,10 +80,15 @@ def render_schema(model: type[BaseModel]) -> str:
 
 
 def generated_artifacts() -> dict[Path, str]:
-    return {
+    v1 = {
         SCHEMA_DIRECTORY / f"{name}.schema.json": render_schema(model)
         for name, model in PUBLIC_SCHEMAS.items()
     }
+    v2 = {
+        V2_SCHEMA_DIRECTORY / f"{name}.schema.json": render_schema(model)
+        for name, model in V2_PUBLIC_SCHEMAS.items()
+    }
+    return {**v1, **v2}
 
 
 def check_artifacts() -> bool:
@@ -89,8 +99,8 @@ def check_artifacts() -> bool:
 
 
 def write_artifacts() -> None:
-    SCHEMA_DIRECTORY.mkdir(parents=True, exist_ok=True)
     for path, contents in generated_artifacts().items():
+        path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(contents, encoding="utf-8")
 
 

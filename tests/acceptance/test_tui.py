@@ -15,6 +15,9 @@ def test_terminal_shell_starts_headlessly() -> None:
         async with app.run_test() as pilot:
             await pilot.pause()
             assert app.query_one("#product-title", Static)
+            assert "OPERATIONAL STATUS: PENDING" in str(
+                app.query_one("#operations-panel", Static).content
+            )
 
     asyncio.run(start())
 

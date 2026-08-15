@@ -19,6 +19,7 @@ from reconcile.contracts import (
     ERROR_VERSION,
     EXECUTION_ENVELOPE_SUMMARY_VERSION,
     SCENARIO_LAUNCH_REQUEST_VERSION,
+    SCENARIO_OPERATIONAL_STATUS_VERSION,
     SCENARIO_RUN_EVENT_VERSION,
     SCENARIO_RUN_SNAPSHOT_VERSION,
     ApiError,
@@ -29,6 +30,11 @@ from reconcile.contracts import (
     ScenarioLaunchName,
     ScenarioLaunchRequest,
     ScenarioLifecycleEventPayload,
+    ScenarioOperationalCleanupState,
+    ScenarioOperationalInvestigationState,
+    ScenarioOperationalMutationState,
+    ScenarioOperationalRecoveryState,
+    ScenarioOperationalStatus,
     ScenarioRunEvent,
     ScenarioRunEventType,
     ScenarioRunFailureCategory,
@@ -193,6 +199,42 @@ def _snapshot(
         failure_category=failure,
         accepted_at=NOW,
         updated_at=NOW + timedelta(milliseconds=cursor),
+    )
+
+
+def _operational_status(
+    *,
+    investigation_id: str = "investigation-7",
+    cleanup_state: ScenarioOperationalCleanupState = (
+        ScenarioOperationalCleanupState.NOT_REQUESTED
+    ),
+    recovery_state: ScenarioOperationalRecoveryState = (
+        ScenarioOperationalRecoveryState.NOT_ESCALATED
+    ),
+) -> ScenarioOperationalStatus:
+    investigation_state = (
+        ScenarioOperationalInvestigationState.ESCALATION_REQUIRED
+        if recovery_state is ScenarioOperationalRecoveryState.HUMAN_ESCALATION_REQUIRED
+        else ScenarioOperationalInvestigationState.NOT_STARTED
+    )
+    if cleanup_state is not ScenarioOperationalCleanupState.NOT_REQUESTED:
+        investigation_state = ScenarioOperationalInvestigationState.RECORDED
+    return ScenarioOperationalStatus(
+        schema_version=SCENARIO_OPERATIONAL_STATUS_VERSION,
+        launch_id="launch-7",
+        investigation_id=investigation_id,
+        scenario=ScenarioLaunchName.STORAGE,
+        mode=ScenarioRunMode.FIXED,
+        revision=7,
+        mutation_state=(
+            ScenarioOperationalMutationState.RECORDED
+            if investigation_state is ScenarioOperationalInvestigationState.RECORDED
+            else ScenarioOperationalMutationState.NOT_STARTED
+        ),
+        investigation_state=investigation_state,
+        cleanup_state=cleanup_state,
+        recovery_state=recovery_state,
+        updated_at=NOW,
     )
 
 
@@ -529,6 +571,64 @@ def test_snapshot_and_envelope_are_canonical_and_path_bound() -> None:
         "/api/v1/scenario-runs/investigation-7",
         f"/api/v1/investigations/{summary.investigation_id}/envelope-summary",
     ]
+
+
+def test_operational_status_is_canonical_and_path_bound() -> None:
+    status = _operational_status()
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return _json_response(status)
+
+    async def scenario() -> None:
+        async with _client(handler) as client:
+            assert await client.get_operational_status("investigation-7") == status
+
+    asyncio.run(scenario())
+    assert len(requests) == 1
+    assert requests[0].method == "GET"
+    assert requests[0].url.path == (
+        "/api/v2/scenario-runs/investigation-7/operational-status"
+    )
+    assert requests[0].url.query == b""
+    assert requests[0].headers["accept"] == "application/json"
+
+
+def test_operational_status_rejects_malformed_or_wrong_identity_response() -> None:
+    status = _operational_status()
+    responses = iter(
+        (
+            _json_response(
+                status,
+                content=b" " + canonical_json_bytes(status),
+            ),
+            _json_response(_operational_status(investigation_id="other-investigation")),
+        )
+    )
+
+    async def scenario() -> None:
+        async with _client(lambda _request: next(responses)) as client:
+            with pytest.raises(RemoteProtocolError):
+                await client.get_operational_status("investigation-7")
+            with pytest.raises(RemoteProtocolError):
+                await client.get_operational_status("investigation-7")
+
+    asyncio.run(scenario())
+
+
+def test_operational_status_preserves_existing_api_error_mapping() -> None:
+    async def scenario() -> None:
+        async with _client(
+            lambda _request: _api_error_response(
+                ApiErrorCode.DEPENDENCY_UNAVAILABLE,
+                HTTPStatus.SERVICE_UNAVAILABLE,
+            )
+        ) as client:
+            with pytest.raises(ServiceUnavailableError):
+                await client.get_operational_status("investigation-7")
+
+    asyncio.run(scenario())
 
 
 @pytest.mark.parametrize(

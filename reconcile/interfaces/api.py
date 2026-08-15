@@ -32,6 +32,7 @@ from reconcile.contracts import (
     ScenarioLaunchName,
     ScenarioLaunchRequest,
     ScenarioLifecycleEventPayload,
+    ScenarioOperationalStatus,
     ScenarioRunEvent,
     ScenarioRunEventType,
     ScenarioRunLifecycle,
@@ -124,6 +125,11 @@ class _OperatorService(Protocol):
 
     async def get(self, investigation_id: str) -> ScenarioRunSnapshot: ...
 
+    async def get_operational_status(
+        self,
+        investigation_id: str,
+    ) -> ScenarioOperationalStatus: ...
+
     async def get_envelope_summary(
         self,
         investigation_id: str,
@@ -208,6 +214,12 @@ class _UnavailableOperatorService:
         raise _DependencyUnavailable
 
     async def get(self, _investigation_id: str) -> ScenarioRunSnapshot:
+        raise _DependencyUnavailable
+
+    async def get_operational_status(
+        self,
+        _investigation_id: str,
+    ) -> ScenarioOperationalStatus:
         raise _DependencyUnavailable
 
     async def get_envelope_summary(
@@ -759,6 +771,22 @@ def _validated_scenario_snapshot(
     return value
 
 
+def _validated_operational_status(
+    value: object,
+    *,
+    investigation_id: str,
+) -> ScenarioOperationalStatus:
+    if type(value) is not ScenarioOperationalStatus:
+        raise _InternalApiFailure
+    try:
+        canonical_json_bytes(value)
+    except (TypeError, ValueError) as error:
+        raise _InternalApiFailure from error
+    if value.investigation_id != investigation_id:
+        raise _InternalApiFailure
+    return value
+
+
 def _validated_envelope_summary(
     value: object,
     *,
@@ -1002,6 +1030,29 @@ def create_app(
         )
         return Response(
             content=canonical_json_bytes(snapshot),
+            media_type="application/json",
+        )
+
+    @application.get(
+        "/api/v2/scenario-runs/{investigation_id}/operational-status",
+        response_model=None,
+    )
+    async def get_scenario_operational_status(
+        investigation_id: str,
+        request: Request,
+    ) -> Response:
+        _reject_query_parameters(request, allowed=set())
+        validated_id = _validated_investigation_id(investigation_id)
+        if validated_id is None:
+            raise _InvalidApiRequest
+        status = _validated_operational_status(
+            await _call_service(
+                _operator_service(application).get_operational_status(validated_id)
+            ),
+            investigation_id=validated_id,
+        )
+        return Response(
+            content=canonical_json_bytes(status),
             media_type="application/json",
         )
 

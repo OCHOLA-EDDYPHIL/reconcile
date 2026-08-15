@@ -7,6 +7,7 @@ import pytest
 from reconcile.contracts import (
     EVIDENCE_DECISION_VERSION,
     EXECUTION_ENVELOPE_SUMMARY_VERSION,
+    SCENARIO_OPERATIONAL_STATUS_VERSION,
     SCENARIO_RUN_EVENT_VERSION,
     SCENARIO_RUN_SNAPSHOT_VERSION,
     AdaptivePlannerPhase,
@@ -38,6 +39,11 @@ from reconcile.contracts import (
     SanitizedProbeRequest,
     SanitizedProbeResult,
     ScenarioLaunchName,
+    ScenarioOperationalCleanupState,
+    ScenarioOperationalInvestigationState,
+    ScenarioOperationalMutationState,
+    ScenarioOperationalRecoveryState,
+    ScenarioOperationalStatus,
     ScenarioRunEvent,
     ScenarioRunEventType,
     ScenarioRunFailureCategory,
@@ -52,6 +58,7 @@ from reconcile.contracts import (
 )
 from reconcile.interfaces.tui_state import (
     ConnectionPhase,
+    OperationalStatusAvailability,
     OperatorViewState,
     ViewStateProtocolError,
     ViewStateProtocolErrorCode,
@@ -297,6 +304,38 @@ def _failed_snapshot(
     )
 
 
+def _operational_status(
+    snapshot: ScenarioRunSnapshot,
+    *,
+    revision: int,
+    mutation_state: ScenarioOperationalMutationState = (
+        ScenarioOperationalMutationState.RECORDED
+    ),
+    investigation_state: ScenarioOperationalInvestigationState = (
+        ScenarioOperationalInvestigationState.STARTED
+    ),
+    cleanup_state: ScenarioOperationalCleanupState = (
+        ScenarioOperationalCleanupState.NOT_REQUESTED
+    ),
+    recovery_state: ScenarioOperationalRecoveryState = (
+        ScenarioOperationalRecoveryState.NOT_ESCALATED
+    ),
+) -> ScenarioOperationalStatus:
+    return ScenarioOperationalStatus(
+        schema_version=SCENARIO_OPERATIONAL_STATUS_VERSION,
+        launch_id=snapshot.launch_id,
+        investigation_id=snapshot.investigation_id,
+        scenario=snapshot.scenario,
+        mode=snapshot.mode,
+        revision=revision,
+        mutation_state=mutation_state,
+        investigation_state=investigation_state,
+        cleanup_state=cleanup_state,
+        recovery_state=recovery_state,
+        updated_at=NOW + timedelta(seconds=revision),
+    )
+
+
 def _event(
     cursor: int,
     event_type: ScenarioRunEventType,
@@ -452,6 +491,143 @@ def test_snapshot_progression_rejects_cursor_terminal_and_content_regression() -
     with pytest.raises(ViewStateProtocolError) as divergence_error:
         completed.apply_snapshot(divergent)
     assert divergence_error.value.code is ViewStateProtocolErrorCode.SNAPSHOT_DIVERGENCE
+
+
+def test_operational_status_is_identity_bound_and_revision_monotonic() -> None:
+    snapshot = _active_snapshot()
+    first = _operational_status(snapshot, revision=3)
+    state = (
+        OperatorViewState.empty()
+        .apply_snapshot(snapshot)
+        .apply_operational_status(first)
+    )
+
+    assert state.operational_status == first
+    assert state.operational_status_availability is (
+        OperationalStatusAvailability.AVAILABLE
+    )
+    assert state.apply_operational_status(first) == state
+
+    advanced = _operational_status(snapshot, revision=4)
+    state = state.apply_operational_status(advanced)
+    assert state.operational_status == advanced
+
+    foreign = advanced.model_copy(update={"investigation_id": "investigation-foreign"})
+    with pytest.raises(ViewStateProtocolError) as identity_error:
+        state.apply_operational_status(foreign)
+    assert identity_error.value.code is (
+        ViewStateProtocolErrorCode.OPERATIONAL_STATUS_IDENTITY
+    )
+
+    regressed = _operational_status(snapshot, revision=2)
+    with pytest.raises(ViewStateProtocolError) as revision_error:
+        state.apply_operational_status(regressed)
+    assert revision_error.value.code is (
+        ViewStateProtocolErrorCode.OPERATIONAL_STATUS_REVISION_REGRESSION
+    )
+
+    divergent = advanced.model_copy(
+        update={"updated_at": advanced.updated_at + timedelta(seconds=1)}
+    )
+    with pytest.raises(ViewStateProtocolError) as divergence_error:
+        state.apply_operational_status(divergent)
+    assert divergence_error.value.code is (
+        ViewStateProtocolErrorCode.OPERATIONAL_STATUS_DIVERGENCE
+    )
+
+    with pytest.raises(ViewStateProtocolError) as invalid_error:
+        state.apply_operational_status(object())  # type: ignore[arg-type]
+    assert invalid_error.value.code is (
+        ViewStateProtocolErrorCode.INVALID_OPERATIONAL_STATUS
+    )
+
+
+def test_operational_status_never_changes_v1_authority_and_failure_is_visible() -> None:
+    snapshot = _active_snapshot(event_cursor=1)
+    initial = (
+        OperatorViewState.empty().apply_snapshot(snapshot).ingest(_terminal_event())
+    )
+    v1_projection = (
+        initial.snapshot,
+        initial.event_bytes_by_cursor,
+        initial.last_cursor,
+        initial.render_timeline(),
+        initial.render_deterministic(),
+        initial.render_actions(),
+    )
+
+    status = _operational_status(snapshot, revision=5)
+    current = initial.apply_operational_status(status)
+    unavailable = current.mark_operational_status_unavailable()
+    invalid = current.mark_operational_status_unavailable(invalid=True)
+
+    for state in (current, unavailable, invalid):
+        assert (
+            state.snapshot,
+            state.event_bytes_by_cursor,
+            state.last_cursor,
+            state.render_timeline(),
+            state.render_deterministic(),
+            state.render_actions(),
+        ) == v1_projection
+        assert state.operational_status == status
+
+    assert unavailable.operational_status_availability is (
+        OperationalStatusAvailability.UNAVAILABLE
+    )
+    assert invalid.operational_status_availability is (
+        OperationalStatusAvailability.INVALID
+    )
+    assert unavailable.render_operations()[0] == (
+        "OPERATIONAL STATUS: UNAVAILABLE - V1 STATE RETAINED"
+    )
+    assert invalid.render_operations()[0] == (
+        "OPERATIONAL STATUS: INVALID - V1 STATE RETAINED"
+    )
+    assert "OPERATIONS REVISION: 5" in invalid.render_operations()
+
+
+@pytest.mark.parametrize(
+    ("status", "cleanup", "escalation"),
+    (
+        (
+            _operational_status(
+                _active_snapshot(),
+                revision=6,
+                investigation_state=(ScenarioOperationalInvestigationState.RECORDED),
+                cleanup_state=ScenarioOperationalCleanupState.FAILED,
+            ),
+            "CLEANUP: FAILED",
+            "HUMAN ESCALATION: NOT_ESCALATED",
+        ),
+        (
+            _operational_status(
+                _active_snapshot(),
+                revision=7,
+                investigation_state=(
+                    ScenarioOperationalInvestigationState.ESCALATION_REQUIRED
+                ),
+                recovery_state=(
+                    ScenarioOperationalRecoveryState.HUMAN_ESCALATION_REQUIRED
+                ),
+            ),
+            "CLEANUP: NOT_REQUESTED",
+            "HUMAN ESCALATION: HUMAN_ESCALATION_REQUIRED",
+        ),
+    ),
+)
+def test_operations_render_cleanup_and_human_escalation_explicitly(
+    status: ScenarioOperationalStatus,
+    cleanup: str,
+    escalation: str,
+) -> None:
+    state = OperatorViewState.empty().apply_snapshot(_active_snapshot())
+    rendered = state.apply_operational_status(status).render_operations()
+
+    assert "MUTATION: RECORDED" in rendered
+    assert any(line.startswith("INVESTIGATION: ") for line in rendered)
+    assert cleanup in rendered
+    assert escalation in rendered
 
 
 @pytest.mark.parametrize(

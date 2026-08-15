@@ -15,6 +15,7 @@ from textual.widgets import Button, Input, Select, Static, TabbedContent
 from reconcile.contracts import (
     EVIDENCE_DECISION_VERSION,
     EXECUTION_ENVELOPE_SUMMARY_VERSION,
+    SCENARIO_OPERATIONAL_STATUS_VERSION,
     SCENARIO_RUN_EVENT_VERSION,
     SCENARIO_RUN_SNAPSHOT_VERSION,
     AdaptivePlannerPhase,
@@ -50,6 +51,11 @@ from reconcile.contracts import (
     ScenarioLaunchName,
     ScenarioLaunchRequest,
     ScenarioLifecycleEventPayload,
+    ScenarioOperationalCleanupState,
+    ScenarioOperationalInvestigationState,
+    ScenarioOperationalMutationState,
+    ScenarioOperationalRecoveryState,
+    ScenarioOperationalStatus,
     ScenarioRunEvent,
     ScenarioRunEventPayload,
     ScenarioRunEventType,
@@ -64,6 +70,7 @@ from reconcile.contracts import (
 )
 from reconcile.interfaces.api_client import (
     InvestigationNotFoundError,
+    RemoteProtocolError,
     ServiceUnavailableError,
     TransportError,
 )
@@ -109,12 +116,14 @@ class _ScriptedClient:
         *,
         launch: ScenarioRunSnapshot | Exception | None = None,
         snapshots: tuple[ScenarioRunSnapshot | Exception, ...] = (),
+        statuses: tuple[ScenarioOperationalStatus | Exception, ...] = (),
         streams: tuple[_StreamPlan, ...] = (),
         created: bool = True,
         launch_gate: _LaunchGate | None = None,
     ) -> None:
         self._launch = launch
         self._snapshots = deque(snapshots)
+        self._statuses = deque(statuses)
         self._streams = deque(streams)
         self._created = created
         self._launch_gate = launch_gate
@@ -141,6 +150,18 @@ class _ScriptedClient:
         if not self._snapshots:
             raise AssertionError("unexpected snapshot read")
         result = self._snapshots.popleft()
+        if isinstance(result, Exception):
+            raise result
+        return result
+
+    async def get_operational_status(
+        self,
+        investigation_id: str,
+    ) -> ScenarioOperationalStatus:
+        self.calls.append(("get_operational_status", investigation_id))
+        if not self._statuses:
+            raise ServiceUnavailableError()
+        result = self._statuses.popleft()
         if isinstance(result, Exception):
             raise result
         return result
@@ -426,6 +447,35 @@ def _failed_snapshot(
         failure_category=ScenarioRunFailureCategory.MODEL_UNAVAILABLE,
         accepted_at=NOW,
         updated_at=NOW + timedelta(seconds=2),
+    )
+
+
+def _operational_status(
+    snapshot: ScenarioRunSnapshot,
+    *,
+    revision: int,
+    investigation_state: ScenarioOperationalInvestigationState = (
+        ScenarioOperationalInvestigationState.STARTED
+    ),
+    cleanup_state: ScenarioOperationalCleanupState = (
+        ScenarioOperationalCleanupState.NOT_REQUESTED
+    ),
+    recovery_state: ScenarioOperationalRecoveryState = (
+        ScenarioOperationalRecoveryState.NOT_ESCALATED
+    ),
+) -> ScenarioOperationalStatus:
+    return ScenarioOperationalStatus(
+        schema_version=SCENARIO_OPERATIONAL_STATUS_VERSION,
+        launch_id=snapshot.launch_id,
+        investigation_id=snapshot.investigation_id,
+        scenario=snapshot.scenario,
+        mode=snapshot.mode,
+        revision=revision,
+        mutation_state=ScenarioOperationalMutationState.RECORDED,
+        investigation_state=investigation_state,
+        cleanup_state=cleanup_state,
+        recovery_state=recovery_state,
+        updated_at=NOW + timedelta(seconds=revision),
     )
 
 
@@ -762,6 +812,195 @@ def test_keyboard_launch_keeps_active_and_terminal_fixed_states_explicit(
     asyncio.run(journey())
 
 
+def test_operations_panel_keeps_cleanup_failure_separate_from_v1_decision() -> None:
+    async def journey() -> None:
+        launch_id = "launch-cleanup-failed"
+        investigation_id = "investigation-cleanup-failed"
+        active = _active_snapshot(
+            scenario=ScenarioLaunchName.STORAGE,
+            mode=ScenarioRunMode.FIXED,
+            launch_id=launch_id,
+            investigation_id=investigation_id,
+            event_cursor=2,
+        )
+        terminal = _completed_report_snapshot(
+            classification=Classification.COMMITTED,
+            scenario=ScenarioLaunchName.STORAGE,
+            launch_id=launch_id,
+            investigation_id=investigation_id,
+        )
+        initial_status = _operational_status(active, revision=3)
+        cleanup_failed = _operational_status(
+            terminal,
+            revision=8,
+            investigation_state=ScenarioOperationalInvestigationState.RECORDED,
+            cleanup_state=ScenarioOperationalCleanupState.FAILED,
+        )
+        client = _ScriptedClient(
+            launch=active,
+            snapshots=(terminal,),
+            statuses=(initial_status, cleanup_failed),
+            streams=(
+                _StreamPlan(
+                    events=(
+                        *_lifecycle_events(investigation_id),
+                        _report_terminal_event(terminal),
+                    )
+                ),
+            ),
+        )
+        app = ReconcileApp(client=client)
+
+        async with app.run_test(size=(100, 40)) as pilot:
+            app.query_one("#launch-id", Input).value = launch_id
+            await pilot.press("f5")
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+
+            operations = _text(app, "#operations-panel")
+            assert "OPERATIONAL STATUS: AVAILABLE" in operations
+            assert "MUTATION: RECORDED" in operations
+            assert "INVESTIGATION: RECORDED" in operations
+            assert "CLEANUP: FAILED" in operations
+            assert "HUMAN ESCALATION: NOT_ESCALATED" in operations
+            assert "DETERMINISTIC CLASSIFICATION: COMMITTED" in _text(
+                app, "#deterministic-panel"
+            )
+            assert "ACTION CONTINUE: ALLOWED" in _text(app, "#actions-panel")
+            assert [
+                call[1] for call in client.calls if call[0] == "get_operational_status"
+            ] == [investigation_id, investigation_id]
+
+        assert client.close_count == 1
+
+    asyncio.run(journey())
+
+
+def test_operations_panel_exposes_required_human_escalation() -> None:
+    async def journey() -> None:
+        launch_id = "launch-human-escalation"
+        investigation_id = "investigation-human-escalation"
+        active = _active_snapshot(
+            scenario=ScenarioLaunchName.STORAGE,
+            mode=ScenarioRunMode.ADAPTIVE,
+            launch_id=launch_id,
+            investigation_id=investigation_id,
+            event_cursor=2,
+            include_summary=False,
+        )
+        failed = _failed_snapshot(
+            launch_id=launch_id,
+            investigation_id=investigation_id,
+        )
+        escalated = _operational_status(
+            failed,
+            revision=6,
+            investigation_state=(
+                ScenarioOperationalInvestigationState.ESCALATION_REQUIRED
+            ),
+            recovery_state=(ScenarioOperationalRecoveryState.HUMAN_ESCALATION_REQUIRED),
+        )
+        client = _ScriptedClient(
+            launch=active,
+            snapshots=(failed,),
+            statuses=(_operational_status(active, revision=2), escalated),
+            streams=(
+                _StreamPlan(
+                    events=(
+                        *_lifecycle_events(investigation_id),
+                        _failure_terminal_event(failed),
+                    )
+                ),
+            ),
+        )
+        app = ReconcileApp(client=client)
+
+        async with app.run_test(size=(100, 40)) as pilot:
+            app.query_one("#mode-select", Select).value = ScenarioRunMode.ADAPTIVE
+            app.query_one("#launch-id", Input).value = launch_id
+            await pilot.press("f5")
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+
+            operations = _text(app, "#operations-panel")
+            assert "INVESTIGATION: ESCALATION_REQUIRED" in operations
+            assert "CLEANUP: NOT_REQUESTED" in operations
+            assert "HUMAN ESCALATION: HUMAN_ESCALATION_REQUIRED" in operations
+            assert "RUN FAILED" in _text(app, "#deterministic-panel")
+
+        assert client.close_count == 1
+
+    asyncio.run(journey())
+
+
+@pytest.mark.parametrize(
+    ("status_error", "marker"),
+    (
+        (RemoteProtocolError(), "OPERATIONAL STATUS: INVALID"),
+        (ServiceUnavailableError(), "OPERATIONAL STATUS: UNAVAILABLE"),
+    ),
+)
+def test_bad_terminal_status_retains_authoritative_v1_and_last_good_operations(
+    status_error: Exception,
+    marker: str,
+) -> None:
+    async def journey() -> None:
+        launch_id = f"launch-status-{marker.rsplit(': ', 1)[-1].lower()}"
+        investigation_id = f"investigation-status-{marker.rsplit(': ', 1)[-1].lower()}"
+        active = _active_snapshot(
+            scenario=ScenarioLaunchName.STORAGE,
+            mode=ScenarioRunMode.FIXED,
+            launch_id=launch_id,
+            investigation_id=investigation_id,
+            event_cursor=2,
+        )
+        terminal = _completed_report_snapshot(
+            classification=Classification.COMMITTED,
+            scenario=ScenarioLaunchName.STORAGE,
+            launch_id=launch_id,
+            investigation_id=investigation_id,
+        )
+        initial_status = _operational_status(active, revision=2)
+        client = _ScriptedClient(
+            launch=active,
+            snapshots=(terminal,),
+            statuses=(initial_status, status_error),
+            streams=(
+                _StreamPlan(
+                    events=(
+                        *_lifecycle_events(investigation_id),
+                        _report_terminal_event(terminal),
+                    )
+                ),
+            ),
+        )
+        app = ReconcileApp(client=client)
+
+        async with app.run_test(size=(100, 40)) as pilot:
+            app.query_one("#launch-id", Input).value = launch_id
+            await pilot.press("f5")
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+
+            assert app.operator_view_state.snapshot == terminal
+            assert app.operator_view_state.timeline_complete
+            assert app.operator_view_state.operational_status == initial_status
+            assert "DETERMINISTIC CLASSIFICATION: COMMITTED" in _text(
+                app, "#deterministic-panel"
+            )
+            assert "CURSOR 3 TERMINAL" in _text(app, "#timeline-panel")
+            operations = _text(app, "#operations-panel")
+            assert marker in operations
+            assert "V1 STATE RETAINED" in operations
+            assert "OPERATIONS REVISION: 2" in operations
+            assert app.operator_view_state.connection_phase is ConnectionPhase.LIVE
+            assert "Terminal snapshot confirmed" in _text(app, "#operator-message")
+
+        assert client.close_count == 1
+
+    asyncio.run(journey())
+
+
 def test_authoritative_outcome_is_visible_at_supported_small_sizes() -> None:
     async def journey() -> None:
         launch_id = "launch-small-terminal"
@@ -993,6 +1232,14 @@ def test_explicit_keyboard_reconnect_resumes_after_the_confirmed_cursor() -> Non
             event_calls = [call for call in client.calls if call[0] == "events"]
             assert [call[2] for call in event_calls] == [0, 2]
             assert all(call[3] == 0 for call in event_calls)
+            status_calls = [
+                call for call in client.calls if call[0] == "get_operational_status"
+            ]
+            assert [call[1] for call in status_calls] == [
+                investigation_id,
+                investigation_id,
+                investigation_id,
+            ]
             assert app.operator_view_state.last_cursor == 3
             assert app.operator_view_state.timeline_complete
             assert "CURSOR 1 LIFECYCLE: ACCEPTED" in _text(app, "#timeline-panel")
@@ -1321,6 +1568,11 @@ def test_unmount_cancels_only_the_local_stream_and_closes_the_client() -> None:
 
         assert stream.cancelled
         assert client.close_count == 1
-        assert {call[0] for call in client.calls} == {"launch", "events", "close"}
+        assert {call[0] for call in client.calls} == {
+            "launch",
+            "get_operational_status",
+            "events",
+            "close",
+        }
 
     asyncio.run(journey())

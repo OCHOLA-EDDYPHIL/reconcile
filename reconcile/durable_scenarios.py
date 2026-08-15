@@ -20,6 +20,14 @@ from reconcile.contracts.comparison import (
     INVESTIGATION_COMPARISON_RECORD_VERSION,
     InvestigationComparisonRecord,
 )
+from reconcile.contracts.operational import (
+    SCENARIO_OPERATIONAL_STATUS_VERSION,
+    ScenarioOperationalCleanupState,
+    ScenarioOperationalInvestigationState,
+    ScenarioOperationalMutationState,
+    ScenarioOperationalRecoveryState,
+    ScenarioOperationalStatus,
+)
 from reconcile.contracts.operator import (
     ScenarioLaunchRequest,
     ScenarioRunEvent,
@@ -314,6 +322,44 @@ class DurableScenarioWorkflow:
         return (
             self._vertex_config is not None
             or self._supplied_planner_factory is not None
+        )
+
+    async def get_operational_status(
+        self,
+        investigation_id: str,
+    ) -> ScenarioOperationalStatus:
+        """Project validated durable authority without acquiring ownership."""
+
+        work = await self._store.get_work(investigation_id)
+        scenario = ScenarioName(work.launch_request.scenario.value)
+        mode = ScenarioMode(work.launch_request.mode.value)
+        if (
+            work.strategy_sha256 != _strategy_sha256(scenario, mode)
+            or work.semantic_config_sha256 != self._semantic_config_sha256
+            or work.runtime_provenance_sha256 != self._runtime_provenance(mode)
+            or work.workspace_id != _workspace_id(investigation_id)
+        ):
+            raise ValueError("scenario operational authority is incompatible")
+        recovery_state = (
+            ScenarioOperationalRecoveryState.HUMAN_ESCALATION_REQUIRED
+            if work.investigation_state
+            is ScenarioInvestigationState.ESCALATION_REQUIRED
+            else ScenarioOperationalRecoveryState.NOT_ESCALATED
+        )
+        return ScenarioOperationalStatus(
+            schema_version=SCENARIO_OPERATIONAL_STATUS_VERSION,
+            launch_id=work.launch_request.launch_id,
+            investigation_id=work.scenario_request.investigation_id,
+            scenario=work.launch_request.scenario,
+            mode=work.launch_request.mode,
+            revision=work.revision,
+            mutation_state=ScenarioOperationalMutationState(work.mutation_state.value),
+            investigation_state=ScenarioOperationalInvestigationState(
+                work.investigation_state.value
+            ),
+            cleanup_state=ScenarioOperationalCleanupState(work.cleanup_status.value),
+            recovery_state=recovery_state,
+            updated_at=work.updated_at,
         )
 
     async def bind_launch(

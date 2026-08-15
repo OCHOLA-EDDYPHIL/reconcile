@@ -13,6 +13,7 @@ from reconcile.contracts import (
     ERROR_VERSION,
     EXECUTION_ENVELOPE_SUMMARY_VERSION,
     SCENARIO_LAUNCH_REQUEST_VERSION,
+    SCENARIO_OPERATIONAL_STATUS_VERSION,
     SCENARIO_RUN_EVENT_VERSION,
     SCENARIO_RUN_SNAPSHOT_VERSION,
     ApiError,
@@ -23,6 +24,11 @@ from reconcile.contracts import (
     ScenarioLaunchName,
     ScenarioLaunchRequest,
     ScenarioLifecycleEventPayload,
+    ScenarioOperationalCleanupState,
+    ScenarioOperationalInvestigationState,
+    ScenarioOperationalMutationState,
+    ScenarioOperationalRecoveryState,
+    ScenarioOperationalStatus,
     ScenarioRunEvent,
     ScenarioRunEventType,
     ScenarioRunFailureCategory,
@@ -43,6 +49,7 @@ from reconcile.operator import (
     LaunchScenarioResult,
     OperatorCapacityExceeded,
     OperatorServiceClosed,
+    OperatorServiceUnavailable,
     ScenarioLaunchConflict,
     ScenarioRunEventSnapshot,
     ScenarioRunNotFound,
@@ -158,6 +165,22 @@ def _event(
     )
 
 
+def _operational_status() -> ScenarioOperationalStatus:
+    return ScenarioOperationalStatus(
+        schema_version=SCENARIO_OPERATIONAL_STATUS_VERSION,
+        launch_id="launch-7",
+        investigation_id="investigation-7",
+        scenario=ScenarioLaunchName.STORAGE,
+        mode=ScenarioRunMode.FIXED,
+        revision=7,
+        mutation_state=ScenarioOperationalMutationState.RECORDED,
+        investigation_state=ScenarioOperationalInvestigationState.RECORDED,
+        cleanup_state=ScenarioOperationalCleanupState.SUCCEEDED,
+        recovery_state=ScenarioOperationalRecoveryState.NOT_ESCALATED,
+        updated_at=NOW + timedelta(seconds=7),
+    )
+
+
 def _terminal_events() -> tuple[ScenarioRunEvent, ...]:
     return (
         _event(
@@ -198,6 +221,8 @@ class _FakeOperatorService:
         self.launch_created = True
         self.launch_error: Exception | None = None
         self.get_error: Exception | None = None
+        self.operational_status: object = _operational_status()
+        self.operational_status_error: Exception | None = None
         self.summary = _summary()
         self.summary_error: Exception | None = None
         self.events = _terminal_events()
@@ -208,6 +233,7 @@ class _FakeOperatorService:
         self.allow_max_cursor = False
         self.launches: list[ScenarioLaunchRequest] = []
         self.get_ids: list[str] = []
+        self.operational_status_ids: list[str] = []
         self.summary_ids: list[str] = []
         self.snapshot_cursors: list[int] = []
         self.wait_cursors: list[int] = []
@@ -228,6 +254,15 @@ class _FakeOperatorService:
         if self.get_error is not None:
             raise self.get_error
         return self.current_snapshot  # type: ignore[return-value]
+
+    async def get_operational_status(
+        self,
+        investigation_id: str,
+    ) -> ScenarioOperationalStatus:
+        self.operational_status_ids.append(investigation_id)
+        if self.operational_status_error is not None:
+            raise self.operational_status_error
+        return self.operational_status  # type: ignore[return-value]
 
     async def get_envelope_summary(
         self,
@@ -481,6 +516,87 @@ def test_scenario_snapshot_must_match_the_path_identity() -> None:
 
     assert response.status_code == 500
     assert _error(response).code is ApiErrorCode.INTERNAL_FAILURE
+
+
+def test_get_operational_status_is_canonical_and_path_bound() -> None:
+    service = _FakeOperatorService()
+    with TestClient(create_app(operator_service=service)) as client:
+        response = client.get(
+            "/api/v2/scenario-runs/investigation-7/operational-status"
+        )
+
+    status = decode_contract(response.content, ScenarioOperationalStatus)
+    assert response.status_code == 200
+    assert response.content == canonical_json_bytes(status)
+    assert status == _operational_status()
+    assert service.operational_status_ids == ["investigation-7"]
+
+
+@pytest.mark.parametrize(
+    ("error", "expected_status", "expected_code"),
+    (
+        (
+            ScenarioRunNotFound("investigation-7"),
+            404,
+            ApiErrorCode.INVESTIGATION_NOT_FOUND,
+        ),
+        (
+            OperatorServiceUnavailable("investigation-7"),
+            503,
+            ApiErrorCode.DEPENDENCY_UNAVAILABLE,
+        ),
+    ),
+)
+def test_operational_status_normalizes_missing_or_unavailable_authority(
+    error: Exception,
+    expected_status: int,
+    expected_code: ApiErrorCode,
+) -> None:
+    service = _FakeOperatorService()
+    service.operational_status_error = error
+    with TestClient(create_app(operator_service=service)) as client:
+        response = client.get(
+            "/api/v2/scenario-runs/investigation-7/operational-status"
+        )
+
+    assert response.status_code == expected_status
+    assert _error(response).code is expected_code
+
+
+@pytest.mark.parametrize(
+    "replacement",
+    (
+        _operational_status().model_copy(
+            update={"investigation_id": "other-investigation"}
+        ),
+        {"schema_version": SCENARIO_OPERATIONAL_STATUS_VERSION},
+    ),
+)
+def test_operational_status_response_must_be_exact_and_path_bound(
+    replacement: object,
+) -> None:
+    service = _FakeOperatorService()
+    service.operational_status = replacement
+    with TestClient(create_app(operator_service=service)) as client:
+        response = client.get(
+            "/api/v2/scenario-runs/investigation-7/operational-status"
+        )
+
+    assert response.status_code == 500
+    assert _error(response).code is ApiErrorCode.INTERNAL_FAILURE
+
+
+def test_operational_status_rejects_queries_and_invalid_identifiers() -> None:
+    service = _FakeOperatorService()
+    with TestClient(create_app(operator_service=service)) as client:
+        query = client.get(
+            "/api/v2/scenario-runs/investigation-7/operational-status?expand=true"
+        )
+        invalid = client.get("/api/v2/scenario-runs/bad%20identity/operational-status")
+
+    assert query.status_code == 400
+    assert invalid.status_code == 400
+    assert service.operational_status_ids == []
 
 
 def test_terminal_scenario_sse_is_ordered_canonical_and_complete() -> None:
@@ -819,6 +935,7 @@ def test_openapi_contains_only_the_additive_versioned_operator_routes() -> None:
     assert "/api/v1/scenario-runs" in paths
     assert "/api/v1/scenario-runs/{investigation_id}" in paths
     assert "/api/v1/scenario-runs/{investigation_id}/events" in paths
+    assert "/api/v2/scenario-runs/{investigation_id}/operational-status" in paths
     assert "/api/v1/investigations/{investigation_id}/envelope-summary" in paths
 
 

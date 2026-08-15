@@ -29,6 +29,10 @@ from reconcile.contracts import (
     ScenarioLaunchName,
     ScenarioLaunchRequest,
     ScenarioLifecycleEventPayload,
+    ScenarioOperationalCleanupState,
+    ScenarioOperationalInvestigationState,
+    ScenarioOperationalMutationState,
+    ScenarioOperationalRecoveryState,
     ScenarioRunEvent,
     ScenarioRunEventType,
     ScenarioRunFailureCategory,
@@ -407,6 +411,7 @@ def test_real_fixed_operator_scenarios_use_durable_parent_and_lane(
         created = await service.launch(launch)
         terminal = await _terminal(service, created.snapshot.investigation_id)
         work = await store.get_work(created.snapshot.investigation_id)
+        status = await service.get_operational_status(created.snapshot.investigation_id)
         await service.aclose()
 
         assert terminal.lifecycle is ScenarioRunLifecycle.COMPLETED
@@ -414,6 +419,13 @@ def test_real_fixed_operator_scenarios_use_durable_parent_and_lane(
         assert work.mutation_state is ScenarioMutationState.RECORDED
         assert work.investigation_state is ScenarioInvestigationState.RECORDED
         assert work.cleanup_status is CleanupStatus.SUCCEEDED
+        assert status.revision == work.revision
+        assert status.mutation_state is ScenarioOperationalMutationState.RECORDED
+        assert (
+            status.investigation_state is ScenarioOperationalInvestigationState.RECORDED
+        )
+        assert status.cleanup_state is ScenarioOperationalCleanupState.SUCCEEDED
+        assert status.recovery_state is ScenarioOperationalRecoveryState.NOT_ESCALATED
         lane = workspace_root / work.workspace_id / "runtime-fixed.sqlite3"
         assert lane.is_file()
 
@@ -829,6 +841,7 @@ def test_started_mutation_without_result_escalates_and_is_never_repeated(
         await service.start()
         terminal = await _terminal(service, investigation_id)
         recovered = await store.get_work(investigation_id)
+        status = await service.get_operational_status(investigation_id)
         await service.aclose()
 
         assert terminal.lifecycle is ScenarioRunLifecycle.FAILED
@@ -839,6 +852,15 @@ def test_started_mutation_without_result_escalates_and_is_never_repeated(
             is ScenarioInvestigationState.ESCALATION_REQUIRED
         )
         assert recovered.recovery_failure_code == "mutation-outcome-unknown"
+        assert status.mutation_state is ScenarioOperationalMutationState.STARTED
+        assert (
+            status.investigation_state
+            is ScenarioOperationalInvestigationState.ESCALATION_REQUIRED
+        )
+        assert (
+            status.recovery_state
+            is ScenarioOperationalRecoveryState.HUMAN_ESCALATION_REQUIRED
+        )
         assert not (
             workspace_root / recovered.workspace_id / "storage.sqlite3"
         ).exists()
@@ -1733,12 +1755,15 @@ def test_pending_cleanup_recovers_as_unknown_without_redispatch(tmp_path: Path) 
         await service.start()
         terminal = await _terminal(service, investigation_id)
         recovered = await store.get_work(investigation_id)
+        status = await service.get_operational_status(investigation_id)
         await service.aclose()
 
         assert terminal.lifecycle is ScenarioRunLifecycle.COMPLETED
         assert recovered.cleanup_status is CleanupStatus.FAILED
         assert recovered.cleanup_failure_code == "cleanup-outcome-unknown"
         assert recovered.workflow_result == pending.workflow_result
+        assert status.cleanup_state is ScenarioOperationalCleanupState.FAILED
+        assert status.recovery_state is ScenarioOperationalRecoveryState.NOT_ESCALATED
 
     asyncio.run(exercise())
 

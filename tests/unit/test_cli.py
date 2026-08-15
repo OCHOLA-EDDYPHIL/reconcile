@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import stat
+from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
+from datetime import timedelta
 from pathlib import Path
 
 import pytest
@@ -18,12 +20,33 @@ from reconcile.cli_core import (
     render_human_status,
 )
 from reconcile.contracts import (
+    EXECUTION_ENVELOPE_SUMMARY_VERSION,
+    SCENARIO_LAUNCH_REQUEST_VERSION,
+    SCENARIO_OPERATIONAL_STATUS_VERSION,
+    SCENARIO_RUN_EVENT_VERSION,
+    SCENARIO_RUN_SNAPSHOT_VERSION,
     Classification,
+    EnvelopeEffectSummary,
     ExecutionEnvelope,
+    ExecutionEnvelopeSummary,
     InvestigationEvent,
     InvestigationEventType,
     InvestigationReport,
+    ScenarioLaunchName,
+    ScenarioLaunchRequest,
+    ScenarioLifecycleEventPayload,
+    ScenarioOperationalCleanupState,
+    ScenarioOperationalInvestigationState,
+    ScenarioOperationalMutationState,
+    ScenarioOperationalRecoveryState,
+    ScenarioOperationalStatus,
+    ScenarioRunEvent,
+    ScenarioRunEventType,
+    ScenarioRunLifecycle,
+    ScenarioRunMode,
+    ScenarioRunSnapshot,
     canonical_json_bytes,
+    canonical_sha256,
 )
 from reconcile.interfaces.api_client import (
     InvalidRequestError,
@@ -34,8 +57,11 @@ from reconcile.interfaces.api_client import (
     ServiceUnavailableError,
     TransportError,
 )
+from reconcile.interfaces.operator_api_client import ScenarioLaunchResult
+from reconcile.operator import sanitize_report
 from reconcile.scenarios.service import ScenarioMode, ScenarioName
 from tests.contract._factories import (
+    NOW,
     make_envelope,
     make_investigation_event,
     make_report,
@@ -138,6 +164,183 @@ def _install_client(
     return state
 
 
+def _scenario_snapshot(
+    classification: Classification = Classification.COMMITTED,
+) -> ScenarioRunSnapshot:
+    envelope = make_envelope()
+    report = sanitize_report(make_report(classification))
+    summary = ExecutionEnvelopeSummary(
+        schema_version=EXECUTION_ENVELOPE_SUMMARY_VERSION,
+        investigation_id=envelope.investigation_id,
+        envelope_sha256=canonical_sha256(envelope),
+        target_kind=envelope.target.target_kind,
+        invoked_at=envelope.invoked_at,
+        ambiguity_kind=envelope.ambiguity.kind,
+        ambiguity_observed_at=envelope.ambiguity.observed_at,
+        expected_effects=tuple(
+            EnvelopeEffectSummary(
+                effect_id=item.effect_id,
+                commit_scope=item.commit_scope,
+            )
+            for item in envelope.expected_effects
+        ),
+        enabled_capabilities=envelope.context.enabled_capabilities,
+        evidence_budget=envelope.context.evidence_budget,
+    )
+    return ScenarioRunSnapshot(
+        schema_version=SCENARIO_RUN_SNAPSHOT_VERSION,
+        launch_id="launch-7",
+        investigation_id=envelope.investigation_id,
+        scenario=ScenarioLaunchName.STORAGE,
+        mode=ScenarioRunMode.FIXED,
+        lifecycle=ScenarioRunLifecycle.COMPLETED,
+        event_cursor=3,
+        envelope_summary=summary,
+        report=report,
+        comparison=None,
+        failure_category=None,
+        accepted_at=NOW,
+        updated_at=NOW + timedelta(seconds=5),
+    )
+
+
+def _scenario_status(
+    *,
+    cleanup_state: ScenarioOperationalCleanupState = (
+        ScenarioOperationalCleanupState.SUCCEEDED
+    ),
+    recovery_state: ScenarioOperationalRecoveryState = (
+        ScenarioOperationalRecoveryState.NOT_ESCALATED
+    ),
+    investigation_id: str = "investigation-7",
+) -> ScenarioOperationalStatus:
+    investigation_state = (
+        ScenarioOperationalInvestigationState.ESCALATION_REQUIRED
+        if recovery_state is ScenarioOperationalRecoveryState.HUMAN_ESCALATION_REQUIRED
+        else ScenarioOperationalInvestigationState.RECORDED
+    )
+    return ScenarioOperationalStatus(
+        schema_version=SCENARIO_OPERATIONAL_STATUS_VERSION,
+        launch_id="launch-7",
+        investigation_id=investigation_id,
+        scenario=ScenarioLaunchName.STORAGE,
+        mode=ScenarioRunMode.FIXED,
+        revision=9,
+        mutation_state=ScenarioOperationalMutationState.RECORDED,
+        investigation_state=investigation_state,
+        cleanup_state=(
+            ScenarioOperationalCleanupState.NOT_REQUESTED
+            if investigation_state
+            is ScenarioOperationalInvestigationState.ESCALATION_REQUIRED
+            else cleanup_state
+        ),
+        recovery_state=recovery_state,
+        updated_at=NOW + timedelta(seconds=5),
+    )
+
+
+def _scenario_event(cursor: int = 1) -> ScenarioRunEvent:
+    return ScenarioRunEvent(
+        schema_version=SCENARIO_RUN_EVENT_VERSION,
+        investigation_id="investigation-7",
+        cursor=cursor,
+        type=ScenarioRunEventType.LIFECYCLE,
+        occurred_at=NOW + timedelta(milliseconds=cursor),
+        payload=ScenarioLifecycleEventPayload(lifecycle=ScenarioRunLifecycle.ACCEPTED),
+    )
+
+
+@dataclass(slots=True)
+class _OperatorClientState:
+    snapshot: ScenarioRunSnapshot
+    status: ScenarioOperationalStatus
+    events: tuple[ScenarioRunEvent, ...] = ()
+    failure: BaseException | None = None
+    status_failure: BaseException | None = None
+    base_urls: list[str] = field(default_factory=list)
+    launches: list[ScenarioLaunchRequest] = field(default_factory=list)
+    status_requests: list[str] = field(default_factory=list)
+    snapshot_requests: list[str] = field(default_factory=list)
+    event_requests: list[tuple[str, int]] = field(default_factory=list)
+    exits: int = 0
+
+
+def _install_operator_client(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    snapshot: ScenarioRunSnapshot | None = None,
+    status: ScenarioOperationalStatus | None = None,
+    events: tuple[ScenarioRunEvent, ...] = (),
+    failure: BaseException | None = None,
+    status_failure: BaseException | None = None,
+) -> _OperatorClientState:
+    state = _OperatorClientState(
+        snapshot=snapshot or _scenario_snapshot(),
+        status=status or _scenario_status(),
+        events=events,
+        failure=failure,
+        status_failure=status_failure,
+    )
+
+    class FakeOperatorApiClient:
+        def __init__(self, base_url: str) -> None:
+            state.base_urls.append(base_url)
+
+        async def __aenter__(self) -> FakeOperatorApiClient:
+            return self
+
+        async def __aexit__(self, *_exc_info: object) -> None:
+            state.exits += 1
+
+        async def launch(
+            self,
+            request: ScenarioLaunchRequest,
+        ) -> ScenarioLaunchResult:
+            state.launches.append(request)
+            if state.failure is not None:
+                raise state.failure
+            return ScenarioLaunchResult(created=True, snapshot=state.snapshot)
+
+        async def get_snapshot(
+            self,
+            investigation_id: str,
+        ) -> ScenarioRunSnapshot:
+            state.snapshot_requests.append(investigation_id)
+            if state.failure is not None:
+                raise state.failure
+            return state.snapshot
+
+        async def get_operational_status(
+            self,
+            investigation_id: str,
+        ) -> ScenarioOperationalStatus:
+            state.status_requests.append(investigation_id)
+            if state.status_failure is not None:
+                raise state.status_failure
+            if state.failure is not None:
+                raise state.failure
+            return state.status
+
+        async def events(
+            self,
+            investigation_id: str,
+            *,
+            after: int = 0,
+        ) -> AsyncIterator[ScenarioRunEvent]:
+            state.event_requests.append((investigation_id, after))
+            if state.failure is not None:
+                raise state.failure
+            for event in state.events:
+                yield event
+
+    monkeypatch.setattr(
+        cli_module,
+        "OperatorApiClient",
+        FakeOperatorApiClient,
+    )
+    return state
+
+
 def _assert_clean_success(result: Result, expected: bytes) -> None:
     assert result.exit_code == 0
     assert result.stdout_bytes == expected
@@ -171,6 +374,272 @@ def test_help_lists_the_stable_command_surface() -> None:
         "scenario",
     ):
         assert command in result.stdout
+
+    scenario_result = _RUNNER.invoke(app, ["scenario", "--help"])
+    assert scenario_result.exit_code == 0
+    for command in ("launch", "status", "events", "watch", "run", "suite"):
+        assert command in scenario_result.stdout
+
+
+def test_remote_scenario_launch_emits_exact_v1_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    snapshot = _scenario_snapshot()
+    state = _install_operator_client(monkeypatch, snapshot=snapshot)
+
+    result = _RUNNER.invoke(
+        app,
+        [
+            "scenario",
+            "launch",
+            "launch-7",
+            "storage",
+            "--mode",
+            "fixed",
+            "--output",
+            "json",
+            "--api-url",
+            "http://127.0.0.1:9000",
+        ],
+    )
+
+    _assert_clean_success(result, canonical_json_output(snapshot))
+    assert state.base_urls == ["http://127.0.0.1:9000"]
+    assert state.launches == [
+        ScenarioLaunchRequest(
+            schema_version=SCENARIO_LAUNCH_REQUEST_VERSION,
+            launch_id="launch-7",
+            scenario=ScenarioLaunchName.STORAGE,
+            mode=ScenarioRunMode.FIXED,
+        )
+    ]
+    assert state.exits == 1
+
+
+def test_remote_scenario_status_emits_exact_v2_status(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    status = _scenario_status(cleanup_state=ScenarioOperationalCleanupState.FAILED)
+    state = _install_operator_client(monkeypatch, status=status)
+
+    result = _RUNNER.invoke(
+        app,
+        ["scenario", "status", "investigation-7", "--output", "json"],
+    )
+
+    _assert_clean_success(result, canonical_json_output(status))
+    assert state.base_urls == ["http://127.0.0.1:8000"]
+    assert state.status_requests == ["investigation-7"]
+    assert state.snapshot_requests == []
+
+
+def test_remote_scenario_status_human_surfaces_recovery_escalation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    status = _scenario_status(
+        recovery_state=(ScenarioOperationalRecoveryState.HUMAN_ESCALATION_REQUIRED)
+    )
+    _install_operator_client(monkeypatch, status=status)
+
+    result = _RUNNER.invoke(
+        app,
+        ["scenario", "status", "investigation-7", "--output", "human"],
+    )
+
+    assert result.exit_code == 0
+    assert result.stderr_bytes == b""
+    assert "Investigation: ESCALATION_REQUIRED\n" in result.stdout
+    assert "Cleanup: NOT_REQUESTED\n" in result.stdout
+    assert "Recovery: HUMAN_ESCALATION_REQUIRED\n" in result.stdout
+
+
+def test_remote_scenario_events_preserve_exclusive_v1_cursor_and_jsonl(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    event = _scenario_event(cursor=5)
+    state = _install_operator_client(monkeypatch, events=(event,))
+
+    result = _RUNNER.invoke(
+        app,
+        [
+            "scenario",
+            "events",
+            "investigation-7",
+            "--after",
+            "4",
+            "--output",
+            "jsonl",
+        ],
+    )
+
+    _assert_clean_success(result, canonical_json_output(event))
+    assert state.event_requests == [("investigation-7", 4)]
+    assert state.status_requests == []
+    assert state.snapshot_requests == []
+
+
+def test_remote_scenario_watch_json_is_only_authoritative_v1_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    snapshot = _scenario_snapshot(Classification.COMMITTED)
+    status = _scenario_status(cleanup_state=ScenarioOperationalCleanupState.FAILED)
+    state = _install_operator_client(
+        monkeypatch,
+        snapshot=snapshot,
+        status=status,
+        status_failure=RuntimeError("v2 must not be requested for JSON watch"),
+    )
+
+    result = _RUNNER.invoke(
+        app,
+        [
+            "scenario",
+            "watch",
+            "investigation-7",
+            "--after",
+            "2",
+            "--output",
+            "json",
+        ],
+    )
+
+    _assert_clean_success(result, canonical_json_output(snapshot))
+    assert state.event_requests == [("investigation-7", 2)]
+    assert state.status_requests == []
+    assert state.snapshot_requests == ["investigation-7"]
+
+
+def test_remote_scenario_watch_human_shows_operations_then_v1_outcome(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    snapshot = _scenario_snapshot(Classification.UNKNOWN)
+    status = _scenario_status(cleanup_state=ScenarioOperationalCleanupState.FAILED)
+    event = _scenario_event()
+    _install_operator_client(
+        monkeypatch,
+        snapshot=snapshot,
+        status=status,
+        events=(event,),
+    )
+
+    result = _RUNNER.invoke(
+        app,
+        ["scenario", "watch", "investigation-7", "--output", "human"],
+    )
+
+    assert result.exit_code == 6
+    assert result.stderr_bytes == b""
+    assert "Cursor: 1\nType: LIFECYCLE\n" in result.stdout
+    assert "Cleanup: FAILED\n" in result.stdout
+    assert "Recovery: NOT_ESCALATED\n" in result.stdout
+    assert "Lifecycle: COMPLETED\n" in result.stdout
+    assert "Classification: UNKNOWN\n" in result.stdout
+    assert result.stdout.index("Cleanup: FAILED") < result.stdout.index(
+        "Classification: UNKNOWN"
+    )
+
+
+@pytest.mark.parametrize(
+    ("status_failure", "classification", "exit_code"),
+    (
+        (ServiceUnavailableError(), Classification.COMMITTED, 0),
+        (RemoteProtocolError(), Classification.UNKNOWN, 6),
+        (TransportError(), Classification.NOT_COMMITTED, 0),
+    ),
+)
+def test_remote_scenario_watch_v2_failure_never_suppresses_v1_result(
+    monkeypatch: pytest.MonkeyPatch,
+    status_failure: BaseException,
+    classification: Classification,
+    exit_code: int,
+) -> None:
+    snapshot = _scenario_snapshot(classification)
+    state = _install_operator_client(
+        monkeypatch,
+        snapshot=snapshot,
+        status_failure=status_failure,
+    )
+
+    result = _RUNNER.invoke(
+        app,
+        ["scenario", "watch", "investigation-7", "--output", "human"],
+    )
+
+    assert result.exit_code == exit_code
+    assert result.stderr_bytes == b""
+    assert "Operational status: unavailable\n" in result.stdout
+    assert f"Classification: {classification.value}\n" in result.stdout
+    assert state.snapshot_requests == ["investigation-7"]
+    assert state.status_requests == ["investigation-7"]
+
+
+def test_remote_scenario_watch_does_not_render_v2_identity_collision(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    snapshot = _scenario_snapshot()
+    state = _install_operator_client(
+        monkeypatch,
+        snapshot=snapshot,
+        status=_scenario_status(investigation_id="other-investigation"),
+    )
+
+    result = _RUNNER.invoke(
+        app,
+        ["scenario", "watch", "investigation-7", "--output", "human"],
+    )
+
+    assert result.exit_code == 0
+    assert result.stderr_bytes == b""
+    assert "Operational status: unavailable\n" in result.stdout
+    assert "Classification: COMMITTED\n" in result.stdout
+    assert "other-investigation" not in result.stdout
+    assert state.status_requests == ["investigation-7"]
+
+
+def test_remote_scenario_invalid_cursor_is_rejected_before_client_creation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = _install_operator_client(monkeypatch)
+
+    result = _RUNNER.invoke(
+        app,
+        ["scenario", "events", "investigation-7", "--after", "1025"],
+    )
+
+    assert result.exit_code == 2
+    assert state.base_urls == []
+
+
+@pytest.mark.parametrize(
+    ("failure", "exit_code", "message"),
+    (
+        (InvalidRequestError(), 2, "The input is invalid.\n"),
+        (
+            InvestigationNotFoundError(),
+            3,
+            "The requested investigation was not found.\n",
+        ),
+        (ServiceUnavailableError(), 5, "The service is unavailable.\n"),
+        (RemoteProtocolError(), 5, "The service is unavailable.\n"),
+        (TransportError(), 5, "The service is unavailable.\n"),
+    ),
+)
+def test_remote_scenario_status_uses_stable_client_failure_mapping(
+    monkeypatch: pytest.MonkeyPatch,
+    failure: BaseException,
+    exit_code: int,
+    message: str,
+) -> None:
+    _install_operator_client(monkeypatch, failure=failure)
+
+    result = _RUNNER.invoke(
+        app,
+        ["scenario", "status", "investigation-7", "--output", "json"],
+    )
+
+    assert result.exit_code == exit_code
+    assert result.stdout_bytes == b""
+    assert result.stderr_bytes == message.encode()
 
 
 def test_main_returns_the_parser_exit_code() -> None:

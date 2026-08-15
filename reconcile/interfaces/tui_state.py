@@ -15,6 +15,7 @@ from reconcile.contracts import (
     ProbeResultEventPayload,
     SanitizedComparisonRun,
     ScenarioLifecycleEventPayload,
+    ScenarioOperationalStatus,
     ScenarioRunEvent,
     ScenarioRunEventType,
     ScenarioRunLifecycle,
@@ -38,6 +39,15 @@ class ConnectionPhase(StrEnum):
     CLOSED = "CLOSED"
 
 
+class OperationalStatusAvailability(StrEnum):
+    """Operator-visible freshness of the independent v2 status projection."""
+
+    PENDING = "PENDING"
+    AVAILABLE = "AVAILABLE"
+    UNAVAILABLE = "UNAVAILABLE"
+    INVALID = "INVALID"
+
+
 class ViewStateProtocolErrorCode(StrEnum):
     """Stable fail-closed reasons for rejected API-derived state."""
 
@@ -50,6 +60,10 @@ class ViewStateProtocolErrorCode(StrEnum):
     EVENT_IDENTITY = "event_identity"
     DIVERGENT_DUPLICATE = "divergent_duplicate"
     EVENT_GAP = "event_gap"
+    INVALID_OPERATIONAL_STATUS = "invalid_operational_status"
+    OPERATIONAL_STATUS_IDENTITY = "operational_status_identity"
+    OPERATIONAL_STATUS_REVISION_REGRESSION = "operational_status_revision_regression"
+    OPERATIONAL_STATUS_DIVERGENCE = "operational_status_divergence"
 
 
 class ViewStateProtocolError(ValueError):
@@ -67,6 +81,7 @@ class RenderedSections:
     connection: tuple[str, ...]
     identity: tuple[str, ...]
     outcome: tuple[str, ...]
+    operations: tuple[str, ...]
     transport: tuple[str, ...]
     envelope: tuple[str, ...]
     advisory: tuple[str, ...]
@@ -99,6 +114,17 @@ def _snapshot_identity(snapshot: ScenarioRunSnapshot) -> tuple[object, ...]:
     )
 
 
+def _operational_status_identity(
+    status: ScenarioOperationalStatus,
+) -> tuple[object, ...]:
+    return (
+        status.launch_id,
+        status.investigation_id,
+        status.scenario,
+        status.mode,
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class OperatorViewState:
     """Immutable reducer state sourced only from operator API contracts."""
@@ -106,6 +132,10 @@ class OperatorViewState:
     connection_phase: ConnectionPhase = ConnectionPhase.IDLE
     snapshot: ScenarioRunSnapshot | None = None
     event_bytes_by_cursor: tuple[tuple[int, bytes], ...] = ()
+    operational_status: ScenarioOperationalStatus | None = None
+    operational_status_availability: OperationalStatusAvailability = (
+        OperationalStatusAvailability.PENDING
+    )
 
     @classmethod
     def empty(cls) -> OperatorViewState:
@@ -228,6 +258,66 @@ class OperatorViewState:
                 ) from None
         return replace(self, snapshot=snapshot)
 
+    def apply_operational_status(
+        self,
+        status: ScenarioOperationalStatus,
+    ) -> OperatorViewState:
+        """Accept one identity-bound, monotonic v2 operational projection."""
+
+        if type(status) is not ScenarioOperationalStatus:
+            raise ViewStateProtocolError(
+                ViewStateProtocolErrorCode.INVALID_OPERATIONAL_STATUS
+            ) from None
+        status = decode_contract(
+            canonical_json_bytes(status),
+            ScenarioOperationalStatus,
+        )
+        snapshot = self.snapshot
+        if snapshot is None or _operational_status_identity(status) != (
+            _snapshot_identity(snapshot)
+        ):
+            raise ViewStateProtocolError(
+                ViewStateProtocolErrorCode.OPERATIONAL_STATUS_IDENTITY
+            ) from None
+
+        previous = self.operational_status
+        if previous is not None:
+            if _operational_status_identity(status) != (
+                _operational_status_identity(previous)
+            ):
+                raise ViewStateProtocolError(
+                    ViewStateProtocolErrorCode.OPERATIONAL_STATUS_IDENTITY
+                ) from None
+            if status.revision < previous.revision:
+                raise ViewStateProtocolError(
+                    ViewStateProtocolErrorCode.OPERATIONAL_STATUS_REVISION_REGRESSION
+                ) from None
+            if status.revision == previous.revision and status != previous:
+                raise ViewStateProtocolError(
+                    ViewStateProtocolErrorCode.OPERATIONAL_STATUS_DIVERGENCE
+                ) from None
+        return replace(
+            self,
+            operational_status=status,
+            operational_status_availability=(OperationalStatusAvailability.AVAILABLE),
+        )
+
+    def mark_operational_status_unavailable(
+        self,
+        *,
+        invalid: bool = False,
+    ) -> OperatorViewState:
+        """Retain all confirmed projections while making a v2 failure visible."""
+
+        if type(invalid) is not bool:
+            raise TypeError("invalid marker must be exact")
+        availability = (
+            OperationalStatusAvailability.INVALID
+            if invalid
+            else OperationalStatusAvailability.UNAVAILABLE
+        )
+        return replace(self, operational_status_availability=availability)
+
     def ingest(self, event: ScenarioRunEvent) -> OperatorViewState:
         """Append one contiguous event or ignore one exact replay."""
 
@@ -287,6 +377,35 @@ class OperatorViewState:
             f"TARGET KIND: {summary.target_kind}",
             f"INVOKED AT: {summary.invoked_at.isoformat()}",
             f"AMBIGUITY OBSERVED AT: {summary.ambiguity_observed_at.isoformat()}",
+        )
+
+    def render_operations(self) -> tuple[str, ...]:
+        availability = self.operational_status_availability
+        if availability is OperationalStatusAvailability.PENDING:
+            header = "OPERATIONAL STATUS: PENDING"
+        elif availability is OperationalStatusAvailability.AVAILABLE:
+            header = "OPERATIONAL STATUS: AVAILABLE"
+        elif availability is OperationalStatusAvailability.INVALID:
+            header = "OPERATIONAL STATUS: INVALID - V1 STATE RETAINED"
+        else:
+            header = "OPERATIONAL STATUS: UNAVAILABLE - V1 STATE RETAINED"
+
+        status = self.operational_status
+        if status is None:
+            return (
+                header,
+                "MUTATION: UNAVAILABLE",
+                "INVESTIGATION: UNAVAILABLE",
+                "CLEANUP: UNAVAILABLE",
+                "HUMAN ESCALATION: UNKNOWN",
+            )
+        return (
+            header,
+            f"OPERATIONS REVISION: {status.revision}",
+            f"MUTATION: {status.mutation_state.value}",
+            f"INVESTIGATION: {status.investigation_state.value}",
+            f"CLEANUP: {status.cleanup_state.value}",
+            f"HUMAN ESCALATION: {status.recovery_state.value}",
         )
 
     def render_outcome(self) -> tuple[str, ...]:
@@ -641,6 +760,7 @@ class OperatorViewState:
             connection=self.render_connection(),
             identity=self.render_identity(),
             outcome=self.render_outcome(),
+            operations=self.render_operations(),
             transport=self.render_transport(),
             envelope=self.render_envelope(),
             advisory=self.render_advisory(),
@@ -655,6 +775,7 @@ class OperatorViewState:
 
 __all__ = [
     "ConnectionPhase",
+    "OperationalStatusAvailability",
     "OperatorViewState",
     "RenderedSections",
     "ViewStateProtocolError",
