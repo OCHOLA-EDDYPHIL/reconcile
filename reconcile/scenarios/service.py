@@ -23,7 +23,6 @@ from reconcile.adaptive import (
     AdaptiveStopReason,
     AdvisoryPlanner,
     AdvisoryPlannerMetadata,
-    PlannerFailureKind,
     ProposalDisposition,
 )
 from reconcile.adk_planner import AdkGeminiPlanner, VertexAdcPlannerConfig
@@ -154,13 +153,6 @@ BOUNDED_HYBRID_PROVIDER_CLEANUP_PROVENANCE = (
     "authority."
 )
 
-_PROVIDER_FAILURES = frozenset(
-    {
-        PlannerFailureKind.UNAVAILABLE,
-        PlannerFailureKind.TIMEOUT,
-        PlannerFailureKind.SCHEMA_INVALID,
-    }
-)
 _PROVIDER_FAILURE_STOP_REASONS = frozenset(
     {
         AdaptiveStopReason.PLANNER_UNAVAILABLE,
@@ -183,13 +175,11 @@ def bounded_hybrid_route_for(scenario: ScenarioName) -> ScenarioHybridRoute:
 def adaptive_result_has_provider_failure(
     result: AdaptiveInvestigationResult,
 ) -> bool:
-    """Return whether a sanitized advisory provider failure was retained."""
+    """Return whether evidence acquisition stopped on a provider failure."""
 
     if type(result) is not AdaptiveInvestigationResult:
         raise TypeError("hybrid fallback requires an exact adaptive result")
-    return result.stop_reason in _PROVIDER_FAILURE_STOP_REASONS or any(
-        turn.failure in _PROVIDER_FAILURES for turn in result.turns
-    )
+    return result.stop_reason in _PROVIDER_FAILURE_STOP_REASONS
 
 
 def adaptive_result_requires_fixed_fallback(
@@ -216,12 +206,18 @@ def adaptive_result_requires_explicit_unknown(
 ) -> bool:
     """Return whether provider failure must stop without a fresh fixed replay."""
 
-    return adaptive_result_has_provider_failure(
-        result
-    ) and not adaptive_result_requires_fixed_fallback(
+    if not adaptive_result_has_provider_failure(result):
+        return False
+    if adaptive_result_requires_fixed_fallback(
         result,
         max_elapsed_ms=max_elapsed_ms,
-    )
+    ):
+        return False
+    if result.report.classification is not Classification.UNKNOWN:
+        raise ValueError(
+            "provider failure cannot relabel an established classification"
+        )
+    return True
 
 
 def _mark_bounded_hybrid_route(

@@ -937,6 +937,85 @@ def test_sandbox_adaptive_provider_failure_uses_separate_fixed_fallback_lane(
     asyncio.run(exercise())
 
 
+def test_durable_explanation_failure_preserves_advisory_result(
+    tmp_path: Path,
+) -> None:
+    async def exercise() -> None:
+        os.chmod(tmp_path, 0o700)
+        workspace_root = tmp_path / "workspaces"
+        workspace_root.mkdir(mode=0o700)
+        store = SqliteScenarioStore(tmp_path / "parent.sqlite3")
+
+        class ExplanationFailurePlanner(_ScriptedPlanner):
+            async def plan(
+                self,
+                planner_input: AdaptivePlannerInput,
+            ) -> AdvisoryPlannerTurn:
+                if planner_input.phase is not AdaptivePlannerPhase.EXPLAIN_EVIDENCE:
+                    return await super().plan(planner_input)
+                payload = canonical_json_bytes(planner_input)
+                self.inputs.append(planner_input)
+                self.input_bytes.append(payload)
+                return AdvisoryPlannerTurn(
+                    output=None,
+                    failure=PlannerFailureKind.UNAVAILABLE,
+                    metadata=self.metadata,
+                    input_sha256=hashlib.sha256(payload).hexdigest(),
+                    output_sha256=None,
+                    usage=None,
+                )
+
+        workflow = DurableScenarioWorkflow(
+            store,
+            workspace_root,
+            semantic_config_sha256="e" * 64,
+            planner_factory=lambda _scenario: ExplanationFailurePlanner(
+                tuple(step.request for step in SANDBOX_ORDER_FIXED_PROBE_PLAN.steps)
+            ),
+        )
+        service = OperatorApplicationService(runner=workflow, projection_store=store)
+        await service.start()
+        launch = ScenarioLaunchRequest(
+            schema_version=SCENARIO_LAUNCH_REQUEST_VERSION,
+            launch_id="durable-explanation-provider-failure",
+            scenario=ScenarioLaunchName.SANDBOX_ORDER,
+            mode=ScenarioRunMode.ADAPTIVE,
+        )
+        created = await service.launch(launch)
+        terminal = await _terminal(service, created.snapshot.investigation_id)
+        journal = await service.snapshot(created.snapshot.investigation_id)
+        work = await store.get_work(created.snapshot.investigation_id)
+        await service.aclose()
+
+        assert terminal.lifecycle is ScenarioRunLifecycle.COMPLETED
+        assert terminal.report is not None
+        assert terminal.report.classification is Classification.UNKNOWN
+        assert terminal.report.route_provenance is not None
+        assert terminal.report.route_provenance.outcome is (
+            ScenarioHybridOutcome.PLANNER_EVIDENCE
+        )
+        assert not terminal.report.route_provenance.provider_failure
+        assert work.workflow_result is not None
+        assert not is_bounded_hybrid_fixed_fallback(work.workflow_result)
+        assert not is_bounded_hybrid_explicit_unknown(work.workflow_result)
+        failed_turns = tuple(
+            event.payload.turn
+            for event in journal.events
+            if isinstance(event.payload, AdvisoryTurnEventPayload)
+            and event.payload.turn.status is AdvisoryTurnStatus.FAILED
+        )
+        assert len(failed_turns) == 1
+        assert failed_turns[0].phase is AdaptivePlannerPhase.EXPLAIN_EVIDENCE
+        assert failed_turns[0].failure_category is (
+            AdvisoryTurnFailureCategory.UNAVAILABLE
+        )
+        lane_root = workspace_root / work.workspace_id
+        assert (lane_root / "runtime-adaptive.sqlite3").is_file()
+        assert not (lane_root / "runtime-fixed.sqlite3").exists()
+
+    asyncio.run(exercise())
+
+
 def test_late_durable_provider_failure_stops_unknown_without_budget_reset(
     tmp_path: Path,
 ) -> None:
