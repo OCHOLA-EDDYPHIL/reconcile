@@ -43,6 +43,7 @@ from reconcile.contracts.planning import (
     ADAPTIVE_PLANNER_OUTPUT_VERSION,
     AdaptivePlannerInput,
     AdaptivePlannerOutput,
+    AdaptivePlannerPhase,
     PlannerAcquisitionAdvice,
     PlannerCitationRefs,
     PlannerExplanation,
@@ -72,6 +73,10 @@ from reconcile.progress import (
     ProgressProposalDisposition,
     StrategyProgress,
     StrategyProgressStage,
+)
+from reconcile.scenarios.service import (
+    adaptive_result_has_provider_failure,
+    adaptive_result_requires_explicit_unknown,
 )
 from tests.contract._factories import make_envelope, make_target
 
@@ -973,6 +978,85 @@ async def test_malformed_explanation_citations_cannot_change_core_result() -> No
     assert result.explanation_valid is False
     assert result.report.advisory_explanation is None
     assert result.attempted_probe_count == 1
+
+
+@_async_test
+@pytest.mark.parametrize(
+    "failure",
+    (
+        PlannerFailureKind.UNAVAILABLE,
+        PlannerFailureKind.TIMEOUT,
+        PlannerFailureKind.SCHEMA_INVALID,
+    ),
+)
+async def test_explanation_provider_failure_preserves_core_result(
+    failure: PlannerFailureKind,
+) -> None:
+    clock = _Clock()
+    handler = _Handler(clock, (_observation("committed", "committed-1"),))
+    capabilities, rules = _registries({"safe-read": (handler, 1)})
+    planner = _FakePlanner(
+        [
+            _output((_request("safe-read"),)),
+            failure,
+        ]
+    )
+
+    result = await execute_adaptive_investigation(
+        _envelope(("safe-read",)),
+        capabilities,
+        rules,
+        planner,
+        _policy(include_explanation=True),
+        clock=clock,
+    )
+
+    assert result.stop_reason is AdaptiveStopReason.SUFFICIENT_EVIDENCE
+    assert result.classification is Classification.COMMITTED
+    assert result.explanation_valid is False
+    assert result.report.advisory_explanation is None
+    assert result.attempted_probe_count == 1
+    assert result.turns[-1].phase is AdaptivePlannerPhase.EXPLAIN_EVIDENCE
+    assert result.turns[-1].failure is failure
+    assert not adaptive_result_has_provider_failure(result)
+
+
+@_async_test
+async def test_non_unknown_acquisition_failure_cannot_be_relabelled_unknown() -> None:
+    clock = _Clock()
+    handler = _Handler(
+        clock,
+        (_observation("pending-business", "business-active-1"),),
+    )
+    capabilities, rules = _registries({"business-read": (handler, 1)})
+    result = await execute_adaptive_investigation(
+        _envelope(("business-read",)),
+        capabilities,
+        rules,
+        _FakePlanner(
+            [
+                _output((_request("business-read"),)),
+                PlannerFailureKind.UNAVAILABLE,
+            ]
+        ),
+        _policy(),
+        clock=clock,
+    )
+
+    assert result.stop_reason is AdaptiveStopReason.PLANNER_UNAVAILABLE
+    assert result.classification is Classification.PENDING
+    assert result.attempted_probe_count == 1
+    assert tuple(turn.phase for turn in result.turns) == (
+        AdaptivePlannerPhase.ACQUIRE_EVIDENCE,
+        AdaptivePlannerPhase.ACQUIRE_EVIDENCE,
+    )
+    assert adaptive_result_has_provider_failure(result)
+
+    with pytest.raises(
+        ValueError,
+        match="cannot relabel an established classification",
+    ):
+        adaptive_result_requires_explicit_unknown(result, max_elapsed_ms=1_000)
 
 
 @_async_test

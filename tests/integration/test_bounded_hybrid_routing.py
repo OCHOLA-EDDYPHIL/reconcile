@@ -18,6 +18,7 @@ from reconcile.contracts import (
     ADAPTIVE_PLANNER_INPUT_VERSION,
     ADAPTIVE_PLANNER_OUTPUT_VERSION,
     AdaptivePlannerInput,
+    AdaptivePlannerPhase,
     Classification,
     RequestedAction,
     ScenarioHybridOutcome,
@@ -250,6 +251,54 @@ def test_sandbox_successful_planning_retains_bounded_advisory_provenance(
     assert route.outcome is ScenarioHybridOutcome.PLANNER_EVIDENCE
     assert route.planner_invoked
     assert not route.fixed_connector_invoked
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_sandbox_explanation_failure_preserves_advisory_result(
+    tmp_path: Path,
+) -> None:
+    class ExplanationFailurePlanner(_ScriptedPlanner):
+        async def plan(
+            self,
+            planner_input: AdaptivePlannerInput,
+        ) -> AdvisoryPlannerTurn:
+            if planner_input.phase is not AdaptivePlannerPhase.EXPLAIN_EVIDENCE:
+                return await super().plan(planner_input)
+            payload = canonical_json_bytes(planner_input)
+            self.inputs.append(planner_input)
+            self.input_bytes.append(payload)
+            return AdvisoryPlannerTurn(
+                output=None,
+                failure=PlannerFailureKind.UNAVAILABLE,
+                metadata=self.metadata,
+                input_sha256=hashlib.sha256(payload).hexdigest(),
+                output_sha256=None,
+                usage=None,
+            )
+
+    planner = ExplanationFailurePlanner(
+        tuple(step.request for step in SANDBOX_ORDER_FIXED_PROBE_PLAN.steps)
+    )
+    report = asyncio.run(
+        run_one(
+            ScenarioName.SANDBOX_ORDER,
+            ScenarioMode.ADAPTIVE,
+            planner=planner,
+            workspace=tmp_path,
+            run_id="sandbox-explanation-provider-failure",
+        )
+    )
+
+    assert planner.inputs[-1].phase is AdaptivePlannerPhase.EXPLAIN_EVIDENCE
+    assert report.classification is Classification.UNKNOWN
+    assert len(report.probe_audit) == 2
+    assert BOUNDED_HYBRID_ADVISORY_PROVENANCE in report.limitations
+    assert not is_bounded_hybrid_fixed_fallback(report)
+    assert not is_bounded_hybrid_explicit_unknown(report)
+    route = bounded_hybrid_route_provenance(report)
+    assert route is not None
+    assert route.outcome is ScenarioHybridOutcome.PLANNER_EVIDENCE
+    assert not route.provider_failure
     assert list(tmp_path.iterdir()) == []
 
 
