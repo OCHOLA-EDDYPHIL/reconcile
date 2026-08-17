@@ -237,6 +237,20 @@ def _write_scenario_snapshot(
                 f"Missing evidence groups: {len(report.missing_evidence)}",
             )
         )
+        if report.route_provenance is not None:
+            route = report.route_provenance
+            lines.extend(
+                (
+                    f"Hybrid route policy: {route.policy_version}",
+                    f"Hybrid route: {route.route.value}",
+                    f"Hybrid outcome: {route.outcome.value}",
+                    f"Planner invoked: {str(route.planner_invoked).lower()}",
+                    "Fixed connector invoked: "
+                    f"{str(route.fixed_connector_invoked).lower()}",
+                    "Provider cleanup failure: "
+                    f"{str(route.provider_cleanup_failure).lower()}",
+                )
+            )
         lines.extend(
             f"Action {gate.requested_action.value}: "
             f"{'allowed' if gate.allowed else 'denied'}"
@@ -368,6 +382,10 @@ def _vertex_config(mode: ScenarioMode) -> VertexAdcPlannerConfig | None:
         os.environ.get("RECONCILE_VERTEX_LOCATION"),
         os.environ.get("RECONCILE_VERTEX_MODEL"),
     )
+    if all(value is None for value in values):
+        if mode is ScenarioMode.ADAPTIVE:
+            return None
+        _fail(FailureCategory.INVALID_INPUT)
     if any(value is None or not value for value in values):
         _fail(FailureCategory.INVALID_INPUT)
     try:

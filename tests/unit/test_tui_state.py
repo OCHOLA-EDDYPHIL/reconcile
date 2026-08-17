@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 from reconcile.contracts import (
+    BOUNDED_HYBRID_ROUTE_POLICY_VERSION,
     EVIDENCE_DECISION_VERSION,
     EXECUTION_ENVELOPE_SUMMARY_VERSION,
     SCENARIO_OPERATIONAL_STATUS_VERSION,
@@ -38,12 +39,15 @@ from reconcile.contracts import (
     SanitizedProbeAuditRecord,
     SanitizedProbeRequest,
     SanitizedProbeResult,
+    ScenarioHybridOutcome,
+    ScenarioHybridRoute,
     ScenarioLaunchName,
     ScenarioOperationalCleanupState,
     ScenarioOperationalInvestigationState,
     ScenarioOperationalMutationState,
     ScenarioOperationalRecoveryState,
     ScenarioOperationalStatus,
+    ScenarioRouteProvenance,
     ScenarioRunEvent,
     ScenarioRunEventType,
     ScenarioRunFailureCategory,
@@ -464,6 +468,37 @@ def test_snapshot_is_authoritative_for_deterministic_state() -> None:
     assert regression_error.value.code is (
         ViewStateProtocolErrorCode.SNAPSHOT_CURSOR_REGRESSION
     )
+
+
+def test_deterministic_panel_renders_sanitized_hybrid_route_provenance() -> None:
+    snapshot = _completed_report_snapshot(Classification.UNKNOWN)
+    assert snapshot.report is not None
+    route = ScenarioRouteProvenance(
+        policy_version=BOUNDED_HYBRID_ROUTE_POLICY_VERSION,
+        route=ScenarioHybridRoute.PLANNER_HETEROGENEOUS,
+        outcome=ScenarioHybridOutcome.EXPLICIT_UNKNOWN,
+        planner_invoked=True,
+        fixed_connector_invoked=False,
+        provider_failure=True,
+        provider_cleanup_failure=False,
+    )
+    snapshot = snapshot.model_copy(
+        update={
+            "scenario": ScenarioLaunchName.SANDBOX_ORDER,
+            "mode": ScenarioRunMode.ADAPTIVE,
+            "report": snapshot.report.model_copy(update={"route_provenance": route}),
+        }
+    )
+
+    lines = OperatorViewState.empty().apply_snapshot(snapshot).render_deterministic()
+
+    assert lines[0] == (
+        "HYBRID ROUTE: policy=1.0.0 route=PLANNER_HETEROGENEOUS "
+        "outcome=EXPLICIT_UNKNOWN planner_invoked=TRUE "
+        "fixed_connector_invoked=FALSE provider_failure=TRUE "
+        "provider_cleanup_failure=FALSE"
+    )
+    assert lines[1] == "DETERMINISTIC CLASSIFICATION: UNKNOWN"
 
 
 def test_snapshot_progression_rejects_cursor_terminal_and_content_regression() -> None:

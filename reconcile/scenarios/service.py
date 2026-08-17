@@ -7,6 +7,7 @@ import hashlib
 import inspect
 import re
 import tempfile
+import time
 import uuid
 import warnings
 from collections.abc import Callable
@@ -19,12 +20,16 @@ from typing import Protocol
 
 from reconcile.adaptive import (
     AdaptiveInvestigationResult,
+    AdaptiveStopReason,
     AdvisoryPlanner,
+    AdvisoryPlannerMetadata,
+    PlannerFailureKind,
     ProposalDisposition,
 )
 from reconcile.adk_planner import AdkGeminiPlanner, VertexAdcPlannerConfig
 from reconcile.baseline import FixedBaselineResult
 from reconcile.contracts import (
+    BOUNDED_HYBRID_ROUTE_POLICY_VERSION,
     EXECUTION_ENVELOPE_SUMMARY_VERSION,
     INVESTIGATION_COMPARISON_RECORD_VERSION,
     SCENARIO_RUN_REQUEST_VERSION,
@@ -45,7 +50,10 @@ from reconcile.contracts import (
     ScenarioFaultAction,
     ScenarioFaultInstruction,
     ScenarioFaultPoint,
+    ScenarioHybridOutcome,
+    ScenarioHybridRoute,
     ScenarioRef,
+    ScenarioRouteProvenance,
     ScenarioRunRequest,
     canonical_json_bytes,
     canonical_sha256,
@@ -116,6 +124,275 @@ SCENARIO_SUITE = (
     ScenarioName.FIRESTORE_BUSINESS,
     ScenarioName.SANDBOX_ORDER,
 )
+
+BOUNDED_HYBRID_FIXED_PROVENANCE = (
+    f"Bounded hybrid route policy {BOUNDED_HYBRID_ROUTE_POLICY_VERSION} selected "
+    "the deterministic fixed connector; no advisory planner was invoked."
+)
+BOUNDED_HYBRID_ADVISORY_PROVENANCE = (
+    f"Bounded hybrid route policy {BOUNDED_HYBRID_ROUTE_POLICY_VERSION} selected "
+    "allowlisted read-only advisory evidence planning; deterministic code retained "
+    "evidence, classification, and action authority."
+)
+BOUNDED_HYBRID_FALLBACK_PROVENANCE = (
+    f"Bounded hybrid route policy {BOUNDED_HYBRID_ROUTE_POLICY_VERSION} selected "
+    "the deterministic fixed fallback because advisory planning was not safely "
+    "available."
+)
+BOUNDED_HYBRID_PLANNER_INVOKED_PROVENANCE = (
+    f"Bounded hybrid route policy {BOUNDED_HYBRID_ROUTE_POLICY_VERSION} invoked "
+    "the advisory planner before reaching this deterministic outcome."
+)
+BOUNDED_HYBRID_EXPLICIT_UNKNOWN_PROVENANCE = (
+    f"Bounded hybrid route policy {BOUNDED_HYBRID_ROUTE_POLICY_VERSION} retained "
+    "explicit UNKNOWN after advisory failure because a fresh fixed plan would "
+    "exceed or replay the target-read budget."
+)
+BOUNDED_HYBRID_PROVIDER_CLEANUP_PROVENANCE = (
+    "Advisory provider cleanup failed after the deterministic result was "
+    "established; the sanitized failure did not change classification or action "
+    "authority."
+)
+
+_PROVIDER_FAILURES = frozenset(
+    {
+        PlannerFailureKind.UNAVAILABLE,
+        PlannerFailureKind.TIMEOUT,
+        PlannerFailureKind.SCHEMA_INVALID,
+    }
+)
+_PROVIDER_FAILURE_STOP_REASONS = frozenset(
+    {
+        AdaptiveStopReason.PLANNER_UNAVAILABLE,
+        AdaptiveStopReason.PLANNER_TIMEOUT,
+        AdaptiveStopReason.PLANNER_SCHEMA_INVALID,
+    }
+)
+
+
+def bounded_hybrid_route_for(scenario: ScenarioName) -> ScenarioHybridRoute:
+    """Resolve the frozen bounded-hybrid route for one canonical scenario."""
+
+    if type(scenario) is not ScenarioName:
+        raise TypeError("bounded hybrid routing requires an exact scenario")
+    if scenario in {ScenarioName.STORAGE, ScenarioName.FIRESTORE_BUSINESS}:
+        return ScenarioHybridRoute.FIXED_AUTHORITATIVE
+    return ScenarioHybridRoute.PLANNER_HETEROGENEOUS
+
+
+def adaptive_result_has_provider_failure(
+    result: AdaptiveInvestigationResult,
+) -> bool:
+    """Return whether a sanitized advisory provider failure was retained."""
+
+    if type(result) is not AdaptiveInvestigationResult:
+        raise TypeError("hybrid fallback requires an exact adaptive result")
+    return result.stop_reason in _PROVIDER_FAILURE_STOP_REASONS or any(
+        turn.failure in _PROVIDER_FAILURES for turn in result.turns
+    )
+
+
+def adaptive_result_requires_fixed_fallback(
+    result: AdaptiveInvestigationResult,
+    *,
+    max_elapsed_ms: int,
+) -> bool:
+    """Return whether a sanitized advisory provider failure requires fallback."""
+
+    if type(max_elapsed_ms) is not int or max_elapsed_ms < 1:
+        raise ValueError("hybrid fallback elapsed budget must be positive")
+    return adaptive_result_has_provider_failure(result) and (
+        result.attempted_probe_count == 0
+        and result.probe_count_used == 0
+        and not result.report.probe_audit
+        and result.total_elapsed_ms < max_elapsed_ms
+    )
+
+
+def adaptive_result_requires_explicit_unknown(
+    result: AdaptiveInvestigationResult,
+    *,
+    max_elapsed_ms: int,
+) -> bool:
+    """Return whether provider failure must stop without a fresh fixed replay."""
+
+    return adaptive_result_has_provider_failure(
+        result
+    ) and not adaptive_result_requires_fixed_fallback(
+        result,
+        max_elapsed_ms=max_elapsed_ms,
+    )
+
+
+def _mark_bounded_hybrid_route(
+    report: InvestigationReport,
+    provenance: str,
+) -> InvestigationReport:
+    if type(report) is not InvestigationReport:
+        raise TypeError("hybrid route provenance requires an exact report")
+    sealed = decode_contract(canonical_json_bytes(report), InvestigationReport)
+    if provenance in sealed.limitations:
+        return sealed
+    payload = sealed.model_dump(mode="python")
+    payload["limitations"] = (*sealed.limitations, provenance)
+    return InvestigationReport.model_validate(payload)
+
+
+def mark_bounded_hybrid_deterministic_fixed(
+    report: InvestigationReport,
+) -> InvestigationReport:
+    """Attach stable provenance to an authoritative deterministic fixed route."""
+
+    return _mark_bounded_hybrid_route(report, BOUNDED_HYBRID_FIXED_PROVENANCE)
+
+
+def mark_bounded_hybrid_advisory(
+    report: InvestigationReport,
+    *,
+    provider_cleanup_failed: bool = False,
+) -> InvestigationReport:
+    """Attach stable provenance to bounded advisory evidence planning."""
+
+    marked = _mark_bounded_hybrid_route(report, BOUNDED_HYBRID_ADVISORY_PROVENANCE)
+    marked = _mark_bounded_hybrid_route(
+        marked,
+        BOUNDED_HYBRID_PLANNER_INVOKED_PROVENANCE,
+    )
+    if provider_cleanup_failed:
+        marked = _mark_bounded_hybrid_route(
+            marked,
+            BOUNDED_HYBRID_PROVIDER_CLEANUP_PROVENANCE,
+        )
+    return marked
+
+
+def mark_bounded_hybrid_fixed_fallback(
+    report: InvestigationReport,
+    *,
+    planner_invoked: bool = False,
+    provider_cleanup_failed: bool = False,
+) -> InvestigationReport:
+    """Attach stable provenance to a deterministic fixed fallback route."""
+
+    marked = _mark_bounded_hybrid_route(report, BOUNDED_HYBRID_FALLBACK_PROVENANCE)
+    if planner_invoked:
+        marked = _mark_bounded_hybrid_route(
+            marked,
+            BOUNDED_HYBRID_PLANNER_INVOKED_PROVENANCE,
+        )
+    if provider_cleanup_failed:
+        marked = _mark_bounded_hybrid_route(
+            marked,
+            BOUNDED_HYBRID_PROVIDER_CLEANUP_PROVENANCE,
+        )
+    return marked
+
+
+def mark_bounded_hybrid_explicit_unknown(
+    report: InvestigationReport,
+    *,
+    provider_cleanup_failed: bool = False,
+) -> InvestigationReport:
+    """Attach provenance to a provider failure that cannot replay fixed reads."""
+
+    if report.classification is not Classification.UNKNOWN:
+        raise ValueError("explicit hybrid fallback requires UNKNOWN classification")
+    marked = _mark_bounded_hybrid_route(
+        report,
+        BOUNDED_HYBRID_EXPLICIT_UNKNOWN_PROVENANCE,
+    )
+    marked = _mark_bounded_hybrid_route(
+        marked,
+        BOUNDED_HYBRID_PLANNER_INVOKED_PROVENANCE,
+    )
+    if provider_cleanup_failed:
+        marked = _mark_bounded_hybrid_route(
+            marked,
+            BOUNDED_HYBRID_PROVIDER_CLEANUP_PROVENANCE,
+        )
+    return marked
+
+
+def mark_bounded_hybrid_provider_cleanup_failure(
+    report: InvestigationReport,
+) -> InvestigationReport:
+    """Retain a sanitized cleanup failure without changing the established result."""
+
+    return _mark_bounded_hybrid_route(
+        report,
+        BOUNDED_HYBRID_PROVIDER_CLEANUP_PROVENANCE,
+    )
+
+
+def is_bounded_hybrid_fixed_fallback(report: InvestigationReport) -> bool:
+    """Return whether a report carries exact bounded-hybrid fallback provenance."""
+
+    if type(report) is not InvestigationReport:
+        raise TypeError("hybrid fallback inspection requires an exact report")
+    return BOUNDED_HYBRID_FALLBACK_PROVENANCE in report.limitations
+
+
+def is_bounded_hybrid_explicit_unknown(report: InvestigationReport) -> bool:
+    """Return whether provider failure ended without replaying fixed reads."""
+
+    if type(report) is not InvestigationReport:
+        raise TypeError("hybrid UNKNOWN inspection requires an exact report")
+    return BOUNDED_HYBRID_EXPLICIT_UNKNOWN_PROVENANCE in report.limitations
+
+
+def bounded_hybrid_route_provenance(
+    report: InvestigationReport,
+) -> ScenarioRouteProvenance | None:
+    """Project static route markers into a sanitized public provenance record."""
+
+    if type(report) is not InvestigationReport:
+        raise TypeError("hybrid route projection requires an exact report")
+    limitations = frozenset(report.limitations)
+    primary = tuple(
+        marker
+        for marker in (
+            BOUNDED_HYBRID_FIXED_PROVENANCE,
+            BOUNDED_HYBRID_ADVISORY_PROVENANCE,
+            BOUNDED_HYBRID_FALLBACK_PROVENANCE,
+            BOUNDED_HYBRID_EXPLICIT_UNKNOWN_PROVENANCE,
+        )
+        if marker in limitations
+    )
+    if not primary:
+        return None
+    if len(primary) != 1:
+        raise ValueError("hybrid report contains conflicting route provenance")
+    planner_invoked = BOUNDED_HYBRID_PLANNER_INVOKED_PROVENANCE in limitations
+    cleanup_failed = BOUNDED_HYBRID_PROVIDER_CLEANUP_PROVENANCE in limitations
+    if primary[0] == BOUNDED_HYBRID_FIXED_PROVENANCE:
+        route = ScenarioHybridRoute.FIXED_AUTHORITATIVE
+        outcome = ScenarioHybridOutcome.FIXED_AUTHORITATIVE
+        fixed_invoked = True
+        provider_failure = False
+    elif primary[0] == BOUNDED_HYBRID_ADVISORY_PROVENANCE:
+        route = ScenarioHybridRoute.PLANNER_HETEROGENEOUS
+        outcome = ScenarioHybridOutcome.PLANNER_EVIDENCE
+        fixed_invoked = False
+        provider_failure = False
+    elif primary[0] == BOUNDED_HYBRID_FALLBACK_PROVENANCE:
+        route = ScenarioHybridRoute.PLANNER_HETEROGENEOUS
+        outcome = ScenarioHybridOutcome.FIXED_FALLBACK
+        fixed_invoked = True
+        provider_failure = True
+    else:
+        route = ScenarioHybridRoute.PLANNER_HETEROGENEOUS
+        outcome = ScenarioHybridOutcome.EXPLICIT_UNKNOWN
+        fixed_invoked = False
+        provider_failure = True
+    return ScenarioRouteProvenance(
+        policy_version=BOUNDED_HYBRID_ROUTE_POLICY_VERSION,
+        route=route,
+        outcome=outcome,
+        planner_invoked=planner_invoked,
+        fixed_connector_invoked=fixed_invoked,
+        provider_failure=provider_failure,
+        provider_cleanup_failure=cleanup_failed,
+    )
 
 
 class ScenarioWorkflowErrorCategory(StrEnum):
@@ -251,7 +528,7 @@ def _validate_provider_selection(
         if selected:
             raise _workflow_error(ScenarioWorkflowErrorCategory.INVALID_CONFIGURATION)
         return
-    if selected != 1:
+    if selected > 1 or (mode is ScenarioMode.COMPARE and selected != 1):
         raise _workflow_error(ScenarioWorkflowErrorCategory.INVALID_CONFIGURATION)
     if vertex_config is not None:
         if type(vertex_config) is not VertexAdcPlannerConfig:
@@ -260,6 +537,15 @@ def _validate_provider_selection(
             raise _workflow_error(ScenarioWorkflowErrorCategory.INVALID_CONFIGURATION)
     if planner_factory is not None and not callable(planner_factory):
         raise _workflow_error(ScenarioWorkflowErrorCategory.INVALID_CONFIGURATION)
+
+
+def _planner_protocol_available(planner: AdvisoryPlanner) -> bool:
+    try:
+        metadata = planner.metadata
+        plan = planner.plan
+    except Exception:
+        return False
+    return type(metadata) is AdvisoryPlannerMetadata and callable(plan)
 
 
 def _request(scenario: ScenarioName, run_id: str) -> ScenarioRunRequest:
@@ -552,6 +838,7 @@ async def _fixed_investigation(
     progress_emitter: ProgressEmitter | None,
     revision: int = 1,
     durability_observer: ProbeDurabilityObserver | None = None,
+    elapsed_offset_ms: int = 0,
 ) -> FixedBaselineResult:
     if scenario is ScenarioName.STORAGE:
         return await execute_storage_baseline(
@@ -578,6 +865,7 @@ async def _fixed_investigation(
         progress_emitter=progress_emitter,
         revision=revision,
         durability_observer=durability_observer,
+        elapsed_offset_ms=elapsed_offset_ms,
     )
 
 
@@ -597,9 +885,15 @@ async def _investigate(
     durability_observer: ProbeDurabilityObserver | None = None,
 ) -> ScenarioWorkflowResult:
     sealed_envelope = canonical_json_bytes(envelope)
-    if mode is ScenarioMode.FIXED:
+
+    async def fixed_report(
+        *,
+        hybrid_route: ScenarioHybridRoute | None = None,
+        planner_invoked: bool = False,
+        elapsed_offset_ms: int = 0,
+    ) -> InvestigationReport:
         fixed_envelope = decode_contract(sealed_envelope, ExecutionEnvelope)
-        return (
+        report = (
             await _fixed_investigation(
                 scenario,
                 workspace,
@@ -608,25 +902,62 @@ async def _investigate(
                 progress_emitter=progress_emitter,
                 revision=revision,
                 durability_observer=durability_observer,
+                elapsed_offset_ms=elapsed_offset_ms,
             )
         ).report
+        if hybrid_route is ScenarioHybridRoute.FIXED_AUTHORITATIVE:
+            return mark_bounded_hybrid_deterministic_fixed(report)
+        if hybrid_route is ScenarioHybridRoute.PLANNER_HETEROGENEOUS:
+            return mark_bounded_hybrid_fixed_fallback(
+                report,
+                planner_invoked=planner_invoked,
+            )
+        return report
+
+    if mode is ScenarioMode.FIXED:
+        return await fixed_report()
+    if mode is ScenarioMode.ADAPTIVE:
+        route = bounded_hybrid_route_for(scenario)
+        if route is ScenarioHybridRoute.FIXED_AUTHORITATIVE:
+            return await fixed_report(hybrid_route=route)
+        if planner is None or not _planner_protocol_available(planner):
+            return await fixed_report(hybrid_route=route)
+        adaptive_envelope = decode_contract(sealed_envelope, ExecutionEnvelope)
+        adaptive_started_monotonic = time.monotonic()
+        adaptive = await definition.adaptive(
+            adaptive_envelope,
+            planner,
+            cancellation_event=cancellation_event,
+            progress_emitter=progress_emitter,
+            revision=revision,
+            durability_observer=durability_observer,
+        )
+        max_elapsed_ms = adaptive_envelope.context.evidence_budget.max_elapsed_ms
+        aggregate_elapsed_ms = max(
+            adaptive.total_elapsed_ms,
+            int((time.monotonic() - adaptive_started_monotonic) * 1_000),
+        )
+        if (
+            adaptive_result_requires_fixed_fallback(
+                adaptive,
+                max_elapsed_ms=max_elapsed_ms,
+            )
+            and aggregate_elapsed_ms < max_elapsed_ms
+        ):
+            return await fixed_report(
+                hybrid_route=route,
+                planner_invoked=bool(adaptive.turns),
+                elapsed_offset_ms=aggregate_elapsed_ms,
+            )
+        if adaptive_result_has_provider_failure(adaptive):
+            return mark_bounded_hybrid_explicit_unknown(adaptive.report)
+        return mark_bounded_hybrid_advisory(adaptive.report)
+
     if planner is None:
         raise _workflow_error(
             ScenarioWorkflowErrorCategory.INVALID_CONFIGURATION,
             scenario,
         )
-    if mode is ScenarioMode.ADAPTIVE:
-        adaptive_envelope = decode_contract(sealed_envelope, ExecutionEnvelope)
-        return (
-            await definition.adaptive(
-                adaptive_envelope,
-                planner,
-                cancellation_event=cancellation_event,
-                progress_emitter=progress_emitter,
-                revision=revision,
-                durability_observer=durability_observer,
-            )
-        ).report
 
     fixed_envelope = decode_contract(sealed_envelope, ExecutionEnvelope)
     fixed = await _fixed_investigation(
@@ -861,10 +1192,10 @@ async def _close_factory_planner(
     planner: AdvisoryPlanner,
     scenario: ScenarioName,
 ) -> None:
-    closer = getattr(planner, "aclose", None)
-    if not callable(closer):
-        return
     try:
+        closer = getattr(planner, "aclose", None)
+        if not callable(closer):
+            return
         result = closer()
         if inspect.isawaitable(result):
             await result
@@ -885,15 +1216,39 @@ async def _run_with_factory(
     cancellation_event: asyncio.Event | None = None,
     progress_callback: ProgressCallback | None = None,
 ) -> ScenarioWorkflowResult:
+    if (
+        mode is ScenarioMode.ADAPTIVE
+        and bounded_hybrid_route_for(scenario)
+        is ScenarioHybridRoute.FIXED_AUTHORITATIVE
+    ):
+        return await _run_isolated(
+            scenario,
+            mode,
+            None,
+            workspace_parent=workspace_parent,
+            run_id=run_id,
+            cancellation_event=cancellation_event,
+            progress_callback=progress_callback,
+        )
     try:
         planner = planner_factory(scenario)
     except Exception:
+        if mode is ScenarioMode.ADAPTIVE:
+            return await _run_isolated(
+                scenario,
+                mode,
+                None,
+                workspace_parent=workspace_parent,
+                run_id=run_id,
+                cancellation_event=cancellation_event,
+                progress_callback=progress_callback,
+            )
         raise _workflow_error(
             ScenarioWorkflowErrorCategory.PROVIDER_FAILED,
             scenario,
         ) from None
     try:
-        return await _run_isolated(
+        result = await _run_isolated(
             scenario,
             mode,
             planner,
@@ -902,8 +1257,17 @@ async def _run_with_factory(
             cancellation_event=cancellation_event,
             progress_callback=progress_callback,
         )
-    finally:
+    except BaseException:
+        with suppress(ScenarioWorkflowError):
+            await _close_factory_planner(planner, scenario)
+        raise
+    try:
         await _close_factory_planner(planner, scenario)
+    except ScenarioWorkflowError:
+        if mode is ScenarioMode.ADAPTIVE:
+            return mark_bounded_hybrid_provider_cleanup_failure(result)
+        raise
+    return result
 
 
 async def run_one(
@@ -943,6 +1307,20 @@ async def run_one(
             cancellation_event=cancellation_event,
             progress_callback=progress_callback,
         )
+    if (
+        mode is ScenarioMode.ADAPTIVE
+        and bounded_hybrid_route_for(scenario)
+        is ScenarioHybridRoute.FIXED_AUTHORITATIVE
+    ):
+        return await _run_isolated(
+            scenario,
+            mode,
+            None,
+            workspace_parent=workspace_parent,
+            run_id=selected_run_id,
+            cancellation_event=cancellation_event,
+            progress_callback=progress_callback,
+        )
     if planner is not None:
         return await _run_isolated(
             scenario,
@@ -964,33 +1342,68 @@ async def run_one(
             progress_callback=progress_callback,
         )
     if vertex_config is None:
-        raise _workflow_error(
-            ScenarioWorkflowErrorCategory.INVALID_CONFIGURATION,
-            scenario,
-        )
-    try:
-        provider = AdkGeminiPlanner.from_vertex_adc(vertex_config)
-        async with provider as active_planner:
+        if mode is ScenarioMode.ADAPTIVE:
             return await _run_isolated(
                 scenario,
                 mode,
-                active_planner,
+                None,
                 workspace_parent=workspace_parent,
                 run_id=selected_run_id,
                 cancellation_event=cancellation_event,
                 progress_callback=progress_callback,
             )
+        raise _workflow_error(
+            ScenarioWorkflowErrorCategory.INVALID_CONFIGURATION, scenario
+        )
+    try:
+        provider = AdkGeminiPlanner.from_vertex_adc(vertex_config)
+    except Exception:
+        if mode is ScenarioMode.ADAPTIVE:
+            return await _run_isolated(
+                scenario,
+                mode,
+                None,
+                workspace_parent=workspace_parent,
+                run_id=selected_run_id,
+                cancellation_event=cancellation_event,
+                progress_callback=progress_callback,
+            )
+        raise _workflow_error(
+            ScenarioWorkflowErrorCategory.PROVIDER_FAILED,
+            scenario,
+        ) from None
+    try:
+        result = await _run_isolated(
+            scenario,
+            mode,
+            provider,
+            workspace_parent=workspace_parent,
+            run_id=selected_run_id,
+            cancellation_event=cancellation_event,
+            progress_callback=progress_callback,
+        )
     except (
         ProgressDeliveryError,
         ScenarioWorkflowError,
         asyncio.CancelledError,
     ):
+        with suppress(ScenarioWorkflowError):
+            await _close_factory_planner(provider, scenario)
         raise
     except Exception:
+        with suppress(ScenarioWorkflowError):
+            await _close_factory_planner(provider, scenario)
         raise _workflow_error(
             ScenarioWorkflowErrorCategory.PROVIDER_FAILED,
             scenario,
         ) from None
+    try:
+        await _close_factory_planner(provider, scenario)
+    except ScenarioWorkflowError:
+        if mode is ScenarioMode.ADAPTIVE:
+            return mark_bounded_hybrid_provider_cleanup_failure(result)
+        raise
+    return result
 
 
 async def run_suite(
@@ -1015,7 +1428,15 @@ async def run_suite(
     selected_run_id = _validated_run_id(run_id)
     workspace_parent = _validated_workspace(workspace)
 
-    if mode is ScenarioMode.FIXED or planner is not None:
+    if (
+        mode is ScenarioMode.FIXED
+        or planner is not None
+        or (
+            mode is ScenarioMode.ADAPTIVE
+            and planner_factory is None
+            and vertex_config is None
+        )
+    ):
         active_planner = planner
         return tuple(
             [
@@ -1046,26 +1467,64 @@ async def run_suite(
         raise _workflow_error(ScenarioWorkflowErrorCategory.INVALID_CONFIGURATION)
     try:
         provider = AdkGeminiPlanner.from_vertex_adc(vertex_config)
-        async with provider as active_planner:
+    except Exception:
+        if mode is ScenarioMode.ADAPTIVE:
             return tuple(
                 [
                     await _run_isolated(
                         scenario,
                         mode,
-                        active_planner,
+                        None,
                         workspace_parent=workspace_parent,
                         run_id=selected_run_id,
                     )
                     for scenario in SCENARIO_SUITE
                 ]
             )
+        raise _workflow_error(ScenarioWorkflowErrorCategory.PROVIDER_FAILED) from None
+    try:
+        results = tuple(
+            [
+                await _run_isolated(
+                    scenario,
+                    mode,
+                    provider,
+                    workspace_parent=workspace_parent,
+                    run_id=selected_run_id,
+                )
+                for scenario in SCENARIO_SUITE
+            ]
+        )
     except (ScenarioWorkflowError, asyncio.CancelledError):
+        with suppress(ScenarioWorkflowError):
+            await _close_factory_planner(provider, ScenarioName.SANDBOX_ORDER)
         raise
     except Exception:
+        with suppress(ScenarioWorkflowError):
+            await _close_factory_planner(provider, ScenarioName.SANDBOX_ORDER)
         raise _workflow_error(ScenarioWorkflowErrorCategory.PROVIDER_FAILED) from None
+    try:
+        await _close_factory_planner(provider, ScenarioName.SANDBOX_ORDER)
+    except ScenarioWorkflowError:
+        if mode is not ScenarioMode.ADAPTIVE:
+            raise
+        return tuple(
+            mark_bounded_hybrid_provider_cleanup_failure(result)
+            if scenario is ScenarioName.SANDBOX_ORDER
+            else result
+            for scenario, result in zip(SCENARIO_SUITE, results, strict=True)
+        )
+    return results
 
 
 __all__ = [
+    "BOUNDED_HYBRID_ADVISORY_PROVENANCE",
+    "BOUNDED_HYBRID_EXPLICIT_UNKNOWN_PROVENANCE",
+    "BOUNDED_HYBRID_FALLBACK_PROVENANCE",
+    "BOUNDED_HYBRID_FIXED_PROVENANCE",
+    "BOUNDED_HYBRID_PLANNER_INVOKED_PROVENANCE",
+    "BOUNDED_HYBRID_PROVIDER_CLEANUP_PROVENANCE",
+    "BOUNDED_HYBRID_ROUTE_POLICY_VERSION",
     "SCENARIO_SUITE",
     "AdvisoryPlannerFactory",
     "ScenarioMode",
@@ -1073,6 +1532,18 @@ __all__ = [
     "ScenarioWorkflowError",
     "ScenarioWorkflowErrorCategory",
     "ScenarioWorkflowResult",
+    "adaptive_result_has_provider_failure",
+    "adaptive_result_requires_explicit_unknown",
+    "adaptive_result_requires_fixed_fallback",
+    "bounded_hybrid_route_for",
+    "bounded_hybrid_route_provenance",
+    "is_bounded_hybrid_explicit_unknown",
+    "is_bounded_hybrid_fixed_fallback",
+    "mark_bounded_hybrid_advisory",
+    "mark_bounded_hybrid_deterministic_fixed",
+    "mark_bounded_hybrid_explicit_unknown",
+    "mark_bounded_hybrid_fixed_fallback",
+    "mark_bounded_hybrid_provider_cleanup_failure",
     "run_one",
     "run_suite",
     "scenario_investigation_id",

@@ -44,8 +44,9 @@ from reconcile.contracts.report import (
 
 EXECUTION_ENVELOPE_SUMMARY_VERSION = "reconcile/execution-envelope-summary/v1"
 SCENARIO_LAUNCH_REQUEST_VERSION = "reconcile/scenario-launch-request/v1"
-SCENARIO_RUN_SNAPSHOT_VERSION = "reconcile/scenario-run-snapshot/v1"
-SCENARIO_RUN_EVENT_VERSION = "reconcile/scenario-run-event/v1"
+SCENARIO_RUN_SNAPSHOT_VERSION = "reconcile/scenario-run-snapshot/v2"
+SCENARIO_RUN_EVENT_VERSION = "reconcile/scenario-run-event/v2"
+BOUNDED_HYBRID_ROUTE_POLICY_VERSION = "1.0.0"
 
 MAX_SCENARIO_RUN_EVENTS = 1024
 
@@ -106,6 +107,63 @@ class ScenarioRunMode(StrEnum):
     FIXED = "fixed"
     ADAPTIVE = "adaptive"
     COMPARE = "compare"
+
+
+class ScenarioHybridRoute(StrEnum):
+    """Deterministic G4R route selected from a trusted scenario profile."""
+
+    FIXED_AUTHORITATIVE = "FIXED_AUTHORITATIVE"
+    PLANNER_HETEROGENEOUS = "PLANNER_HETEROGENEOUS"
+
+
+class ScenarioHybridOutcome(StrEnum):
+    """Sanitized terminal disposition of one bounded hybrid route."""
+
+    FIXED_AUTHORITATIVE = "FIXED_AUTHORITATIVE"
+    PLANNER_EVIDENCE = "PLANNER_EVIDENCE"
+    FIXED_FALLBACK = "FIXED_FALLBACK"
+    EXPLICIT_UNKNOWN = "EXPLICIT_UNKNOWN"
+
+
+class ScenarioRouteProvenance(StrictModel):
+    """Public route and provider-failure facts without provider detail."""
+
+    policy_version: Literal[BOUNDED_HYBRID_ROUTE_POLICY_VERSION]
+    route: ScenarioHybridRoute
+    outcome: ScenarioHybridOutcome
+    planner_invoked: bool
+    fixed_connector_invoked: bool
+    provider_failure: bool
+    provider_cleanup_failure: bool
+
+    @model_validator(mode="after")
+    def validate_route(self) -> ScenarioRouteProvenance:
+        if self.route is ScenarioHybridRoute.FIXED_AUTHORITATIVE:
+            valid = (
+                self.outcome is ScenarioHybridOutcome.FIXED_AUTHORITATIVE
+                and not self.planner_invoked
+                and self.fixed_connector_invoked
+                and not self.provider_failure
+                and not self.provider_cleanup_failure
+            )
+        elif self.outcome is ScenarioHybridOutcome.PLANNER_EVIDENCE:
+            valid = (
+                self.planner_invoked
+                and not self.fixed_connector_invoked
+                and not self.provider_failure
+            )
+        elif self.outcome is ScenarioHybridOutcome.FIXED_FALLBACK:
+            valid = self.fixed_connector_invoked and self.provider_failure
+        else:
+            valid = (
+                self.outcome is ScenarioHybridOutcome.EXPLICIT_UNKNOWN
+                and self.planner_invoked
+                and not self.fixed_connector_invoked
+                and self.provider_failure
+            )
+        if not valid:
+            raise ValueError("hybrid route provenance is inconsistent")
+        return self
 
 
 class ScenarioRunLifecycle(StrEnum):
@@ -305,6 +363,7 @@ class SanitizedInvestigationReport(StrictModel):
     action_gate: tuple[ActionGateResult, ...] = Field(max_length=len(RequestedAction))
     missing_evidence: tuple[SanitizedMissingEvidence, ...] = Field(max_length=64)
     advisory_cited_evidence_ids: tuple[Identifier, ...] = Field(max_length=64)
+    route_provenance: ScenarioRouteProvenance | None = None
     created_at: AwareDatetime
     updated_at: AwareDatetime
     revision: int = Field(ge=0, le=_MAX_SIGNED_64)
@@ -938,6 +997,7 @@ class TerminalStateSummary(StrictModel):
     missing_evidence_count: int = Field(ge=0, le=64)
     escalation_required: bool | None
     failure_category: ScenarioRunFailureCategory | None
+    route_provenance: ScenarioRouteProvenance | None = None
 
     @model_validator(mode="after")
     def validate_terminal_state(self) -> TerminalStateSummary:
@@ -959,6 +1019,7 @@ class TerminalStateSummary(StrictModel):
                     or action_count != 0
                     or self.missing_evidence_count != 0
                     or self.escalation_required is not None
+                    or self.route_provenance is not None
                 ):
                     raise ValueError("comparison terminal state must remain neutral")
             else:
@@ -971,6 +1032,7 @@ class TerminalStateSummary(StrictModel):
                 or self.missing_evidence_count != 0
                 or self.escalation_required is not None
                 or self.failure_category is None
+                or self.route_provenance is not None
             ):
                 raise ValueError("failed terminal state is inconsistent")
         elif (
@@ -980,6 +1042,7 @@ class TerminalStateSummary(StrictModel):
             or self.missing_evidence_count != 0
             or self.escalation_required is not None
             or self.failure_category is not None
+            or self.route_provenance is not None
         ):
             raise ValueError("cancelled terminal state is inconsistent")
         return self
@@ -1096,6 +1159,7 @@ class ScenarioRunEvent(StrictModel):
 
 
 __all__ = [
+    "BOUNDED_HYBRID_ROUTE_POLICY_VERSION",
     "EXECUTION_ENVELOPE_SUMMARY_VERSION",
     "MAX_SCENARIO_RUN_EVENTS",
     "SCENARIO_LAUNCH_REQUEST_VERSION",
@@ -1122,9 +1186,12 @@ __all__ = [
     "SanitizedProbeAuditRecord",
     "SanitizedProbeRequest",
     "SanitizedProbeResult",
+    "ScenarioHybridOutcome",
+    "ScenarioHybridRoute",
     "ScenarioLaunchName",
     "ScenarioLaunchRequest",
     "ScenarioLifecycleEventPayload",
+    "ScenarioRouteProvenance",
     "ScenarioRunEvent",
     "ScenarioRunEventPayload",
     "ScenarioRunEventType",

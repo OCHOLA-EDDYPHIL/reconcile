@@ -629,6 +629,20 @@ class OperatorViewState:
                 f"conflicting_authority={str(report.proof.conflicting_authority).upper()}"
             ),
         ]
+        if report.route_provenance is not None:
+            route = report.route_provenance
+            lines.insert(
+                0,
+                "HYBRID ROUTE: "
+                f"policy={route.policy_version} route={route.route.value} "
+                f"outcome={route.outcome.value} "
+                f"planner_invoked={str(route.planner_invoked).upper()} "
+                "fixed_connector_invoked="
+                f"{str(route.fixed_connector_invoked).upper()} "
+                f"provider_failure={str(route.provider_failure).upper()} "
+                "provider_cleanup_failure="
+                f"{str(route.provider_cleanup_failure).upper()}",
+            )
         lines.extend(
             (
                 f"PROOF EFFECT: {finding.effect_id} "

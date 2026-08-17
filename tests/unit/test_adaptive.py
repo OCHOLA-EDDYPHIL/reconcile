@@ -14,6 +14,7 @@ import pytest
 
 from reconcile.adaptive import (
     AdaptiveInvestigationPolicy,
+    AdaptiveInvestigationResult,
     AdaptiveStopReason,
     AdvisoryPlannerMetadata,
     AdvisoryPlannerTurn,
@@ -372,9 +373,11 @@ class _FakePlanner:
         self.metadata = _metadata()
 
     async def plan(self, planner_input: AdaptivePlannerInput) -> AdvisoryPlannerTurn:
-        self.calls.append(
-            decode_contract(canonical_json_bytes(planner_input), AdaptivePlannerInput)
+        sealed_input = decode_contract(
+            canonical_json_bytes(planner_input),
+            AdaptivePlannerInput,
         )
+        self.calls.append(sealed_input)
         if not self.items:
             raise RuntimeError("the fake planner has no queued turn")
         item = self.items.pop(0)
@@ -393,7 +396,7 @@ class _FakePlanner:
                 usage=None,
             )
         if callable(item):
-            item = item(planner_input)
+            item = item(sealed_input)
         if type(item) is not AdaptivePlannerOutput:
             return item  # type: ignore[return-value]
         output_sha256 = hashlib.sha256(canonical_json_bytes(item)).hexdigest()
@@ -517,6 +520,107 @@ async def test_admitted_pending_evidence_changes_the_next_probe() -> None:
     assert all(
         decision.disposition.value == "ADMITTED"
         for decision in result.report.evidence_decisions
+    )
+
+
+@_async_test
+async def test_same_catalog_replans_from_normalized_evidence() -> None:
+    first_probe = "triage-read"
+    admitted_follow_up = "terminal-read"
+    weak_follow_up = "corroborating-read"
+    catalog = (first_probe, admitted_follow_up, weak_follow_up)
+
+    def conditional_plan(planner_input: AdaptivePlannerInput) -> AdaptivePlannerOutput:
+        if not planner_input.prior_executable_request_hashes:
+            assert planner_input.admitted_evidence == ()
+            assert planner_input.weak_evidence == ()
+            selected = first_probe
+        elif planner_input.admitted_evidence:
+            admitted = planner_input.admitted_evidence[0]
+            assert admitted.capability_name == first_probe
+            assert admitted.operation_status is OperationStatus.ACTIVE
+            assert tuple(item.effect_id for item in planner_input.missing_evidence) == (
+                EFFECT_IDS[1],
+            )
+            selected = admitted_follow_up
+        elif planner_input.weak_evidence:
+            weak = planner_input.weak_evidence[0]
+            assert weak.capability_name == first_probe
+            assert weak.relevant_effect_ids == EFFECT_IDS
+            selected = weak_follow_up
+        else:
+            raise AssertionError("intermediate evidence did not select a follow-up")
+        return _output((_request(selected),))
+
+    async def run(
+        first_kind: str,
+    ) -> tuple[AdaptiveInvestigationResult, _FakePlanner, list[str]]:
+        clock = _Clock()
+        call_order: list[str] = []
+        capabilities, rules = _registries(
+            {
+                first_probe: (
+                    _Handler(
+                        clock,
+                        (_observation(first_kind, f"triage-{first_kind}"),),
+                        call_order=call_order,
+                    ),
+                    1,
+                ),
+                admitted_follow_up: (
+                    _Handler(
+                        clock,
+                        (_observation("committed", "terminal"),),
+                        call_order=call_order,
+                    ),
+                    1,
+                ),
+                weak_follow_up: (
+                    _Handler(
+                        clock,
+                        (_observation("committed", "corroborating"),),
+                        call_order=call_order,
+                    ),
+                    1,
+                ),
+            }
+        )
+        planner = _FakePlanner([conditional_plan, conditional_plan])
+        result = await execute_adaptive_investigation(
+            _envelope(catalog),
+            capabilities,
+            rules,
+            planner,
+            _policy(),
+            clock=clock,
+        )
+        return result, planner, call_order
+
+    pending_result, pending_planner, pending_order = await run("pending-business")
+    weak_result, weak_planner, weak_order = await run("weak")
+    assert pending_result.classification is Classification.COMMITTED
+    assert weak_result.classification is Classification.COMMITTED
+    assert pending_order == [first_probe, admitted_follow_up]
+    assert weak_order == [first_probe, weak_follow_up]
+    assert len(pending_planner.calls) == len(weak_planner.calls) == 2
+    pending_initial_bytes = canonical_json_bytes(pending_planner.calls[0])
+    weak_initial_bytes = canonical_json_bytes(weak_planner.calls[0])
+    pending_follow_up_bytes = canonical_json_bytes(pending_planner.calls[1])
+    weak_follow_up_bytes = canonical_json_bytes(weak_planner.calls[1])
+    assert pending_initial_bytes == weak_initial_bytes
+    assert pending_follow_up_bytes != weak_follow_up_bytes
+    for planner, serialized in (
+        (pending_planner, pending_follow_up_bytes),
+        (weak_planner, weak_follow_up_bytes),
+    ):
+        assert decode_contract(serialized, AdaptivePlannerInput) == planner.calls[1]
+    assert pending_planner.calls[1].admitted_evidence
+    assert weak_planner.calls[1].weak_evidence
+    assert pending_result.turns[0].selected_request_sha256 == (
+        weak_result.turns[0].selected_request_sha256
+    )
+    assert pending_result.turns[1].selected_request_sha256 != (
+        weak_result.turns[1].selected_request_sha256
     )
 
 

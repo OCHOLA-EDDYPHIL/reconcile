@@ -88,6 +88,7 @@ from reconcile.scenarios.service import (
     ScenarioWorkflowErrorCategory,
     ScenarioWorkflowResult,
     _envelope_summary,
+    bounded_hybrid_route_provenance,
     run_one,
     scenario_investigation_id,
 )
@@ -371,6 +372,7 @@ def sanitize_report(report: InvestigationReport) -> SanitizedInvestigationReport
             if report.advisory_explanation is None
             else report.advisory_explanation.cited_evidence_ids
         ),
+        route_provenance=bounded_hybrid_route_provenance(report),
         created_at=report.created_at,
         updated_at=report.updated_at,
         revision=report.revision,
@@ -1286,7 +1288,7 @@ class OperatorApplicationService:
             elif current.lifecycle is not ScenarioRunLifecycle.RUNNING:
                 return
             if (
-                mode is not ScenarioMode.FIXED
+                mode is ScenarioMode.COMPARE
                 and self._vertex_config is None
                 and (
                     self._coordinator is None
@@ -1382,6 +1384,7 @@ class OperatorApplicationService:
                 missing_evidence_count=len(report.missing_evidence),
                 escalation_required=(report.classification.value != "COMMITTED"),
                 failure_category=None,
+                route_provenance=report.route_provenance,
             )
             updates: dict[str, object] = {
                 "lifecycle": ScenarioRunLifecycle.COMPLETED,

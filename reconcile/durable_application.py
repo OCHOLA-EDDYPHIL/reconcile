@@ -556,6 +556,7 @@ class DurableExecutionContext(ProbeDurabilityObserver):
         remaining_ms = self.remaining_elapsed_ms(_aware_utc(self._clock()))
         if remaining_ms <= 0:
             self._provider_calls_in_flight.discard(call_id)
+            self._provider_deadline_exhausted = True
             raise BudgetExceeded(self._run.investigation_id, "deadline")
 
         async def invoke_provider() -> Result:
@@ -819,10 +820,15 @@ class DurableInvestigationApplicationService:
     async def create(
         self,
         envelope: ExecutionEnvelope,
+        *,
+        started_at: datetime | None = None,
     ) -> CreateInvestigationResult:
         self._assert_available()
         envelope = self._validated_envelope(envelope)
-        created_at = self._now()
+        now = self._now()
+        created_at = now if started_at is None else _aware_utc(started_at)
+        if created_at > now:
+            raise ValueError("durable investigation start cannot be in the future")
         result = await self._store.create_run(
             envelope,
             created_at=created_at,

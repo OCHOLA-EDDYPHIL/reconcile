@@ -18,9 +18,14 @@ from reconcile.contracts import (
     SCENARIO_RUN_SNAPSHOT_VERSION,
     ApiError,
     ApiErrorCode,
+    Classification,
+    ComparisonStrategyKind,
     EnvelopeEffectSummary,
     EnvelopeSummaryEventPayload,
     ExecutionEnvelopeSummary,
+    ProbeRequestEventPayload,
+    ScenarioHybridOutcome,
+    ScenarioHybridRoute,
     ScenarioLaunchName,
     ScenarioLaunchRequest,
     ScenarioLifecycleEventPayload,
@@ -975,4 +980,122 @@ def test_default_operator_api_completes_the_fixed_storage_journey() -> None:
             ExecutionEnvelopeSummary,
         )
         == current.envelope_summary
+    )
+
+
+def test_operator_api_exposes_authoritative_hybrid_route_and_fixed_lane_events(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    for name in (
+        "RECONCILE_VERTEX_PROJECT",
+        "RECONCILE_VERTEX_LOCATION",
+        "RECONCILE_VERTEX_MODEL",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    launch = ScenarioLaunchRequest(
+        schema_version=SCENARIO_LAUNCH_REQUEST_VERSION,
+        launch_id="api-hybrid-storage",
+        scenario=ScenarioLaunchName.STORAGE,
+        mode=ScenarioRunMode.ADAPTIVE,
+    )
+    with TestClient(create_app()) as client:
+        created = client.post(
+            "/api/v1/scenario-runs",
+            content=canonical_json_bytes(launch),
+            headers={"Content-Type": "application/json"},
+        )
+        accepted = decode_contract(created.content, ScenarioRunSnapshot)
+        events_response = client.get(
+            f"/api/v1/scenario-runs/{accepted.investigation_id}/events"
+        )
+        current_response = client.get(
+            f"/api/v1/scenario-runs/{accepted.investigation_id}"
+        )
+
+    current = decode_contract(current_response.content, ScenarioRunSnapshot)
+    events = _parse_sse(events_response)
+    assert current.lifecycle is ScenarioRunLifecycle.COMPLETED
+    assert current.report is not None
+    assert current.report.route_provenance is not None
+    assert current.report.route_provenance.route is (
+        ScenarioHybridRoute.FIXED_AUTHORITATIVE
+    )
+    assert current.report.route_provenance.outcome is (
+        ScenarioHybridOutcome.FIXED_AUTHORITATIVE
+    )
+    assert not current.report.route_provenance.planner_invoked
+    probe_requests = tuple(
+        event.payload
+        for event in events
+        if isinstance(event.payload, ProbeRequestEventPayload)
+    )
+    assert probe_requests
+    assert all(
+        payload.strategy is ComparisonStrategyKind.FIXED for payload in probe_requests
+    )
+    terminal_events = tuple(
+        event.payload
+        for event in events
+        if isinstance(event.payload, TerminalStateEventPayload)
+    )
+    assert len(terminal_events) == 1
+    assert terminal_events[0].terminal.route_provenance == (
+        current.report.route_provenance
+    )
+
+
+def test_operator_api_exposes_providerless_fixed_fallback_provenance(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    for name in (
+        "RECONCILE_VERTEX_PROJECT",
+        "RECONCILE_VERTEX_LOCATION",
+        "RECONCILE_VERTEX_MODEL",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    launch = ScenarioLaunchRequest(
+        schema_version=SCENARIO_LAUNCH_REQUEST_VERSION,
+        launch_id="api-hybrid-sandbox-fallback",
+        scenario=ScenarioLaunchName.SANDBOX_ORDER,
+        mode=ScenarioRunMode.ADAPTIVE,
+    )
+    with TestClient(create_app()) as client:
+        created = client.post(
+            "/api/v1/scenario-runs",
+            content=canonical_json_bytes(launch),
+            headers={"Content-Type": "application/json"},
+        )
+        accepted = decode_contract(created.content, ScenarioRunSnapshot)
+        events_response = client.get(
+            f"/api/v1/scenario-runs/{accepted.investigation_id}/events"
+        )
+        current_response = client.get(
+            f"/api/v1/scenario-runs/{accepted.investigation_id}"
+        )
+
+    current = decode_contract(current_response.content, ScenarioRunSnapshot)
+    events = _parse_sse(events_response)
+    assert current.report is not None
+    assert current.report.classification is Classification.UNKNOWN
+    assert current.report.route_provenance is not None
+    assert current.report.route_provenance.route is (
+        ScenarioHybridRoute.PLANNER_HETEROGENEOUS
+    )
+    assert current.report.route_provenance.outcome is (
+        ScenarioHybridOutcome.FIXED_FALLBACK
+    )
+    assert not current.report.route_provenance.planner_invoked
+    assert any(
+        isinstance(event.payload, ProbeRequestEventPayload)
+        and event.payload.strategy is ComparisonStrategyKind.FIXED
+        for event in events
+    )
+    terminal_events = tuple(
+        event.payload
+        for event in events
+        if isinstance(event.payload, TerminalStateEventPayload)
+    )
+    assert len(terminal_events) == 1
+    assert terminal_events[0].terminal.route_provenance == (
+        current.report.route_provenance
     )
