@@ -32,3 +32,21 @@ jobs:
       - run: uv run --no-sync ruff format --check .
       - run: uv run --no-sync pytest
       - run: uv build --no-sources
+
+  terraform:
+    runs-on: [self-hosted, Linux, X64, reconcile-ci]
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: "3.12.13"
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e
+        with:
+          terraform_version: "1.15.8"
+          terraform_wrapper: false
+      - run: terraform fmt -check -recursive infra
+      - name: Inspect offline create plans
+        run: python3 scripts/check_phase5_terraform_plans.py

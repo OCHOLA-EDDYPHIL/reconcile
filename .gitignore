@@ -8,3 +8,11 @@ artifacts/
 build/
 dist/
 *.egg-info/
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+*.tfvars
+*.tfvars.json
+crash.log
+crash.*.log
