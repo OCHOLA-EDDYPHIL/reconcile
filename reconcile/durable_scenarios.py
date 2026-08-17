@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import inspect
 import os
 import stat
 from collections.abc import AsyncIterator, Callable
@@ -29,6 +30,7 @@ from reconcile.contracts.operational import (
     ScenarioOperationalStatus,
 )
 from reconcile.contracts.operator import (
+    ScenarioHybridRoute,
     ScenarioLaunchRequest,
     ScenarioRunEvent,
     ScenarioRunSnapshot,
@@ -65,6 +67,7 @@ from reconcile.runtime_provenance import build_runtime_provenance
 from reconcile.scenarios.runner import ScenarioRunner
 from reconcile.scenarios.service import (
     _RECIPES,
+    BOUNDED_HYBRID_ROUTE_POLICY_VERSION,
     ScenarioMode,
     ScenarioName,
     ScenarioWorkflowError,
@@ -76,8 +79,18 @@ from reconcile.scenarios.service import (
     _expectation,
     _fixed_comparison_run,
     _fixed_investigation,
+    _planner_protocol_available,
     _request,
     _seed_sandbox_fixture,
+    adaptive_result_requires_explicit_unknown,
+    adaptive_result_requires_fixed_fallback,
+    bounded_hybrid_route_for,
+    bounded_hybrid_route_provenance,
+    is_bounded_hybrid_fixed_fallback,
+    mark_bounded_hybrid_advisory,
+    mark_bounded_hybrid_deterministic_fixed,
+    mark_bounded_hybrid_explicit_unknown,
+    mark_bounded_hybrid_fixed_fallback,
 )
 
 _PLANNER_MAX_CALLS = 64
@@ -95,12 +108,23 @@ def _workspace_id(investigation_id: str) -> str:
 
 
 def _strategy_sha256(scenario: ScenarioName, mode: ScenarioMode) -> str:
+    bounded_hybrid_route = (
+        bounded_hybrid_route_for(scenario).value
+        if mode is ScenarioMode.ADAPTIVE
+        else None
+    )
     return hashlib.sha256(
         canonical_json_value_bytes(
             {
+                "bounded_hybrid_route": bounded_hybrid_route,
+                "bounded_hybrid_route_policy_version": (
+                    BOUNDED_HYBRID_ROUTE_POLICY_VERSION
+                    if mode is ScenarioMode.ADAPTIVE
+                    else None
+                ),
                 "mode": mode.value,
                 "scenario": scenario.value,
-                "version": "durable-scenario-strategy-v1",
+                "version": "durable-scenario-strategy-v2",
             }
         )
     ).hexdigest()
@@ -167,12 +191,18 @@ class _FixedScenarioExecutor:
         expectation,
         progress_emitter: ProgressEmitter | None,
         lane_recorder: Callable[[ScenarioLane, object], object] | None,
+        hybrid_route: ScenarioHybridRoute | None = None,
+        planner_invoked: bool = False,
+        provider_cleanup_failed: bool = False,
     ) -> None:
         self._scenario = scenario
         self._workspace = workspace
         self._expectation = expectation
         self._progress_emitter = progress_emitter
         self._lane_recorder = lane_recorder
+        self._hybrid_route = hybrid_route
+        self._planner_invoked = planner_invoked
+        self._provider_cleanup_failed = provider_cleanup_failed
 
     async def __call__(
         self,
@@ -199,7 +229,41 @@ class _FixedScenarioExecutor:
                 result,
             )
             await self._lane_recorder(ScenarioLane.FIXED, comparison)  # type: ignore[misc]
-        return await runtime.complete(result.report)
+        report = result.report
+        if self._hybrid_route is ScenarioHybridRoute.FIXED_AUTHORITATIVE:
+            report = mark_bounded_hybrid_deterministic_fixed(report)
+        elif self._hybrid_route is ScenarioHybridRoute.PLANNER_HETEROGENEOUS:
+            report = mark_bounded_hybrid_fixed_fallback(
+                report,
+                planner_invoked=self._planner_invoked,
+                provider_cleanup_failed=self._provider_cleanup_failed,
+            )
+        return await runtime.complete(report)
+
+
+class _PreProviderFallbackFixedScenarioExecutor(_FixedScenarioExecutor):
+    """Durable identity for fallback selected before any provider lane exists."""
+
+
+class _PostProviderFallbackFixedScenarioExecutor(_FixedScenarioExecutor):
+    """Durable identity for fallback that requires an intact provider ledger."""
+
+
+async def _close_advisory_planner(planner: AdvisoryPlanner) -> bool:
+    """Close an owned planner while retaining only a sanitized outcome."""
+
+    try:
+        closer = getattr(planner, "aclose", None)
+        if not callable(closer):
+            return True
+        closed = closer()
+        if inspect.isawaitable(closed):
+            await closed
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        return False
+    return True
 
 
 class _AdaptiveScenarioExecutor:
@@ -212,6 +276,8 @@ class _AdaptiveScenarioExecutor:
         expectation,
         progress_emitter: ProgressEmitter | None,
         lane_recorder: Callable[[ScenarioLane, object], object] | None,
+        fixed_fallback_enabled: bool = False,
+        prepared_planner: AdvisoryPlanner | None = None,
     ) -> None:
         self._scenario = scenario
         self._definition = definition
@@ -219,6 +285,16 @@ class _AdaptiveScenarioExecutor:
         self._expectation = expectation
         self._progress_emitter = progress_emitter
         self._lane_recorder = lane_recorder
+        self._fixed_fallback_enabled = fixed_fallback_enabled
+        self._prepared_planner = prepared_planner
+
+    async def aclose_unstarted(self) -> None:
+        """Close a prepared planner when the durable lane never invoked it."""
+
+        planner = self._prepared_planner
+        self._prepared_planner = None
+        if planner is not None:
+            await _close_advisory_planner(planner)
 
     async def __call__(
         self,
@@ -228,13 +304,17 @@ class _AdaptiveScenarioExecutor:
         cancellation_event: asyncio.Event,
         runtime: DurableExecutionContext,
     ) -> DurableExecutionOutcome:
-        planner = self._planner_factory(self._scenario)
-        durable_planner = DurableAdvisoryPlanner(
-            planner,
-            runtime,
-            estimated_cost_microunits=_PLANNER_CALL_COST_MICROUNITS,
-        )
+        planner = self._prepared_planner
+        self._prepared_planner = None
+        if planner is None:
+            planner = self._planner_factory(self._scenario)
+        close_failed = False
         try:
+            durable_planner: AdvisoryPlanner = DurableAdvisoryPlanner(
+                planner,
+                runtime,
+                estimated_cost_microunits=_PLANNER_CALL_COST_MICROUNITS,
+            )
             result = await self._definition.adaptive(
                 envelope,
                 durable_planner,
@@ -244,11 +324,9 @@ class _AdaptiveScenarioExecutor:
                 durability_observer=runtime,
             )
         finally:
-            closer = getattr(planner, "aclose", None)
-            if callable(closer):
-                closed = closer()
-                if hasattr(closed, "__await__"):
-                    await closed
+            close_failed = not await _close_advisory_planner(planner)
+            if close_failed and not self._fixed_fallback_enabled:
+                raise RuntimeError("advisory provider cleanup failed")
         if self._lane_recorder is not None:
             comparison = _adaptive_comparison_run(
                 self._scenario,
@@ -257,7 +335,31 @@ class _AdaptiveScenarioExecutor:
                 result,
             )
             await self._lane_recorder(ScenarioLane.ADAPTIVE, comparison)  # type: ignore[misc]
-        return await runtime.complete(result.report)
+        report = result.report
+        max_elapsed_ms = envelope.context.evidence_budget.max_elapsed_ms
+        if self._fixed_fallback_enabled and adaptive_result_requires_fixed_fallback(
+            result,
+            max_elapsed_ms=max_elapsed_ms,
+        ):
+            report = mark_bounded_hybrid_fixed_fallback(
+                report,
+                planner_invoked=True,
+                provider_cleanup_failed=close_failed,
+            )
+        elif self._fixed_fallback_enabled and adaptive_result_requires_explicit_unknown(
+            result,
+            max_elapsed_ms=max_elapsed_ms,
+        ):
+            report = mark_bounded_hybrid_explicit_unknown(
+                report,
+                provider_cleanup_failed=close_failed,
+            )
+        elif self._fixed_fallback_enabled:
+            report = mark_bounded_hybrid_advisory(
+                report,
+                provider_cleanup_failed=close_failed,
+            )
+        return await runtime.complete(report)
 
 
 class DurableScenarioWorkflow:
@@ -303,16 +405,26 @@ class DurableScenarioWorkflow:
         self._owner_id = owner_id
         self._clock = clock
 
-    def _runtime_provenance(self, mode: ScenarioMode) -> str:
+    def _runtime_provenance(
+        self,
+        scenario: ScenarioName,
+        mode: ScenarioMode,
+    ) -> str:
+        provider_calls_allowed = not (
+            mode is ScenarioMode.FIXED
+            or (
+                mode is ScenarioMode.ADAPTIVE
+                and bounded_hybrid_route_for(scenario)
+                is ScenarioHybridRoute.FIXED_AUTHORITATIVE
+            )
+        )
         return build_runtime_provenance(
             executor=self,
             cleanup=None,
             strategy=mode.value,
-            max_provider_calls=(
-                0 if mode is ScenarioMode.FIXED else _PLANNER_MAX_CALLS
-            ),
+            max_provider_calls=(_PLANNER_MAX_CALLS if provider_calls_allowed else 0),
             max_estimated_cost_microunits=(
-                0 if mode is ScenarioMode.FIXED else _PLANNER_MAX_CALLS
+                _PLANNER_MAX_CALLS if provider_calls_allowed else 0
             ),
             semantic_config_sha256=self._semantic_config_sha256,
         ).sha256
@@ -336,7 +448,8 @@ class DurableScenarioWorkflow:
         if (
             work.strategy_sha256 != _strategy_sha256(scenario, mode)
             or work.semantic_config_sha256 != self._semantic_config_sha256
-            or work.runtime_provenance_sha256 != self._runtime_provenance(mode)
+            or work.runtime_provenance_sha256
+            != self._runtime_provenance(scenario, mode)
             or work.workspace_id != _workspace_id(investigation_id)
         ):
             raise ValueError("scenario operational authority is incompatible")
@@ -383,7 +496,7 @@ class DurableScenarioWorkflow:
             scenario_request,
             strategy_sha256=_strategy_sha256(scenario, mode),
             semantic_config_sha256=self._semantic_config_sha256,
-            runtime_provenance_sha256=self._runtime_provenance(mode),
+            runtime_provenance_sha256=self._runtime_provenance(scenario, mode),
             workspace_id=workspace_id,
             invoked_at=snapshot.accepted_at,
             snapshot=snapshot,
@@ -712,7 +825,7 @@ class DurableScenarioWorkflow:
         authority: _ScenarioAuthority,
     ) -> Path:
         if (
-            work.runtime_provenance_sha256 != self._runtime_provenance(mode)
+            work.runtime_provenance_sha256 != self._runtime_provenance(scenario, mode)
             or work.strategy_sha256 != _strategy_sha256(scenario, mode)
             or work.semantic_config_sha256 != self._semantic_config_sha256
         ):
@@ -829,6 +942,7 @@ class DurableScenarioWorkflow:
         recovering: bool,
     ) -> ScenarioWorkflowResult:
         expectation = _expectation(scenario)
+        hybrid_route = bounded_hybrid_route_for(scenario)
 
         async def record_lane(lane: ScenarioLane, result) -> None:
             async with authority.hold() as token:
@@ -839,12 +953,30 @@ class DurableScenarioWorkflow:
                     occurred_at=self._clock(),
                 )
 
-        fixed_executor = _FixedScenarioExecutor(
+        hybrid_provider_missing = (
+            mode is ScenarioMode.ADAPTIVE
+            and hybrid_route is ScenarioHybridRoute.PLANNER_HETEROGENEOUS
+            and not self.provider_available
+        )
+        fixed_hybrid_route = None
+        if mode is ScenarioMode.ADAPTIVE:
+            if hybrid_route is ScenarioHybridRoute.FIXED_AUTHORITATIVE:
+                fixed_hybrid_route = hybrid_route
+            elif hybrid_route is ScenarioHybridRoute.PLANNER_HETEROGENEOUS:
+                fixed_hybrid_route = hybrid_route
+        fixed_executor_type = (
+            _PreProviderFallbackFixedScenarioExecutor
+            if mode is ScenarioMode.ADAPTIVE
+            and hybrid_route is ScenarioHybridRoute.PLANNER_HETEROGENEOUS
+            else _FixedScenarioExecutor
+        )
+        fixed_executor = fixed_executor_type(
             scenario=scenario,
             workspace=workspace,
             expectation=expectation,
             progress_emitter=progress_emitter,
             lane_recorder=(record_lane if mode is ScenarioMode.COMPARE else None),
+            hybrid_route=fixed_hybrid_route,
         )
         if mode is ScenarioMode.FIXED:
             return await self._run_lane(
@@ -856,6 +988,88 @@ class DurableScenarioWorkflow:
                 cancellation_event,
                 require_existing=False,
             )
+        if (
+            mode is ScenarioMode.ADAPTIVE
+            and hybrid_route is ScenarioHybridRoute.FIXED_AUTHORITATIVE
+        ):
+            return await self._run_lane(
+                work,
+                ScenarioLane.FIXED,
+                DurableExecutionStrategy.FIXED,
+                fixed_executor,
+                envelope,
+                cancellation_event,
+                require_existing=False,
+                started_at=work.invoked_at,
+            )
+        if (
+            mode is ScenarioMode.ADAPTIVE
+            and hybrid_route is ScenarioHybridRoute.PLANNER_HETEROGENEOUS
+            and recovering
+            and self._lane_path_present(work, ScenarioLane.FIXED)
+            and not self._lane_path_present(work, ScenarioLane.ADAPTIVE)
+        ):
+            return await self._run_lane(
+                work,
+                ScenarioLane.FIXED,
+                DurableExecutionStrategy.FIXED,
+                fixed_executor,
+                envelope,
+                cancellation_event,
+                require_existing=True,
+                started_at=work.invoked_at,
+            )
+        if hybrid_provider_missing and not recovering:
+            return await self._run_lane(
+                work,
+                ScenarioLane.FIXED,
+                DurableExecutionStrategy.FIXED,
+                fixed_executor,
+                envelope,
+                cancellation_event,
+                require_existing=False,
+                started_at=work.invoked_at,
+            )
+
+        prepared_planner = None
+        if mode is ScenarioMode.ADAPTIVE and not recovering:
+            planner_construction_failed = False
+            construction_cleanup_failed = False
+            try:
+                prepared_planner = self._planner_factory(scenario)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                planner_construction_failed = True
+            if prepared_planner is not None and not _planner_protocol_available(
+                prepared_planner
+            ):
+                construction_cleanup_failed = not await _close_advisory_planner(
+                    prepared_planner
+                )
+                prepared_planner = None
+                planner_construction_failed = True
+            if planner_construction_failed:
+                if construction_cleanup_failed:
+                    fixed_executor = _PreProviderFallbackFixedScenarioExecutor(
+                        scenario=scenario,
+                        workspace=workspace,
+                        expectation=expectation,
+                        progress_emitter=progress_emitter,
+                        lane_recorder=None,
+                        hybrid_route=ScenarioHybridRoute.PLANNER_HETEROGENEOUS,
+                        provider_cleanup_failed=True,
+                    )
+                return await self._run_lane(
+                    work,
+                    ScenarioLane.FIXED,
+                    DurableExecutionStrategy.FIXED,
+                    fixed_executor,
+                    envelope,
+                    cancellation_event,
+                    require_existing=False,
+                    started_at=work.invoked_at,
+                )
 
         adaptive_executor = _AdaptiveScenarioExecutor(
             scenario=scenario,
@@ -864,16 +1078,47 @@ class DurableScenarioWorkflow:
             expectation=expectation,
             progress_emitter=progress_emitter,
             lane_recorder=(record_lane if mode is ScenarioMode.COMPARE else None),
+            fixed_fallback_enabled=(mode is ScenarioMode.ADAPTIVE),
+            prepared_planner=prepared_planner,
         )
         if mode is ScenarioMode.ADAPTIVE:
+            try:
+                adaptive_report = await self._run_lane(
+                    work,
+                    ScenarioLane.ADAPTIVE,
+                    DurableExecutionStrategy.ADAPTIVE,
+                    adaptive_executor,
+                    envelope,
+                    cancellation_event,
+                    require_existing=recovering,
+                    started_at=work.invoked_at,
+                )
+            finally:
+                await adaptive_executor.aclose_unstarted()
+            if not is_bounded_hybrid_fixed_fallback(adaptive_report):
+                return adaptive_report
+            provenance = bounded_hybrid_route_provenance(adaptive_report)
+            if provenance is None:
+                raise DurableEscalationRequired(envelope.investigation_id)
+            fallback_executor = _PostProviderFallbackFixedScenarioExecutor(
+                scenario=scenario,
+                workspace=workspace,
+                expectation=expectation,
+                progress_emitter=progress_emitter,
+                lane_recorder=None,
+                hybrid_route=ScenarioHybridRoute.PLANNER_HETEROGENEOUS,
+                planner_invoked=provenance.planner_invoked,
+                provider_cleanup_failed=provenance.provider_cleanup_failure,
+            )
             return await self._run_lane(
                 work,
-                ScenarioLane.ADAPTIVE,
-                DurableExecutionStrategy.ADAPTIVE,
-                adaptive_executor,
+                ScenarioLane.FIXED,
+                DurableExecutionStrategy.FIXED,
+                fallback_executor,
                 envelope,
                 cancellation_event,
-                require_existing=recovering,
+                require_existing=False,
+                started_at=work.invoked_at,
             )
 
         await self._run_lane(
@@ -921,6 +1166,29 @@ class DurableScenarioWorkflow:
             adaptive=adaptive,
         )
 
+    def _lane_path(self, work: ScenarioWorkItem, lane: ScenarioLane) -> Path:
+        return (
+            self._workspace_root
+            / work.workspace_id
+            / f"runtime-{lane.value.lower()}.sqlite3"
+        )
+
+    def _lane_path_present(
+        self,
+        work: ScenarioWorkItem,
+        lane: ScenarioLane,
+    ) -> bool:
+        path = self._lane_path(work, lane)
+        try:
+            path.lstat()
+        except FileNotFoundError:
+            return False
+        except OSError:
+            raise DurableEscalationRequired(
+                work.scenario_request.investigation_id
+            ) from None
+        return True
+
     async def _run_lane(
         self,
         work: ScenarioWorkItem,
@@ -931,12 +1199,9 @@ class DurableScenarioWorkflow:
         cancellation_event: asyncio.Event | None,
         *,
         require_existing: bool,
+        started_at: datetime | None = None,
     ) -> InvestigationReport:
-        path = (
-            self._workspace_root
-            / work.workspace_id
-            / f"runtime-{lane.value.lower()}.sqlite3"
-        )
+        path = self._lane_path(work, lane)
         try:
             path_metadata = path.lstat()
         except FileNotFoundError:
@@ -992,7 +1257,7 @@ class DurableScenarioWorkflow:
             raise DurableEscalationRequired(envelope.investigation_id) from None
         try:
             await service.start()
-            await service.create(envelope)
+            await service.create(envelope, started_at=started_at)
             cursor = 0
             while True:
                 if cancellation_event is not None and cancellation_event.is_set():

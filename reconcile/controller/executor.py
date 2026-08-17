@@ -343,9 +343,16 @@ class ProbeController:
         *,
         clock: ControllerClock | None = None,
         durability_observer: ProbeDurabilityObserver | None = None,
+        elapsed_offset_ms: int = 0,
     ) -> None:
         envelope_payload = canonical_json_bytes(envelope)
         self._envelope = decode_contract(envelope_payload, ExecutionEnvelope)
+        if (
+            type(elapsed_offset_ms) is not int
+            or elapsed_offset_ms < 0
+            or elapsed_offset_ms > self._envelope.context.evidence_budget.max_elapsed_ms
+        ):
+            raise ValueError("controller elapsed offset is outside the evidence budget")
         self._envelope_sha256 = canonical_sha256(self._envelope)
         self._session_token = object()
         registry.freeze()
@@ -353,9 +360,12 @@ class ProbeController:
         self._clock = clock or _SystemClock()
         self._durability_observer = durability_observer
         self._started_monotonic = self._clock.monotonic()
-        self._elapsed_offset_ms = 0
+        self._elapsed_offset_ms = elapsed_offset_ms
         if durability_observer is not None:
-            self._elapsed_offset_ms = self._durable_elapsed_floor_ms()
+            self._elapsed_offset_ms = max(
+                self._elapsed_offset_ms,
+                self._durable_elapsed_floor_ms(),
+            )
         self._target_sha256 = hashlib.sha256(
             canonical_json_bytes(self._envelope.target)
         ).hexdigest()
@@ -542,7 +552,10 @@ class ProbeController:
         local_elapsed_ms = self._local_elapsed_ms()
         observer = self._durability_observer
         if observer is None:
-            return local_elapsed_ms
+            return min(
+                self._elapsed_offset_ms + local_elapsed_ms,
+                self._envelope.context.evidence_budget.max_elapsed_ms,
+            )
         floor = self._durable_elapsed_floor_ms()
         self._elapsed_offset_ms = max(
             self._elapsed_offset_ms,

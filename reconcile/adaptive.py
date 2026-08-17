@@ -1785,9 +1785,7 @@ async def execute_adaptive_investigation(
                 metadata=configured_metadata,
             )
         except (TypeError, ValueError):
-            stop_reason = AdaptiveStopReason.PLANNER_SCHEMA_INVALID
-            planner_failed = True
-            break
+            raise RuntimeError("adaptive planner input construction failed") from None
         input_sha256 = hashlib.sha256(canonical_json_bytes(planner_input)).hexdigest()
         sequence = len(turns) + 1
         _emit_advisory_requested(

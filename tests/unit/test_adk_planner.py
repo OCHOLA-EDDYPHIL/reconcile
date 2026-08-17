@@ -416,6 +416,10 @@ def test_structured_success_uses_one_stateless_tool_free_adk_turn() -> None:
         model = _FakeLlm(model="fake-model", responses=(_response(_valid_text()),))
         planner = _planner(model, service=service)
         planner_input = _planner_input(planner)
+        assert planner_input.admitted_evidence
+        assert planner_input.weak_evidence
+        assert planner_input.rejected_evidence
+        assert planner_input.missing_evidence
 
         async with planner:
             turn = await planner.plan(planner_input)
@@ -448,6 +452,10 @@ def test_structured_success_uses_one_stateless_tool_free_adk_turn() -> None:
             assert request.tools_dict == {}
             assert len(request.contents) == 1
             assert request.contents[0].role == "user"
+            parts = request.contents[0].parts
+            assert parts is not None
+            assert len(parts) == 1
+            assert parts[0].text == canonical_json_bytes(planner_input).decode("utf-8")
             assert request.config.response_mime_type == "application/json"
             assert request.config.response_schema is not None
             assert request.config.candidate_count == 1

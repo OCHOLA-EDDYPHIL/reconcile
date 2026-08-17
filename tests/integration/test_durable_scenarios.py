@@ -11,11 +11,14 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
+import reconcile.adaptive as adaptive_module
 import reconcile.durable_scenarios as durable_scenarios_module
+from reconcile.adaptive import AdvisoryPlannerTurn, PlannerFailureKind
 from reconcile.contracts import (
     SCENARIO_LAUNCH_REQUEST_VERSION,
     SCENARIO_RUN_EVENT_VERSION,
     SCENARIO_RUN_SNAPSHOT_VERSION,
+    AdaptivePlannerInput,
     AdaptivePlannerPhase,
     AdvisoryTurnEventPayload,
     AdvisoryTurnFailureCategory,
@@ -24,8 +27,11 @@ from reconcile.contracts import (
     Classification,
     ComparisonStrategyKind,
     EnvelopeSummaryEventPayload,
+    InvestigationReport,
     InvestigationStatus,
     ProbeRequestEventPayload,
+    ScenarioHybridOutcome,
+    ScenarioHybridRoute,
     ScenarioLaunchName,
     ScenarioLaunchRequest,
     ScenarioLifecycleEventPayload,
@@ -79,6 +85,10 @@ from reconcile.scenarios.firestore_business import (
 from reconcile.scenarios.runner import ScenarioRunner
 from reconcile.scenarios.sandbox_order import SANDBOX_ORDER_FIXED_PROBE_PLAN
 from reconcile.scenarios.service import (
+    BOUNDED_HYBRID_ADVISORY_PROVENANCE,
+    BOUNDED_HYBRID_EXPLICIT_UNKNOWN_PROVENANCE,
+    BOUNDED_HYBRID_FIXED_PROVENANCE,
+    BOUNDED_HYBRID_PROVIDER_CLEANUP_PROVENANCE,
     ScenarioMode,
     ScenarioName,
     ScenarioWorkflowError,
@@ -86,6 +96,9 @@ from reconcile.scenarios.service import (
     _definition,
     _envelope_summary,
     _seed_sandbox_fixture,
+    bounded_hybrid_route_provenance,
+    is_bounded_hybrid_explicit_unknown,
+    is_bounded_hybrid_fixed_fallback,
 )
 from reconcile.scenarios.storage import STORAGE_FIXED_PROBE_PLAN
 from tests.contract._factories import make_comparison_record, make_envelope, make_report
@@ -415,6 +428,7 @@ def test_real_fixed_operator_scenarios_use_durable_parent_and_lane(
         await service.aclose()
 
         assert terminal.lifecycle is ScenarioRunLifecycle.COMPLETED
+        assert work.workflow_result is not None
         assert terminal.report is not None
         assert work.mutation_state is ScenarioMutationState.RECORDED
         assert work.investigation_state is ScenarioInvestigationState.RECORDED
@@ -681,13 +695,12 @@ def test_spontaneously_cancelled_child_surfaces_without_parent_cleanup(
     asyncio.run(exercise())
 
 
-@pytest.mark.parametrize(("scenario", "proposals"), _SCENARIO_PROPOSALS)
 def test_real_adaptive_scenario_precharges_every_planner_turn(
     tmp_path: Path,
-    scenario: ScenarioLaunchName,
-    proposals,
 ) -> None:
     async def exercise() -> None:
+        scenario = ScenarioLaunchName.SANDBOX_ORDER
+        proposals = tuple(step.request for step in SANDBOX_ORDER_FIXED_PROBE_PLAN.steps)
         os.chmod(tmp_path, 0o700)
         workspace_root = tmp_path / "workspaces"
         workspace_root.mkdir(mode=0o700)
@@ -723,6 +736,16 @@ def test_real_adaptive_scenario_precharges_every_planner_turn(
         await service.aclose()
 
         assert terminal.lifecycle is ScenarioRunLifecycle.COMPLETED
+        assert work.workflow_result is not None
+        assert BOUNDED_HYBRID_ADVISORY_PROVENANCE in work.workflow_result.limitations
+        assert terminal.report is not None
+        assert terminal.report.route_provenance is not None
+        assert terminal.report.route_provenance.route is (
+            ScenarioHybridRoute.PLANNER_HETEROGENEOUS
+        )
+        assert terminal.report.route_provenance.outcome is (
+            ScenarioHybridOutcome.PLANNER_EVIDENCE
+        )
         lane_path = workspace_root / work.workspace_id / "runtime-adaptive.sqlite3"
         lane_store = SqliteDurableRuntimeStore(lane_path)
         receipts = await lane_store.provider_call_receipts(
@@ -741,6 +764,406 @@ def test_real_adaptive_scenario_precharges_every_planner_turn(
         )
         assert len({receipt.call_id for receipt in receipts}) == len(receipts)
         assert all(receipt.call_id.startswith("planner-") for receipt in receipts)
+
+    asyncio.run(exercise())
+
+
+@pytest.mark.parametrize(
+    "scenario",
+    (ScenarioLaunchName.STORAGE, ScenarioLaunchName.FIRESTORE_BUSINESS),
+)
+def test_adaptive_authoritative_routes_never_construct_a_planner(
+    tmp_path: Path,
+    scenario: ScenarioLaunchName,
+) -> None:
+    async def exercise() -> None:
+        os.chmod(tmp_path, 0o700)
+        workspace_root = tmp_path / "workspaces"
+        workspace_root.mkdir(mode=0o700)
+        store = SqliteScenarioStore(tmp_path / "parent.sqlite3")
+        planner_factories = 0
+
+        def planner_factory(_scenario):
+            nonlocal planner_factories
+            planner_factories += 1
+            raise AssertionError("authoritative routes cannot construct a planner")
+
+        workflow = DurableScenarioWorkflow(
+            store,
+            workspace_root,
+            semantic_config_sha256="a" * 64,
+            planner_factory=planner_factory,
+        )
+        service = OperatorApplicationService(runner=workflow, projection_store=store)
+        await service.start()
+        launch = ScenarioLaunchRequest(
+            schema_version=SCENARIO_LAUNCH_REQUEST_VERSION,
+            launch_id=f"durable-authoritative-{scenario.value}",
+            scenario=scenario,
+            mode=ScenarioRunMode.ADAPTIVE,
+        )
+        created = await service.launch(launch)
+        terminal = await _terminal(service, created.snapshot.investigation_id)
+        work = await store.get_work(created.snapshot.investigation_id)
+        await service.aclose()
+
+        lane_root = workspace_root / work.workspace_id
+        assert terminal.lifecycle is ScenarioRunLifecycle.COMPLETED
+        assert planner_factories == 0
+        assert work.workflow_result is not None
+        assert BOUNDED_HYBRID_FIXED_PROVENANCE in work.workflow_result.limitations
+        assert terminal.report is not None
+        assert terminal.report.route_provenance is not None
+        assert terminal.report.route_provenance.route is (
+            ScenarioHybridRoute.FIXED_AUTHORITATIVE
+        )
+        assert (lane_root / "runtime-fixed.sqlite3").is_file()
+        assert not (lane_root / "runtime-adaptive.sqlite3").exists()
+
+    asyncio.run(exercise())
+
+
+@pytest.mark.parametrize(
+    "failure_kind",
+    ("missing", "factory", "protocol", "dispatch"),
+)
+def test_sandbox_adaptive_provider_failure_uses_separate_fixed_fallback_lane(
+    tmp_path: Path,
+    failure_kind: str,
+) -> None:
+    async def exercise() -> None:
+        os.chmod(tmp_path, 0o700)
+        workspace_root = tmp_path / "workspaces"
+        workspace_root.mkdir(mode=0o700)
+        store = SqliteScenarioStore(tmp_path / "parent.sqlite3")
+        planner_factory = None
+        invalid_planners = []
+        if failure_kind == "factory":
+
+            def planner_factory(_scenario):
+                raise RuntimeError("private provider construction detail")
+
+        elif failure_kind == "protocol":
+
+            class InvalidPlanner:
+                closed = False
+
+                @property
+                def metadata(self):
+                    return object()
+
+                async def plan(self, planner_input):
+                    del planner_input
+                    raise AssertionError("invalid planner cannot be invoked")
+
+                async def aclose(self):
+                    self.closed = True
+
+            def invalid_factory(_scenario):
+                planner = InvalidPlanner()
+                invalid_planners.append(planner)
+                return planner
+
+            planner_factory = invalid_factory
+
+        elif failure_kind == "dispatch":
+
+            class UnavailablePlanner(_ScriptedPlanner):
+                async def plan(self, planner_input):
+                    del planner_input
+                    raise RuntimeError("private provider dispatch detail")
+
+            def unavailable_factory(_scenario):
+                return UnavailablePlanner(())
+
+            planner_factory = unavailable_factory
+
+        workflow = DurableScenarioWorkflow(
+            store,
+            workspace_root,
+            semantic_config_sha256="f" * 64,
+            planner_factory=planner_factory,
+        )
+        service = OperatorApplicationService(runner=workflow, projection_store=store)
+        await service.start()
+        launch = ScenarioLaunchRequest(
+            schema_version=SCENARIO_LAUNCH_REQUEST_VERSION,
+            launch_id=f"durable-fallback-{failure_kind}",
+            scenario=ScenarioLaunchName.SANDBOX_ORDER,
+            mode=ScenarioRunMode.ADAPTIVE,
+        )
+        created = await service.launch(launch)
+        terminal = await _terminal(service, created.snapshot.investigation_id)
+        journal = await service.snapshot(created.snapshot.investigation_id)
+        work = await store.get_work(created.snapshot.investigation_id)
+        await service.aclose()
+
+        assert terminal.lifecycle is ScenarioRunLifecycle.COMPLETED
+        assert terminal.report is not None
+        assert terminal.report.classification is Classification.UNKNOWN
+        assert terminal.report.route_provenance is not None
+        assert terminal.report.route_provenance.outcome is (
+            ScenarioHybridOutcome.FIXED_FALLBACK
+        )
+        assert terminal.report.route_provenance.planner_invoked is (
+            failure_kind == "dispatch"
+        )
+        assert work.workflow_result is not None
+        assert is_bounded_hybrid_fixed_fallback(work.workflow_result)
+        lane_root = workspace_root / work.workspace_id
+        assert (lane_root / "runtime-fixed.sqlite3").is_file()
+        if failure_kind in {"missing", "factory", "protocol"}:
+            assert not (lane_root / "runtime-adaptive.sqlite3").exists()
+        else:
+            assert (lane_root / "runtime-adaptive.sqlite3").is_file()
+        fixed_requests = tuple(
+            event
+            for event in journal.events
+            if isinstance(event.payload, ProbeRequestEventPayload)
+            and event.payload.strategy is ComparisonStrategyKind.FIXED
+        )
+        assert len(fixed_requests) == len(SANDBOX_ORDER_FIXED_PROBE_PLAN.steps)
+        advisory_failures = tuple(
+            event
+            for event in journal.events
+            if isinstance(event.payload, AdvisoryTurnEventPayload)
+            and event.payload.turn.status is AdvisoryTurnStatus.FAILED
+        )
+        assert bool(advisory_failures) is (failure_kind == "dispatch")
+        if failure_kind == "protocol":
+            assert len(invalid_planners) == 1
+            assert invalid_planners[0].closed
+
+    asyncio.run(exercise())
+
+
+def test_late_durable_provider_failure_stops_unknown_without_budget_reset(
+    tmp_path: Path,
+) -> None:
+    async def exercise() -> None:
+        os.chmod(tmp_path, 0o700)
+        workspace_root = tmp_path / "workspaces"
+        workspace_root.mkdir(mode=0o700)
+        store = SqliteScenarioStore(tmp_path / "parent.sqlite3")
+        first_request = SANDBOX_ORDER_FIXED_PROBE_PLAN.steps[0].request
+        planners: list[_ScriptedPlanner] = []
+
+        class LateFailurePlanner(_ScriptedPlanner):
+            async def plan(
+                self,
+                planner_input: AdaptivePlannerInput,
+            ) -> AdvisoryPlannerTurn:
+                if not self.inputs:
+                    return await super().plan(planner_input)
+                payload = canonical_json_bytes(planner_input)
+                self.inputs.append(planner_input)
+                self.input_bytes.append(payload)
+                return AdvisoryPlannerTurn(
+                    output=None,
+                    failure=PlannerFailureKind.UNAVAILABLE,
+                    metadata=self.metadata,
+                    input_sha256=hashlib.sha256(payload).hexdigest(),
+                    output_sha256=None,
+                    usage=None,
+                )
+
+        def planner_factory(_scenario):
+            planner = LateFailurePlanner((first_request,))
+            planners.append(planner)
+            return planner
+
+        workflow = DurableScenarioWorkflow(
+            store,
+            workspace_root,
+            semantic_config_sha256="1" * 64,
+            planner_factory=planner_factory,
+        )
+        service = OperatorApplicationService(runner=workflow, projection_store=store)
+        await service.start()
+        launch = ScenarioLaunchRequest(
+            schema_version=SCENARIO_LAUNCH_REQUEST_VERSION,
+            launch_id="durable-late-provider-failure",
+            scenario=ScenarioLaunchName.SANDBOX_ORDER,
+            mode=ScenarioRunMode.ADAPTIVE,
+        )
+        created = await service.launch(launch)
+        terminal = await _terminal(service, created.snapshot.investigation_id)
+        journal = await service.snapshot(created.snapshot.investigation_id)
+        work = await store.get_work(created.snapshot.investigation_id)
+        await service.aclose()
+
+        assert terminal.lifecycle is ScenarioRunLifecycle.COMPLETED
+        assert terminal.report is not None
+        assert terminal.report.classification is Classification.UNKNOWN
+        assert terminal.report.route_provenance is not None
+        assert terminal.report.route_provenance.outcome is (
+            ScenarioHybridOutcome.EXPLICIT_UNKNOWN
+        )
+        assert work.workflow_result is not None
+        assert is_bounded_hybrid_explicit_unknown(work.workflow_result)
+        assert BOUNDED_HYBRID_EXPLICIT_UNKNOWN_PROVENANCE in (
+            work.workflow_result.limitations
+        )
+        lane_root = workspace_root / work.workspace_id
+        adaptive_path = lane_root / "runtime-adaptive.sqlite3"
+        assert adaptive_path.is_file()
+        assert not (lane_root / "runtime-fixed.sqlite3").exists()
+        lane_store = SqliteDurableRuntimeStore(adaptive_path)
+        checkpoints = await lane_store.probe_checkpoints(
+            created.snapshot.investigation_id
+        )
+        receipts = await lane_store.provider_call_receipts(
+            created.snapshot.investigation_id
+        )
+        assert len(planners) == 1
+        assert len(planners[0].inputs) == len(receipts) == 2
+        assert len(checkpoints) == 1
+        assert work.scenario_result is not None
+        assert work.scenario_result.execution_envelope is not None
+        assert len(checkpoints) <= (
+            work.scenario_result.execution_envelope.context.evidence_budget.max_probes
+        )
+        fixed_requests = tuple(
+            event
+            for event in journal.events
+            if isinstance(event.payload, ProbeRequestEventPayload)
+            and event.payload.strategy is ComparisonStrategyKind.FIXED
+        )
+        assert fixed_requests == ()
+
+    asyncio.run(exercise())
+
+
+def test_late_trusted_input_failure_escalates_without_fixed_fallback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def exercise() -> None:
+        os.chmod(tmp_path, 0o700)
+        workspace_root = tmp_path / "workspaces"
+        workspace_root.mkdir(mode=0o700)
+        store = SqliteScenarioStore(tmp_path / "parent.sqlite3")
+        first_request = SANDBOX_ORDER_FIXED_PROBE_PLAN.steps[0].request
+        original_input = adaptive_module._planner_input
+        input_calls = 0
+
+        def fail_second_input(*args, **kwargs):
+            nonlocal input_calls
+            input_calls += 1
+            if input_calls == 2:
+                raise ValueError("private trusted input construction detail")
+            return original_input(*args, **kwargs)
+
+        monkeypatch.setattr(adaptive_module, "_planner_input", fail_second_input)
+        workflow = DurableScenarioWorkflow(
+            store,
+            workspace_root,
+            semantic_config_sha256="6" * 64,
+            planner_factory=lambda _scenario: _ScriptedPlanner((first_request,)),
+        )
+        service = OperatorApplicationService(runner=workflow, projection_store=store)
+        await service.start()
+        launch = ScenarioLaunchRequest(
+            schema_version=SCENARIO_LAUNCH_REQUEST_VERSION,
+            launch_id="late-trusted-input-failure",
+            scenario=ScenarioLaunchName.SANDBOX_ORDER,
+            mode=ScenarioRunMode.ADAPTIVE,
+        )
+        created = await service.launch(launch)
+        terminal = await _terminal(service, created.snapshot.investigation_id)
+        work = await store.get_work(created.snapshot.investigation_id)
+        await service.aclose()
+
+        assert terminal.lifecycle is ScenarioRunLifecycle.FAILED
+        assert terminal.failure_category is (
+            ScenarioRunFailureCategory.SCENARIO_EXECUTION_FAILED
+        )
+        assert work.workflow_result is None
+        assert (
+            work.investigation_state is ScenarioInvestigationState.ESCALATION_REQUIRED
+        )
+        lane_root = workspace_root / work.workspace_id
+        adaptive_path = lane_root / "runtime-adaptive.sqlite3"
+        assert adaptive_path.is_file()
+        assert not (lane_root / "runtime-fixed.sqlite3").exists()
+        lane_store = SqliteDurableRuntimeStore(adaptive_path)
+        assert (
+            len(
+                await lane_store.provider_call_receipts(
+                    created.snapshot.investigation_id
+                )
+            )
+            == 1
+        )
+        assert (
+            len(await lane_store.probe_checkpoints(created.snapshot.investigation_id))
+            == 1
+        )
+
+    asyncio.run(exercise())
+
+
+@pytest.mark.parametrize("failure_surface", ("call", "attribute"))
+def test_durable_provider_cleanup_failure_preserves_established_result(
+    tmp_path: Path,
+    failure_surface: str,
+) -> None:
+    async def exercise() -> None:
+        os.chmod(tmp_path, 0o700)
+        workspace_root = tmp_path / "workspaces"
+        workspace_root.mkdir(mode=0o700)
+        store = SqliteScenarioStore(tmp_path / "parent.sqlite3")
+
+        class CleanupFailurePlanner(_ScriptedPlanner):
+            async def aclose(self) -> None:
+                raise RuntimeError("private provider cleanup detail")
+
+        class CleanupAttributeFailurePlanner(_ScriptedPlanner):
+            @property
+            def aclose(self):
+                raise RuntimeError("private provider cleanup descriptor detail")
+
+        planner_type = (
+            CleanupFailurePlanner
+            if failure_surface == "call"
+            else CleanupAttributeFailurePlanner
+        )
+
+        workflow = DurableScenarioWorkflow(
+            store,
+            workspace_root,
+            semantic_config_sha256="2" * 64,
+            planner_factory=lambda _scenario: planner_type(
+                tuple(step.request for step in SANDBOX_ORDER_FIXED_PROBE_PLAN.steps)
+            ),
+        )
+        service = OperatorApplicationService(runner=workflow, projection_store=store)
+        await service.start()
+        launch = ScenarioLaunchRequest(
+            schema_version=SCENARIO_LAUNCH_REQUEST_VERSION,
+            launch_id=f"durable-provider-cleanup-failure-{failure_surface}",
+            scenario=ScenarioLaunchName.SANDBOX_ORDER,
+            mode=ScenarioRunMode.ADAPTIVE,
+        )
+        created = await service.launch(launch)
+        terminal = await _terminal(service, created.snapshot.investigation_id)
+        work = await store.get_work(created.snapshot.investigation_id)
+        await service.aclose()
+
+        assert terminal.lifecycle is ScenarioRunLifecycle.COMPLETED
+        assert terminal.report is not None
+        assert terminal.report.route_provenance is not None
+        assert terminal.report.route_provenance.outcome is (
+            ScenarioHybridOutcome.PLANNER_EVIDENCE
+        )
+        assert terminal.report.route_provenance.provider_cleanup_failure
+        assert work.workflow_result is not None
+        assert BOUNDED_HYBRID_PROVIDER_CLEANUP_PROVENANCE in (
+            work.workflow_result.limitations
+        )
+        lane_root = workspace_root / work.workspace_id
+        assert (lane_root / "runtime-adaptive.sqlite3").is_file()
+        assert not (lane_root / "runtime-fixed.sqlite3").exists()
 
     asyncio.run(exercise())
 
@@ -1132,7 +1555,7 @@ def test_adaptive_restart_balances_precharged_open_advisory_before_escalation(
         launch = ScenarioLaunchRequest(
             schema_version=SCENARIO_LAUNCH_REQUEST_VERSION,
             launch_id="adaptive-precharge-restart",
-            scenario=ScenarioLaunchName.STORAGE,
+            scenario=ScenarioLaunchName.SANDBOX_ORDER,
             mode=ScenarioRunMode.ADAPTIVE,
         )
         created = await first.launch(launch)
@@ -2115,6 +2538,281 @@ def test_fixed_recovery_may_start_missing_safe_read_lane(
     asyncio.run(exercise())
 
 
+def test_providerless_sandbox_recovery_without_route_lane_fails_closed(
+    tmp_path: Path,
+) -> None:
+    async def exercise() -> None:
+        os.chmod(tmp_path, 0o700)
+        workspace_root = tmp_path / "workspaces"
+        workspace_root.mkdir(mode=0o700)
+        store = SqliteScenarioStore(tmp_path / "parent.sqlite3")
+        workflow = DurableScenarioWorkflow(
+            store,
+            workspace_root,
+            semantic_config_sha256="3" * 64,
+        )
+        bound = await _bind(
+            workflow,
+            launch_id="providerless-recovery-without-route-lane",
+            scenario=ScenarioLaunchName.SANDBOX_ORDER,
+            mode=ScenarioRunMode.ADAPTIVE,
+        )
+        await _record_mutation_and_start_investigation(
+            store,
+            workspace_root,
+            bound,
+        )
+        investigation_id = bound.work.scenario_request.investigation_id
+        before = await store.get_work(investigation_id)
+        assert before.scenario_result is not None
+        scenario_result_bytes = canonical_json_bytes(before.scenario_result)
+
+        service = OperatorApplicationService(runner=workflow, projection_store=store)
+        await service.start()
+        terminal = await _terminal(service, investigation_id)
+        recovered = await store.get_work(investigation_id)
+        await service.aclose()
+
+        assert terminal.lifecycle is ScenarioRunLifecycle.FAILED
+        assert terminal.failure_category is (
+            ScenarioRunFailureCategory.SCENARIO_EXECUTION_FAILED
+        )
+        assert recovered.scenario_result is not None
+        assert canonical_json_bytes(recovered.scenario_result) == scenario_result_bytes
+        assert recovered.workflow_result is None
+        assert (
+            recovered.investigation_state
+            is ScenarioInvestigationState.ESCALATION_REQUIRED
+        )
+        assert recovered.recovery_failure_code == "durable-lane-escalation-required"
+        lane_root = workspace_root / recovered.workspace_id
+        assert not (lane_root / "runtime-fixed.sqlite3").exists()
+        assert not (lane_root / "runtime-adaptive.sqlite3").exists()
+
+    asyncio.run(exercise())
+
+
+def test_construction_fallback_recovery_resumes_existing_fixed_lane(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def exercise() -> None:
+        os.chmod(tmp_path, 0o700)
+        workspace_root = tmp_path / "workspaces"
+        workspace_root.mkdir(mode=0o700)
+        store = SqliteScenarioStore(tmp_path / "parent.sqlite3")
+
+        def unavailable_factory(_scenario):
+            raise RuntimeError("private provider construction detail")
+
+        first_workflow = DurableScenarioWorkflow(
+            store,
+            workspace_root,
+            semantic_config_sha256="3" * 64,
+            planner_factory=unavailable_factory,
+        )
+        bound = await _bind(
+            first_workflow,
+            launch_id="construction-fixed-fallback-recovery",
+            scenario=ScenarioLaunchName.SANDBOX_ORDER,
+            mode=ScenarioRunMode.ADAPTIVE,
+        )
+        original_record = store.record_workflow_result
+
+        async def interrupt_parent_record(*args, **kwargs):
+            del args, kwargs
+            raise RuntimeError("injected parent record interruption")
+
+        monkeypatch.setattr(store, "record_workflow_result", interrupt_parent_record)
+        with pytest.raises(RuntimeError, match="parent record interruption"):
+            await first_workflow(
+                ScenarioName.SANDBOX_ORDER,
+                ScenarioMode.ADAPTIVE,
+                vertex_config=None,
+                run_id="construction-fixed-fallback-recovery",
+                progress_callback=None,
+                cancellation_event=None,
+            )
+        monkeypatch.setattr(store, "record_workflow_result", original_record)
+
+        interrupted = await store.get_work(bound.work.scenario_request.investigation_id)
+        lane_root = workspace_root / interrupted.workspace_id
+        assert interrupted.workflow_result is None
+        assert (lane_root / "runtime-fixed.sqlite3").is_file()
+        assert not (lane_root / "runtime-adaptive.sqlite3").exists()
+
+        planner_constructions = 0
+
+        def unexpected_factory(_scenario):
+            nonlocal planner_constructions
+            planner_constructions += 1
+            raise AssertionError("fixed fallback recovery cannot construct a planner")
+
+        second_workflow = DurableScenarioWorkflow(
+            store,
+            workspace_root,
+            semantic_config_sha256="3" * 64,
+            planner_factory=unexpected_factory,
+        )
+        report = await second_workflow(
+            ScenarioName.SANDBOX_ORDER,
+            ScenarioMode.ADAPTIVE,
+            vertex_config=None,
+            run_id="construction-fixed-fallback-recovery",
+            progress_callback=None,
+            cancellation_event=None,
+        )
+        recovered = await store.get_work(bound.work.scenario_request.investigation_id)
+
+        assert type(report) is InvestigationReport
+        provenance = bounded_hybrid_route_provenance(report)
+        assert provenance is not None
+        assert provenance.outcome is ScenarioHybridOutcome.FIXED_FALLBACK
+        assert not provenance.planner_invoked
+        assert planner_constructions == 0
+        assert recovered.workflow_result == report
+        assert recovered.cleanup_status is CleanupStatus.SUCCEEDED
+
+    asyncio.run(exercise())
+
+
+def test_missing_adaptive_ledger_cannot_be_relabelled_as_predispatch_fallback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def exercise() -> None:
+        os.chmod(tmp_path, 0o700)
+        workspace_root = tmp_path / "workspaces"
+        workspace_root.mkdir(mode=0o700)
+        store = SqliteScenarioStore(tmp_path / "parent.sqlite3")
+
+        class UnavailablePlanner(_ScriptedPlanner):
+            async def plan(self, planner_input):
+                del planner_input
+                raise RuntimeError("private provider dispatch detail")
+
+        def planner_factory(_scenario):
+            return UnavailablePlanner(())
+
+        first_workflow = DurableScenarioWorkflow(
+            store,
+            workspace_root,
+            semantic_config_sha256="4" * 64,
+            planner_factory=planner_factory,
+        )
+        bound = await _bind(
+            first_workflow,
+            launch_id="missing-adaptive-ledger",
+            scenario=ScenarioLaunchName.SANDBOX_ORDER,
+            mode=ScenarioRunMode.ADAPTIVE,
+        )
+        original_record = store.record_workflow_result
+
+        async def interrupt_parent_record(*args, **kwargs):
+            del args, kwargs
+            raise RuntimeError("injected parent record interruption")
+
+        monkeypatch.setattr(store, "record_workflow_result", interrupt_parent_record)
+        with pytest.raises(RuntimeError, match="parent record interruption"):
+            await first_workflow(
+                ScenarioName.SANDBOX_ORDER,
+                ScenarioMode.ADAPTIVE,
+                vertex_config=None,
+                run_id="missing-adaptive-ledger",
+                progress_callback=None,
+                cancellation_event=None,
+            )
+        monkeypatch.setattr(store, "record_workflow_result", original_record)
+
+        interrupted = await store.get_work(bound.work.scenario_request.investigation_id)
+        lane_root = workspace_root / interrupted.workspace_id
+        fixed_path = lane_root / "runtime-fixed.sqlite3"
+        adaptive_path = lane_root / "runtime-adaptive.sqlite3"
+        assert fixed_path.is_file()
+        assert adaptive_path.is_file()
+        adaptive_path.unlink()
+
+        second_workflow = DurableScenarioWorkflow(
+            store,
+            workspace_root,
+            semantic_config_sha256="4" * 64,
+            planner_factory=planner_factory,
+        )
+        with pytest.raises(ScenarioWorkflowError) as captured:
+            await second_workflow(
+                ScenarioName.SANDBOX_ORDER,
+                ScenarioMode.ADAPTIVE,
+                vertex_config=None,
+                run_id="missing-adaptive-ledger",
+                progress_callback=None,
+                cancellation_event=None,
+            )
+        recovered = await store.get_work(bound.work.scenario_request.investigation_id)
+
+        assert captured.value.category is (
+            ScenarioWorkflowErrorCategory.SCENARIO_EXECUTION_FAILED
+        )
+        assert recovered.workflow_result is None
+        assert (
+            recovered.investigation_state
+            is ScenarioInvestigationState.ESCALATION_REQUIRED
+        )
+        assert recovered.recovery_failure_code == "durable-lane-escalation-required"
+
+    asyncio.run(exercise())
+
+
+def test_hybrid_durable_lanes_share_one_elapsed_budget_origin(tmp_path: Path) -> None:
+    async def exercise() -> None:
+        os.chmod(tmp_path, 0o700)
+        workspace_root = tmp_path / "workspaces"
+        workspace_root.mkdir(mode=0o700)
+        store = SqliteScenarioStore(tmp_path / "parent.sqlite3")
+
+        class SlowUnavailablePlanner(_ScriptedPlanner):
+            async def plan(self, planner_input):
+                del planner_input
+                await asyncio.sleep(0.05)
+                raise RuntimeError("private provider dispatch detail")
+
+        workflow = DurableScenarioWorkflow(
+            store,
+            workspace_root,
+            semantic_config_sha256="5" * 64,
+            planner_factory=lambda _scenario: SlowUnavailablePlanner(()),
+        )
+        service = OperatorApplicationService(runner=workflow, projection_store=store)
+        await service.start()
+        launch = ScenarioLaunchRequest(
+            schema_version=SCENARIO_LAUNCH_REQUEST_VERSION,
+            launch_id="hybrid-shared-elapsed-budget",
+            scenario=ScenarioLaunchName.SANDBOX_ORDER,
+            mode=ScenarioRunMode.ADAPTIVE,
+        )
+        created = await service.launch(launch)
+        terminal = await _terminal(service, created.snapshot.investigation_id)
+        work = await store.get_work(created.snapshot.investigation_id)
+        await service.aclose()
+
+        assert terminal.report is not None
+        assert terminal.report.route_provenance is not None
+        assert terminal.report.route_provenance.outcome is (
+            ScenarioHybridOutcome.FIXED_FALLBACK
+        )
+        assert terminal.report.probe_audit[0].session_elapsed_ms >= 40
+        assert terminal.report.probe_audit[-1].session_elapsed_ms <= 5_000
+        lane_root = workspace_root / work.workspace_id
+        adaptive_run = await SqliteDurableRuntimeStore(
+            lane_root / "runtime-adaptive.sqlite3"
+        ).get_run(created.snapshot.investigation_id)
+        fixed_run = await SqliteDurableRuntimeStore(
+            lane_root / "runtime-fixed.sqlite3"
+        ).get_run(created.snapshot.investigation_id)
+        assert adaptive_run.created_at == fixed_run.created_at == work.invoked_at
+
+    asyncio.run(exercise())
+
+
 def test_adaptive_recovery_without_existing_lane_fails_closed(
     tmp_path: Path,
 ) -> None:
@@ -2127,7 +2825,7 @@ def test_adaptive_recovery_without_existing_lane_fails_closed(
         def planner_factory(_scenario):
             nonlocal planner_dispatches
             planner_dispatches += 1
-            return _ScriptedPlanner((STORAGE_FIXED_PROBE_PLAN.steps[0].request,))
+            return _ScriptedPlanner((SANDBOX_ORDER_FIXED_PROBE_PLAN.steps[0].request,))
 
         store = SqliteScenarioStore(tmp_path / "parent.sqlite3")
         workflow = DurableScenarioWorkflow(
@@ -2139,6 +2837,7 @@ def test_adaptive_recovery_without_existing_lane_fails_closed(
         bound = await _bind(
             workflow,
             launch_id="adaptive-boundary",
+            scenario=ScenarioLaunchName.SANDBOX_ORDER,
             mode=ScenarioRunMode.ADAPTIVE,
         )
         await _record_mutation_and_start_investigation(
@@ -2190,7 +2889,7 @@ def test_adaptive_recovery_with_empty_valid_lane_fails_closed(
         def planner_factory(_scenario):
             nonlocal planner_factories
             planner_factories += 1
-            return _ScriptedPlanner((STORAGE_FIXED_PROBE_PLAN.steps[0].request,))
+            return _ScriptedPlanner((SANDBOX_ORDER_FIXED_PROBE_PLAN.steps[0].request,))
 
         store = SqliteScenarioStore(tmp_path / "parent.sqlite3")
         workflow = DurableScenarioWorkflow(
@@ -2202,6 +2901,7 @@ def test_adaptive_recovery_with_empty_valid_lane_fails_closed(
         bound = await _bind(
             workflow,
             launch_id=f"empty-adaptive-{mode.value.lower()}",
+            scenario=ScenarioLaunchName.SANDBOX_ORDER,
             mode=mode,
         )
         await _record_mutation_and_start_investigation(

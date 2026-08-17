@@ -1164,6 +1164,7 @@ class SqliteScenarioStore(SqliteDurableRuntimeStore):
                     and summary.escalation_required
                     is (snapshot.report.classification.value != "COMMITTED")
                     and summary.failure_category is None
+                    and summary.route_provenance == snapshot.report.route_provenance
                 )
             return (
                 snapshot.comparison is not None

@@ -324,21 +324,20 @@ def test_comparison_suite_uses_actual_metrics_and_closes_factory_planners(
     assert list(tmp_path.iterdir()) == []
 
 
-def test_adaptive_requires_one_explicit_provider_source(tmp_path: Path) -> None:
-    with pytest.raises(ScenarioWorkflowError) as captured:
-        asyncio.run(
-            run_one(
-                ScenarioName.STORAGE,
-                ScenarioMode.ADAPTIVE,
-                workspace=tmp_path,
-                run_id="missing-provider",
-            )
+def test_adaptive_authoritative_route_does_not_require_a_provider(
+    tmp_path: Path,
+) -> None:
+    report = asyncio.run(
+        run_one(
+            ScenarioName.STORAGE,
+            ScenarioMode.ADAPTIVE,
+            workspace=tmp_path,
+            run_id="missing-provider",
         )
-
-    assert (
-        captured.value.category is ScenarioWorkflowErrorCategory.INVALID_CONFIGURATION
     )
-    assert str(tmp_path) not in str(captured.value)
+
+    assert report.classification is Classification.COMMITTED
+    assert list(tmp_path.iterdir()) == []
 
 
 def test_scenario_run_identifier_rejects_secret_signatures_before_setup(

@@ -438,6 +438,39 @@ class _SingleProviderExecutor:
         raise AssertionError("single provider result unexpectedly returned")
 
 
+class _CaughtDeadlineProviderFailureExecutor:
+    def __init__(self, handler: _ReadHandler, clock: _MutableClock) -> None:
+        self.handler = handler
+        self.clock = clock
+        self.external_calls = 0
+        self.provider_failure_caught = False
+        self.fixed_fallback_attempted = False
+
+    async def __call__(self, envelope, *, revision, cancellation_event, runtime):
+        async def provider_call() -> str:
+            self.external_calls += 1
+            return "provider-dispatched-after-deadline"
+
+        try:
+            await runtime.call_provider(
+                "turn-caught-deadline",
+                estimated_cost_microunits=40,
+                operation=provider_call,
+            )
+        except Exception:
+            self.provider_failure_caught = True
+        else:
+            raise AssertionError("deadline-expired provider call unexpectedly returned")
+
+        self.fixed_fallback_attempted = True
+        return await _FixedExecutor(self.handler, clock=self.clock)(
+            envelope,
+            revision=revision,
+            cancellation_event=cancellation_event,
+            runtime=runtime,
+        )
+
+
 class _SelfCancellingProviderExecutor:
     def __init__(self) -> None:
         self.external_calls = 0
@@ -2045,6 +2078,47 @@ def test_provider_never_dispatches_after_stalled_receipt_lookup_deadline(
         assert executor.external_calls == 0
         receipts = await durable.provider_call_receipts(envelope.investigation_id)
         assert tuple(item.call_id for item in receipts) == ("turn-single",)
+        await service.aclose()
+
+    asyncio.run(scenario())
+
+
+def test_caught_provider_failure_after_receipt_deadline_cannot_complete_fallback(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        durable = SqliteDurableRuntimeStore(
+            tmp_path / "provider-caught-deadline.sqlite3"
+        )
+        envelope = _envelope(max_elapsed_ms=1_000)
+        clock = _MutableClock(envelope.ambiguity.observed_at)
+        store = _AdvanceClockAfterProviderReceiptStore(durable, clock)
+        fallback_handler = _ReadHandler(clock=clock)
+        executor = _CaughtDeadlineProviderFailureExecutor(fallback_handler, clock)
+        service = _service(
+            store,
+            executor,
+            owner_id="worker-provider-caught-deadline",
+            strategy=DurableExecutionStrategy.ADAPTIVE,
+            max_provider_calls=1,
+            clock=clock.now,
+        )
+        await service.create(envelope)
+
+        async def escalated() -> bool:
+            return (
+                await durable.get_run(envelope.investigation_id)
+            ).state is DurableRunState.ESCALATION_REQUIRED
+
+        await _wait_for(escalated)
+        run = await durable.get_run(envelope.investigation_id)
+        receipts = await durable.provider_call_receipts(envelope.investigation_id)
+        assert executor.provider_failure_caught
+        assert executor.fixed_fallback_attempted
+        assert executor.external_calls == 0
+        assert fallback_handler.calls == []
+        assert run.established_report is None
+        assert tuple(item.call_id for item in receipts) == ("turn-caught-deadline",)
         await service.aclose()
 
     asyncio.run(scenario())

@@ -26,6 +26,8 @@ from reconcile.contracts import (
     ProbeOutcome,
     ProbeRequestEventPayload,
     ProbeResultEventPayload,
+    ScenarioHybridOutcome,
+    ScenarioHybridRoute,
     ScenarioLaunchName,
     ScenarioLaunchRequest,
     ScenarioRunEventType,
@@ -65,6 +67,8 @@ from reconcile.scenarios.service import (
     ScenarioWorkflowError,
     ScenarioWorkflowErrorCategory,
     ScenarioWorkflowResult,
+    mark_bounded_hybrid_advisory,
+    mark_bounded_hybrid_deterministic_fixed,
     scenario_investigation_id,
 )
 from tests.contract._factories import (
@@ -541,11 +545,42 @@ def test_adaptive_progress_is_projected_once_with_strategy_identity() -> None:
     asyncio.run(check())
 
 
-def test_adaptive_without_server_configuration_fails_without_running() -> None:
+def test_adaptive_without_server_configuration_runs_providerless() -> None:
     async def check() -> None:
         runner = _Runner()
         service = OperatorApplicationService(runner=runner, clock=_TickClock())
         launched = await service.launch(_launch(mode=ScenarioRunMode.ADAPTIVE))
+
+        terminal = await _terminal_snapshot(
+            service,
+            launched.snapshot.investigation_id,
+        )
+
+        assert terminal.lifecycle is ScenarioRunLifecycle.COMPLETED
+        assert terminal.failure_category is None
+        assert terminal.report is not None
+        assert terminal.comparison is None
+        assert runner.calls == [
+            (
+                ScenarioName.STORAGE,
+                ScenarioMode.ADAPTIVE,
+                None,
+                "operator-run-7",
+            )
+        ]
+        assert await service.get_envelope_summary(terminal.investigation_id) == (
+            terminal.envelope_summary
+        )
+        await service.aclose()
+
+    asyncio.run(check())
+
+
+def test_compare_without_server_configuration_fails_without_running() -> None:
+    async def check() -> None:
+        runner = _Runner()
+        service = OperatorApplicationService(runner=runner, clock=_TickClock())
+        launched = await service.launch(_launch(mode=ScenarioRunMode.COMPARE))
 
         terminal = await _terminal_snapshot(
             service,
@@ -887,6 +922,31 @@ def test_oversize_probe_projection_hides_rejected_result_identity() -> None:
     assert projected.probe_audit[0].result_bytes_acquired == 89
     assert projected.probe_audit[0].result_sha256 is None
     assert projected.probe_audit[0].result_byte_count is None
+
+
+def test_report_projection_preserves_only_structured_hybrid_provenance() -> None:
+    fixed = sanitize_report(
+        mark_bounded_hybrid_deterministic_fixed(make_report(Classification.COMMITTED))
+    )
+    advisory = sanitize_report(
+        mark_bounded_hybrid_advisory(
+            make_report(Classification.UNKNOWN),
+            provider_cleanup_failed=True,
+        )
+    )
+
+    assert fixed.route_provenance is not None
+    assert fixed.route_provenance.route is ScenarioHybridRoute.FIXED_AUTHORITATIVE
+    assert fixed.route_provenance.outcome is (ScenarioHybridOutcome.FIXED_AUTHORITATIVE)
+    assert not fixed.route_provenance.planner_invoked
+    assert advisory.route_provenance is not None
+    assert advisory.route_provenance.route is (
+        ScenarioHybridRoute.PLANNER_HETEROGENEOUS
+    )
+    assert advisory.route_provenance.outcome is ScenarioHybridOutcome.PLANNER_EVIDENCE
+    assert advisory.route_provenance.provider_cleanup_failure
+    material = canonical_json_bytes(advisory)
+    assert b"private provider" not in material
 
 
 def test_invalid_event_cursors_are_rejected() -> None:

@@ -13,6 +13,7 @@ from textual.containers import VerticalScroll
 from textual.widgets import Button, Input, Select, Static, TabbedContent
 
 from reconcile.contracts import (
+    BOUNDED_HYBRID_ROUTE_POLICY_VERSION,
     EVIDENCE_DECISION_VERSION,
     EXECUTION_ENVELOPE_SUMMARY_VERSION,
     SCENARIO_OPERATIONAL_STATUS_VERSION,
@@ -48,6 +49,8 @@ from reconcile.contracts import (
     SanitizedProbeAuditRecord,
     SanitizedProbeRequest,
     SanitizedProbeResult,
+    ScenarioHybridOutcome,
+    ScenarioHybridRoute,
     ScenarioLaunchName,
     ScenarioLaunchRequest,
     ScenarioLifecycleEventPayload,
@@ -56,6 +59,7 @@ from reconcile.contracts import (
     ScenarioOperationalMutationState,
     ScenarioOperationalRecoveryState,
     ScenarioOperationalStatus,
+    ScenarioRouteProvenance,
     ScenarioRunEvent,
     ScenarioRunEventPayload,
     ScenarioRunEventType,
@@ -238,6 +242,8 @@ def _summary(investigation_id: str) -> ExecutionEnvelopeSummary:
 def _sanitized_report(
     classification: Classification,
     investigation_id: str,
+    *,
+    route_provenance: ScenarioRouteProvenance | None = None,
 ) -> SanitizedInvestigationReport:
     payload = make_report(classification).model_dump(mode="python")
     payload["investigation_id"] = investigation_id
@@ -314,6 +320,7 @@ def _sanitized_report(
             if report.advisory_explanation is None
             else report.advisory_explanation.cited_evidence_ids
         ),
+        route_provenance=route_provenance,
         created_at=report.created_at,
         updated_at=report.updated_at,
         revision=report.revision,
@@ -375,17 +382,23 @@ def _completed_report_snapshot(
     launch_id: str,
     investigation_id: str,
     event_cursor: int = 3,
+    mode: ScenarioRunMode = ScenarioRunMode.FIXED,
+    route_provenance: ScenarioRouteProvenance | None = None,
 ) -> ScenarioRunSnapshot:
     return ScenarioRunSnapshot(
         schema_version=SCENARIO_RUN_SNAPSHOT_VERSION,
         launch_id=launch_id,
         investigation_id=investigation_id,
         scenario=scenario,
-        mode=ScenarioRunMode.FIXED,
+        mode=mode,
         lifecycle=ScenarioRunLifecycle.COMPLETED,
         event_cursor=event_cursor,
         envelope_summary=_summary(investigation_id),
-        report=_sanitized_report(classification, investigation_id),
+        report=_sanitized_report(
+            classification,
+            investigation_id,
+            route_provenance=route_provenance,
+        ),
         comparison=None,
         failure_category=None,
         accepted_at=NOW,
@@ -1245,6 +1258,77 @@ def test_explicit_keyboard_reconnect_resumes_after_the_confirmed_cursor() -> Non
             assert "CURSOR 1 LIFECYCLE: ACCEPTED" in _text(app, "#timeline-panel")
             assert "CURSOR 3 TERMINAL" in _text(app, "#timeline-panel")
             assert "Terminal snapshot confirmed" in _text(app, "#operator-message")
+
+        assert client.close_count == 1
+
+    asyncio.run(journey())
+
+
+def test_fixed_fallback_route_provenance_is_visible_without_provider_detail() -> None:
+    async def journey() -> None:
+        launch_id = "launch-hybrid-fixed-fallback"
+        investigation_id = "investigation-hybrid-fixed-fallback"
+        provenance = ScenarioRouteProvenance(
+            policy_version=BOUNDED_HYBRID_ROUTE_POLICY_VERSION,
+            route=ScenarioHybridRoute.PLANNER_HETEROGENEOUS,
+            outcome=ScenarioHybridOutcome.FIXED_FALLBACK,
+            planner_invoked=True,
+            fixed_connector_invoked=True,
+            provider_failure=True,
+            provider_cleanup_failure=False,
+        )
+        active = _active_snapshot(
+            scenario=ScenarioLaunchName.SANDBOX_ORDER,
+            mode=ScenarioRunMode.ADAPTIVE,
+            launch_id=launch_id,
+            investigation_id=investigation_id,
+            event_cursor=2,
+        )
+        terminal = _completed_report_snapshot(
+            classification=Classification.UNKNOWN,
+            scenario=ScenarioLaunchName.SANDBOX_ORDER,
+            launch_id=launch_id,
+            investigation_id=investigation_id,
+            mode=ScenarioRunMode.ADAPTIVE,
+            route_provenance=provenance,
+        )
+        client = _ScriptedClient(
+            launch=active,
+            snapshots=(terminal,),
+            streams=(
+                _StreamPlan(
+                    events=(
+                        *_lifecycle_events(investigation_id),
+                        _report_terminal_event(terminal),
+                    )
+                ),
+            ),
+        )
+        app = ReconcileApp(client=client)
+
+        async with app.run_test(size=(120, 40)) as pilot:
+            app.query_one(
+                "#scenario-select", Select
+            ).value = ScenarioLaunchName.SANDBOX_ORDER
+            app.query_one("#mode-select", Select).value = ScenarioRunMode.ADAPTIVE
+            app.query_one("#launch-id", Input).value = launch_id
+            await pilot.press("f5")
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+
+            rendered = _text(app, "#deterministic-panel")
+            assert (
+                "HYBRID ROUTE: policy=1.0.0 route=PLANNER_HETEROGENEOUS "
+                "outcome=FIXED_FALLBACK planner_invoked=TRUE "
+                "fixed_connector_invoked=TRUE provider_failure=TRUE "
+                "provider_cleanup_failure=FALSE"
+            ) in rendered
+            assert "DETERMINISTIC CLASSIFICATION: UNKNOWN" in rendered
+            snapshot = app.operator_view_state.snapshot
+            assert snapshot is not None
+            assert snapshot.report is not None
+            assert snapshot.report.route_provenance == provenance
+            assert "private provider" not in rendered.lower()
 
         assert client.close_count == 1
 

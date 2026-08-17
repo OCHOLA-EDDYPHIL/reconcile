@@ -449,6 +449,7 @@ async def execute_fixed_plan(
     additional_limitations: tuple[str, ...] = (),
     progress_emitter: ProgressEmitter | None = None,
     durability_observer: ProbeDurabilityObserver | None = None,
+    elapsed_offset_ms: int = 0,
 ) -> FixedBaselineResult:
     """Execute one finite plan without bypassing controller or evidence policy."""
 
@@ -485,6 +486,7 @@ async def execute_fixed_plan(
         capabilities,
         clock=selected_clock,
         durability_observer=durability_observer,
+        elapsed_offset_ms=elapsed_offset_ms,
     )
     engine = EvidenceEngine(sealed_envelope, rules)
     stop_reason: FixedBaselineStopReason | None = None

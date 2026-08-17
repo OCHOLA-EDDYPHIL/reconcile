@@ -59,7 +59,11 @@ from reconcile.interfaces.api_client import (
 )
 from reconcile.interfaces.operator_api_client import ScenarioLaunchResult
 from reconcile.operator import sanitize_report
-from reconcile.scenarios.service import ScenarioMode, ScenarioName
+from reconcile.scenarios.service import (
+    ScenarioMode,
+    ScenarioName,
+    mark_bounded_hybrid_fixed_fallback,
+)
 from tests.contract._factories import (
     NOW,
     make_envelope,
@@ -513,7 +517,27 @@ def test_remote_scenario_watch_human_shows_operations_then_v1_outcome(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     snapshot = _scenario_snapshot(Classification.UNKNOWN)
-    status = _scenario_status(cleanup_state=ScenarioOperationalCleanupState.FAILED)
+    snapshot = snapshot.model_copy(
+        update={
+            "scenario": ScenarioLaunchName.SANDBOX_ORDER,
+            "mode": ScenarioRunMode.ADAPTIVE,
+            "report": sanitize_report(
+                mark_bounded_hybrid_fixed_fallback(
+                    make_report(Classification.UNKNOWN),
+                    planner_invoked=True,
+                    provider_cleanup_failed=True,
+                )
+            ),
+        }
+    )
+    status = _scenario_status(
+        cleanup_state=ScenarioOperationalCleanupState.FAILED
+    ).model_copy(
+        update={
+            "scenario": ScenarioLaunchName.SANDBOX_ORDER,
+            "mode": ScenarioRunMode.ADAPTIVE,
+        }
+    )
     event = _scenario_event()
     _install_operator_client(
         monkeypatch,
@@ -534,6 +558,11 @@ def test_remote_scenario_watch_human_shows_operations_then_v1_outcome(
     assert "Recovery: NOT_ESCALATED\n" in result.stdout
     assert "Lifecycle: COMPLETED\n" in result.stdout
     assert "Classification: UNKNOWN\n" in result.stdout
+    assert "Hybrid route policy: 1.0.0\n" in result.stdout
+    assert "Hybrid route: PLANNER_HETEROGENEOUS\n" in result.stdout
+    assert "Hybrid outcome: FIXED_FALLBACK\n" in result.stdout
+    assert "Fixed connector invoked: true\n" in result.stdout
+    assert "Provider cleanup failure: true\n" in result.stdout
     assert result.stdout.index("Cleanup: FAILED") < result.stdout.index(
         "Classification: UNKNOWN"
     )
@@ -1080,7 +1109,96 @@ def test_broken_output_pipe_preserves_the_waited_product_exit(
     )
 
 
-def test_adaptive_scenario_requires_explicit_provider_configuration(
+def test_adaptive_scenario_accepts_absent_provider_configuration(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    for name in (
+        "RECONCILE_VERTEX_PROJECT",
+        "RECONCILE_VERTEX_LOCATION",
+        "RECONCILE_VERTEX_MODEL",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+    report = make_report(Classification.COMMITTED)
+    calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
+
+    async def fake_run_one(*args: object, **kwargs: object) -> InvestigationReport:
+        calls.append((args, kwargs))
+        return report
+
+    monkeypatch.setattr(cli_module, "run_one", fake_run_one)
+
+    result = _RUNNER.invoke(
+        app,
+        [
+            "scenario",
+            "run",
+            "storage",
+            "--local",
+            "--mode",
+            "adaptive",
+            "--output",
+            "json",
+        ],
+    )
+
+    _assert_clean_success(result, canonical_json_output(report))
+    assert calls == [
+        (
+            (ScenarioName.STORAGE, ScenarioMode.ADAPTIVE),
+            {"vertex_config": None, "workspace": None, "run_id": None},
+        )
+    ]
+
+
+@pytest.mark.parametrize("mode", ("adaptive", "compare"))
+def test_nonfixed_scenario_rejects_partial_provider_configuration(
+    monkeypatch: pytest.MonkeyPatch,
+    mode: str,
+) -> None:
+    monkeypatch.setenv("RECONCILE_VERTEX_PROJECT", "project-7")
+    monkeypatch.delenv("RECONCILE_VERTEX_LOCATION", raising=False)
+    monkeypatch.delenv("RECONCILE_VERTEX_MODEL", raising=False)
+
+    async def forbidden_run_one(
+        *_args: object, **_kwargs: object
+    ) -> InvestigationReport:
+        pytest.fail("scenario execution must not start")
+
+    monkeypatch.setattr(cli_module, "run_one", forbidden_run_one)
+
+    result = _RUNNER.invoke(
+        app,
+        ["scenario", "run", "storage", "--local", "--mode", mode],
+    )
+
+    assert result.exit_code == 2
+    assert result.stdout_bytes == b""
+    assert result.stderr_bytes == b"The input is invalid.\n"
+
+
+@pytest.mark.parametrize(
+    "mode",
+    (ScenarioMode.ADAPTIVE, ScenarioMode.COMPARE),
+)
+def test_nonfixed_scenario_accepts_complete_provider_configuration(
+    monkeypatch: pytest.MonkeyPatch,
+    mode: ScenarioMode,
+) -> None:
+    monkeypatch.setenv("RECONCILE_VERTEX_PROJECT", "project-7")
+    monkeypatch.setenv("RECONCILE_VERTEX_LOCATION", "global")
+    monkeypatch.setenv("RECONCILE_VERTEX_MODEL", "gemini-model-7")
+
+    config = cli_module._vertex_config(mode)
+
+    assert config is not None
+    assert config.project == "project-7"
+    assert config.location == "global"
+    assert config.model == "gemini-model-7"
+    assert config.credentials is None
+
+
+def test_compare_scenario_requires_provider_configuration(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     for name in (
@@ -1099,7 +1217,7 @@ def test_adaptive_scenario_requires_explicit_provider_configuration(
 
     result = _RUNNER.invoke(
         app,
-        ["scenario", "run", "storage", "--local", "--mode", "adaptive"],
+        ["scenario", "run", "storage", "--local", "--mode", "compare"],
     )
 
     assert result.exit_code == 2

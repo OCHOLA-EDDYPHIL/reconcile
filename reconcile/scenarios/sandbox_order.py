@@ -516,6 +516,7 @@ async def execute_sandbox_order_baseline(
     cancellation_event: asyncio.Event | None = None,
     progress_emitter: ProgressEmitter | None = None,
     durability_observer: ProbeDurabilityObserver | None = None,
+    elapsed_offset_ms: int = 0,
 ) -> FixedBaselineResult:
     """Execute a permitted two-read weak-evidence baseline."""
 
@@ -542,6 +543,7 @@ async def execute_sandbox_order_baseline(
         progress_emitter=progress_emitter,
         additional_limitations=_SANDBOX_ORDER_LIMITATIONS,
         durability_observer=durability_observer,
+        elapsed_offset_ms=elapsed_offset_ms,
     )
 
 
