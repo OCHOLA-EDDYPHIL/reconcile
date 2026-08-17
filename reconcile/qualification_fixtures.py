@@ -566,6 +566,7 @@ def _final_access_bindings_match(access: QualificationFinalFixtureAccess) -> boo
         )
         and start.get("historical_attempt_ledger_sha256")
         == access.historical_attempt_ledger_sha256
+        and start.get("consumed_v2_custody_sha256") == access.consumed_v2_custody_sha256
         and start.get("prior_stage_completion_sha256")
         == completion_identities[1].sha256
         and first.get("stage") == QualificationProtocolStage.DEVELOPMENT_1.value
@@ -597,6 +598,9 @@ def _final_access_bindings_match(access: QualificationFinalFixtureAccess) -> boo
         == access.historical_attempt_ledger_sha256
         and second.get("historical_attempt_ledger_sha256")
         == access.historical_attempt_ledger_sha256
+        and first.get("consumed_v2_custody_sha256") == access.consumed_v2_custody_sha256
+        and second.get("consumed_v2_custody_sha256")
+        == access.consumed_v2_custody_sha256
         and _identity_record_matches(first.get("model_binding"), binding_identities[0])
         and _identity_record_matches(second.get("model_binding"), binding_identities[1])
         and final_binding.get("suite_id") == manifest.get("suite_id")
@@ -657,6 +661,7 @@ class QualificationFinalFixtureAccess:
     runtime_identity_sha256: str
     concrete_model_revision: str
     historical_attempt_ledger_sha256: str
+    consumed_v2_custody_sha256: str
     schedule: tuple[tuple[str, int], ...]
     _seal: object = field(repr=False, compare=False)
 
@@ -685,6 +690,7 @@ class QualificationFinalFixtureAccess:
         runtime_identity_sha256: str,
         concrete_model_revision: str,
         historical_attempt_ledger_sha256: str,
+        consumed_v2_custody_sha256: str,
         schedule: tuple[tuple[str, int], ...],
         _seal: object,
     ) -> None:
@@ -721,6 +727,11 @@ class QualificationFinalFixtureAccess:
             "historical_attempt_ledger_sha256",
             historical_attempt_ledger_sha256,
         )
+        object.__setattr__(
+            self,
+            "consumed_v2_custody_sha256",
+            consumed_v2_custody_sha256,
+        )
         object.__setattr__(self, "schedule", schedule)
         object.__setattr__(self, "_seal", _seal)
 
@@ -749,6 +760,7 @@ def _issue_final_fixture_access(
     runtime_identity_sha256: str,
     concrete_model_revision: str,
     historical_attempt_ledger_sha256: str,
+    consumed_v2_custody_sha256: str,
     schedule: tuple[tuple[str, int], ...],
 ) -> QualificationFinalFixtureAccess:
     path = Path(stage_path)
@@ -773,6 +785,7 @@ def _issue_final_fixture_access(
         runtime_identity_sha256=runtime_identity_sha256,
         concrete_model_revision=concrete_model_revision,
         historical_attempt_ledger_sha256=historical_attempt_ledger_sha256,
+        consumed_v2_custody_sha256=consumed_v2_custody_sha256,
         schedule=schedule,
         _seal=_FINAL_ACCESS_SEAL,
     )

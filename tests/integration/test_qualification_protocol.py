@@ -63,17 +63,18 @@ from reconcile.qualification_protocol import (
     QUALIFICATION_ATTEMPT_START_VERSION,
     QualificationArtifactStore,
     QualificationAttemptOutcome,
+    QualificationBoundStatus,
     QualificationBudgetExceeded,
     QualificationExecutionBasis,
     QualificationExecutionConsumed,
     QualificationModelUsageTotals,
-    QualificationPriorAttemptLedger,
     QualificationProtocolError,
     QualificationProtocolRunner,
     QualificationProviderAttemptStart,
     QualificationProviderDrift,
     QualificationProviderOperation,
     QualificationSourceState,
+    QualificationV2CustodySource,
     _adaptive_normalized_run,
     _AttemptMeter,
     _empty_usage,
@@ -82,7 +83,9 @@ from reconcile.qualification_protocol import (
     _reservation_exceeds_ceiling,
     build_protocol_manifest,
     build_vertex_qualification_planner,
+    canonical_consumed_v2_custody,
     canonical_historical_attempt_ledger,
+    canonical_prior_attempt_ledger,
     frozen_qualification_provider_settings,
     frozen_qualification_runtime_identity,
     qualification_runtime_identity,
@@ -98,6 +101,10 @@ HISTORICAL_GIT_COMMIT = "b6f17aa197b82740d04e9c54ee6baf6a12b7ade6"
 HISTORICAL_SOURCE_REVISION = (
     "db97e18893f3cd6088cffe3901f05cb630480c7a32b3f09ddd72c030b138b334"
 )
+
+
+def _artifact_root(tmp_path: Path, name: str = "artifacts") -> Path:
+    return tmp_path / name / "qualification-protocol-v3"
 
 
 def _provider() -> QualificationProviderSettings:
@@ -467,19 +474,12 @@ def test_repository_source_state_binds_raw_git_identity_to_sha256(
     assert state.source_revision == source_revision_for_git_commit(state.git_commit)
 
 
-def _prior_attempts(
-    manifest: QualificationSuiteManifest,
-) -> QualificationPriorAttemptLedger:
-    assert manifest.provider == frozen_qualification_provider_settings()
-    return canonical_historical_attempt_ledger()
-
-
 def test_two_development_cycles_are_single_use_and_leave_final_untouched(
     tmp_path: Path,
 ) -> None:
     repository = tmp_path / "source"
     source_revision = _source_repository(repository)
-    artifact_root = tmp_path / "artifacts"
+    artifact_root = _artifact_root(tmp_path)
     runner = QualificationProtocolRunner(artifact_root, repository=repository)
     provider = _provider()
     development_one = build_protocol_manifest(
@@ -494,7 +494,6 @@ def test_two_development_cycles_are_single_use_and_leave_final_untouched(
             QualificationProtocolStage.DEVELOPMENT_1,
             development_one,
             first_planner,
-            prior_attempts=_prior_attempts(development_one),
             execution_basis=QualificationExecutionBasis.DETERMINISTIC_TEST,
         )
     )
@@ -502,21 +501,25 @@ def test_two_development_cycles_are_single_use_and_leave_final_untouched(
     assert not first.completion.provider_evidence_qualifying
     assert not first.completion.successful
     assert len(first.result_set.results) == 8
-    assert first.protocol_summary.prior_attempt_usage.model_call_count == 3
+    assert first.protocol_summary.prior_attempt_usage.model_call_count == 4
     assert (
-        first.protocol_summary.prior_attempt_usage.model_cost_nano_units == 40_042_500
+        first.protocol_summary.prior_attempt_usage.model_cost_nano_units == 51_859_500
     )
     assert all(
         not item.qualification_evidence_qualifying
-        for item in _prior_attempts(development_one).attempts
+        for item in canonical_historical_attempt_ledger().attempts
     )
     assert all(
         item.source_revision != development_one.source_revision
-        for item in _prior_attempts(development_one).attempts
+        for item in canonical_historical_attempt_ledger().attempts
     )
     assert first.protocol_summary.ceiling_usage.model_call_count == (
-        first.attempt_ledger.totals.model_call_count + 3
+        first.attempt_ledger.totals.model_call_count + 4
     )
+    assert first.protocol_summary.prior_attempt_usage == (
+        canonical_prior_attempt_ledger().totals
+    )
+    assert first.completion.consumed_v2_custody is not None
     assert tuple(item.operation for item in first.attempt_ledger.attempts[:2]) == (
         QualificationProviderOperation.COUNT_TOKENS,
         QualificationProviderOperation.GENERATE,
@@ -556,6 +559,13 @@ def test_two_development_cycles_are_single_use_and_leave_final_untouched(
         item.request_byte_count
         <= frozen_qualification_runtime_identity().maximum_input_tokens_per_call
         for item in first.attempt_ledger.attempts
+    )
+    assert all(
+        item.reserved_input_tokens == 12_000
+        and item.reserved_output_tokens == 1_024
+        and item.reserved_cost_nano_units == 27_216_000
+        for item in first.attempt_ledger.attempts
+        if item.operation is QualificationProviderOperation.GENERATE
     )
     assert (
         sum(
@@ -643,6 +653,7 @@ def test_two_development_cycles_are_single_use_and_leave_final_untouched(
             final_manifest,
             QualificationExecutionBasis.LIVE_PROVIDER,
             canonical_sha256(planner_configuration_sha256),
+            canonical_consumed_v2_custody(),
         )
     assert not (artifact_root / "final-holdout").exists()
     assert not (artifact_root / ".runtime-final-holdout").exists()
@@ -670,6 +681,22 @@ def test_two_development_cycles_are_single_use_and_leave_final_untouched(
     for path in (artifact_root / "development-1").glob("*.json"):
         assert path.stat().st_mode & 0o777 == 0o400
 
+    live_claim = second.completion.model_copy(
+        update={
+            "execution_basis": QualificationExecutionBasis.LIVE_PROVIDER,
+            "provider_evidence_qualifying": True,
+            "successful": second.completion.protocol_valid,
+        }
+    )
+    completion_path = artifact_root / "development-2" / "execution-completion.json"
+    completion_path.chmod(0o600)
+    completion_path.write_bytes(canonical_json_bytes(live_claim))
+    completion_path.chmod(0o400)
+    with pytest.raises(QualificationProtocolError, match="requires consumed-v2"):
+        QualificationArtifactStore(artifact_root).read_completion(
+            QualificationProtocolStage.DEVELOPMENT_2
+        )
+
 
 @pytest.mark.parametrize("measured", (False, True))
 def test_provider_failure_is_consumed_and_never_relabelled(
@@ -678,7 +705,7 @@ def test_provider_failure_is_consumed_and_never_relabelled(
 ) -> None:
     repository = tmp_path / "source"
     source_revision = _source_repository(repository)
-    artifact_root = tmp_path / "artifacts"
+    artifact_root = _artifact_root(tmp_path)
     manifest = build_protocol_manifest(
         QualificationProtocolStage.DEVELOPMENT_1,
         source_revision=source_revision,
@@ -711,7 +738,20 @@ def test_provider_failure_is_consumed_and_never_relabelled(
         and item.operation is QualificationProviderOperation.GENERATE
     )
     assert case_failures[0].outcome is QualificationAttemptOutcome.PROVIDER_FAILURE
-    assert outcome.protocol_summary.usage_incomplete
+    assert (
+        case_failures[0].provider_failure_kind == PlannerFailureKind.UNAVAILABLE.value
+    )
+    assert case_failures[0].input_bound_status is (
+        QualificationBoundStatus.WITHIN
+        if measured
+        else QualificationBoundStatus.UNKNOWN
+    )
+    assert case_failures[0].output_bound_status is (
+        QualificationBoundStatus.WITHIN
+        if measured
+        else QualificationBoundStatus.UNKNOWN
+    )
+    assert outcome.protocol_summary.usage_incomplete is (not measured)
     with pytest.raises(QualificationExecutionConsumed):
         asyncio.run(
             runner.run(
@@ -768,7 +808,9 @@ def test_provider_identity_drift_is_retained_and_invalid(
         provider=_provider(),
     )
     planner = _PostPreflightDriftPlanner(manifest.provider, drift)
-    runner = QualificationProtocolRunner(tmp_path / "artifacts", repository=repository)
+    runner = QualificationProtocolRunner(
+        _artifact_root(tmp_path), repository=repository
+    )
 
     outcome = asyncio.run(
         runner.run(
@@ -805,7 +847,7 @@ def test_model_revision_preflight_rejects_alias_default_or_missing_identity(
     )
     planner = _ScriptedPlanner(manifest.provider)
     planner.reported_model = reported_model
-    artifact_root = tmp_path / "artifacts"
+    artifact_root = _artifact_root(tmp_path)
     runner = QualificationProtocolRunner(artifact_root, repository=repository)
 
     with pytest.raises(QualificationProviderDrift, match="preflight"):
@@ -848,7 +890,7 @@ def test_interruption_consumes_stage_and_purges_runtime(
 ) -> None:
     repository = tmp_path / "source"
     source_revision = _source_repository(repository)
-    artifact_root = tmp_path / "artifacts"
+    artifact_root = _artifact_root(tmp_path)
     manifest = build_protocol_manifest(
         QualificationProtocolStage.DEVELOPMENT_1,
         source_revision=source_revision,
@@ -901,7 +943,9 @@ def test_manifest_freeze_and_planner_identity_fail_closed(tmp_path: Path) -> Non
     repository = tmp_path / "source"
     source_revision = _source_repository(repository)
     bound = manifest.model_copy(update={"source_revision": source_revision})
-    runner = QualificationProtocolRunner(tmp_path / "artifacts", repository=repository)
+    runner = QualificationProtocolRunner(
+        _artifact_root(tmp_path), repository=repository
+    )
     with pytest.raises(QualificationProviderDrift):
         asyncio.run(
             runner.run(
@@ -911,12 +955,12 @@ def test_manifest_freeze_and_planner_identity_fail_closed(tmp_path: Path) -> Non
                 execution_basis=QualificationExecutionBasis.DETERMINISTIC_TEST,
             )
         )
-    assert not (tmp_path / "artifacts" / "development-1").exists()
+    assert not (_artifact_root(tmp_path) / "development-1").exists()
 
     live_spoof_runner = QualificationProtocolRunner(
-        tmp_path / "live-spoof-artifacts", repository=repository
+        _artifact_root(tmp_path, "live-spoof-artifacts"), repository=repository
     )
-    with pytest.raises(QualificationProviderDrift, match="sealed Vertex"):
+    with pytest.raises(QualificationProtocolError, match="custody source"):
         asyncio.run(
             live_spoof_runner.run(
                 QualificationProtocolStage.DEVELOPMENT_1,
@@ -924,11 +968,69 @@ def test_manifest_freeze_and_planner_identity_fail_closed(tmp_path: Path) -> Non
                 _ScriptedPlanner(bound.provider),
             )
         )
+    assert not (
+        live_spoof_runner.store.root / QualificationProtocolStage.DEVELOPMENT_1.value
+    ).exists()
+    with pytest.raises(QualificationProviderDrift, match="sealed Vertex"):
+        live_spoof_runner._validate_planner(
+            bound,
+            _ScriptedPlanner(bound.provider),
+            QualificationExecutionBasis.LIVE_PROVIDER,
+        )
     assert not (tmp_path / "live-spoof-artifacts" / "development-1").exists()
 
 
+def test_v3_protocol_identities_change_only_protocol_custody() -> None:
+    manifests = {stage: _manifest(stage) for stage in QualificationProtocolStage}
+    assert {stage: manifest.suite_id for stage, manifest in manifests.items()} == {
+        QualificationProtocolStage.DEVELOPMENT_1: "adaptive-development-one-v3",
+        QualificationProtocolStage.DEVELOPMENT_2: "adaptive-development-two-v3",
+        QualificationProtocolStage.FINAL_HOLDOUT: "adaptive-fixed-qualification-v3",
+    }
+    assert all(
+        manifest.controller_version == "qualification-controller-v3"
+        for manifest in manifests.values()
+    )
+    protocol_versions = (
+        qualification_protocol_module.QUALIFICATION_EXECUTION_START_VERSION,
+        qualification_protocol_module.QUALIFICATION_RUNTIME_IDENTITY_VERSION,
+        qualification_protocol_module.QUALIFICATION_MODEL_BINDING_VERSION,
+        qualification_protocol_module.QUALIFICATION_OBSERVATION_BUNDLE_VERSION,
+        qualification_protocol_module.QUALIFICATION_NORMALIZED_RUN_VERSION,
+        qualification_protocol_module.QUALIFICATION_LANE_RECEIPT_VERSION,
+        qualification_protocol_module.QUALIFICATION_FAILURE_RECORD_VERSION,
+        qualification_protocol_module.QUALIFICATION_PARTIAL_PUBLICATION_VERSION,
+        qualification_protocol_module.QUALIFICATION_ATTEMPT_START_VERSION,
+        qualification_protocol_module.QUALIFICATION_ATTEMPT_VERSION,
+        qualification_protocol_module.QUALIFICATION_ATTEMPT_LEDGER_VERSION,
+        qualification_protocol_module.QUALIFICATION_COMBINED_PRIOR_ATTEMPT_LEDGER_VERSION,
+        qualification_protocol_module.QUALIFICATION_CASE_EXECUTION_VERSION,
+        qualification_protocol_module.QUALIFICATION_PROTOCOL_SUMMARY_VERSION,
+        qualification_protocol_module.QUALIFICATION_EXECUTION_COMPLETION_VERSION,
+    )
+    assert all(version.endswith("/v3") for version in protocol_versions)
+    assert (
+        qualification_protocol_module.QUALIFICATION_PRIOR_ATTEMPT_LEDGER_VERSION
+        == "reconcile/qualification-prior-attempt-ledger/v2"
+    )
+    assert (
+        qualification_protocol_module.QUALIFICATION_HISTORICAL_ATTEMPT_LEDGER_VERSION
+        == "reconcile/qualification-prior-attempt-ledger/v2"
+    )
+    historical = canonical_historical_attempt_ledger()
+    assert qualification_protocol_module.canonical_sha256(historical) == (
+        "eb4d3d2be8f0cc89e3bb2b09b264c75d4785b78e90e42a3be350a30f1092026d"
+    )
+    assert (
+        qualification_protocol_module.QualificationPriorAttemptLedger.model_validate_json(
+            canonical_json_bytes(historical)
+        )
+        == historical
+    )
+
+
 def test_artifacts_are_atomic_immutable_and_symlink_safe(tmp_path: Path) -> None:
-    store = QualificationArtifactStore(tmp_path / "artifacts")
+    store = QualificationArtifactStore(_artifact_root(tmp_path))
     store.begin(QualificationProtocolStage.DEVELOPMENT_1)
     git_commit = "1" * 40
     payload = QualificationSourceState(
@@ -951,7 +1053,70 @@ def test_artifacts_are_atomic_immutable_and_symlink_safe(tmp_path: Path) -> None
     symlink = tmp_path / "linked"
     symlink.symlink_to(real, target_is_directory=True)
     with pytest.raises(QualificationProtocolError, match="symlink"):
-        QualificationArtifactStore(symlink / "artifacts")
+        QualificationArtifactStore(symlink / "qualification-protocol-v3")
+
+
+def test_v3_artifact_namespace_cannot_overlap_v2_custody(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository = tmp_path / "source"
+    _source_repository(repository)
+    custody_stage = tmp_path / "legacy-stage"
+    custody_stage.mkdir()
+    custody_alias = tmp_path / "legacy-stage-alias"
+    custody_alias.symlink_to(custody_stage, target_is_directory=True)
+    launcher = tmp_path / "legacy-launcher.py"
+    launcher.write_text("raise SystemExit(0)\n")
+    monkeypatch.setattr(
+        qualification_protocol_module,
+        "load_consumed_v2_custody",
+        lambda source: canonical_consumed_v2_custody(),
+    )
+    source = QualificationV2CustodySource(
+        stage_directory=custody_alias,
+        launcher_file=launcher,
+    )
+    artifact_root = custody_stage / "qualification-protocol-v3"
+    with pytest.raises(QualificationProtocolError, match="must not overlap"):
+        QualificationProtocolRunner(
+            artifact_root,
+            repository=repository,
+            v2_custody_source=source,
+        )
+    assert not artifact_root.exists()
+
+    other_custody_stage = tmp_path / "other-legacy-stage"
+    other_custody_stage.mkdir()
+    launcher_overlap_root = (
+        tmp_path / "launcher-artifacts" / "qualification-protocol-v3"
+    )
+    launcher_overlap_root.mkdir(parents=True, mode=0o750)
+    launcher_overlap_root.chmod(0o750)
+    launcher_inside_root = launcher_overlap_root / "legacy-launcher.py"
+    launcher_inside_root.write_text("raise SystemExit(0)\n")
+    launcher_source = QualificationV2CustodySource(
+        stage_directory=other_custody_stage,
+        launcher_file=launcher_inside_root,
+    )
+    with pytest.raises(QualificationProtocolError, match="must not overlap"):
+        QualificationProtocolRunner(
+            launcher_overlap_root,
+            repository=repository,
+            v2_custody_source=launcher_source,
+        )
+    assert launcher_inside_root.read_text() == "raise SystemExit(0)\n"
+    assert launcher_overlap_root.stat().st_mode & 0o777 == 0o750
+
+    repository_alias = tmp_path / "source-alias"
+    repository_alias.symlink_to(repository, target_is_directory=True)
+    repository_artifact_root = repository / "qualification-protocol-v3"
+    with pytest.raises(QualificationProtocolError, match="outside the source"):
+        QualificationProtocolRunner(
+            repository_artifact_root,
+            repository=repository_alias,
+        )
+    assert not repository_artifact_root.exists()
 
 
 @pytest.mark.parametrize("failure", ("temporary-unlink", "directory-fsync"))
@@ -960,7 +1125,7 @@ def test_post_link_cleanup_or_durability_failure_is_never_resolved(
     monkeypatch: pytest.MonkeyPatch,
     failure: str,
 ) -> None:
-    store = QualificationArtifactStore(tmp_path / failure)
+    store = QualificationArtifactStore(_artifact_root(tmp_path, failure))
     store.begin(QualificationProtocolStage.DEVELOPMENT_1)
     payload = QualificationSourceState(
         source_revision=source_revision_for_git_commit("1" * 40),
@@ -1014,7 +1179,7 @@ def test_one_shot_completion_durability_failure_poison_is_cross_process_visible(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    store = QualificationArtifactStore(tmp_path / "one-shot-completion")
+    store = QualificationArtifactStore(_artifact_root(tmp_path, "one-shot-completion"))
     store.begin(QualificationProtocolStage.DEVELOPMENT_1)
     payload = QualificationSourceState(
         source_revision=source_revision_for_git_commit("1" * 40),
@@ -1055,7 +1220,7 @@ def test_only_ambiguous_link_call_can_resolve_an_exact_commit(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    store = QualificationArtifactStore(tmp_path / "ambiguous-link")
+    store = QualificationArtifactStore(_artifact_root(tmp_path, "ambiguous-link"))
     store.begin(QualificationProtocolStage.DEVELOPMENT_1)
     payload = QualificationSourceState(
         source_revision=source_revision_for_git_commit("1" * 40),
@@ -1080,7 +1245,7 @@ def test_only_ambiguous_link_call_can_resolve_an_exact_commit(
         store.publish("ambiguous-artifact", payload)
 
 
-def test_historical_custody_is_canonical_and_live_development_cannot_omit_it() -> None:
+def test_historical_and_consumed_v2_custody_are_canonical_and_add_once() -> None:
     ledger = canonical_historical_attempt_ledger()
 
     assert tuple(item.attempt_id for item in ledger.attempts) == (
@@ -1108,27 +1273,17 @@ def test_historical_custody_is_canonical_and_live_development_cannot_omit_it() -
     assert canonical_sha256(ledger) == (
         "eb4d3d2be8f0cc89e3bb2b09b264c75d4785b78e90e42a3be350a30f1092026d"
     )
-    assert (
-        QualificationProtocolRunner._resolve_prior_attempts(
-            QualificationProtocolStage.DEVELOPMENT_1,
-            QualificationExecutionBasis.LIVE_PROVIDER,
-            None,
-        )
-        == ledger
-    )
-
-    changed_attempt = ledger.attempts[0].model_copy(
-        update={"attempt_id": "call_substituted"}
-    )
-    substituted = ledger.model_copy(
-        update={"attempts": (changed_attempt, *ledger.attempts[1:])}
-    )
-    with pytest.raises(QualificationProtocolError, match="canonical historical"):
-        QualificationProtocolRunner._resolve_prior_attempts(
-            QualificationProtocolStage.DEVELOPMENT_1,
-            QualificationExecutionBasis.LIVE_PROVIDER,
-            substituted,
-        )
+    combined = canonical_prior_attempt_ledger()
+    assert combined.historical_attempt_ledger == ledger
+    assert combined.historical_attempt_ledger_sha256 == canonical_sha256(ledger)
+    assert combined.totals.model_call_count == 4
+    assert combined.totals.count_tokens_call_count == 1
+    assert combined.totals.provider_request_count == 5
+    assert combined.totals.input_token_count == 21_679
+    assert combined.totals.output_token_count == 2_149
+    assert combined.totals.model_cost_nano_units == 51_859_500
+    assert combined.totals.reserved_usage_count == 3
+    assert combined.totals.unexpected_missing_usage_count == 0
 
 
 def test_runtime_identity_freezes_project_provider_versions_and_pricing() -> None:
@@ -1146,7 +1301,7 @@ def test_runtime_identity_freezes_project_provider_versions_and_pricing() -> Non
         identity = qualification_runtime_identity(planner)
         assert identity == frozen_qualification_runtime_identity()
         assert canonical_sha256(identity) == (
-            "5be6321b3848417cd005cb309a970909aae88cac7a3ce97a208c486e1517ee92"
+            "ebcccd85ec30ce87fa88d478715865d5962392719b5f10a045374db9bb4a6a34"
         )
         assert identity.provider_project == "reconcile-dev-260813-14fa6d"
         assert identity.configured_model == "gemini-3.5-flash"
@@ -1177,7 +1332,7 @@ def test_runtime_identity_freezes_project_provider_versions_and_pricing() -> Non
         )
 
 
-def test_failed_count_attempt_is_persisted_and_blocks_generation(
+def test_deterministic_rejects_live_planner_and_failed_count_is_persisted(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1209,21 +1364,53 @@ def test_failed_count_attempt_is_persisted_and_blocks_generation(
 
     raw_models = planner._model.api_client.aio.models._raw_models
     monkeypatch.setattr(raw_models, "count_tokens", fail_count)
-    artifact_root = tmp_path / "artifacts"
+    artifact_root = _artifact_root(tmp_path)
     runner = QualificationProtocolRunner(artifact_root, repository=repository)
     try:
-        with pytest.raises(QualificationProviderDrift, match="preflight"):
+        with pytest.raises(QualificationProviderDrift, match="deterministic"):
             asyncio.run(
                 runner.run(
                     QualificationProtocolStage.DEVELOPMENT_1,
                     manifest,
                     planner,
+                    execution_basis=QualificationExecutionBasis.DETERMINISTIC_TEST,
                 )
             )
+        assert count_calls == 0
+        assert not (
+            artifact_root / QualificationProtocolStage.DEVELOPMENT_1.value
+        ).exists()
+
+        direct_store = QualificationArtifactStore(_artifact_root(tmp_path, "direct"))
+        direct_store.begin(QualificationProtocolStage.DEVELOPMENT_1)
+        meter = _AttemptMeter(
+            manifest,
+            direct_store,
+            [],
+            prior_usage=canonical_prior_attempt_ledger().totals,
+            execution_basis=QualificationExecutionBasis.LIVE_PROVIDER,
+            runtime_identity=frozen_qualification_runtime_identity(),
+            source_guard=lambda: None,
+        )
+        preflight = qualification_protocol_module._model_revision_preflight_input(
+            planner.metadata,
+            NOW,
+        )
+        metered = qualification_protocol_module._MeteredPlanner(
+            planner,
+            meter,
+            execution_id="provider-model-revision-preflight",
+            case_id="provider-model-revision-preflight",
+            repetition=1,
+            control_failure=False,
+            preflight=True,
+        )
+        turn = asyncio.run(metered.plan(preflight))
+        assert turn.failure is not None
     finally:
         asyncio.run(planner.aclose())
 
-    stage_path = artifact_root / QualificationProtocolStage.DEVELOPMENT_1.value
+    stage_path = direct_store.stage_path
     attempt_paths = tuple(stage_path.glob("attempt-*.json"))
     assert count_calls == 1
     assert {path.name for path in attempt_paths} == {
@@ -1252,9 +1439,9 @@ def test_provider_reservation_uses_context_bound_and_exact_global_ceilings(
         _provider_reservation(runtime, runtime.maximum_input_tokens_per_call + 1)
     assert qualification_request_static_byte_counts() == (1_021, 1_901)
     assert (
-        177 * reservation.cost_nano_units
-        + canonical_historical_attempt_ledger().totals.model_cost_nano_units
-        == 4_857_274_500
+        176 * reservation.cost_nano_units
+        + canonical_prior_attempt_ledger().totals.model_cost_nano_units
+        == 4_841_875_500
     )
 
     manifest = _manifest(QualificationProtocolStage.DEVELOPMENT_1)
@@ -1288,7 +1475,7 @@ def test_provider_reservation_uses_context_bound_and_exact_global_ceilings(
         reservation,
     )
 
-    store = QualificationArtifactStore(tmp_path / "meter")
+    store = QualificationArtifactStore(_artifact_root(tmp_path, "meter"))
     store.begin(QualificationProtocolStage.DEVELOPMENT_1)
     retained: list[QualificationArtifactIdentity] = []
     meter = _AttemptMeter(
@@ -1336,17 +1523,307 @@ def test_provider_reservation_uses_context_bound_and_exact_global_ceilings(
         ),
     )
     record = meter.complete_generation(start, metadata, turn=turn)
-    assert record.outcome is QualificationAttemptOutcome.RESERVATION_EXCEEDED
+    assert record.outcome is QualificationAttemptOutcome.PROVIDER_FAILURE
+    assert record.provider_failure_kind == PlannerFailureKind.UNAVAILABLE.value
+    assert record.input_bound_status is QualificationBoundStatus.EXCEEDED
+    assert record.output_bound_status is QualificationBoundStatus.WITHIN
+    assert record.usage_measured
 
 
-def test_count_attempts_use_the_exact_177_new_attempt_boundary(
+def test_post_provider_source_guard_preserves_measured_failure_accounting(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manifest = _manifest(QualificationProtocolStage.DEVELOPMENT_1)
+    runtime = frozen_qualification_runtime_identity()
+    guard_checks = 0
+
+    def source_guard() -> None:
+        nonlocal guard_checks
+        guard_checks += 1
+        if guard_checks == 3:
+            raise QualificationProtocolError(
+                "qualification source changed after provider call"
+            )
+
+    store = QualificationArtifactStore(_artifact_root(tmp_path, "post-call-guard"))
+    store.begin(QualificationProtocolStage.DEVELOPMENT_1)
+    meter = _AttemptMeter(
+        manifest,
+        store,
+        [],
+        prior_usage=_empty_usage(),
+        execution_basis=QualificationExecutionBasis.DETERMINISTIC_TEST,
+        runtime_identity=runtime,
+        source_guard=source_guard,
+    )
+    planner = _ScriptedPlanner(manifest.provider)
+
+    async def measured_failure(
+        planner_input: AdaptivePlannerInput,
+    ) -> AdvisoryPlannerTurn:
+        input_sha256 = hashlib.sha256(canonical_json_bytes(planner_input)).hexdigest()
+        return AdvisoryPlannerTurn(
+            output=None,
+            failure=PlannerFailureKind.UNAVAILABLE,
+            metadata=planner.metadata,
+            input_sha256=input_sha256,
+            output_sha256=None,
+            usage=AdvisoryPlannerUsage(
+                prompt_tokens=12_001,
+                output_tokens=1_025,
+                total_tokens=13_026,
+            ),
+        )
+
+    monkeypatch.setattr(planner, "plan", measured_failure)
+    metered_planner = qualification_protocol_module._MeteredPlanner(
+        planner,
+        meter,
+        execution_id="provider-model-revision-preflight",
+        case_id="provider-model-revision-preflight",
+        repetition=1,
+        control_failure=False,
+        preflight=True,
+    )
+    planner_input = qualification_protocol_module._model_revision_preflight_input(
+        planner.metadata, NOW
+    )
+
+    with pytest.raises(QualificationProtocolError, match="source changed"):
+        asyncio.run(metered_planner.plan(planner_input))
+
+    assert guard_checks == 3
+    generation_records = tuple(
+        record
+        for record in meter.attempts
+        if record.operation is QualificationProviderOperation.GENERATE
+    )
+    assert len(generation_records) == 1
+    record = generation_records[0]
+    assert record.outcome is QualificationAttemptOutcome.PROVIDER_FAILURE
+    assert record.provider_failure_kind == PlannerFailureKind.UNAVAILABLE.value
+    assert record.input_bound_status is QualificationBoundStatus.EXCEEDED
+    assert record.output_bound_status is QualificationBoundStatus.EXCEEDED
+    assert record.usage_measured
+    assert record.accounted_input_tokens == 12_001
+    assert record.accounted_output_tokens == 1_025
+    assert meter._totals().unexpected_missing_usage_count == 0
+
+
+@pytest.mark.parametrize(
+    (
+        "failure",
+        "input_tokens",
+        "output_tokens",
+        "expected_outcome",
+        "input_status",
+        "output_status",
+        "missing_usage",
+    ),
+    (
+        (
+            None,
+            12_000,
+            1_024,
+            QualificationAttemptOutcome.MEASURED,
+            QualificationBoundStatus.WITHIN,
+            QualificationBoundStatus.WITHIN,
+            False,
+        ),
+        (
+            None,
+            12_001,
+            100,
+            QualificationAttemptOutcome.RESERVATION_EXCEEDED,
+            QualificationBoundStatus.EXCEEDED,
+            QualificationBoundStatus.WITHIN,
+            False,
+        ),
+        (
+            None,
+            100,
+            1_025,
+            QualificationAttemptOutcome.RESERVATION_EXCEEDED,
+            QualificationBoundStatus.WITHIN,
+            QualificationBoundStatus.EXCEEDED,
+            False,
+        ),
+        (
+            PlannerFailureKind.UNAVAILABLE,
+            100,
+            20,
+            QualificationAttemptOutcome.PROVIDER_FAILURE,
+            QualificationBoundStatus.WITHIN,
+            QualificationBoundStatus.WITHIN,
+            False,
+        ),
+        (
+            PlannerFailureKind.UNAVAILABLE,
+            12_001,
+            20,
+            QualificationAttemptOutcome.PROVIDER_FAILURE,
+            QualificationBoundStatus.EXCEEDED,
+            QualificationBoundStatus.WITHIN,
+            False,
+        ),
+        (
+            PlannerFailureKind.UNAVAILABLE,
+            100,
+            1_025,
+            QualificationAttemptOutcome.PROVIDER_FAILURE,
+            QualificationBoundStatus.WITHIN,
+            QualificationBoundStatus.EXCEEDED,
+            False,
+        ),
+        (
+            PlannerFailureKind.UNAVAILABLE,
+            12_001,
+            1_025,
+            QualificationAttemptOutcome.PROVIDER_FAILURE,
+            QualificationBoundStatus.EXCEEDED,
+            QualificationBoundStatus.EXCEEDED,
+            False,
+        ),
+        (
+            PlannerFailureKind.UNAVAILABLE,
+            None,
+            None,
+            QualificationAttemptOutcome.PROVIDER_FAILURE,
+            QualificationBoundStatus.UNKNOWN,
+            QualificationBoundStatus.UNKNOWN,
+            True,
+        ),
+        (
+            None,
+            None,
+            None,
+            QualificationAttemptOutcome.USAGE_UNAVAILABLE,
+            QualificationBoundStatus.UNKNOWN,
+            QualificationBoundStatus.UNKNOWN,
+            True,
+        ),
+    ),
+)
+def test_generation_failure_bounds_and_usage_are_orthogonal(
+    tmp_path: Path,
+    failure: PlannerFailureKind | None,
+    input_tokens: int | None,
+    output_tokens: int | None,
+    expected_outcome: QualificationAttemptOutcome,
+    input_status: QualificationBoundStatus,
+    output_status: QualificationBoundStatus,
+    missing_usage: bool,
+) -> None:
+    manifest = _manifest(QualificationProtocolStage.DEVELOPMENT_1)
+    runtime = frozen_qualification_runtime_identity()
+    slug = f"{expected_outcome.value.lower()}-{input_tokens}-{output_tokens}"
+    store = QualificationArtifactStore(_artifact_root(tmp_path, slug))
+    store.begin(QualificationProtocolStage.DEVELOPMENT_1)
+    meter = _AttemptMeter(
+        manifest,
+        store,
+        [],
+        prior_usage=_empty_usage(),
+        execution_basis=QualificationExecutionBasis.DETERMINISTIC_TEST,
+        runtime_identity=runtime,
+        source_guard=lambda: None,
+    )
+    planner = _ScriptedPlanner(manifest.provider)
+    planner_input = qualification_protocol_module._model_revision_preflight_input(
+        planner.metadata, NOW
+    )
+    successful_turn = asyncio.run(planner.plan(planner_input))
+    start = QualificationProviderAttemptStart(
+        schema_version=QUALIFICATION_ATTEMPT_START_VERSION,
+        attempt_id="attempt-001-generate",
+        sequence=1,
+        dispatch_id="dispatch-001-bounds",
+        execution_id="provider-model-revision-preflight",
+        case_id="provider-model-revision-preflight",
+        repetition=1,
+        planner_phase=AdaptivePlannerPhase.ACQUIRE_EVIDENCE,
+        operation=QualificationProviderOperation.GENERATE,
+        execution_basis=QualificationExecutionBasis.DETERMINISTIC_TEST,
+        planner_configuration_sha256=canonical_sha256(runtime),
+        input_sha256=successful_turn.input_sha256,
+        request_byte_count=1,
+        sealed_generation_request_sha256="2" * 64,
+        paired_count_attempt_id="attempt-000-count-tokens",
+        reserved_provider_request_count=1,
+        reserved_input_tokens=12_000,
+        reserved_output_tokens=1_024,
+        reserved_cost_nano_units=27_216_000,
+        started_at=NOW,
+    )
+    usage = (
+        None
+        if input_tokens is None or output_tokens is None
+        else AdvisoryPlannerUsage(
+            prompt_tokens=input_tokens,
+            output_tokens=output_tokens,
+            total_tokens=input_tokens + output_tokens,
+        )
+    )
+    if failure is None and usage is not None:
+        turn = AdvisoryPlannerTurn(
+            output=successful_turn.output,
+            failure=None,
+            metadata=successful_turn.metadata,
+            input_sha256=successful_turn.input_sha256,
+            output_sha256=successful_turn.output_sha256,
+            usage=usage,
+        )
+    elif failure is None:
+        turn = None
+    else:
+        turn = AdvisoryPlannerTurn(
+            output=None,
+            failure=failure,
+            metadata=planner.metadata,
+            input_sha256=start.input_sha256,
+            output_sha256=None,
+            usage=usage,
+        )
+    record = meter.complete_generation(
+        start,
+        planner.metadata,
+        turn=turn,
+        preflight=True,
+    )
+
+    assert record.outcome is expected_outcome
+    assert record.provider_failure_kind == (None if failure is None else failure.value)
+    assert record.input_bound_status is input_status
+    assert record.output_bound_status is output_status
+    assert record.usage_measured is (usage is not None)
+    assert record.accounting_basis.value == (
+        "MEASURED"
+        if expected_outcome is QualificationAttemptOutcome.MEASURED
+        else "RESERVED"
+    )
+    assert record.accounted_input_tokens == (
+        input_tokens
+        if expected_outcome is QualificationAttemptOutcome.MEASURED
+        else max(12_000, input_tokens or 0)
+    )
+    assert record.accounted_output_tokens == (
+        output_tokens
+        if expected_outcome is QualificationAttemptOutcome.MEASURED
+        else max(1_024, output_tokens or 0)
+    )
+    assert meter._totals().unexpected_missing_usage_count == int(missing_usage)
+    assert meter._totals().reserved_usage_count == int(
+        expected_outcome is not QualificationAttemptOutcome.MEASURED
+    )
+
+
+def test_count_attempts_include_consumed_v2_at_the_exact_total_boundary(
     tmp_path: Path,
 ) -> None:
     manifest = _manifest(QualificationProtocolStage.DEVELOPMENT_1)
-    historical = qualification_protocol_module._project_prior_usage(
-        canonical_historical_attempt_ledger().totals
-    )
-    store = QualificationArtifactStore(tmp_path / "count-boundary")
+    historical = canonical_prior_attempt_ledger().totals
+    store = QualificationArtifactStore(_artifact_root(tmp_path, "count-boundary"))
     store.begin(QualificationProtocolStage.DEVELOPMENT_1)
     meter = _AttemptMeter(
         manifest,
@@ -1358,7 +1835,7 @@ def test_count_attempts_use_the_exact_177_new_attempt_boundary(
         source_guard=lambda: None,
     )
     metadata = _ScriptedPlanner(manifest.provider).metadata
-    for sequence in range(1, 178):
+    for sequence in range(1, 177):
         start = meter.reserve_count_tokens(
             execution_id=f"count-boundary-{sequence:03d}",
             case_id=manifest.cases[0].case_id,
@@ -1376,27 +1853,27 @@ def test_count_attempts_use_the_exact_177_new_attempt_boundary(
         )
 
     combined = qualification_protocol_module._add_usage(historical, meter._totals())
-    assert combined.model_call_count == 3
+    assert combined.model_call_count == 4
     assert combined.count_tokens_call_count == 177
-    assert combined.provider_request_count == 180
+    assert combined.provider_request_count == 181
     assert combined.input_token_count == historical.input_token_count
     assert combined.output_token_count == historical.output_token_count
     assert combined.model_cost_nano_units == historical.model_cost_nano_units
-    assert len(meter.attempts) == 177
+    assert len(meter.attempts) == 176
     assert all(
         item.operation is QualificationProviderOperation.COUNT_TOKENS
         for item in meter.attempts
     )
     with pytest.raises(QualificationBudgetExceeded, match="ceiling"):
         meter.reserve_count_tokens(
-            execution_id="count-boundary-178",
+            execution_id="count-boundary-177",
             case_id=manifest.cases[0].case_id,
             repetition=1,
             planner_phase=AdaptivePlannerPhase.ACQUIRE_EVIDENCE,
-            input_sha256=f"{178:064x}",
+            input_sha256=f"{177:064x}",
             request_byte_count=1,
-            sealed_generation_request_sha256=f"{179:064x}",
-            provider_request_sha256=f"{180:064x}",
+            sealed_generation_request_sha256=f"{178:064x}",
+            provider_request_sha256=f"{179:064x}",
         )
 
 
@@ -1405,7 +1882,7 @@ def test_successful_attempts_bind_provider_and_preflight_ownership(
 ) -> None:
     manifest = _manifest(QualificationProtocolStage.DEVELOPMENT_1)
     runtime = frozen_qualification_runtime_identity()
-    store = QualificationArtifactStore(tmp_path / "attempt-ownership")
+    store = QualificationArtifactStore(_artifact_root(tmp_path, "attempt-ownership"))
     store.begin(QualificationProtocolStage.DEVELOPMENT_1)
     meter = _AttemptMeter(
         manifest,
@@ -1456,15 +1933,82 @@ def test_successful_attempts_bind_provider_and_preflight_ownership(
         meter.ledger()
 
 
+def test_count_tokens_is_provenance_not_generation_reservation(
+    tmp_path: Path,
+) -> None:
+    manifest = _manifest(QualificationProtocolStage.DEVELOPMENT_1)
+    runtime = frozen_qualification_runtime_identity()
+    store = QualificationArtifactStore(_artifact_root(tmp_path, "count-provenance"))
+    store.begin(QualificationProtocolStage.DEVELOPMENT_1)
+    meter = _AttemptMeter(
+        manifest,
+        store,
+        [],
+        prior_usage=canonical_prior_attempt_ledger().totals,
+        execution_basis=QualificationExecutionBasis.DETERMINISTIC_TEST,
+        runtime_identity=runtime,
+        source_guard=lambda: None,
+    )
+    planner = _ScriptedPlanner(manifest.provider)
+    planner_input = qualification_protocol_module._model_revision_preflight_input(
+        planner.metadata, NOW
+    )
+    turn = asyncio.run(planner.plan(planner_input))
+    turn = AdvisoryPlannerTurn(
+        output=turn.output,
+        failure=None,
+        metadata=turn.metadata,
+        input_sha256=turn.input_sha256,
+        output_sha256=turn.output_sha256,
+        usage=AdvisoryPlannerUsage(
+            prompt_tokens=1_734,
+            output_tokens=1_007,
+            total_tokens=2_741,
+        ),
+    )
+    input_bytes = canonical_json_bytes(planner_input)
+    count_start = meter.reserve_count_tokens(
+        execution_id="provider-model-revision-preflight",
+        case_id="provider-model-revision-preflight",
+        repetition=1,
+        planner_phase=AdaptivePlannerPhase.ACQUIRE_EVIDENCE,
+        input_sha256=turn.input_sha256,
+        request_byte_count=len(input_bytes),
+        sealed_generation_request_sha256="1" * 64,
+        provider_request_sha256="2" * 64,
+    )
+    count_finish = meter.complete_count_tokens(
+        count_start,
+        planner.metadata,
+        counted_input_tokens=1_089,
+    )
+    generation_start = meter.reserve_generation(count_attempt=count_finish)
+    generation_finish = meter.complete_generation(
+        generation_start,
+        planner.metadata,
+        turn=turn,
+        preflight=True,
+    )
+
+    assert count_finish.counted_input_tokens == 1_089
+    assert generation_start.reserved_input_tokens == 12_000
+    assert generation_start.reserved_output_tokens == 1_024
+    assert generation_finish.outcome is QualificationAttemptOutcome.MEASURED
+    assert generation_finish.accounting_basis.value == "MEASURED"
+    assert generation_finish.accounted_input_tokens == 1_734
+    assert generation_finish.accounted_output_tokens == 1_007
+    assert generation_finish.input_bound_status is QualificationBoundStatus.WITHIN
+    assert generation_finish.output_bound_status is QualificationBoundStatus.WITHIN
+    assert meter.ledger().totals.unexpected_missing_usage_count == 0
+
+
 def test_paired_dispatches_reach_every_frozen_provider_ceiling(
     tmp_path: Path,
 ) -> None:
     manifest = _manifest(QualificationProtocolStage.DEVELOPMENT_1)
-    historical = qualification_protocol_module._project_prior_usage(
-        canonical_historical_attempt_ledger().totals
-    )
+    historical = canonical_prior_attempt_ledger().totals
     runtime = frozen_qualification_runtime_identity()
-    store = QualificationArtifactStore(tmp_path / "paired-boundary")
+    store = QualificationArtifactStore(_artifact_root(tmp_path, "paired-boundary"))
     store.begin(QualificationProtocolStage.DEVELOPMENT_1)
     meter = _AttemptMeter(
         manifest,
@@ -1476,7 +2020,7 @@ def test_paired_dispatches_reach_every_frozen_provider_ceiling(
         source_guard=lambda: None,
     )
     metadata = _ScriptedPlanner(manifest.provider).metadata
-    for dispatch in range(1, 178):
+    for dispatch in range(1, 177):
         input_sha256 = f"{dispatch:064x}"
         count_start = meter.reserve_count_tokens(
             execution_id=f"paired-boundary-{dispatch:03d}",
@@ -1515,20 +2059,20 @@ def test_paired_dispatches_reach_every_frozen_provider_ceiling(
     assert combined.model_call_count == 180
     assert combined.count_tokens_call_count == 177
     assert combined.provider_request_count == 357
-    assert combined.input_token_count == 2_143_945
+    assert combined.input_token_count == 2_133_679
     assert combined.output_token_count == 182_373
-    assert combined.model_cost_nano_units == 4_857_274_500
-    assert len(meter.attempts) == 354
+    assert combined.model_cost_nano_units == 4_841_875_500
+    assert len(meter.attempts) == 352
     with pytest.raises(QualificationBudgetExceeded, match="ceiling"):
         meter.reserve_count_tokens(
-            execution_id="paired-boundary-178",
+            execution_id="paired-boundary-177",
             case_id=manifest.cases[0].case_id,
             repetition=1,
             planner_phase=AdaptivePlannerPhase.ACQUIRE_EVIDENCE,
-            input_sha256=f"{178:064x}",
+            input_sha256=f"{177:064x}",
             request_byte_count=1,
-            sealed_generation_request_sha256=f"{179:064x}",
-            provider_request_sha256=f"{180:064x}",
+            sealed_generation_request_sha256=f"{178:064x}",
+            provider_request_sha256=f"{179:064x}",
         )
 
 
@@ -1650,7 +2194,7 @@ def test_partial_lane_failure_remains_reachable_and_readable(
 ) -> None:
     repository = tmp_path / "source"
     source_revision = _source_repository(repository)
-    artifact_root = tmp_path / "artifacts"
+    artifact_root = _artifact_root(tmp_path)
     manifest = build_protocol_manifest(
         QualificationProtocolStage.DEVELOPMENT_1,
         source_revision=source_revision,
@@ -1672,7 +2216,6 @@ def test_partial_lane_failure_remains_reachable_and_readable(
             QualificationProtocolStage.DEVELOPMENT_1,
             manifest,
             _ScriptedPlanner(manifest.provider),
-            prior_attempts=canonical_historical_attempt_ledger(),
             execution_basis=QualificationExecutionBasis.DETERMINISTIC_TEST,
         )
     )
@@ -1723,7 +2266,7 @@ def test_lane_publication_interruption_retains_each_published_artifact(
 ) -> None:
     repository = tmp_path / "source"
     source_revision = _source_repository(repository)
-    artifact_root = tmp_path / "artifacts"
+    artifact_root = _artifact_root(tmp_path)
     manifest = build_protocol_manifest(
         QualificationProtocolStage.DEVELOPMENT_1,
         source_revision=source_revision,
@@ -1785,7 +2328,7 @@ def test_post_link_receipt_error_resolves_the_exact_durable_commit(
 ) -> None:
     repository = tmp_path / "source"
     source_revision = _source_repository(repository)
-    artifact_root = tmp_path / "artifacts"
+    artifact_root = _artifact_root(tmp_path)
     manifest = build_protocol_manifest(
         QualificationProtocolStage.DEVELOPMENT_1,
         source_revision=source_revision,
@@ -1955,7 +2498,7 @@ def test_reader_rejects_adaptive_usage_undercount_in_every_retained_graph(
 ) -> None:
     repository = tmp_path / "source"
     source_revision = _source_repository(repository)
-    artifact_root = tmp_path / "artifacts"
+    artifact_root = _artifact_root(tmp_path)
     manifest = build_protocol_manifest(
         QualificationProtocolStage.DEVELOPMENT_1,
         source_revision=source_revision,
@@ -2064,7 +2607,7 @@ def test_reader_recomputes_summaries_and_enumerates_stage_files(
 ) -> None:
     repository = tmp_path / "source"
     source_revision = _source_repository(repository)
-    artifact_root = tmp_path / "artifacts"
+    artifact_root = _artifact_root(tmp_path)
     manifest = build_protocol_manifest(
         QualificationProtocolStage.DEVELOPMENT_1,
         source_revision=source_revision,
@@ -2246,6 +2789,7 @@ def test_final_access_revalidates_all_sealed_prerequisites_before_prepare(
     runtime_sha256 = runtime_identities[QualificationProtocolStage.FINAL_HOLDOUT].sha256
     concrete_revision = "gemini-3.5-flash-001"
     historical_sha256 = "4" * 64
+    consumed_v2_sha256 = "5" * 64
 
     def binding_payload(suite_id: str, nonce: str) -> dict[str, object]:
         return {
@@ -2277,6 +2821,7 @@ def test_final_access_revalidates_all_sealed_prerequisites_before_prepare(
 
     first_completion_payload: dict[str, object] = {
         "execution_basis": "LIVE_PROVIDER",
+        "consumed_v2_custody_sha256": consumed_v2_sha256,
         "historical_attempt_ledger_sha256": historical_sha256,
         "model_binding": identity_value(first_binding),
         "planner_configuration_sha256": runtime_sha256,
@@ -2319,6 +2864,7 @@ def test_final_access_revalidates_all_sealed_prerequisites_before_prepare(
         QualificationProtocolStage.FINAL_HOLDOUT,
         "execution-start",
         {
+            "consumed_v2_custody_sha256": consumed_v2_sha256,
             "execution_basis": "LIVE_PROVIDER",
             "historical_attempt_ledger_sha256": historical_sha256,
             "manifest_sha256": manifest_identity.sha256,
@@ -2369,6 +2915,7 @@ def test_final_access_revalidates_all_sealed_prerequisites_before_prepare(
         runtime_identity_sha256=runtime_sha256,
         concrete_model_revision=concrete_revision,
         historical_attempt_ledger_sha256=historical_sha256,
+        consumed_v2_custody_sha256=consumed_v2_sha256,
         schedule=schedule,
     )
     session = _FinalFixtureSession(access)
@@ -2472,6 +3019,7 @@ def test_final_access_rejects_forged_store_path_and_identity(tmp_path: Path) -> 
             runtime_identity_sha256="2" * 64,
             concrete_model_revision="gemini-3.5-flash-001",
             historical_attempt_ledger_sha256="4" * 64,
+            consumed_v2_custody_sha256="5" * 64,
             schedule=(("case", 1),),
             _seal=object(),
         )
@@ -2484,7 +3032,7 @@ def test_final_access_rejects_forged_store_path_and_identity(tmp_path: Path) -> 
             workspace=tmp_path / "direct-final-fixtures",
         )
 
-    store = QualificationArtifactStore(tmp_path / "forged")
+    store = QualificationArtifactStore(_artifact_root(tmp_path, "forged"))
     store.begin(QualificationProtocolStage.FINAL_HOLDOUT)
     forged = store.publish(
         "execution-start",
