@@ -1,4 +1,4 @@
-"""Single-use v2 execution protocol around frozen public v1 qualification models."""
+"""Single-use v3 execution protocol around frozen public v1 qualification models."""
 
 from __future__ import annotations
 
@@ -103,6 +103,13 @@ from reconcile.qualification_fixtures import (
     _issue_final_fixture_access,
     qualification_cases_for_stage,
 )
+from reconcile.qualification_v2_custody import (
+    QualificationConsumedV2Custody,
+    QualificationV2CustodySource,
+    QualificationV2UsageTotals,
+    canonical_consumed_v2_custody,
+    load_consumed_v2_custody,
+)
 from reconcile.security import is_sensitive_key
 
 _ARTIFACT_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
@@ -125,10 +132,10 @@ _FROZEN_INPUT_COST_NANO_UNITS = 1_500
 _FROZEN_OUTPUT_COST_NANO_UNITS = 9_000
 _FROZEN_CONTEXT_WINDOW_TOKENS = 1_048_576
 _FROZEN_MAX_INPUT_TOKENS_PER_CALL = 12_000
-_FROZEN_MAX_NEW_MODEL_CALLS = 177
+_FROZEN_MAX_NEW_MODEL_CALLS = 176
 _FROZEN_MAX_COUNT_TOKEN_CALLS = 177
 _FROZEN_MAX_TOTAL_PROVIDER_REQUESTS = 357
-_FROZEN_MAX_CURRENT_OPERATION_RECORDS = 354
+_FROZEN_MAX_CURRENT_OPERATION_RECORDS = 352
 _CONCRETE_MODEL_REVISION = re.compile(rf"^{re.escape(_FROZEN_MODEL_NAME)}-[0-9]{{3}}$")
 _FROZEN_MAX_TOTAL_INPUT_TOKENS = 2_143_945
 _FROZEN_MAX_TOTAL_OUTPUT_TOKENS = 182_373
@@ -162,28 +169,34 @@ def _reject_artifact_secret_keys(value: object) -> None:
             _reject_artifact_secret_keys(item)
 
 
-QUALIFICATION_EXECUTION_START_VERSION = "reconcile/qualification-execution-start/v2"
-QUALIFICATION_RUNTIME_IDENTITY_VERSION = "reconcile/qualification-runtime-identity/v2"
-QUALIFICATION_MODEL_BINDING_VERSION = "reconcile/qualification-model-binding/v2"
+QUALIFICATION_EXECUTION_START_VERSION = "reconcile/qualification-execution-start/v3"
+QUALIFICATION_RUNTIME_IDENTITY_VERSION = "reconcile/qualification-runtime-identity/v3"
+QUALIFICATION_MODEL_BINDING_VERSION = "reconcile/qualification-model-binding/v3"
 QUALIFICATION_OBSERVATION_BUNDLE_VERSION = (
-    "reconcile/qualification-observation-bundle/v2"
+    "reconcile/qualification-observation-bundle/v3"
 )
-QUALIFICATION_NORMALIZED_RUN_VERSION = "reconcile/qualification-normalized-run/v2"
-QUALIFICATION_LANE_RECEIPT_VERSION = "reconcile/qualification-lane-receipt/v2"
-QUALIFICATION_FAILURE_RECORD_VERSION = "reconcile/qualification-failure-record/v2"
+QUALIFICATION_NORMALIZED_RUN_VERSION = "reconcile/qualification-normalized-run/v3"
+QUALIFICATION_LANE_RECEIPT_VERSION = "reconcile/qualification-lane-receipt/v3"
+QUALIFICATION_FAILURE_RECORD_VERSION = "reconcile/qualification-failure-record/v3"
 QUALIFICATION_PARTIAL_PUBLICATION_VERSION = (
-    "reconcile/qualification-partial-publication/v2"
+    "reconcile/qualification-partial-publication/v3"
 )
-QUALIFICATION_ATTEMPT_START_VERSION = "reconcile/qualification-attempt-start/v2"
-QUALIFICATION_ATTEMPT_VERSION = "reconcile/qualification-attempt/v2"
-QUALIFICATION_ATTEMPT_LEDGER_VERSION = "reconcile/qualification-attempt-ledger/v2"
+QUALIFICATION_ATTEMPT_START_VERSION = "reconcile/qualification-attempt-start/v3"
+QUALIFICATION_ATTEMPT_VERSION = "reconcile/qualification-attempt/v3"
+QUALIFICATION_ATTEMPT_LEDGER_VERSION = "reconcile/qualification-attempt-ledger/v3"
 QUALIFICATION_PRIOR_ATTEMPT_LEDGER_VERSION = (
     "reconcile/qualification-prior-attempt-ledger/v2"
 )
-QUALIFICATION_CASE_EXECUTION_VERSION = "reconcile/qualification-case-execution/v2"
-QUALIFICATION_PROTOCOL_SUMMARY_VERSION = "reconcile/qualification-protocol-summary/v2"
+QUALIFICATION_HISTORICAL_ATTEMPT_LEDGER_VERSION = (
+    QUALIFICATION_PRIOR_ATTEMPT_LEDGER_VERSION
+)
+QUALIFICATION_COMBINED_PRIOR_ATTEMPT_LEDGER_VERSION = (
+    "reconcile/qualification-combined-prior-attempt-ledger/v3"
+)
+QUALIFICATION_CASE_EXECUTION_VERSION = "reconcile/qualification-case-execution/v3"
+QUALIFICATION_PROTOCOL_SUMMARY_VERSION = "reconcile/qualification-protocol-summary/v3"
 QUALIFICATION_EXECUTION_COMPLETION_VERSION = (
-    "reconcile/qualification-execution-completion/v2"
+    "reconcile/qualification-execution-completion/v3"
 )
 
 
@@ -222,6 +235,13 @@ class QualificationAccountingBasis(StrEnum):
     MEASURED = "MEASURED"
     NON_BILLABLE = "NON_BILLABLE"
     RESERVED = "RESERVED"
+
+
+class QualificationBoundStatus(StrEnum):
+    WITHIN = "WITHIN"
+    EXCEEDED = "EXCEEDED"
+    UNKNOWN = "UNKNOWN"
+    NOT_APPLICABLE = "NOT_APPLICABLE"
 
 
 class QualificationExecutionBasis(StrEnum):
@@ -350,6 +370,7 @@ class QualificationExecutionStart(StrictModel):
     prior_stage_completion_sha256: Sha256Digest | None
     prior_attempt_ledger_sha256: Sha256Digest | None
     historical_attempt_ledger_sha256: Sha256Digest
+    consumed_v2_custody_sha256: Sha256Digest
     started_at: AwareDatetime
 
     @model_validator(mode="after")
@@ -638,11 +659,11 @@ class QualificationProviderAttemptStart(StrictModel):
             + self.reserved_output_tokens * _FROZEN_OUTPUT_COST_NANO_UNITS
         )
         if (
-            not 1 <= self.reserved_input_tokens <= _FROZEN_MAX_INPUT_TOKENS_PER_CALL
+            self.reserved_input_tokens != _FROZEN_MAX_INPUT_TOKENS_PER_CALL
             or self.reserved_output_tokens != _FROZEN_MAX_OUTPUT_TOKENS
             or self.reserved_cost_nano_units != expected_cost
         ):
-            raise ValueError("generation start has an invalid reservation")
+            raise ValueError("generation start must reserve the frozen full call")
         return self
 
 
@@ -668,6 +689,9 @@ class QualificationProviderAttempt(StrictModel):
     outcome: QualificationAttemptOutcome
     accounting_basis: QualificationAccountingBasis
     failure_category: Identifier | None = None
+    provider_failure_kind: Identifier | None = None
+    input_bound_status: QualificationBoundStatus
+    output_bound_status: QualificationBoundStatus
     provider_name: Identifier
     configured_model: Identifier
     reported_model: Identifier | None = None
@@ -710,6 +734,10 @@ class QualificationProviderAttempt(StrictModel):
                 or self.reserved_input_tokens != 0
                 or self.reserved_output_tokens != 0
                 or self.reserved_cost_nano_units != 0
+                or self.input_bound_status
+                is not QualificationBoundStatus.NOT_APPLICABLE
+                or self.output_bound_status
+                is not QualificationBoundStatus.NOT_APPLICABLE
             ):
                 raise ValueError("token-count attempts are non-generative accounting")
             counted = self.outcome is QualificationAttemptOutcome.TOKEN_COUNTED
@@ -719,12 +747,14 @@ class QualificationProviderAttempt(StrictModel):
                     self.counted_input_tokens is None
                     or self.counted_input_tokens > _FROZEN_MAX_INPUT_TOKENS_PER_CALL
                     or self.failure_category is not None
+                    or self.provider_failure_kind is not None
                 )
             ) or (
                 not counted
                 and (
                     self.counted_input_tokens is not None
                     or self.failure_category is None
+                    or self.provider_failure_kind != self.failure_category
                 )
             ):
                 raise ValueError("token-count outcome and response are inconsistent")
@@ -782,16 +812,64 @@ class QualificationProviderAttempt(StrictModel):
             + self.reserved_output_tokens * _FROZEN_OUTPUT_COST_NANO_UNITS
         )
         if (
-            not 1 <= self.reserved_input_tokens <= _FROZEN_MAX_INPUT_TOKENS_PER_CALL
+            self.reserved_input_tokens != _FROZEN_MAX_INPUT_TOKENS_PER_CALL
             or self.reserved_output_tokens != _FROZEN_MAX_OUTPUT_TOKENS
             or self.reserved_cost_nano_units != expected_reservation_cost
         ):
-            raise ValueError("generation attempt has an invalid reservation")
+            raise ValueError("generation attempt must retain the frozen full call")
+        expected_input_status = (
+            QualificationBoundStatus.NOT_APPLICABLE
+            if self.reserved_provider_request_count == 0
+            else (
+                QualificationBoundStatus.UNKNOWN
+                if self.measured_input_tokens is None
+                else (
+                    QualificationBoundStatus.EXCEEDED
+                    if self.measured_input_tokens > self.reserved_input_tokens
+                    else QualificationBoundStatus.WITHIN
+                )
+            )
+        )
+        expected_output_status = (
+            QualificationBoundStatus.NOT_APPLICABLE
+            if self.reserved_provider_request_count == 0
+            else (
+                QualificationBoundStatus.UNKNOWN
+                if self.measured_output_tokens is None
+                else (
+                    QualificationBoundStatus.EXCEEDED
+                    if self.measured_output_tokens > self.reserved_output_tokens
+                    else QualificationBoundStatus.WITHIN
+                )
+            )
+        )
+        if (
+            self.input_bound_status is not expected_input_status
+            or self.output_bound_status is not expected_output_status
+        ):
+            raise ValueError("generation bound status must derive per measured axis")
+        provider_failure = self.outcome in {
+            QualificationAttemptOutcome.PROVIDER_FAILURE,
+            QualificationAttemptOutcome.PROVIDER_DRIFT,
+            QualificationAttemptOutcome.RAISED,
+        }
+        if provider_failure is not (self.provider_failure_kind is not None) or (
+            provider_failure and self.provider_failure_kind != self.failure_category
+        ):
+            raise ValueError("provider failure must remain an orthogonal exact fact")
+        if (
+            self.outcome is not QualificationAttemptOutcome.MEASURED
+            and self.accounting_basis is not QualificationAccountingBasis.RESERVED
+        ):
+            raise ValueError("non-success generation accounting must be conservative")
         if self.outcome is QualificationAttemptOutcome.MEASURED:
             if (
                 not self.usage_measured
                 or self.accounting_basis is not QualificationAccountingBasis.MEASURED
                 or self.failure_category is not None
+                or self.provider_failure_kind is not None
+                or self.input_bound_status is not QualificationBoundStatus.WITHIN
+                or self.output_bound_status is not QualificationBoundStatus.WITHIN
                 or self.measured_input_tokens != self.accounted_input_tokens
                 or self.measured_output_tokens != self.accounted_output_tokens
             ):
@@ -801,8 +879,19 @@ class QualificationProviderAttempt(StrictModel):
                 self.usage_measured
                 or self.accounting_basis is not QualificationAccountingBasis.RESERVED
                 or self.failure_category != "control-unavailable"
+                or self.provider_failure_kind is not None
             ):
                 raise ValueError("control failures require reserved accounting")
+        elif self.outcome is QualificationAttemptOutcome.RESERVATION_EXCEEDED:
+            if (
+                not self.usage_measured
+                or self.accounting_basis is not QualificationAccountingBasis.RESERVED
+                or self.failure_category != "reservation-exceeded"
+                or self.provider_failure_kind is not None
+                or QualificationBoundStatus.EXCEEDED
+                not in {self.input_bound_status, self.output_bound_status}
+            ):
+                raise ValueError("reservation overrun must retain measured bounds")
         elif self.failure_category is None:
             raise ValueError("failed attempts require a sanitized failure category")
         if self.accounting_basis is QualificationAccountingBasis.RESERVED and (
@@ -811,6 +900,12 @@ class QualificationProviderAttempt(StrictModel):
             or self.accounted_cost_nano_units < self.reserved_cost_nano_units
         ):
             raise ValueError("reserved accounting cannot undercharge a reservation")
+        expected_accounted_cost = (
+            self.accounted_input_tokens * _FROZEN_INPUT_COST_NANO_UNITS
+            + self.accounted_output_tokens * _FROZEN_OUTPUT_COST_NANO_UNITS
+        )
+        if self.accounted_cost_nano_units != expected_accounted_cost:
+            raise ValueError("generation accounted cost must derive from usage")
         return self
 
 
@@ -938,8 +1033,7 @@ def _attempt_totals(
         for item in generations
     )
     unexpected = sum(
-        item.accounting_basis is QualificationAccountingBasis.RESERVED
-        and item.outcome is not QualificationAttemptOutcome.CONTROL_FAILURE
+        item.reserved_provider_request_count == 1 and not item.usage_measured
         for item in generations
     )
     inputs = sum(item.accounted_input_tokens for item in generations)
@@ -1105,8 +1199,6 @@ class QualificationAttemptLedger(StrictModel):
                         generation.operation
                         is not QualificationProviderOperation.GENERATE
                         or generation.paired_count_attempt_id != attempt.attempt_id
-                        or generation.reserved_input_tokens
-                        != attempt.counted_input_tokens
                         or any(
                             getattr(generation, field_name)
                             != getattr(attempt, field_name)
@@ -1227,6 +1319,8 @@ def _prior_totals(
 
 
 class QualificationPriorAttemptLedger(StrictModel):
+    """Byte-compatible decoder for the immutable historical v2 ledger."""
+
     schema_version: Literal[QUALIFICATION_PRIOR_ATTEMPT_LEDGER_VERSION]
     attempts: tuple[QualificationPriorProviderAttempt, ...] = Field(max_length=180)
     totals: QualificationPriorModelUsageTotals
@@ -1239,6 +1333,9 @@ class QualificationPriorAttemptLedger(StrictModel):
         if self.totals != _prior_totals(self.attempts):
             raise ValueError("prior attempt totals must be derived")
         return self
+
+
+QualificationHistoricalAttemptLedger = QualificationPriorAttemptLedger
 
 
 def canonical_historical_attempt_ledger() -> QualificationPriorAttemptLedger:
@@ -1333,6 +1430,60 @@ def canonical_historical_attempt_ledger() -> QualificationPriorAttemptLedger:
     )
 
 
+def _project_v2_usage(
+    usage: QualificationV2UsageTotals,
+) -> QualificationModelUsageTotals:
+    return QualificationModelUsageTotals(
+        model_call_count=usage.model_call_count,
+        count_tokens_call_count=usage.count_tokens_call_count,
+        provider_request_count=usage.provider_request_count,
+        input_token_count=usage.input_token_count,
+        output_token_count=usage.output_token_count,
+        total_token_count=usage.total_token_count,
+        model_cost_nano_units=usage.model_cost_nano_units,
+        reserved_usage_count=usage.reserved_usage_count,
+        unexpected_missing_usage_count=usage.unexpected_missing_usage_count,
+    )
+
+
+class QualificationCombinedPriorAttemptLedger(StrictModel):
+    schema_version: Literal[QUALIFICATION_COMBINED_PRIOR_ATTEMPT_LEDGER_VERSION]
+    historical_attempt_ledger: QualificationPriorAttemptLedger
+    historical_attempt_ledger_sha256: Sha256Digest
+    consumed_v2_custody_sha256: Sha256Digest
+    historical_usage: QualificationModelUsageTotals
+    consumed_v2_usage: QualificationModelUsageTotals
+    totals: QualificationModelUsageTotals
+
+    @model_validator(mode="after")
+    def validate_ledger(self) -> QualificationCombinedPriorAttemptLedger:
+        if (
+            self.historical_attempt_ledger_sha256
+            != canonical_sha256(self.historical_attempt_ledger)
+            or self.historical_usage
+            != _project_prior_usage(self.historical_attempt_ledger.totals)
+            or self.totals != _add_usage(self.historical_usage, self.consumed_v2_usage)
+        ):
+            raise ValueError("combined prior-attempt custody must be derived")
+        return self
+
+
+def canonical_prior_attempt_ledger(
+    custody: QualificationConsumedV2Custody | None = None,
+) -> QualificationCombinedPriorAttemptLedger:
+    consumed = canonical_consumed_v2_custody() if custody is None else custody
+    historical = canonical_historical_attempt_ledger()
+    return QualificationCombinedPriorAttemptLedger(
+        schema_version=QUALIFICATION_COMBINED_PRIOR_ATTEMPT_LEDGER_VERSION,
+        historical_attempt_ledger=historical,
+        historical_attempt_ledger_sha256=canonical_sha256(historical),
+        consumed_v2_custody_sha256=canonical_sha256(consumed),
+        historical_usage=_project_v2_usage(consumed.historical_totals),
+        consumed_v2_usage=_project_v2_usage(consumed.consumed_v2_totals),
+        totals=_project_v2_usage(consumed.combined_totals),
+    )
+
+
 class QualificationCaseExecutionRecord(StrictModel):
     schema_version: Literal[QUALIFICATION_CASE_EXECUTION_VERSION]
     execution_id: Identifier
@@ -1423,6 +1574,7 @@ class QualificationProtocolSummary(StrictModel):
     model_binding_sha256: Sha256Digest
     prior_attempt_ledger_sha256: Sha256Digest | None
     historical_attempt_ledger_sha256: Sha256Digest
+    consumed_v2_custody_sha256: Sha256Digest
     prior_stage_completion_sha256: Sha256Digest | None
     execution_basis: QualificationExecutionBasis
     planner_configuration_sha256: Sha256Digest
@@ -1430,6 +1582,8 @@ class QualificationProtocolSummary(StrictModel):
     fixed_metrics: QualificationProtocolLaneMetrics
     adaptive_metrics: QualificationProtocolLaneMetrics
     qualification_attempt_usage: QualificationModelUsageTotals
+    historical_attempt_usage: QualificationModelUsageTotals
+    consumed_v2_attempt_usage: QualificationModelUsageTotals
     prior_attempt_usage: QualificationModelUsageTotals
     ceiling_usage: QualificationModelUsageTotals
     maximum_total_model_calls: int = Field(ge=1, le=_MAX_SIGNED_64)
@@ -1451,6 +1605,17 @@ class QualificationProtocolSummary(StrictModel):
             raise ValueError("protocol fixed metrics use the wrong strategy")
         if self.adaptive_metrics.strategy_kind is not ComparisonStrategyKind.ADAPTIVE:
             raise ValueError("protocol adaptive metrics use the wrong strategy")
+        custody = canonical_consumed_v2_custody()
+        historical = canonical_historical_attempt_ledger()
+        if (
+            self.historical_attempt_ledger_sha256 != canonical_sha256(historical)
+            or self.consumed_v2_custody_sha256 != canonical_sha256(custody)
+            or self.historical_attempt_usage
+            != _project_v2_usage(custody.historical_totals)
+            or self.consumed_v2_attempt_usage
+            != _project_v2_usage(custody.consumed_v2_totals)
+        ):
+            raise ValueError("protocol legacy custody totals changed")
         expected_ceiling = _add_usage(
             self.qualification_attempt_usage, self.prior_attempt_usage
         )
@@ -1506,6 +1671,7 @@ class QualificationExecutionCompletion(StrictModel):
     execution_basis: QualificationExecutionBasis
     prior_stage_completion_sha256: Sha256Digest | None
     historical_attempt_ledger_sha256: Sha256Digest
+    consumed_v2_custody_sha256: Sha256Digest
     completed_at: AwareDatetime
     protocol_valid: bool
     provider_evidence_qualifying: bool
@@ -1515,6 +1681,7 @@ class QualificationExecutionCompletion(StrictModel):
     result_set: QualificationArtifactIdentity
     attempt_ledger: QualificationArtifactIdentity
     prior_attempt_ledger: QualificationArtifactIdentity | None
+    consumed_v2_custody: QualificationArtifactIdentity | None
     qualification_summary: QualificationArtifactIdentity
     protocol_summary: QualificationArtifactIdentity
     disposition: QualificationArtifactIdentity
@@ -1541,6 +1708,7 @@ class QualificationExecutionCompletion(StrictModel):
                 if self.prior_attempt_ledger is None
                 else (self.prior_attempt_ledger,)
             ),
+            *(() if self.consumed_v2_custody is None else (self.consumed_v2_custody,)),
         )
         retained = {(item.artifact_id, item.sha256) for item in self.retained_artifacts}
         if any((item.artifact_id, item.sha256) not in retained for item in roots):
@@ -1609,14 +1777,58 @@ def repository_source_state(repository: str | Path) -> QualificationSourceState:
 class QualificationArtifactStore:
     """Atomically publish canonical immutable artifacts beneath a consumed stage."""
 
-    def __init__(self, root: str | Path) -> None:
+    def __init__(
+        self,
+        root: str | Path,
+        *,
+        v2_custody_source: QualificationV2CustodySource | None = None,
+        repository: str | Path | None = None,
+    ) -> None:
         candidate = Path(root).absolute()
+        if candidate.name != "qualification-protocol-v3":
+            raise QualificationProtocolError(
+                "artifact root must use the qualification-protocol-v3 namespace"
+            )
         for path in (candidate, *candidate.parents):
-            if path.exists() and path.is_symlink():
+            try:
+                path_stat = path.lstat()
+            except FileNotFoundError:
+                continue
+            if stat.S_ISLNK(path_stat.st_mode):
                 raise QualificationProtocolError(
                     "artifact path cannot traverse a symlink"
                 )
+        candidate = candidate.resolve(strict=False)
+        if repository is not None:
+            repository_path = Path(repository).resolve(strict=True)
+            if candidate == repository_path or candidate.is_relative_to(
+                repository_path
+            ):
+                raise QualificationProtocolError(
+                    "qualification artifacts must remain outside the source repository"
+                )
+        if v2_custody_source is not None:
+            try:
+                load_consumed_v2_custody(v2_custody_source)
+            except Exception as error:
+                raise QualificationProtocolError(
+                    "consumed-v2 custody source is unsafe"
+                ) from error
+            source_paths = (
+                v2_custody_source.stage_directory.resolve(strict=True),
+                v2_custody_source.launcher_file.resolve(strict=True),
+            )
+            if any(
+                candidate == source_path
+                or candidate.is_relative_to(source_path)
+                or source_path.is_relative_to(candidate)
+                for source_path in source_paths
+            ):
+                raise QualificationProtocolError(
+                    "v3 artifact and consumed-v2 custody paths must not overlap"
+                )
         self.root = candidate
+        self.v2_custody_source = v2_custody_source
         self.root.mkdir(mode=0o700, parents=True, exist_ok=True)
         os.chmod(self.root, 0o700)
         self._stage_path: Path | None = None
@@ -1893,6 +2105,25 @@ class QualificationArtifactStore:
         completion = decode_contract(payload, QualificationExecutionCompletion)
         if completion.stage is not stage:
             raise QualificationProtocolError("qualification completion stage changed")
+        if completion.execution_basis is QualificationExecutionBasis.LIVE_PROVIDER:
+            if self.v2_custody_source is None:
+                raise QualificationProtocolError(
+                    "live completion read requires consumed-v2 custody source"
+                )
+            try:
+                consumed_v2_custody = load_consumed_v2_custody(self.v2_custody_source)
+            except Exception as error:
+                raise QualificationProtocolError(
+                    "consumed-v2 custody revalidation failed"
+                ) from error
+        else:
+            consumed_v2_custody = canonical_consumed_v2_custody()
+        if completion.consumed_v2_custody_sha256 != canonical_sha256(
+            consumed_v2_custody
+        ):
+            raise QualificationProtocolError(
+                "qualification consumed-v2 custody identity changed"
+            )
         reachable: set[tuple[str, str]] = set()
 
         def mark(identity: QualificationArtifactIdentity | None) -> None:
@@ -1907,6 +2138,7 @@ class QualificationArtifactStore:
             completion.result_set,
             completion.attempt_ledger,
             completion.prior_attempt_ledger,
+            completion.consumed_v2_custody,
             completion.qualification_summary,
             completion.protocol_summary,
             completion.disposition,
@@ -1944,6 +2176,10 @@ class QualificationArtifactStore:
                 and completion.prior_attempt_ledger.artifact_id
                 != "prior-attempt-ledger"
             )
+            or (
+                completion.consumed_v2_custody is not None
+                and completion.consumed_v2_custody.artifact_id != "consumed-v2-custody"
+            )
             or completion.manifest.sha256 != completion.manifest_sha256
             or completion.suite_id != manifest.suite_id
             or completion.source_revision != manifest.source_revision
@@ -1960,6 +2196,8 @@ class QualificationArtifactStore:
             or model_binding.configured_model != runtime_identity.configured_model
             or completion.historical_attempt_ledger_sha256
             != canonical_sha256(canonical_historical_attempt_ledger())
+            or completion.consumed_v2_custody_sha256
+            != canonical_sha256(consumed_v2_custody)
         ):
             raise QualificationProtocolError(
                 "qualification completion provenance is inconsistent"
@@ -1990,6 +2228,7 @@ class QualificationArtifactStore:
             )
             or start.historical_attempt_ledger_sha256
             != completion.historical_attempt_ledger_sha256
+            or start.consumed_v2_custody_sha256 != completion.consumed_v2_custody_sha256
         ):
             raise QualificationProtocolError(
                 "qualification execution start is inconsistent"
@@ -2045,6 +2284,8 @@ class QualificationArtifactStore:
             != completion.prior_stage_completion_sha256
             or protocol_summary.historical_attempt_ledger_sha256
             != completion.historical_attempt_ledger_sha256
+            or protocol_summary.consumed_v2_custody_sha256
+            != completion.consumed_v2_custody_sha256
             or protocol_summary.execution_basis is not completion.execution_basis
             or protocol_summary.planner_configuration_sha256
             != completion.planner_configuration_sha256
@@ -2057,28 +2298,38 @@ class QualificationArtifactStore:
                 "qualification completion graph is inconsistent"
             )
         prior = completion.prior_attempt_ledger
+        consumed_v2_identity = completion.consumed_v2_custody
         if protocol_summary.prior_attempt_ledger_sha256 != (
             None if prior is None else prior.sha256
         ):
             raise QualificationProtocolError(
                 "qualification prior-attempt graph is inconsistent"
             )
-        if prior is not None:
+        if prior is not None and consumed_v2_identity is not None:
             prior_ledger = decode_contract(
-                self._read_identity(stage, prior), QualificationPriorAttemptLedger
+                self._read_identity(stage, prior),
+                QualificationCombinedPriorAttemptLedger,
+            )
+            retained_consumed_v2 = decode_contract(
+                self._read_identity(stage, consumed_v2_identity),
+                QualificationConsumedV2Custody,
             )
             if (
                 stage is not QualificationProtocolStage.DEVELOPMENT_1
-                or prior_ledger != canonical_historical_attempt_ledger()
-                or _project_prior_usage(prior_ledger.totals)
-                != protocol_summary.prior_attempt_usage
+                or retained_consumed_v2 != consumed_v2_custody
+                or prior_ledger != canonical_prior_attempt_ledger(consumed_v2_custody)
+                or prior_ledger.totals != protocol_summary.prior_attempt_usage
             ):
                 raise QualificationProtocolError(
                     "qualification imported attempts are inconsistent"
                 )
         elif stage is QualificationProtocolStage.DEVELOPMENT_1:
             raise QualificationProtocolError(
-                "development omitted canonical historical custody"
+                "development omitted canonical legacy custody"
+            )
+        elif prior is not None or consumed_v2_identity is not None:
+            raise QualificationProtocolError(
+                "later qualification stage reimported legacy custody"
             )
         preflight_generations = tuple(
             item
@@ -2788,17 +3039,21 @@ class QualificationArtifactStore:
         }[stage]
         predecessor_identity: QualificationArtifactIdentity | None = None
         if predecessor_stage is None:
-            expected_prior_usage = _project_prior_usage(
-                canonical_historical_attempt_ledger().totals
-            )
-            if prior is None or completion.prior_stage_completion_sha256 is not None:
+            expected_prior_usage = canonical_prior_attempt_ledger(
+                consumed_v2_custody
+            ).totals
+            if (
+                prior is None
+                or consumed_v2_identity is None
+                or completion.prior_stage_completion_sha256 is not None
+            ):
                 raise QualificationProtocolError(
-                    "development one historical custody is incomplete"
+                    "development one legacy custody is incomplete"
                 )
         else:
-            if prior is not None:
+            if prior is not None or consumed_v2_identity is not None:
                 raise QualificationProtocolError(
-                    "later qualification stages cannot reimport historical calls"
+                    "later qualification stages cannot reimport legacy calls"
                 )
             predecessor_completion = self.read_completion(predecessor_stage)
             predecessor_identity = self.completion_identity(predecessor_stage)
@@ -2835,6 +3090,7 @@ class QualificationArtifactStore:
             historical_attempt_ledger_sha256=(
                 completion.historical_attempt_ledger_sha256
             ),
+            consumed_v2_custody_sha256=(completion.consumed_v2_custody_sha256),
             prior_stage_identity=predecessor_identity,
             execution_basis=completion.execution_basis,
             planner_configuration_sha256=(completion.planner_configuration_sha256),
@@ -3120,6 +3376,8 @@ class QualificationArtifactStore:
             != start.historical_attempt_ledger_sha256
             or second.historical_attempt_ledger_sha256
             != start.historical_attempt_ledger_sha256
+            or first.consumed_v2_custody_sha256 != start.consumed_v2_custody_sha256
+            or second.consumed_v2_custody_sha256 != start.consumed_v2_custody_sha256
             or first_binding.reported_model_revision
             != start_binding.reported_model_revision
             or second_binding.reported_model_revision
@@ -3156,6 +3414,7 @@ class QualificationArtifactStore:
             runtime_identity_sha256=start.planner_configuration_sha256,
             concrete_model_revision=start_binding.reported_model_revision,
             historical_attempt_ledger_sha256=(start.historical_attempt_ledger_sha256),
+            consumed_v2_custody_sha256=start.consumed_v2_custody_sha256,
             schedule=schedule,
         )
         self._final_registry_created = True
@@ -3180,9 +3439,9 @@ def build_protocol_manifest(
         )
     cases = qualification_cases_for_stage(stage, PREREGISTERED_QUALIFICATION_CASES)
     suite_id = {
-        QualificationProtocolStage.DEVELOPMENT_1: "adaptive-development-one-v1",
-        QualificationProtocolStage.DEVELOPMENT_2: "adaptive-development-two-v1",
-        QualificationProtocolStage.FINAL_HOLDOUT: "adaptive-fixed-qualification-v1",
+        QualificationProtocolStage.DEVELOPMENT_1: "adaptive-development-one-v3",
+        QualificationProtocolStage.DEVELOPMENT_2: "adaptive-development-two-v3",
+        QualificationProtocolStage.FINAL_HOLDOUT: "adaptive-fixed-qualification-v3",
     }[stage]
     repetition_count = 5 if stage is QualificationProtocolStage.FINAL_HOLDOUT else 1
     lane_orders = {
@@ -3199,6 +3458,7 @@ def build_protocol_manifest(
         repetition_count=repetition_count,
         lane_orders=lane_orders,
         suite_id=suite_id,
+        controller_version="qualification-controller-v3",
         fixed_strategy_version="qualification-fixed-plan:1.0.0",
         adaptive_strategy_version="qualification-adaptive-policy:1.0.0",
         stop_conditions=QualificationStopConditions(
@@ -3707,7 +3967,7 @@ class _AttemptMeter:
             provider_request_sha256=None,
             paired_count_attempt_id=count_attempt.attempt_id,
             reserved_provider_request_count=1,
-            input_tokens=counted_input_tokens,
+            input_tokens=self.runtime_identity.maximum_input_tokens_per_call,
             output_tokens=self.runtime_identity.max_output_tokens,
             model_calls=1,
             count_tokens_calls=0,
@@ -3722,7 +3982,6 @@ class _AttemptMeter:
         planner_phase: AdaptivePlannerPhase,
         input_sha256: str,
         request_byte_count: int,
-        counted_input_tokens: int,
     ) -> QualificationProviderAttemptStart:
         sequence = len(self.attempts) + 1
         return self._reserve(
@@ -3738,7 +3997,7 @@ class _AttemptMeter:
             provider_request_sha256=None,
             paired_count_attempt_id=None,
             reserved_provider_request_count=0,
-            input_tokens=counted_input_tokens,
+            input_tokens=self.runtime_identity.maximum_input_tokens_per_call,
             output_tokens=self.runtime_identity.max_output_tokens,
             model_calls=1,
             count_tokens_calls=0,
@@ -3802,6 +4061,9 @@ class _AttemptMeter:
             outcome=outcome,
             accounting_basis=QualificationAccountingBasis.NON_BILLABLE,
             failure_category=None if counted is not None else failure_category,
+            provider_failure_kind=(None if counted is not None else failure_category),
+            input_bound_status=QualificationBoundStatus.NOT_APPLICABLE,
+            output_bound_status=QualificationBoundStatus.NOT_APPLICABLE,
             provider_name=metadata.provider_name,
             configured_model=metadata.configured_model,
             reported_model=None,
@@ -3873,78 +4135,79 @@ class _AttemptMeter:
                     or turn.metadata.reported_model
                     != self.model_binding.reported_model_revision
                 )
+        usage_measured = usage is not None and not control
+        measured_input_tokens = None if not usage_measured else usage.prompt_tokens
+        measured_output_tokens = None if not usage_measured else usage.output_tokens
+        if control:
+            input_bound_status = QualificationBoundStatus.NOT_APPLICABLE
+            output_bound_status = QualificationBoundStatus.NOT_APPLICABLE
+        else:
+            input_bound_status = (
+                QualificationBoundStatus.UNKNOWN
+                if measured_input_tokens is None
+                else (
+                    QualificationBoundStatus.EXCEEDED
+                    if measured_input_tokens > start.reserved_input_tokens
+                    else QualificationBoundStatus.WITHIN
+                )
+            )
+            output_bound_status = (
+                QualificationBoundStatus.UNKNOWN
+                if measured_output_tokens is None
+                else (
+                    QualificationBoundStatus.EXCEEDED
+                    if measured_output_tokens > start.reserved_output_tokens
+                    else QualificationBoundStatus.WITHIN
+                )
+            )
+        provider_failure_kind: str | None = None
         if control:
             outcome = QualificationAttemptOutcome.CONTROL_FAILURE
-            basis = QualificationAccountingBasis.RESERVED
             failure_category = "control-unavailable"
-            input_tokens = start.reserved_input_tokens
-            output_tokens = start.reserved_output_tokens
-            cost = start.reserved_cost_nano_units
-            usage_measured = False
         elif raised:
             outcome = QualificationAttemptOutcome.RAISED
-            basis = QualificationAccountingBasis.RESERVED
             failure_category = "provider-raised"
-            input_tokens = start.reserved_input_tokens
-            output_tokens = start.reserved_output_tokens
-            cost = start.reserved_cost_nano_units
-            usage_measured = False
+            provider_failure_kind = failure_category
         elif provider_drift:
             outcome = QualificationAttemptOutcome.PROVIDER_DRIFT
-            basis = QualificationAccountingBasis.RESERVED
             failure_category = "provider-drift"
+            provider_failure_kind = failure_category
+        elif failure is not None:
+            outcome = QualificationAttemptOutcome.PROVIDER_FAILURE
+            failure_category = failure.value
+            provider_failure_kind = failure_category
+        elif usage is None:
+            outcome = QualificationAttemptOutcome.USAGE_UNAVAILABLE
+            failure_category = "usage-unavailable"
+        elif QualificationBoundStatus.EXCEEDED in {
+            input_bound_status,
+            output_bound_status,
+        }:
+            outcome = QualificationAttemptOutcome.RESERVATION_EXCEEDED
+            failure_category = "reservation-exceeded"
+        else:
+            outcome = QualificationAttemptOutcome.MEASURED
+            failure_category = None
+        basis = (
+            QualificationAccountingBasis.MEASURED
+            if outcome is QualificationAttemptOutcome.MEASURED
+            else QualificationAccountingBasis.RESERVED
+        )
+        if basis is QualificationAccountingBasis.MEASURED:
+            assert measured_input_tokens is not None
+            assert measured_output_tokens is not None
+            input_tokens = measured_input_tokens
+            output_tokens = measured_output_tokens
+        else:
             input_tokens = max(
                 start.reserved_input_tokens,
-                0 if usage is None else usage.prompt_tokens,
+                0 if measured_input_tokens is None else measured_input_tokens,
             )
             output_tokens = max(
                 start.reserved_output_tokens,
-                0 if usage is None else usage.output_tokens,
+                0 if measured_output_tokens is None else measured_output_tokens,
             )
-            cost = _attempt_cost(provider, input_tokens, output_tokens)
-            usage_measured = usage is not None
-        elif usage is None:
-            outcome = (
-                QualificationAttemptOutcome.PROVIDER_FAILURE
-                if failure is not None
-                else QualificationAttemptOutcome.USAGE_UNAVAILABLE
-            )
-            basis = QualificationAccountingBasis.RESERVED
-            failure_category = (
-                failure.value if failure is not None else "usage-unavailable"
-            )
-            input_tokens = start.reserved_input_tokens
-            output_tokens = start.reserved_output_tokens
-            cost = start.reserved_cost_nano_units
-            usage_measured = False
-        else:
-            input_tokens = usage.prompt_tokens
-            output_tokens = usage.output_tokens
-            if (
-                input_tokens > start.reserved_input_tokens
-                or output_tokens > start.reserved_output_tokens
-            ):
-                outcome = QualificationAttemptOutcome.RESERVATION_EXCEEDED
-                basis = QualificationAccountingBasis.RESERVED
-                failure_category = "reservation-exceeded"
-                input_tokens = max(input_tokens, start.reserved_input_tokens)
-                output_tokens = max(output_tokens, start.reserved_output_tokens)
-                cost = _attempt_cost(provider, input_tokens, output_tokens)
-                usage_measured = True
-            elif failure is not None:
-                outcome = QualificationAttemptOutcome.PROVIDER_FAILURE
-                basis = QualificationAccountingBasis.RESERVED
-                failure_category = failure.value
-                input_tokens = max(input_tokens, start.reserved_input_tokens)
-                output_tokens = max(output_tokens, start.reserved_output_tokens)
-                cost = _attempt_cost(provider, input_tokens, output_tokens)
-                usage_measured = True
-            else:
-                outcome = QualificationAttemptOutcome.MEASURED
-                basis = QualificationAccountingBasis.MEASURED
-                failure_category = None
-                cost = _attempt_cost(provider, input_tokens, output_tokens)
-                usage_measured = True
+        cost = _attempt_cost(provider, input_tokens, output_tokens)
         record = QualificationProviderAttempt(
             schema_version=QUALIFICATION_ATTEMPT_VERSION,
             attempt_id=start.attempt_id,
@@ -3967,6 +4230,9 @@ class _AttemptMeter:
             outcome=outcome,
             accounting_basis=basis,
             failure_category=failure_category,
+            provider_failure_kind=provider_failure_kind,
+            input_bound_status=input_bound_status,
+            output_bound_status=output_bound_status,
             provider_name=metadata.provider_name,
             configured_model=metadata.configured_model,
             reported_model=reported_model,
@@ -3978,12 +4244,8 @@ class _AttemptMeter:
             accounted_input_tokens=input_tokens,
             accounted_output_tokens=output_tokens,
             accounted_cost_nano_units=cost,
-            measured_input_tokens=(
-                None if not usage_measured or usage is None else usage.prompt_tokens
-            ),
-            measured_output_tokens=(
-                None if not usage_measured or usage is None else usage.output_tokens
-            ),
+            measured_input_tokens=measured_input_tokens,
+            measured_output_tokens=measured_output_tokens,
             usage_measured=usage_measured,
             completed_at=datetime.now(UTC),
         )
@@ -4048,10 +4310,6 @@ class _MeteredPlanner:
                 planner_phase=planner_input.phase,
                 input_sha256=input_sha256,
                 request_byte_count=len(input_bytes),
-                counted_input_tokens=min(
-                    len(input_bytes),
-                    self._meter.runtime_identity.maximum_input_tokens_per_call,
-                ),
             )
             turn = AdvisoryPlannerTurn(
                 output=None,
@@ -4080,10 +4338,6 @@ class _MeteredPlanner:
                 planner_phase=planner_input.phase,
                 input_sha256=input_sha256,
                 request_byte_count=len(input_bytes),
-                counted_input_tokens=min(
-                    len(input_bytes),
-                    self._meter.runtime_identity.maximum_input_tokens_per_call,
-                ),
             )
             unavailable = AdvisoryPlannerTurn(
                 output=None,
@@ -4187,20 +4441,33 @@ class _MeteredPlanner:
                 count_attempt=count_finish,
             )
         try:
-            turn = await self._planner.plan(planner_input)
-            self._meter.source_guard()
-        except BaseException:
-            if generation_start is not None:
-                self._meter.complete_generation(
-                    generation_start,
-                    self.metadata,
-                    turn=None,
-                    raised=True,
-                    preflight=self._preflight,
-                )
-            elif count_start is None and not paired_budget_refused:
-                persist_undispatched_generation()
-            raise
+            try:
+                turn = await self._planner.plan(planner_input)
+            except BaseException:
+                if generation_start is not None:
+                    self._meter.complete_generation(
+                        generation_start,
+                        self.metadata,
+                        turn=None,
+                        raised=True,
+                        preflight=self._preflight,
+                    )
+                elif count_start is None and not paired_budget_refused:
+                    persist_undispatched_generation()
+                raise
+            try:
+                self._meter.source_guard()
+            except BaseException:
+                if generation_start is not None:
+                    self._meter.complete_generation(
+                        generation_start,
+                        self.metadata,
+                        turn=turn,
+                        preflight=self._preflight,
+                    )
+                elif count_start is None and not paired_budget_refused:
+                    persist_undispatched_generation()
+                raise
         finally:
             if dispatch_hook is not None:
                 dispatch_consumed = live_planner.clear_qualification_dispatch_hook(
@@ -5245,6 +5512,7 @@ def _build_protocol_summary(
     model_binding_identity: QualificationArtifactIdentity,
     prior_identity: QualificationArtifactIdentity | None,
     historical_attempt_ledger_sha256: str,
+    consumed_v2_custody_sha256: str,
     prior_stage_identity: QualificationArtifactIdentity | None,
     execution_basis: QualificationExecutionBasis,
     planner_configuration_sha256: str,
@@ -5271,6 +5539,7 @@ def _build_protocol_summary(
     provider_evidence_qualifying = (
         execution_basis is QualificationExecutionBasis.LIVE_PROVIDER
     )
+    consumed_v2_custody = canonical_consumed_v2_custody()
     return QualificationProtocolSummary(
         schema_version=QUALIFICATION_PROTOCOL_SUMMARY_VERSION,
         suite_id=manifest.suite_id,
@@ -5283,6 +5552,7 @@ def _build_protocol_summary(
             None if prior_identity is None else prior_identity.sha256
         ),
         historical_attempt_ledger_sha256=historical_attempt_ledger_sha256,
+        consumed_v2_custody_sha256=consumed_v2_custody_sha256,
         prior_stage_completion_sha256=(
             None if prior_stage_identity is None else prior_stage_identity.sha256
         ),
@@ -5292,6 +5562,12 @@ def _build_protocol_summary(
         fixed_metrics=fixed_metrics,
         adaptive_metrics=adaptive_metrics,
         qualification_attempt_usage=ledger.totals,
+        historical_attempt_usage=_project_v2_usage(
+            consumed_v2_custody.historical_totals
+        ),
+        consumed_v2_attempt_usage=_project_v2_usage(
+            consumed_v2_custody.consumed_v2_totals
+        ),
         prior_attempt_usage=prior_usage,
         ceiling_usage=ceiling_usage,
         maximum_total_model_calls=(manifest.stop_conditions.maximum_total_model_calls),
@@ -5323,16 +5599,50 @@ class QualificationProtocolRunner:
         artifact_root: str | Path,
         *,
         repository: str | Path,
+        v2_custody_source: QualificationV2CustodySource | None = None,
     ) -> None:
         self.repository = Path(repository).resolve()
-        artifact_path = Path(artifact_root).resolve(strict=False)
+        artifact_path = Path(artifact_root).absolute()
         if artifact_path == self.repository or artifact_path.is_relative_to(
             self.repository
         ):
             raise QualificationProtocolError(
                 "qualification artifacts must remain outside the source repository"
             )
-        self.store = QualificationArtifactStore(artifact_path)
+        self.v2_custody_source = v2_custody_source
+        self.store = QualificationArtifactStore(
+            artifact_path,
+            v2_custody_source=v2_custody_source,
+            repository=self.repository,
+        )
+
+    def _resolve_consumed_v2_custody(
+        self,
+        execution_basis: QualificationExecutionBasis,
+    ) -> QualificationConsumedV2Custody:
+        if execution_basis is QualificationExecutionBasis.DETERMINISTIC_TEST:
+            return canonical_consumed_v2_custody()
+        if self.v2_custody_source is None:
+            raise QualificationProtocolError(
+                "live qualification requires the consumed-v2 custody source"
+            )
+        try:
+            return load_consumed_v2_custody(self.v2_custody_source)
+        except Exception as error:
+            raise QualificationProtocolError(
+                "consumed-v2 custody validation failed"
+            ) from error
+
+    def _assert_consumed_v2_custody(
+        self,
+        execution_basis: QualificationExecutionBasis,
+        expected: QualificationConsumedV2Custody,
+    ) -> None:
+        if (
+            execution_basis is QualificationExecutionBasis.LIVE_PROVIDER
+            and self._resolve_consumed_v2_custody(execution_basis) != expected
+        ):
+            raise QualificationProtocolError("consumed-v2 custody changed")
 
     def _assert_source(
         self, manifest: QualificationSuiteManifest
@@ -5359,6 +5669,13 @@ class QualificationProtocolRunner:
             raise QualificationProviderDrift(
                 "planner identity does not match the qualification manifest"
             )
+        if (
+            execution_basis is QualificationExecutionBasis.DETERMINISTIC_TEST
+            and isinstance(planner, AdkGeminiPlanner)
+        ):
+            raise QualificationProviderDrift(
+                "deterministic qualification cannot use the live provider planner"
+            )
         if execution_basis is QualificationExecutionBasis.LIVE_PROVIDER:
             registered = (
                 qualification_runtime_identity(planner)
@@ -5377,10 +5694,12 @@ class QualificationProtocolRunner:
         manifest: QualificationSuiteManifest,
         execution_basis: QualificationExecutionBasis,
         planner_configuration_sha256: str,
+        consumed_v2_custody: QualificationConsumedV2Custody,
     ) -> tuple[
         QualificationSourceState,
         QualificationArtifactIdentity | None,
         QualificationModelUsageTotals,
+        str,
         str,
         str | None,
     ]:
@@ -5437,13 +5756,22 @@ class QualificationProtocolRunner:
                 "qualification candidate or provider settings changed"
             )
         historical_sha256 = canonical_sha256(canonical_historical_attempt_ledger())
-        if any(
-            item.historical_attempt_ledger_sha256 != historical_sha256
-            for item in completions
-        ) or any(
-            binding.runtime_identity_sha256 != planner_configuration_sha256
-            or binding.reported_model_revision != bindings[0].reported_model_revision
-            for binding in bindings
+        consumed_v2_sha256 = canonical_sha256(consumed_v2_custody)
+        if (
+            any(
+                item.historical_attempt_ledger_sha256 != historical_sha256
+                for item in completions
+            )
+            or any(
+                item.consumed_v2_custody_sha256 != consumed_v2_sha256
+                for item in completions
+            )
+            or any(
+                binding.runtime_identity_sha256 != planner_configuration_sha256
+                or binding.reported_model_revision
+                != bindings[0].reported_model_revision
+                for binding in bindings
+            )
         ):
             raise QualificationProtocolError(
                 "qualification historical or model-revision custody changed"
@@ -5461,50 +5789,27 @@ class QualificationProtocolRunner:
             None if not identities else identities[-1],
             _empty_usage() if not summaries else summaries[-1].ceiling_usage,
             historical_sha256,
+            consumed_v2_sha256,
             None if not bindings else bindings[-1].reported_model_revision,
         )
 
     @staticmethod
-    def _resolve_prior_attempts(
-        stage: QualificationProtocolStage,
-        execution_basis: QualificationExecutionBasis,
-        prior_attempts: QualificationPriorAttemptLedger | None,
-    ) -> QualificationPriorAttemptLedger | None:
-        if stage is not QualificationProtocolStage.DEVELOPMENT_1:
-            if prior_attempts is not None:
-                raise QualificationProtocolError(
-                    "premanifest attempts cannot be resupplied after development one"
-                )
-            return None
-        canonical_prior = canonical_historical_attempt_ledger()
-        if prior_attempts is not None and prior_attempts != canonical_prior:
-            raise QualificationProtocolError(
-                "development test supplied noncanonical historical custody"
-            )
-        return canonical_prior
-
-    @staticmethod
-    def _validate_prior_attempts(
+    def _prior_attempts(
         stage: QualificationProtocolStage,
         manifest: QualificationSuiteManifest,
-        prior: QualificationPriorAttemptLedger | None,
-    ) -> QualificationModelUsageTotals:
-        if prior is None:
-            return _empty_usage()
+        consumed_v2_custody: QualificationConsumedV2Custody,
+    ) -> tuple[
+        QualificationCombinedPriorAttemptLedger | None,
+        QualificationModelUsageTotals,
+    ]:
         if stage is not QualificationProtocolStage.DEVELOPMENT_1:
-            raise QualificationProtocolError(
-                "premanifest attempts may seed only the first development cycle"
-            )
-        if prior != canonical_historical_attempt_ledger():
-            raise QualificationProtocolError(
-                "historical attempts do not match canonical provider custody"
-            )
-        projected_usage = _project_prior_usage(prior.totals)
-        if _provider_limit_exceeded(manifest, projected_usage):
+            return None, _empty_usage()
+        prior = canonical_prior_attempt_ledger(consumed_v2_custody)
+        if _provider_limit_exceeded(manifest, prior.totals):
             raise QualificationBudgetExceeded(
                 "prior development calls already exceed provider ceilings"
             )
-        return projected_usage
+        return prior, prior.totals
 
     async def run(
         self,
@@ -5512,13 +5817,13 @@ class QualificationProtocolRunner:
         manifest: QualificationSuiteManifest,
         planner: AdvisoryPlanner,
         *,
-        prior_attempts: QualificationPriorAttemptLedger | None = None,
         execution_basis: QualificationExecutionBasis = (
             QualificationExecutionBasis.LIVE_PROVIDER
         ),
     ) -> QualificationProtocolOutcome:
         if type(execution_basis) is not QualificationExecutionBasis:
             raise TypeError("qualification execution basis must be exact")
+        consumed_v2_custody = self._resolve_consumed_v2_custody(execution_basis)
         validate_protocol_manifest(stage, manifest)
         runtime_identity = self._validate_planner(manifest, planner, execution_basis)
         planner_configuration_sha256 = canonical_sha256(runtime_identity)
@@ -5527,17 +5832,18 @@ class QualificationProtocolRunner:
             prior_stage_identity,
             carried_usage,
             historical_attempt_ledger_sha256,
+            consumed_v2_custody_sha256,
             required_model_revision,
         ) = self._validate_prerequisites(
             stage,
             manifest,
             execution_basis,
             planner_configuration_sha256,
+            consumed_v2_custody,
         )
-        prior_attempts = self._resolve_prior_attempts(
-            stage, execution_basis, prior_attempts
+        prior_attempts, imported_usage = self._prior_attempts(
+            stage, manifest, consumed_v2_custody
         )
-        imported_usage = self._validate_prior_attempts(stage, manifest, prior_attempts)
         prior_usage = _add_usage(carried_usage, imported_usage)
         self.store.begin(stage)
         retained: list[QualificationArtifactIdentity] = []
@@ -5548,7 +5854,12 @@ class QualificationProtocolRunner:
         )
         retained.append(runtime_identity_artifact)
         prior_identity = None
+        consumed_v2_identity = None
         if prior_attempts is not None:
+            consumed_v2_identity = self.store.publish(
+                "consumed-v2-custody", consumed_v2_custody
+            )
+            retained.append(consumed_v2_identity)
             prior_identity = self.store.publish("prior-attempt-ledger", prior_attempts)
             retained.append(prior_identity)
         meter = _AttemptMeter(
@@ -5558,7 +5869,10 @@ class QualificationProtocolRunner:
             prior_usage=prior_usage,
             execution_basis=execution_basis,
             runtime_identity=runtime_identity,
-            source_guard=lambda: self._assert_source(manifest),
+            source_guard=lambda: (
+                self._assert_source(manifest),
+                self._assert_consumed_v2_custody(execution_basis, consumed_v2_custody),
+            ),
         )
         preflight_input = _model_revision_preflight_input(
             planner.metadata, datetime.now(UTC)
@@ -5632,6 +5946,7 @@ class QualificationProtocolRunner:
                 None if prior_identity is None else prior_identity.sha256
             ),
             historical_attempt_ledger_sha256=historical_attempt_ledger_sha256,
+            consumed_v2_custody_sha256=consumed_v2_custody_sha256,
             started_at=datetime.now(UTC),
         )
         start_identity = self.store.publish("execution-start", start)
@@ -5663,6 +5978,9 @@ class QualificationProtocolRunner:
                     cleanup_failed = False
                     try:
                         self._assert_source(manifest)
+                        self._assert_consumed_v2_custody(
+                            execution_basis, consumed_v2_custody
+                        )
                         fixture = registry.prepare(manifest, case, repetition)
                         if case.role is QualificationCaseRole.FAIL_CLOSED_CONTROL:
                             execution = await _control_result(
@@ -5824,6 +6142,7 @@ class QualificationProtocolRunner:
         finally:
             registry.cleanup_workspace()
         self._assert_source(manifest)
+        self._assert_consumed_v2_custody(execution_basis, consumed_v2_custody)
         result_set = build_result_set(manifest, tuple(results))
         result_set_identity = self.store.publish("result-set", result_set)
         retained.append(result_set_identity)
@@ -5849,6 +6168,7 @@ class QualificationProtocolRunner:
             model_binding_identity=model_binding_identity,
             prior_identity=prior_identity,
             historical_attempt_ledger_sha256=(historical_attempt_ledger_sha256),
+            consumed_v2_custody_sha256=consumed_v2_custody_sha256,
             prior_stage_identity=prior_stage_identity,
             execution_basis=execution_basis,
             planner_configuration_sha256=planner_configuration_sha256,
@@ -5870,6 +6190,7 @@ class QualificationProtocolRunner:
         disposition_identity = self.store.publish("disposition", disposition)
         retained.append(disposition_identity)
         completed_source = self._assert_source(manifest)
+        self._assert_consumed_v2_custody(execution_basis, consumed_v2_custody)
         completion = QualificationExecutionCompletion(
             schema_version=QUALIFICATION_EXECUTION_COMPLETION_VERSION,
             stage=stage,
@@ -5886,6 +6207,7 @@ class QualificationProtocolRunner:
                 None if prior_stage_identity is None else prior_stage_identity.sha256
             ),
             historical_attempt_ledger_sha256=(historical_attempt_ledger_sha256),
+            consumed_v2_custody_sha256=consumed_v2_custody_sha256,
             completed_at=datetime.now(UTC),
             protocol_valid=protocol_valid,
             provider_evidence_qualifying=provider_evidence_qualifying,
@@ -5895,6 +6217,7 @@ class QualificationProtocolRunner:
             result_set=result_set_identity,
             attempt_ledger=ledger_identity,
             prior_attempt_ledger=prior_identity,
+            consumed_v2_custody=consumed_v2_identity,
             qualification_summary=qualification_summary_identity,
             protocol_summary=protocol_summary_identity,
             disposition=disposition_identity,
@@ -5933,16 +6256,21 @@ async def close_qualification_planner(planner: AdvisoryPlanner) -> None:
 
 
 __all__ = [
+    "QUALIFICATION_COMBINED_PRIOR_ATTEMPT_LEDGER_VERSION",
     "QUALIFICATION_PRIOR_ATTEMPT_LEDGER_VERSION",
     "QUALIFICATION_RUNTIME_IDENTITY_VERSION",
     "QualificationAccountingBasis",
     "QualificationArtifactStore",
     "QualificationAttemptLedger",
     "QualificationAttemptOutcome",
+    "QualificationBoundStatus",
     "QualificationBudgetExceeded",
+    "QualificationCombinedPriorAttemptLedger",
+    "QualificationConsumedV2Custody",
     "QualificationExecutionBasis",
     "QualificationExecutionCompletion",
     "QualificationExecutionConsumed",
+    "QualificationHistoricalAttemptLedger",
     "QualificationHistoricalUsageBasis",
     "QualificationModelUsageTotals",
     "QualificationObservationBundle",
@@ -5956,9 +6284,12 @@ __all__ = [
     "QualificationProviderDrift",
     "QualificationRuntimeIdentity",
     "QualificationSourceState",
+    "QualificationV2CustodySource",
     "build_protocol_manifest",
     "build_vertex_qualification_planner",
+    "canonical_consumed_v2_custody",
     "canonical_historical_attempt_ledger",
+    "canonical_prior_attempt_ledger",
     "close_qualification_planner",
     "frozen_qualification_provider_settings",
     "frozen_qualification_runtime_identity",
