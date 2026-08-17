@@ -4,7 +4,6 @@ import asyncio
 import json
 import os
 import sqlite3
-import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -801,19 +800,20 @@ class _TakeoverAfterCleanupPendingStore(_QueuedTakeoverStore):
         return run
 
 
-class _StallAfterProviderReceiptStore:
-    def __init__(self, store: SqliteDurableRuntimeStore) -> None:
+class _AdvanceClockAfterProviderReceiptStore:
+    def __init__(self, store: SqliteDurableRuntimeStore, clock: _MutableClock) -> None:
         self._store = store
-        self._stalled = False
+        self._clock = clock
+        self._advanced = False
 
     def __getattr__(self, name: str):
         return getattr(self._store, name)
 
     async def provider_call_receipts(self, investigation_id: str):
         receipts = await self._store.provider_call_receipts(investigation_id)
-        if not self._stalled:
-            self._stalled = True
-            asyncio.get_running_loop().call_soon(time.sleep, 0.3)
+        if not self._advanced:
+            self._advanced = True
+            self._clock.advance(2)
         return receipts
 
 
@@ -1956,6 +1956,7 @@ def test_cancellation_suppressing_provider_cannot_hold_run_past_deadline(
             tmp_path / "runtime-stubborn-provider.sqlite3"
         )
         envelope = _envelope(max_elapsed_ms=500)
+        clock = _MutableClock(envelope.ambiguity.observed_at)
         executor = _CancellationSuppressingProviderExecutor()
         service = _service(
             store,
@@ -1963,6 +1964,8 @@ def test_cancellation_suppressing_provider_cannot_hold_run_past_deadline(
             owner_id="worker-stubborn-provider",
             strategy=DurableExecutionStrategy.ADAPTIVE,
             max_provider_calls=1,
+            clock=clock.now,
+            monotonic_clock=lambda: 0.0,
         )
         await service.create(envelope)
         await asyncio.wait_for(executor.started.wait(), timeout=2)
@@ -2019,8 +2022,9 @@ def test_provider_never_dispatches_after_stalled_receipt_lookup_deadline(
 ) -> None:
     async def scenario() -> None:
         durable = SqliteDurableRuntimeStore(tmp_path / "provider-stall.sqlite3")
-        store = _StallAfterProviderReceiptStore(durable)
-        envelope = _envelope(max_elapsed_ms=200)
+        envelope = _envelope(max_elapsed_ms=1_000)
+        clock = _MutableClock(envelope.ambiguity.observed_at)
+        store = _AdvanceClockAfterProviderReceiptStore(durable, clock)
         executor = _SingleProviderExecutor()
         service = _service(
             store,
@@ -2028,6 +2032,7 @@ def test_provider_never_dispatches_after_stalled_receipt_lookup_deadline(
             owner_id="worker-provider-stall",
             strategy=DurableExecutionStrategy.ADAPTIVE,
             max_provider_calls=1,
+            clock=clock.now,
         )
         await service.create(envelope)
 
