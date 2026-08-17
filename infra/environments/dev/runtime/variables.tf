@@ -61,30 +61,6 @@ variable "image_references" {
   }
 }
 
-variable "container_args" {
-  type = object({
-    api         = list(string)
-    controller  = list(string)
-    fault_proxy = list(string)
-    sandbox     = list(string)
-  })
-  default = {
-    api         = []
-    controller  = []
-    fault_proxy = []
-    sandbox     = []
-  }
-
-  validation {
-    condition = alltrue(flatten([
-      for arguments in values(var.container_args) : [
-        for argument in arguments : length(trimspace(argument)) > 0
-      ]
-    ]))
-    error_message = "Container arguments cannot contain empty values."
-  }
-}
-
 variable "api_invoker_members" {
   type = set(string)
 

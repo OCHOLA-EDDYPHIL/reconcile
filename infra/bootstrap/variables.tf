@@ -28,6 +28,26 @@ variable "state_bucket_name" {
   }
 }
 
+variable "billing_account_id" {
+  type    = string
+  default = "01029C-95939A-70E448"
+
+  validation {
+    condition     = var.billing_account_id == "01029C-95939A-70E448"
+    error_message = "The billing account must match the approved project billing account."
+  }
+}
+
+variable "owner_principal" {
+  type    = string
+  default = "user:eddyphilochola13@gmail.com"
+
+  validation {
+    condition     = var.owner_principal == "user:eddyphilochola13@gmail.com"
+    error_message = "The bootstrap impersonator must be the approved owner principal."
+  }
+}
+
 variable "allow_state_bucket_destroy" {
   type    = bool
   default = false

@@ -13,7 +13,6 @@ resource "google_project_iam_member" "runtime_database_user" {
 
   depends_on = [
     google_firestore_database.phase5["runtime"],
-    google_project_service.required["cloudresourcemanager.googleapis.com"],
   ]
 }
 
@@ -30,7 +29,6 @@ resource "google_project_iam_member" "target_database_viewer" {
 
   depends_on = [
     google_firestore_database.phase5["target"],
-    google_project_service.required["cloudresourcemanager.googleapis.com"],
   ]
 }
 
@@ -49,7 +47,6 @@ resource "google_project_iam_member" "target_database_user" {
 
   depends_on = [
     google_firestore_database.phase5["target"],
-    google_project_service.required["cloudresourcemanager.googleapis.com"],
   ]
 }
 
@@ -70,8 +67,15 @@ resource "google_project_iam_member" "vertex_user" {
   role    = "roles/aiplatform.user"
   member  = "serviceAccount:${google_service_account.runtime["controller"].email}"
 
-  depends_on = [
-    google_project_service.required["aiplatform.googleapis.com"],
-    google_project_service.required["cloudresourcemanager.googleapis.com"],
-  ]
+  depends_on = [google_project_service.required["aiplatform.googleapis.com"]]
+}
+
+resource "google_service_account_iam_member" "apply_act_as" {
+  for_each = local.service_accounts
+
+  service_account_id = "projects/${var.project_id}/serviceAccounts/${each.value.account_id}@${var.project_id}.iam.gserviceaccount.com"
+  role               = "roles/iam.serviceAccountUser"
+  member             = "serviceAccount:rec-p5-apply@reconcile-dev-260813-14fa6d.iam.gserviceaccount.com"
+
+  depends_on = [google_service_account.runtime]
 }

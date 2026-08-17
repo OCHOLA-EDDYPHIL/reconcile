@@ -9,6 +9,8 @@ terraform {
   }
 
   backend "gcs" {
-    prefix = "phase5/runtime"
+    bucket                      = "reconcile-dev-260813-14fa6d-p5-state"
+    prefix                      = "phase5/runtime"
+    impersonate_service_account = "rec-p5-apply@reconcile-dev-260813-14fa6d.iam.gserviceaccount.com"
   }
 }

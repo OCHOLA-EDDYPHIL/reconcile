@@ -24,7 +24,7 @@ resource "google_artifact_registry_repository" "runtime" {
   }
 
   cleanup_policies {
-    id     = "keep-two-recent"
+    id     = "keep-at-least-two-recent"
     action = "KEEP"
 
     most_recent_versions {

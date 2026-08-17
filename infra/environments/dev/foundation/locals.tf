@@ -8,13 +8,9 @@ locals {
     "aiplatform.googleapis.com",
     "artifactregistry.googleapis.com",
     "billingbudgets.googleapis.com",
-    "cloudresourcemanager.googleapis.com",
     "firestore.googleapis.com",
-    "iam.googleapis.com",
     "logging.googleapis.com",
     "run.googleapis.com",
-    "serviceusage.googleapis.com",
-    "storage.googleapis.com",
   ])
 
   artifact_repository_id = "reconcile-p5"

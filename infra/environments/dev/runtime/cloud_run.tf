@@ -22,7 +22,6 @@ resource "google_cloud_run_v2_service" "sandbox" {
     containers {
       name  = "sandbox"
       image = var.image_references.sandbox
-      args  = var.container_args.sandbox
 
       ports {
         name           = "http1"
@@ -78,7 +77,6 @@ resource "google_cloud_run_v2_service" "fault_proxy" {
     containers {
       name  = "fault-proxy"
       image = var.image_references.fault_proxy
-      args  = var.container_args.fault_proxy
 
       ports {
         name           = "http1"
@@ -136,7 +134,6 @@ resource "google_cloud_run_v2_service" "controller" {
     containers {
       name  = "controller"
       image = var.image_references.controller
-      args  = var.container_args.controller
 
       ports {
         name           = "http1"
@@ -201,7 +198,6 @@ resource "google_cloud_run_v2_service" "api" {
     containers {
       name  = "api"
       image = var.image_references.api
-      args  = var.container_args.api
 
       ports {
         name           = "http1"

@@ -17,5 +17,4 @@ resource "google_storage_bucket" "target" {
     retention_duration_seconds = 0
   }
 
-  depends_on = [google_project_service.required["storage.googleapis.com"]]
 }

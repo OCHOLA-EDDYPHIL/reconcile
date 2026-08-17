@@ -24,4 +24,6 @@ resource "google_storage_bucket" "terraform_state" {
   soft_delete_policy {
     retention_duration_seconds = 0
   }
+
+  depends_on = [google_project_service.bootstrap_required["storage.googleapis.com"]]
 }

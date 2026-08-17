@@ -7,6 +7,4 @@ resource "google_service_account" "runtime" {
   description  = each.value.description
 
   deletion_policy = "DELETE"
-
-  depends_on = [google_project_service.required["iam.googleapis.com"]]
 }
