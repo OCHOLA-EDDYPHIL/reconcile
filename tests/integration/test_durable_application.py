@@ -1956,6 +1956,7 @@ def test_cancellation_suppressing_provider_cannot_hold_run_past_deadline(
             tmp_path / "runtime-stubborn-provider.sqlite3"
         )
         envelope = _envelope(max_elapsed_ms=500)
+        clock = _MutableClock(envelope.ambiguity.observed_at)
         executor = _CancellationSuppressingProviderExecutor()
         service = _service(
             store,
@@ -1963,6 +1964,8 @@ def test_cancellation_suppressing_provider_cannot_hold_run_past_deadline(
             owner_id="worker-stubborn-provider",
             strategy=DurableExecutionStrategy.ADAPTIVE,
             max_provider_calls=1,
+            clock=clock.now,
+            monotonic_clock=lambda: 0.0,
         )
         await service.create(envelope)
         await asyncio.wait_for(executor.started.wait(), timeout=2)
