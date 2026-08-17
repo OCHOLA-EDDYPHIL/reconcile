@@ -929,8 +929,12 @@ def create_app(
     service: _InvestigationService | None = None,
     *,
     operator_service: _OperatorService | None = None,
+    hosted: bool = False,
 ) -> FastAPI:
     """Create the isolated single-process API and own its service lifetime."""
+
+    if type(hosted) is not bool:
+        raise TypeError("API hosted profile must be a boolean")
 
     @asynccontextmanager
     async def lifespan(application: FastAPI) -> AsyncIterator[None]:
@@ -960,10 +964,18 @@ def create_app(
         title="RECONCILE",
         version=__version__,
         description=(
-            "Loopback-only, single-process, single-tenant investigation API. "
-            "Authentication and multi-tenant authorization are deferred."
+            "Authenticated single-tenant hosted investigation API."
+            if hosted
+            else (
+                "Loopback-only, single-process, single-tenant investigation API. "
+                "Authentication and multi-tenant authorization are deferred."
+            )
         ),
         lifespan=lifespan,
+        docs_url=None if hosted else "/docs",
+        redoc_url=None if hosted else "/redoc",
+        openapi_url=None if hosted else "/openapi.json",
+        redirect_slashes=not hosted,
     )
     application.state.investigation_service = service
     application.state.operator_service = operator_service
