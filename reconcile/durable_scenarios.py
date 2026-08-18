@@ -16,11 +16,16 @@ from uuid import uuid4
 from reconcile.adaptive import AdvisoryPlanner
 from reconcile.adk_planner import AdkGeminiPlanner, VertexAdcPlannerConfig
 from reconcile.contracts.base import canonical_json_value_bytes
-from reconcile.contracts.codec import canonical_json_bytes, canonical_sha256
+from reconcile.contracts.codec import (
+    canonical_json_bytes,
+    canonical_sha256,
+    decode_contract,
+)
 from reconcile.contracts.comparison import (
     INVESTIGATION_COMPARISON_RECORD_VERSION,
     InvestigationComparisonRecord,
 )
+from reconcile.contracts.envelope import ExecutionEnvelope
 from reconcile.contracts.operational import (
     SCENARIO_OPERATIONAL_STATUS_VERSION,
     ScenarioOperationalCleanupState,
@@ -52,9 +57,9 @@ from reconcile.persistence import (
     ScenarioLeaseToken,
     ScenarioLeaseUnavailable,
     ScenarioMutationState,
+    ScenarioStore,
     ScenarioWorkItem,
     SqliteDurableRuntimeStore,
-    SqliteScenarioStore,
     StaleScenarioLease,
 )
 from reconcile.progress import (
@@ -133,7 +138,7 @@ def _strategy_sha256(scenario: ScenarioName, mode: ScenarioMode) -> str:
 class _ScenarioAuthority:
     def __init__(
         self,
-        store: SqliteScenarioStore,
+        store: ScenarioStore,
         token: ScenarioLeaseToken,
         clock: Callable[[], datetime],
     ) -> None:
@@ -367,7 +372,7 @@ class DurableScenarioWorkflow:
 
     def __init__(
         self,
-        store: SqliteScenarioStore,
+        store: ScenarioStore,
         workspace_root: str | Path,
         *,
         semantic_config_sha256: str,
@@ -376,8 +381,8 @@ class DurableScenarioWorkflow:
         owner_id: str = "operator",
         clock: Callable[[], datetime] = _now,
     ) -> None:
-        if not isinstance(store, SqliteScenarioStore):
-            raise TypeError("durable scenario workflow requires its exact store")
+        if not isinstance(store, ScenarioStore):
+            raise TypeError("durable scenario workflow requires a scenario store")
         if (vertex_config is None) is (planner_factory is None):
             if vertex_config is not None:
                 raise ValueError("durable planner configuration is ambiguous")
@@ -739,6 +744,10 @@ class DurableScenarioWorkflow:
             async with authority.hold() as token:
                 work = await self._store.record_mutation_started(
                     token,
+                    prepared_envelope=decode_contract(
+                        prepared.execution_envelope_bytes,
+                        ExecutionEnvelope,
+                    ),
                     prepared_envelope_sha256=hashlib.sha256(
                         prepared.execution_envelope_bytes
                     ).hexdigest(),

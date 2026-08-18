@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from enum import StrEnum
-from typing import Literal
+from typing import Literal, Protocol, runtime_checkable
 
 from pydantic import Field, model_validator
 
@@ -15,7 +15,11 @@ from reconcile.contracts.base import (
     StrictModel,
 )
 from reconcile.contracts.codec import canonical_sha256
-from reconcile.contracts.comparison import InvestigationComparisonRecord
+from reconcile.contracts.comparison import (
+    ComparisonRun,
+    InvestigationComparisonRecord,
+)
+from reconcile.contracts.envelope import ExecutionEnvelope
 from reconcile.contracts.operator import (
     ScenarioLaunchRequest,
     ScenarioRunEvent,
@@ -268,6 +272,131 @@ class ScenarioProjectionSnapshot(StrictModel):
     terminal: bool
 
 
+@runtime_checkable
+class ScenarioStore(Protocol):
+    async def create_work(
+        self,
+        launch_request: ScenarioLaunchRequest,
+        scenario_request: ScenarioRunRequest,
+        *,
+        strategy_sha256: str,
+        semantic_config_sha256: str,
+        runtime_provenance_sha256: str,
+        workspace_id: str,
+        invoked_at: datetime,
+        snapshot: ScenarioRunSnapshot,
+        accepted_event: ScenarioRunEvent,
+        created_at: datetime,
+    ) -> CreateScenarioWorkResult: ...
+
+    async def get_work(self, investigation_id: str) -> ScenarioWorkItem: ...
+
+    async def list_work(self) -> tuple[ScenarioWorkItem, ...]: ...
+
+    async def acquire_scenario_lease(
+        self,
+        investigation_id: str,
+        owner_id: str,
+        *,
+        now: datetime,
+    ) -> ScenarioLeaseToken: ...
+
+    async def renew_scenario_lease(
+        self,
+        token: ScenarioLeaseToken,
+        *,
+        now: datetime,
+    ) -> ScenarioLeaseToken: ...
+
+    async def release_scenario_lease(
+        self,
+        token: ScenarioLeaseToken,
+        *,
+        now: datetime,
+    ) -> None: ...
+
+    async def record_mutation_started(
+        self,
+        token: ScenarioLeaseToken,
+        *,
+        prepared_envelope: ExecutionEnvelope | None = None,
+        prepared_envelope_sha256: str,
+        cleanup_manifest_sha256: str,
+        occurred_at: datetime,
+    ) -> ScenarioWorkItem: ...
+
+    async def record_mutation_result(
+        self,
+        token: ScenarioLeaseToken,
+        result: ScenarioRunResult,
+        *,
+        prepared_envelope_bytes: bytes,
+        occurred_at: datetime,
+    ) -> ScenarioWorkItem: ...
+
+    async def mark_investigation_started(
+        self,
+        token: ScenarioLeaseToken,
+        *,
+        occurred_at: datetime,
+    ) -> ScenarioWorkItem: ...
+
+    async def record_workflow_result(
+        self,
+        token: ScenarioLeaseToken,
+        result: InvestigationReport | InvestigationComparisonRecord,
+        *,
+        occurred_at: datetime,
+    ) -> ScenarioWorkItem: ...
+
+    async def require_scenario_escalation(
+        self,
+        token: ScenarioLeaseToken,
+        failure_code: str,
+        *,
+        occurred_at: datetime,
+    ) -> ScenarioWorkItem: ...
+
+    async def record_scenario_cleanup(
+        self,
+        token: ScenarioLeaseToken,
+        status: CleanupStatus,
+        *,
+        occurred_at: datetime,
+        failure_code: str | None = None,
+    ) -> ScenarioWorkItem: ...
+
+    async def append_projection(
+        self,
+        snapshot: ScenarioRunSnapshot,
+        event: ScenarioRunEvent,
+        *,
+        terminal: bool,
+    ) -> ScenarioWorkItem: ...
+
+    async def snapshot_projection(
+        self,
+        investigation_id: str,
+        *,
+        after: int = 0,
+    ) -> ScenarioProjectionSnapshot: ...
+
+    async def record_lane_result(
+        self,
+        token: ScenarioLeaseToken,
+        lane: ScenarioLane,
+        result: ComparisonRun,
+        *,
+        occurred_at: datetime,
+    ) -> None: ...
+
+    async def get_lane_result(
+        self,
+        investigation_id: str,
+        lane: ScenarioLane,
+    ) -> ComparisonRun | None: ...
+
+
 __all__ = [
     "SCENARIO_LEASE_VERSION",
     "SCENARIO_WORK_ITEM_VERSION",
@@ -281,6 +410,7 @@ __all__ = [
     "ScenarioPersistenceError",
     "ScenarioProjectionSnapshot",
     "ScenarioStateConflict",
+    "ScenarioStore",
     "ScenarioWorkConflict",
     "ScenarioWorkItem",
     "ScenarioWorkNotFound",

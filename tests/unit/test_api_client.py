@@ -73,10 +73,14 @@ def _client(
     handler: Callable[[httpx.Request], httpx.Response],
     *,
     base_url: str = "http://127.0.0.1:8000",
+    identity_token_supplier: Callable[[str], str] | None = None,
+    identity_audience: str | None = None,
 ) -> InvestigationApiClient:
     return InvestigationApiClient(
         base_url,
         transport=httpx.MockTransport(handler),
+        identity_token_supplier=identity_token_supplier,
+        identity_audience=identity_audience,
     )
 
 
@@ -258,6 +262,148 @@ def test_client_disables_environment_proxies_and_redirects_and_sets_timeouts(
     assert client._client.timeout.read == 10.0
     assert client._event_timeout.read is None
     client.close()
+
+
+def test_destination_identity_is_refreshed_for_each_remote_request() -> None:
+    tokens = iter(("header.payload1.signature", "header.payload2.signature"))
+    audiences: list[str] = []
+    headers: list[tuple[str, str]] = []
+
+    def supply_token(audience: str) -> str:
+        audiences.append(audience)
+        return next(tokens)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        headers.append(
+            (
+                request.headers["authorization"],
+                request.headers["x-serverless-authorization"],
+            )
+        )
+        return _report_response(make_report(Classification.UNKNOWN))
+
+    with _client(
+        handler,
+        base_url="https://api.example.test",
+        identity_token_supplier=supply_token,
+        identity_audience="https://service.example.test",
+    ) as client:
+        client.get("investigation-7")
+        client.get("investigation-7")
+
+    assert audiences == [
+        "https://service.example.test",
+        "https://service.example.test",
+    ]
+    assert headers == [
+        ("Bearer header.payload1.signature", "Bearer header.payload1.signature"),
+        ("Bearer header.payload2.signature", "Bearer header.payload2.signature"),
+    ]
+
+
+def test_default_client_does_not_send_destination_identity_headers() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert "authorization" not in request.headers
+        assert "x-serverless-authorization" not in request.headers
+        return _report_response(make_report(Classification.UNKNOWN))
+
+    with _client(handler) as client:
+        client.get("investigation-7")
+
+
+@pytest.mark.parametrize(
+    ("base_url", "supplier", "audience"),
+    (
+        ("https://api.example.test", lambda _audience: "a.b.c", None),
+        ("https://api.example.test", None, "https://service.example.test"),
+        (
+            "http://127.0.0.1:8000",
+            lambda _audience: "a.b.c",
+            "https://service.example.test",
+        ),
+        (
+            "https://api.example.test",
+            lambda _audience: "a.b.c",
+            "bad audience",
+        ),
+    ),
+)
+def test_destination_identity_configuration_is_explicit_and_https_only(
+    base_url: str,
+    supplier: Callable[[str], str] | None,
+    audience: str | None,
+) -> None:
+    with pytest.raises(InvalidRequestError):
+        _client(
+            lambda _request: pytest.fail("transport must not be called"),
+            base_url=base_url,
+            identity_token_supplier=supplier,
+            identity_audience=audience,
+        )
+
+
+def test_destination_identity_failure_is_sanitized_and_not_retried() -> None:
+    supplier_calls = 0
+    transport_calls = 0
+
+    def supply_token(_audience: str) -> str:
+        nonlocal supplier_calls
+        supplier_calls += 1
+        raise RuntimeError("private-identity-provider-detail")
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        nonlocal transport_calls
+        transport_calls += 1
+        return httpx.Response(500)
+
+    with _client(
+        handler,
+        base_url="https://api.example.test",
+        identity_token_supplier=supply_token,
+        identity_audience="https://service.example.test",
+    ) as client:
+        with pytest.raises(TransportError) as captured:
+            tuple(client.events("investigation-7", max_reconnects=3))
+
+    assert supplier_calls == 1
+    assert transport_calls == 0
+    assert str(captured.value) == "The service could not be reached."
+    assert captured.value.__cause__ is None
+    assert "private-identity-provider-detail" not in str(captured.value)
+
+
+def test_malformed_destination_identity_token_is_not_dispatched() -> None:
+    transport_calls = 0
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        nonlocal transport_calls
+        transport_calls += 1
+        return httpx.Response(500)
+
+    with _client(
+        handler,
+        base_url="https://api.example.test",
+        identity_token_supplier=lambda _audience: "not-a-jwt",
+        identity_audience="https://service.example.test",
+    ) as client:
+        with pytest.raises(TransportError):
+            client.get("investigation-7")
+
+    assert transport_calls == 0
+
+
+def test_destination_identity_supplier_base_exceptions_propagate() -> None:
+    def supply_token(_audience: str) -> str:
+        raise KeyboardInterrupt
+
+    with _client(
+        lambda _request: pytest.fail("transport must not be called"),
+        base_url="https://api.example.test",
+        identity_token_supplier=supply_token,
+        identity_audience="https://service.example.test",
+    ) as client:
+        with pytest.raises(KeyboardInterrupt):
+            client.get("investigation-7")
 
 
 def test_only_event_streaming_disables_the_read_timeout() -> None:

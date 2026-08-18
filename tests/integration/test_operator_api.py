@@ -237,6 +237,7 @@ class _FakeOperatorService:
         self.snapshot_after_wait: object | None = None
         self.allow_max_cursor = False
         self.launches: list[ScenarioLaunchRequest] = []
+        self.wait_launches: list[ScenarioLaunchRequest] = []
         self.get_ids: list[str] = []
         self.operational_status_ids: list[str] = []
         self.summary_ids: list[str] = []
@@ -247,6 +248,18 @@ class _FakeOperatorService:
 
     async def launch(self, request: ScenarioLaunchRequest) -> LaunchScenarioResult:
         self.launches.append(request)
+        if self.launch_error is not None:
+            raise self.launch_error
+        return LaunchScenarioResult(
+            snapshot=self.launch_snapshot,  # type: ignore[arg-type]
+            created=self.launch_created,
+        )
+
+    async def launch_and_wait_result(
+        self,
+        request: ScenarioLaunchRequest,
+    ) -> LaunchScenarioResult:
+        self.wait_launches.append(request)
         if self.launch_error is not None:
             raise self.launch_error
         return LaunchScenarioResult(
@@ -383,6 +396,29 @@ def test_launch_returns_canonical_new_or_replayed_snapshot(
     assert snapshot.scenario is launch.scenario
     assert snapshot.mode is launch.mode
     assert service.launches == [launch]
+
+
+def test_hosted_launch_uses_the_request_scoped_terminal_waiter() -> None:
+    class HostedOperatorService(_FakeOperatorService):
+        async def start(self) -> None:
+            raise AssertionError("hosted operator must not enumerate startup work")
+
+    service = HostedOperatorService()
+    service.launch_snapshot = _snapshot(ScenarioRunLifecycle.FAILED).model_copy(
+        update={"investigation_id": _LAUNCH_INVESTIGATION_ID}
+    )
+    launch = _launch()
+    with TestClient(create_app(operator_service=service, hosted=True)) as client:
+        response = client.post(
+            "/api/v1/scenario-runs",
+            content=canonical_json_bytes(launch),
+            headers={"Content-Type": "application/json"},
+        )
+
+    assert response.status_code == 202
+    assert response.content == canonical_json_bytes(service.launch_snapshot)
+    assert service.wait_launches == [launch]
+    assert service.launches == []
 
 
 def test_conflicting_launch_is_a_canonical_409() -> None:

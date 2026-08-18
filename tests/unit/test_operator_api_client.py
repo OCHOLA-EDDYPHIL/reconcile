@@ -6,7 +6,7 @@ import ast
 import asyncio
 import gzip
 import json
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from datetime import timedelta
 from http import HTTPStatus
 from pathlib import Path
@@ -136,10 +136,14 @@ def _client(
     handler: Callable[[httpx.Request], httpx.Response],
     *,
     base_url: str = "http://127.0.0.1:8000",
+    identity_token_supplier: (Callable[[str], str | Awaitable[str]] | None) = None,
+    identity_audience: str | None = None,
 ) -> OperatorApiClient:
     return OperatorApiClient(
         base_url,
         transport=httpx.MockTransport(handler),
+        identity_token_supplier=identity_token_supplier,
+        identity_audience=identity_audience,
     )
 
 
@@ -442,9 +446,11 @@ def test_operator_client_has_no_privileged_runtime_imports() -> None:
         "http://localhost",
         "https://localhost:8443/",
         "http://[::1]:8000",
+        "https://api.example.test",
+        "https://203.0.113.8:8443/",
     ),
 )
-def test_base_url_accepts_only_explicit_loopback_hosts(base_url: str) -> None:
+def test_base_url_accepts_loopback_http_and_https(base_url: str) -> None:
     async def scenario() -> None:
         client = _client(lambda _request: httpx.Response(500), base_url=base_url)
         await client.aclose()
@@ -458,9 +464,7 @@ def test_base_url_accepts_only_explicit_loopback_hosts(base_url: str) -> None:
         "",
         "ftp://127.0.0.1",
         "http://example.test",
-        "https://api.example.test",
         "http://0.0.0.0",
-        "https://203.0.113.8:8443/",
         "http://127.0.0.1/path",
         "http://127.0.0.1?query=1",
         "http://127.0.0.1#fragment",
@@ -481,6 +485,171 @@ def test_base_url_rejects_remote_unsafe_or_ambiguous_values(base_url: str) -> No
 
 def test_operator_default_url_is_explicit_loopback() -> None:
     assert DEFAULT_OPERATOR_API_BASE_URL == "http://127.0.0.1:8000"
+
+
+def test_destination_identity_is_refreshed_for_each_remote_request() -> None:
+    tokens = iter(("header.payload1.signature", "header.payload2.signature"))
+    audiences: list[str] = []
+    headers: list[tuple[str, str]] = []
+
+    async def supply_token(audience: str) -> str:
+        audiences.append(audience)
+        await asyncio.sleep(0)
+        return next(tokens)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        headers.append(
+            (
+                request.headers["authorization"],
+                request.headers["x-serverless-authorization"],
+            )
+        )
+        return _json_response(_snapshot())
+
+    async def scenario() -> None:
+        async with _client(
+            handler,
+            base_url="https://api.example.test",
+            identity_token_supplier=supply_token,
+            identity_audience="https://service.example.test",
+        ) as client:
+            await client.get_snapshot("investigation-7")
+            await client.get_snapshot("investigation-7")
+
+    asyncio.run(scenario())
+    assert audiences == [
+        "https://service.example.test",
+        "https://service.example.test",
+    ]
+    assert headers == [
+        ("Bearer header.payload1.signature", "Bearer header.payload1.signature"),
+        ("Bearer header.payload2.signature", "Bearer header.payload2.signature"),
+    ]
+
+
+def test_default_client_does_not_send_destination_identity_headers() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert "authorization" not in request.headers
+        assert "x-serverless-authorization" not in request.headers
+        return _json_response(_snapshot())
+
+    async def scenario() -> None:
+        async with _client(handler) as client:
+            await client.get_snapshot("investigation-7")
+
+    asyncio.run(scenario())
+
+
+def test_sync_destination_identity_supplier_is_supported() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.headers["authorization"] == "Bearer header.payload.signature"
+        return _json_response(_snapshot())
+
+    async def scenario() -> None:
+        async with _client(
+            handler,
+            base_url="https://api.example.test",
+            identity_token_supplier=lambda _audience: "header.payload.signature",
+            identity_audience="https://service.example.test",
+        ) as client:
+            await client.get_snapshot("investigation-7")
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    ("base_url", "supplier", "audience"),
+    (
+        ("https://api.example.test", lambda _audience: "a.b.c", None),
+        ("https://api.example.test", None, "https://service.example.test"),
+        (
+            "http://127.0.0.1:8000",
+            lambda _audience: "a.b.c",
+            "https://service.example.test",
+        ),
+        (
+            "https://api.example.test",
+            lambda _audience: "a.b.c",
+            "bad audience",
+        ),
+    ),
+)
+def test_destination_identity_configuration_is_explicit_and_https_only(
+    base_url: str,
+    supplier: Callable[[str], str | Awaitable[str]] | None,
+    audience: str | None,
+) -> None:
+    with pytest.raises(InvalidRequestError):
+        _client(
+            lambda _request: pytest.fail("transport must not be called"),
+            base_url=base_url,
+            identity_token_supplier=supplier,
+            identity_audience=audience,
+        )
+
+
+def test_destination_identity_failure_is_sanitized_and_not_retried() -> None:
+    supplier_calls = 0
+    transport_calls = 0
+
+    async def supply_token(_audience: str) -> str:
+        nonlocal supplier_calls
+        supplier_calls += 1
+        raise RuntimeError("private-identity-provider-detail")
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        nonlocal transport_calls
+        transport_calls += 1
+        return httpx.Response(500)
+
+    async def scenario() -> None:
+        async with _client(
+            handler,
+            base_url="https://api.example.test",
+            identity_token_supplier=supply_token,
+            identity_audience="https://service.example.test",
+        ) as client:
+            with pytest.raises(TransportError) as captured:
+                await _collect(client.events("investigation-7", max_reconnects=3))
+        assert str(captured.value) == "The service could not be reached."
+        assert captured.value.__cause__ is None
+        assert "private-identity-provider-detail" not in str(captured.value)
+
+    asyncio.run(scenario())
+    assert supplier_calls == 1
+    assert transport_calls == 0
+
+
+def test_destination_identity_supplier_cancellation_propagates() -> None:
+    supplier_started = asyncio.Event()
+    supplier_release = asyncio.Event()
+    transport_calls = 0
+
+    async def supply_token(_audience: str) -> str:
+        supplier_started.set()
+        await supplier_release.wait()
+        return "header.payload.signature"
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        nonlocal transport_calls
+        transport_calls += 1
+        return _json_response(_snapshot())
+
+    async def scenario() -> None:
+        async with _client(
+            handler,
+            base_url="https://api.example.test",
+            identity_token_supplier=supply_token,
+            identity_audience="https://service.example.test",
+        ) as client:
+            task = asyncio.create_task(client.get_snapshot("investigation-7"))
+            await supplier_started.wait()
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+    asyncio.run(scenario())
+    assert transport_calls == 0
 
 
 @pytest.mark.parametrize(("status_code", "created"), ((202, True), (200, False)))

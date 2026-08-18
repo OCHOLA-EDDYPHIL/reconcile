@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import ipaddress
 import re
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import suppress
 from dataclasses import dataclass
 from http import HTTPStatus
@@ -43,6 +44,9 @@ from reconcile.interfaces.api_client import (
     RemoteProtocolError,
     ServiceUnavailableError,
     TransportError,
+    _identity_authorization_headers,
+    _IdentityUnavailableError,
+    _validated_identity_audience,
 )
 from reconcile.security import contains_sensitive_material
 
@@ -60,6 +64,8 @@ _JSON_READ_TIMEOUT_SECONDS = 10.0
 _WRITE_TIMEOUT_SECONDS = 5.0
 _POOL_TIMEOUT_SECONDS = 5.0
 _IDENTIFIER_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
+
+type OperatorIdentityTokenSupplier = Callable[[str], str | Awaitable[str]]
 
 _ERROR_STATUS = {
     ApiErrorCode.INVALID_CONTRACT: HTTPStatus.BAD_REQUEST,
@@ -157,14 +163,15 @@ def _validated_base_url(value: str) -> httpx.URL:
     ):
         raise _invalid_request() from None
 
-    host = url.host.lower()
-    if host != "localhost":
-        try:
-            address = ipaddress.ip_address(host)
-        except ValueError:
-            raise _invalid_request() from None
-        if not address.is_loopback:
-            raise _invalid_request() from None
+    if url.scheme == "http":
+        host = url.host.lower()
+        if host != "localhost":
+            try:
+                address = ipaddress.ip_address(host)
+            except ValueError:
+                raise _invalid_request() from None
+            if not address.is_loopback:
+                raise _invalid_request() from None
     return url.copy_with(path="")
 
 
@@ -415,8 +422,18 @@ class OperatorApiClient:
         base_url: str = DEFAULT_OPERATOR_API_BASE_URL,
         *,
         transport: httpx.AsyncBaseTransport | None = None,
+        identity_token_supplier: OperatorIdentityTokenSupplier | None = None,
+        identity_audience: str | None = None,
     ) -> None:
         validated_url = _validated_base_url(base_url)
+        if (identity_token_supplier is None) is not (identity_audience is None):
+            raise _invalid_request() from None
+        if identity_token_supplier is not None:
+            if not callable(identity_token_supplier) or validated_url.scheme != "https":
+                raise _invalid_request() from None
+            validated_audience = _validated_identity_audience(identity_audience)
+        else:
+            validated_audience = None
         timeout = httpx.Timeout(
             connect=_CONNECT_TIMEOUT_SECONDS,
             read=_JSON_READ_TIMEOUT_SECONDS,
@@ -439,9 +456,31 @@ class OperatorApiClient:
             )
         except Exception:
             raise _invalid_request() from None
+        self._identity_token_supplier = identity_token_supplier
+        self._identity_audience = validated_audience
         self._closed = False
         self._close_lock = asyncio.Lock()
         self._close_task: asyncio.Task[None] | None = None
+
+    async def _request_headers(self, accept: str) -> dict[str, str]:
+        headers = {"Accept": accept}
+        supplier = self._identity_token_supplier
+        audience = self._identity_audience
+        if supplier is None or audience is None:
+            return headers
+        try:
+            if inspect.iscoroutinefunction(supplier):
+                token = supplier(audience)
+            else:
+                token = await asyncio.to_thread(supplier, audience)
+            if inspect.isawaitable(token):
+                token = await token
+            headers.update(_identity_authorization_headers(token))
+        except _IdentityUnavailableError:
+            raise
+        except Exception:
+            raise _IdentityUnavailableError from None
+        return headers
 
     async def __aenter__(self) -> Self:
         self._ensure_open()
@@ -514,14 +553,13 @@ class OperatorApiClient:
             raise _invalid_request() from None
 
         try:
+            headers = await self._request_headers("application/json")
+            headers["Content-Type"] = "application/json"
             async with self._client.stream(
                 "POST",
                 "/api/v1/scenario-runs",
                 content=payload,
-                headers={
-                    "Accept": "application/json",
-                    "Content-Type": "application/json",
-                },
+                headers=headers,
             ) as response:
                 if response.status_code not in {HTTPStatus.OK, HTTPStatus.ACCEPTED}:
                     await _raise_api_error(response)
@@ -551,7 +589,7 @@ class OperatorApiClient:
             async with self._client.stream(
                 "GET",
                 f"/api/v1/scenario-runs/{validated_id}",
-                headers={"Accept": "application/json"},
+                headers=await self._request_headers("application/json"),
             ) as response:
                 if response.status_code != HTTPStatus.OK:
                     await _raise_api_error(response)
@@ -576,7 +614,7 @@ class OperatorApiClient:
             async with self._client.stream(
                 "GET",
                 f"/api/v2/scenario-runs/{validated_id}/operational-status",
-                headers={"Accept": "application/json"},
+                headers=await self._request_headers("application/json"),
             ) as response:
                 if response.status_code != HTTPStatus.OK:
                     await _raise_api_error(response)
@@ -604,7 +642,7 @@ class OperatorApiClient:
             async with self._client.stream(
                 "GET",
                 f"/api/v1/investigations/{validated_id}/envelope-summary",
-                headers={"Accept": "application/json"},
+                headers=await self._request_headers("application/json"),
             ) as response:
                 if response.status_code != HTTPStatus.OK:
                     await _raise_api_error(response)
@@ -650,11 +688,11 @@ class OperatorApiClient:
         initial_cursor = cursor
         while True:
             pending_terminal: ScenarioRunEvent | None = None
-            headers = {"Accept": "text/event-stream"}
-            if cursor:
-                headers["Last-Event-ID"] = str(cursor)
 
             try:
+                headers = await self._request_headers("text/event-stream")
+                if cursor:
+                    headers["Last-Event-ID"] = str(cursor)
                 async with self._client.stream(
                     "GET",
                     f"/api/v1/scenario-runs/{investigation_id}/events",
@@ -704,6 +742,8 @@ class OperatorApiClient:
                         raise _protocol_error() from None
                     return
                 raise StreamInterruptedError(cursor)
+            except _IdentityUnavailableError:
+                raise
             except InvestigationApiClientError as error:
                 if not isinstance(error, TransportError):
                     raise

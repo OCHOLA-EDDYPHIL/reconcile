@@ -260,6 +260,41 @@ class _Ledger:
         self.final_outcome = outcome
 
 
+class _BlockingCountCompletionLedger(_Ledger):
+    def __init__(self) -> None:
+        super().__init__()
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def complete_count_and_reserve_generation(
+        self,
+        reservation: HostedCountReservation,
+        usage: HostedCountTokensUsage,
+    ) -> HostedGenerationReservation:
+        self.started.set()
+        await self.release.wait()
+        return await super().complete_count_and_reserve_generation(
+            reservation,
+            usage,
+        )
+
+
+class _BlockingGenerationUsageLedger(_Ledger):
+    def __init__(self) -> None:
+        super().__init__()
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def record_generation_usage(
+        self,
+        reservation: HostedGenerationReservation,
+        usage: HostedGenerationUsage,
+    ) -> None:
+        self.started.set()
+        await self.release.wait()
+        await super().record_generation_usage(reservation, usage)
+
+
 def test_normalizes_complete_count_and_thought_inclusive_generation_usage() -> None:
     count = normalize_count_tokens_usage(_count_response(cached=5))
     generation = normalize_generation_usage(_generation_response(tool=1, cached=4))
@@ -327,6 +362,68 @@ def test_concurrent_attempts_consume_only_one_candidate_wide_pair() -> None:
         assert ledger.generation_attempts == 1
         assert sum(context.count_calls for context in contexts) == 1
         assert sum(context.generation_calls for context in contexts) == 1
+
+    asyncio.run(scenario())
+
+
+def test_count_completion_settles_before_cancellation_propagates() -> None:
+    async def scenario() -> None:
+        ledger = _BlockingCountCompletionLedger()
+        context = _Context()
+        attempt = _HostedProviderAttempt(_candidate(), ledger, "f" * 64)
+        pending = asyncio.create_task(attempt.dispatch(context))  # type: ignore[arg-type]
+        await ledger.started.wait()
+
+        pending.cancel()
+        await asyncio.sleep(0)
+
+        assert pending.done() is False
+        assert ledger.generation_attempts == 0
+        assert context.count_calls == 1
+        assert context.generation_calls == 0
+
+        ledger.release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await pending
+
+        assert ledger.count_usage == HostedCountTokensUsage(
+            total_tokens=20,
+            cached_content_tokens=0,
+        )
+        assert ledger.generation_attempts == 1
+        assert context.count_calls == 1
+        assert context.generation_calls == 0
+
+    asyncio.run(scenario())
+
+
+def test_generation_usage_settles_before_cancellation_propagates() -> None:
+    async def scenario() -> None:
+        ledger = _BlockingGenerationUsageLedger()
+        context = _Context()
+        attempt = _HostedProviderAttempt(_candidate(), ledger, "f" * 64)
+        pending = asyncio.create_task(attempt.dispatch(context))  # type: ignore[arg-type]
+        await ledger.started.wait()
+
+        pending.cancel()
+        await asyncio.sleep(0)
+
+        assert pending.done() is False
+        assert ledger.generation_usage is None
+        assert context.count_calls == 1
+        assert context.generation_calls == 1
+
+        ledger.release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await pending
+
+        assert ledger.generation_usage == normalize_generation_usage(
+            _generation_response()
+        )
+        assert ledger.count_attempts == 1
+        assert ledger.generation_attempts == 1
+        assert context.count_calls == 1
+        assert context.generation_calls == 1
 
     asyncio.run(scenario())
 

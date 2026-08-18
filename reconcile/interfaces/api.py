@@ -29,6 +29,7 @@ from reconcile.contracts import (
     ExecutionEnvelopeSummary,
     InvestigationEvent,
     InvestigationReport,
+    InvestigationStatus,
     ScenarioLaunchName,
     ScenarioLaunchRequest,
     ScenarioLifecycleEventPayload,
@@ -92,6 +93,11 @@ class _InvestigationService(Protocol):
         envelope: ExecutionEnvelope,
     ) -> _CreateResult: ...
 
+    async def create_and_wait_result(
+        self,
+        envelope: ExecutionEnvelope,
+    ) -> _CreateResult: ...
+
     async def get(self, investigation_id: str) -> InvestigationReport: ...
 
     async def snapshot(
@@ -119,6 +125,11 @@ class _LaunchScenarioResult(Protocol):
 
 class _OperatorService(Protocol):
     async def launch(
+        self,
+        request: ScenarioLaunchRequest,
+    ) -> _LaunchScenarioResult: ...
+
+    async def launch_and_wait_result(
         self,
         request: ScenarioLaunchRequest,
     ) -> _LaunchScenarioResult: ...
@@ -180,6 +191,12 @@ class _UnavailableInvestigationService:
     async def create(self, _envelope: ExecutionEnvelope) -> _CreateResult:
         raise _DependencyUnavailable
 
+    async def create_and_wait_result(
+        self,
+        _envelope: ExecutionEnvelope,
+    ) -> _CreateResult:
+        raise _DependencyUnavailable
+
     async def get(self, _investigation_id: str) -> InvestigationReport:
         raise _DependencyUnavailable
 
@@ -211,6 +228,12 @@ class _UnavailableOperatorService:
         return None
 
     async def launch(self, _request: ScenarioLaunchRequest) -> _LaunchScenarioResult:
+        raise _DependencyUnavailable
+
+    async def launch_and_wait_result(
+        self,
+        _request: ScenarioLaunchRequest,
+    ) -> _LaunchScenarioResult:
         raise _DependencyUnavailable
 
     async def get(self, _investigation_id: str) -> ScenarioRunSnapshot:
@@ -939,15 +962,28 @@ def create_app(
     @asynccontextmanager
     async def lifespan(application: FastAPI) -> AsyncIterator[None]:
         if application.state.investigation_service is None:
-            application.state.investigation_service = _build_default_service()
+            application.state.investigation_service = (
+                _UnavailableInvestigationService()
+                if hosted
+                else _build_default_service()
+            )
         if application.state.operator_service is None:
-            application.state.operator_service = _build_default_operator_service()
-        starter = getattr(application.state.investigation_service, "start", None)
-        if callable(starter):
-            await starter()
-        operator_starter = getattr(application.state.operator_service, "start", None)
-        if callable(operator_starter):
-            await operator_starter()
+            application.state.operator_service = (
+                _UnavailableOperatorService()
+                if hosted
+                else _build_default_operator_service()
+            )
+        if not hosted:
+            starter = getattr(application.state.investigation_service, "start", None)
+            if callable(starter):
+                await starter()
+            operator_starter = getattr(
+                application.state.operator_service,
+                "start",
+                None,
+            )
+            if callable(operator_starter):
+                await operator_starter()
         try:
             yield
         finally:
@@ -999,7 +1035,9 @@ def create_app(
     async def launch_scenario(request: Request) -> Response:
         _reject_query_parameters(request, allowed=set())
         launch = _decode_scenario_launch(await _read_contract_body(request))
-        result = await _call_service(_operator_service(application).launch(launch))
+        operator = _operator_service(application)
+        operation = operator.launch_and_wait_result if hosted else operator.launch
+        result = await _call_service(operation(launch))
         try:
             created = result.created
             result_snapshot = result.snapshot
@@ -1017,6 +1055,8 @@ def create_app(
             scenario=launch.scenario,
             mode=launch.mode,
         )
+        if hosted and snapshot.lifecycle not in _TERMINAL_SCENARIO_LIFECYCLES:
+            raise _InternalApiFailure
         request.state.investigation_id = snapshot.investigation_id
         return Response(
             content=canonical_json_bytes(snapshot),
@@ -1157,7 +1197,13 @@ def create_app(
         _reject_query_parameters(request, allowed=set())
         envelope = _decode_envelope(await _read_contract_body(request))
         request.state.investigation_id = envelope.investigation_id
-        result = await _call_service(_service(application).create(envelope))
+        investigation_service = _service(application)
+        operation = (
+            investigation_service.create_and_wait_result
+            if hosted
+            else investigation_service.create
+        )
+        result = await _call_service(operation(envelope))
         try:
             created = result.created
             result_report = result.report
@@ -1170,6 +1216,11 @@ def create_app(
             investigation_id=envelope.investigation_id,
             envelope_sha256=canonical_sha256(envelope),
         )
+        if hosted and (
+            report.status is not InvestigationStatus.COMPLETED
+            or report.classification is None
+        ):
+            raise _InternalApiFailure
         return Response(
             content=canonical_json_bytes(report),
             status_code=(HTTPStatus.CREATED if created else HTTPStatus.OK),

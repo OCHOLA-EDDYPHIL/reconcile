@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-from collections.abc import Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from enum import Enum
 from typing import NoReturn
 
@@ -151,6 +151,33 @@ def normalize_generation_usage(
 
 def _ledger_failure() -> NoReturn:
     raise HostedProviderLedgerError from None
+
+
+async def _settle_durable_ledger_transition[Result](
+    operation: Callable[[], Awaitable[Result]],
+) -> Result:
+    """Join one started ledger transition before propagating cancellation."""
+
+    task = asyncio.ensure_future(operation())
+    interrupted = False
+    while True:
+        try:
+            result = await asyncio.shield(task)
+        except asyncio.CancelledError:
+            interrupted = True
+            if not task.done():
+                continue
+            if not task.cancelled():
+                task.exception()
+            raise asyncio.CancelledError from None
+        except Exception:
+            if interrupted:
+                task.exception()
+                raise asyncio.CancelledError from None
+            raise
+        if interrupted:
+            raise asyncio.CancelledError from None
+        return result
 
 
 class _HostedProviderAttempt:
@@ -302,8 +329,8 @@ class _HostedProviderAttempt:
             await self._fail_count(HostedCountFailure.INVALID)
 
         try:
-            reserved_generation = (
-                await self._ledger.complete_count_and_reserve_generation(
+            reserved_generation = await _settle_durable_ledger_transition(
+                lambda: self._ledger.complete_count_and_reserve_generation(
                     self._count,
                     count_usage,
                 )
@@ -332,7 +359,12 @@ class _HostedProviderAttempt:
         except Exception:
             await self._fail_generation(HostedGenerationFailure.USAGE_INVALID)
         try:
-            await self._ledger.record_generation_usage(self._generation, usage)
+            await _settle_durable_ledger_transition(
+                lambda: self._ledger.record_generation_usage(
+                    self._generation,
+                    usage,
+                )
+            )
         except asyncio.CancelledError:
             raise
         except Exception:

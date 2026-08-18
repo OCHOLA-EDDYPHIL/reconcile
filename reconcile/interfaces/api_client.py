@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import inspect
 import ipaddress
 import re
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from http import HTTPStatus
 from urllib.parse import urlsplit
 
@@ -40,7 +41,12 @@ _CONNECT_TIMEOUT_SECONDS = 5.0
 _JSON_READ_TIMEOUT_SECONDS = 10.0
 _WRITE_TIMEOUT_SECONDS = 5.0
 _POOL_TIMEOUT_SECONDS = 5.0
+_MAX_IDENTITY_AUDIENCE_BYTES = 2_048
+_MAX_IDENTITY_TOKEN_BYTES = 6_144
 _IDENTIFIER_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
+_JWT_SEGMENT_PATTERN = re.compile(r"^[A-Za-z0-9_-]+$")
+
+type DestinationIdentityTokenSupplier = Callable[[str], str]
 
 _ERROR_STATUS = {
     ApiErrorCode.INVALID_CONTRACT: HTTPStatus.BAD_REQUEST,
@@ -88,6 +94,10 @@ class RemoteProtocolError(InvestigationApiClientError):
 
 class TransportError(InvestigationApiClientError):
     message = "The service could not be reached."
+
+
+class _IdentityUnavailableError(TransportError):
+    pass
 
 
 _ERROR_TYPES: dict[ApiErrorCode, type[InvestigationApiClientError]] = {
@@ -156,6 +166,43 @@ def _validated_base_url(value: str) -> httpx.URL:
                 raise _invalid_request() from None
 
     return url.copy_with(path="")
+
+
+def _validated_identity_audience(value: object) -> str:
+    if type(value) is not str or not value:
+        raise _invalid_request() from None
+    try:
+        encoded = value.encode("ascii")
+    except UnicodeEncodeError:
+        raise _invalid_request() from None
+    if (
+        len(encoded) > _MAX_IDENTITY_AUDIENCE_BYTES
+        or any(character.isspace() for character in value)
+        or any(ord(character) < 33 or ord(character) == 127 for character in value)
+    ):
+        raise _invalid_request() from None
+    return value
+
+
+def _identity_authorization_headers(token: object) -> dict[str, str]:
+    if type(token) is not str or not token:
+        raise _IdentityUnavailableError from None
+    try:
+        encoded = token.encode("ascii")
+    except UnicodeEncodeError:
+        raise _IdentityUnavailableError from None
+    segments = token.split(".")
+    if (
+        len(encoded) > _MAX_IDENTITY_TOKEN_BYTES
+        or len(segments) != 3
+        or any(_JWT_SEGMENT_PATTERN.fullmatch(segment) is None for segment in segments)
+    ):
+        raise _IdentityUnavailableError from None
+    authorization = f"Bearer {token}"
+    return {
+        "Authorization": authorization,
+        "X-Serverless-Authorization": authorization,
+    }
 
 
 def _validated_investigation_id(value: str) -> str:
@@ -368,8 +415,18 @@ class InvestigationApiClient:
         base_url: str = DEFAULT_API_BASE_URL,
         *,
         transport: httpx.BaseTransport | None = None,
+        identity_token_supplier: DestinationIdentityTokenSupplier | None = None,
+        identity_audience: str | None = None,
     ) -> None:
         validated_url = _validated_base_url(base_url)
+        if (identity_token_supplier is None) is not (identity_audience is None):
+            raise _invalid_request() from None
+        if identity_token_supplier is not None:
+            if not callable(identity_token_supplier) or validated_url.scheme != "https":
+                raise _invalid_request() from None
+            validated_audience = _validated_identity_audience(identity_audience)
+        else:
+            validated_audience = None
         timeout = httpx.Timeout(
             connect=_CONNECT_TIMEOUT_SECONDS,
             read=_JSON_READ_TIMEOUT_SECONDS,
@@ -392,7 +449,29 @@ class InvestigationApiClient:
             )
         except Exception:
             raise _invalid_request() from None
+        self._identity_token_supplier = identity_token_supplier
+        self._identity_audience = validated_audience
         self._closed = False
+
+    def _request_headers(self, accept: str) -> dict[str, str]:
+        headers = {"Accept": accept}
+        supplier = self._identity_token_supplier
+        audience = self._identity_audience
+        if supplier is None or audience is None:
+            return headers
+        try:
+            token = supplier(audience)
+            if inspect.isawaitable(token):
+                close = getattr(token, "close", None)
+                if callable(close):
+                    close()
+                raise _IdentityUnavailableError
+            headers.update(_identity_authorization_headers(token))
+        except _IdentityUnavailableError:
+            raise
+        except Exception:
+            raise _IdentityUnavailableError from None
+        return headers
 
     def __enter__(self) -> InvestigationApiClient:
         self._ensure_open()
@@ -434,14 +513,13 @@ class InvestigationApiClient:
             raise _invalid_request() from None
 
         try:
+            headers = self._request_headers("application/json")
+            headers["Content-Type"] = "application/json"
             with self._client.stream(
                 "POST",
                 "/api/v1/investigations",
                 content=payload,
-                headers={
-                    "Accept": "application/json",
-                    "Content-Type": "application/json",
-                },
+                headers=headers,
             ) as response:
                 if response.status_code not in {HTTPStatus.OK, HTTPStatus.CREATED}:
                     _raise_api_error(response)
@@ -464,7 +542,7 @@ class InvestigationApiClient:
             with self._client.stream(
                 "GET",
                 f"/api/v1/investigations/{validated_id}",
-                headers={"Accept": "application/json"},
+                headers=self._request_headers("application/json"),
             ) as response:
                 if response.status_code != HTTPStatus.OK:
                     _raise_api_error(response)
@@ -504,7 +582,7 @@ class InvestigationApiClient:
         while True:
             terminal_seen = False
             connection_cursor = cursor
-            headers = {"Accept": "text/event-stream"}
+            headers = self._request_headers("text/event-stream")
             if cursor:
                 headers["Last-Event-ID"] = str(cursor)
 
