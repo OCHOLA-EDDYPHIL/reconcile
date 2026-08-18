@@ -147,6 +147,12 @@ BOUNDED_HYBRID_EXPLICIT_UNKNOWN_PROVENANCE = (
     "explicit UNKNOWN after advisory failure because a fresh fixed plan would "
     "exceed or replay the target-read budget."
 )
+BOUNDED_HYBRID_PREPLANNER_UNKNOWN_PROVENANCE = (
+    f"Bounded hybrid route policy {BOUNDED_HYBRID_ROUTE_POLICY_VERSION} retained "
+    "explicit UNKNOWN before advisory dispatch because the deterministic bootstrap "
+    "read could not safely support a planning turn; no planner or fresh fixed replay "
+    "was invoked."
+)
 BOUNDED_HYBRID_PROVIDER_CLEANUP_PROVENANCE = (
     "Advisory provider cleanup failed after the deterministic result was "
     "established; the sanitized failure did not change classification or action "
@@ -309,6 +315,19 @@ def mark_bounded_hybrid_explicit_unknown(
     return marked
 
 
+def mark_bounded_hybrid_preplanner_unknown(
+    report: InvestigationReport,
+) -> InvestigationReport:
+    """Attach truthful provenance when the bootstrap stops before planning."""
+
+    if report.classification is not Classification.UNKNOWN:
+        raise ValueError("pre-planner hybrid stop requires UNKNOWN classification")
+    return _mark_bounded_hybrid_route(
+        report,
+        BOUNDED_HYBRID_PREPLANNER_UNKNOWN_PROVENANCE,
+    )
+
+
 def mark_bounded_hybrid_provider_cleanup_failure(
     report: InvestigationReport,
 ) -> InvestigationReport:
@@ -329,11 +348,16 @@ def is_bounded_hybrid_fixed_fallback(report: InvestigationReport) -> bool:
 
 
 def is_bounded_hybrid_explicit_unknown(report: InvestigationReport) -> bool:
-    """Return whether provider failure ended without replaying fixed reads."""
+    """Return whether a bounded hybrid path retained UNKNOWN without replay."""
 
     if type(report) is not InvestigationReport:
         raise TypeError("hybrid UNKNOWN inspection requires an exact report")
-    return BOUNDED_HYBRID_EXPLICIT_UNKNOWN_PROVENANCE in report.limitations
+    return bool(
+        {
+            BOUNDED_HYBRID_EXPLICIT_UNKNOWN_PROVENANCE,
+            BOUNDED_HYBRID_PREPLANNER_UNKNOWN_PROVENANCE,
+        }.intersection(report.limitations)
+    )
 
 
 def bounded_hybrid_route_provenance(
@@ -351,6 +375,7 @@ def bounded_hybrid_route_provenance(
             BOUNDED_HYBRID_ADVISORY_PROVENANCE,
             BOUNDED_HYBRID_FALLBACK_PROVENANCE,
             BOUNDED_HYBRID_EXPLICIT_UNKNOWN_PROVENANCE,
+            BOUNDED_HYBRID_PREPLANNER_UNKNOWN_PROVENANCE,
         )
         if marker in limitations
     )
@@ -375,11 +400,16 @@ def bounded_hybrid_route_provenance(
         outcome = ScenarioHybridOutcome.FIXED_FALLBACK
         fixed_invoked = True
         provider_failure = True
-    else:
+    elif primary[0] == BOUNDED_HYBRID_EXPLICIT_UNKNOWN_PROVENANCE:
         route = ScenarioHybridRoute.PLANNER_HETEROGENEOUS
         outcome = ScenarioHybridOutcome.EXPLICIT_UNKNOWN
         fixed_invoked = False
         provider_failure = True
+    else:
+        route = ScenarioHybridRoute.PLANNER_HETEROGENEOUS
+        outcome = ScenarioHybridOutcome.EXPLICIT_UNKNOWN
+        fixed_invoked = False
+        provider_failure = False
     return ScenarioRouteProvenance(
         policy_version=BOUNDED_HYBRID_ROUTE_POLICY_VERSION,
         route=route,
@@ -1519,6 +1549,7 @@ __all__ = [
     "BOUNDED_HYBRID_FALLBACK_PROVENANCE",
     "BOUNDED_HYBRID_FIXED_PROVENANCE",
     "BOUNDED_HYBRID_PLANNER_INVOKED_PROVENANCE",
+    "BOUNDED_HYBRID_PREPLANNER_UNKNOWN_PROVENANCE",
     "BOUNDED_HYBRID_PROVIDER_CLEANUP_PROVENANCE",
     "BOUNDED_HYBRID_ROUTE_POLICY_VERSION",
     "SCENARIO_SUITE",
@@ -1539,6 +1570,7 @@ __all__ = [
     "mark_bounded_hybrid_deterministic_fixed",
     "mark_bounded_hybrid_explicit_unknown",
     "mark_bounded_hybrid_fixed_fallback",
+    "mark_bounded_hybrid_preplanner_unknown",
     "mark_bounded_hybrid_provider_cleanup_failure",
     "run_one",
     "run_suite",

@@ -53,6 +53,10 @@ from reconcile.interfaces.api_client import (
     ServiceUnavailableError,
     TransportError,
 )
+from reconcile.interfaces.google_identity import (
+    GoogleIdentityTokenError,
+    operator_client_identity,
+)
 from reconcile.interfaces.operator_api_client import OperatorApiClient
 from reconcile.scenarios.service import (
     ScenarioMode,
@@ -586,12 +590,27 @@ def _require_local(local: bool) -> None:
         _fail(FailureCategory.INVALID_INPUT)
 
 
+def _operator_client(api_url: str) -> OperatorApiClient:
+    try:
+        identity = operator_client_identity()
+    except GoogleIdentityTokenError:
+        raise InvalidRequestError from None
+    if identity is None:
+        return OperatorApiClient(api_url)
+    supplier, audience = identity
+    return OperatorApiClient(
+        api_url,
+        identity_token_supplier=supplier,
+        identity_audience=audience,
+    )
+
+
 async def _remote_scenario_launch(
     *,
     api_url: str,
     request: ScenarioLaunchRequest,
 ) -> ScenarioRunSnapshot:
-    async with OperatorApiClient(api_url) as client:
+    async with _operator_client(api_url) as client:
         launched = await client.launch(request)
     return launched.snapshot
 
@@ -634,7 +653,7 @@ async def _remote_scenario_status(
     api_url: str,
     investigation_id: str,
 ) -> ScenarioOperationalStatus:
-    async with OperatorApiClient(api_url) as client:
+    async with _operator_client(api_url) as client:
         return await client.get_operational_status(investigation_id)
 
 
@@ -671,7 +690,7 @@ async def _remote_scenario_events(
     after: int,
     output: EventOutput,
 ) -> None:
-    async with OperatorApiClient(api_url) as client:
+    async with _operator_client(api_url) as client:
         async for event in client.events(investigation_id, after=after):
             _write_scenario_event(event, output)
 
@@ -712,7 +731,7 @@ async def _remote_scenario_watch(
     after: int,
     output: StructuredOutput,
 ) -> tuple[ScenarioRunSnapshot, ScenarioOperationalStatus | None]:
-    async with OperatorApiClient(api_url) as client:
+    async with _operator_client(api_url) as client:
         async for event in client.events(investigation_id, after=after):
             if output is StructuredOutput.HUMAN:
                 _write_scenario_event(event, EventOutput.HUMAN)

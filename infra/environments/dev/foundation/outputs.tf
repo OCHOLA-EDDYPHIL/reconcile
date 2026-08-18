@@ -11,6 +11,7 @@ output "service_account_emails" {
 output "firestore_databases" {
   value = {
     runtime = google_firestore_database.phase5["runtime"].name
+    sandbox = google_firestore_database.phase5["sandbox"].name
     target  = google_firestore_database.phase5["target"].name
   }
 }

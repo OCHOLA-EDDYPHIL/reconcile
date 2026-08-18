@@ -391,6 +391,7 @@ def test_count_completion_settles_before_cancellation_propagates() -> None:
             cached_content_tokens=0,
         )
         assert ledger.generation_attempts == 1
+        assert ledger.generation_failures == [HostedGenerationFailure.TIMEOUT]
         assert context.count_calls == 1
         assert context.generation_calls == 0
 
@@ -422,6 +423,7 @@ def test_generation_usage_settles_before_cancellation_propagates() -> None:
         )
         assert ledger.count_attempts == 1
         assert ledger.generation_attempts == 1
+        assert ledger.generation_failures == [HostedGenerationFailure.TIMEOUT]
         assert context.count_calls == 1
         assert context.generation_calls == 1
 

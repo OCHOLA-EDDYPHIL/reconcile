@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 
+from reconcile.adapters.sandbox_order import SANDBOX_ORDER_TARGET_KIND
 from reconcile.baseline import FixedProbePlan, FixedProbeStep, execute_fixed_plan
 from reconcile.contracts import (
     OBSERVATION_CAPABILITY_VERSION,
@@ -23,6 +24,7 @@ from reconcile.contracts import (
     OperationStatus,
     ProbeOutcome,
     ProbeRequest,
+    TargetBinding,
     TargetConstraint,
     canonical_json_bytes,
     decode_contract,
@@ -63,6 +65,7 @@ from reconcile.persistence import (
     SqliteDurableRuntimeStore,
 )
 from reconcile.persistence.durable import RUNTIME_TELEMETRY_VERSION
+from reconcile.scenarios.service import mark_bounded_hybrid_fixed_fallback
 from tests.contract._factories import make_envelope, make_target
 
 pytestmark = pytest.mark.integration
@@ -84,6 +87,22 @@ def _envelope(*, max_elapsed_ms: int = 30_000) -> ExecutionEnvelope:
         "max_cost_units": 3,
     }
     return decode_contract(json.dumps(payload), ExecutionEnvelope)
+
+
+def _sandbox_envelope() -> ExecutionEnvelope:
+    base = _envelope()
+    return decode_contract(
+        canonical_json_bytes(
+            base.model_copy(
+                update={
+                    "target": base.target.model_copy(
+                        update={"target_kind": SANDBOX_ORDER_TARGET_KIND}
+                    )
+                }
+            )
+        ),
+        ExecutionEnvelope,
+    )
 
 
 def _request(*, rationale: str = "Read the sealed target.") -> ProbeRequest:
@@ -163,8 +182,10 @@ class _Normalizer:
 
 def _registries(
     handler: ObservationHandler | None,
+    *,
+    target: TargetBinding | None = None,
 ) -> tuple[CapabilityRegistry, TargetRuleRegistry]:
-    target = make_target()
+    target = make_target() if target is None else target
     capability = ObservationCapability(
         schema_version=OBSERVATION_CAPABILITY_VERSION,
         name="gcs-object-readback",
@@ -257,6 +278,31 @@ class _FixedExecutor:
             clock=self.clock,
         )
         return await runtime.complete(result.report)
+
+
+class _MarkedFixedFallbackExecutor:
+    def __init__(self, handler: _ReadHandler) -> None:
+        self.handler = handler
+
+    async def __call__(
+        self,
+        envelope: ExecutionEnvelope,
+        *,
+        revision: int,
+        cancellation_event: asyncio.Event,
+        runtime: DurableExecutionContext,
+    ):
+        capabilities, rules = _registries(self.handler, target=envelope.target)
+        result = await execute_fixed_plan(
+            envelope,
+            capabilities,
+            rules,
+            _plan(),
+            revision=revision,
+            cancellation_event=cancellation_event,
+            durability_observer=runtime,
+        )
+        return await runtime.complete(mark_bounded_hybrid_fixed_fallback(result.report))
 
 
 class _UnknownThenFixedExecutor:
@@ -2026,6 +2072,61 @@ def test_adaptive_terminal_receipt_matches_exact_provider_ledger(
         assert executor.external_calls == 1
         assert costs.provider_calls == 1
         assert costs.estimated_cost_microunits == 40
+        await service.aclose()
+
+    asyncio.run(scenario())
+
+
+def test_marked_predispatch_fixed_fallback_retains_deterministic_classification(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        store = SqliteDurableRuntimeStore(tmp_path / "runtime.sqlite3")
+        envelope = _sandbox_envelope()
+        service = _service(
+            store,
+            _MarkedFixedFallbackExecutor(_ReadHandler()),
+            owner_id="worker-marked-zero-provider-fixed-fallback",
+            strategy=DurableExecutionStrategy.ADAPTIVE,
+            max_provider_calls=1,
+        )
+        result = await service.create_and_wait_result(envelope)
+        run = await store.get_run(envelope.investigation_id)
+        receipts = await store.provider_call_receipts(envelope.investigation_id)
+        await service.aclose()
+
+        assert result.report.classification is Classification.COMMITTED
+        assert run.state is DurableRunState.TERMINAL
+        assert receipts == ()
+
+    asyncio.run(scenario())
+
+
+def test_unmarked_adaptive_terminal_without_provider_receipt_fails_closed(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        store = SqliteDurableRuntimeStore(tmp_path / "runtime.sqlite3")
+        envelope = _sandbox_envelope()
+        handler = _ReadHandler()
+        service = _service(
+            store,
+            _FixedExecutor(handler),
+            owner_id="worker-unmarked-zero-provider",
+            strategy=DurableExecutionStrategy.ADAPTIVE,
+            max_provider_calls=1,
+        )
+        await service.create(envelope)
+
+        async def escalated() -> bool:
+            return (
+                await store.get_run(envelope.investigation_id)
+            ).state is DurableRunState.ESCALATION_REQUIRED
+
+        await _wait_for(escalated)
+        run = await store.get_run(envelope.investigation_id)
+        assert run.established_report is None
+        assert await store.provider_call_receipts(envelope.investigation_id) == ()
         await service.aclose()
 
     asyncio.run(scenario())

@@ -153,10 +153,10 @@ def _ledger_failure() -> NoReturn:
     raise HostedProviderLedgerError from None
 
 
-async def _settle_durable_ledger_transition[Result](
+async def _capture_durable_ledger_transition[Result](
     operation: Callable[[], Awaitable[Result]],
-) -> Result:
-    """Join one started ledger transition before propagating cancellation."""
+) -> tuple[Result, bool]:
+    """Join one started transition and report whether its caller was cancelled."""
 
     task = asyncio.ensure_future(operation())
     interrupted = False
@@ -167,17 +167,29 @@ async def _settle_durable_ledger_transition[Result](
             interrupted = True
             if not task.done():
                 continue
-            if not task.cancelled():
-                task.exception()
-            raise asyncio.CancelledError from None
+            if task.cancelled():
+                raise asyncio.CancelledError from None
+            try:
+                result = task.result()
+            except Exception:
+                raise asyncio.CancelledError from None
         except Exception:
             if interrupted:
                 task.exception()
                 raise asyncio.CancelledError from None
             raise
-        if interrupted:
-            raise asyncio.CancelledError from None
-        return result
+        return result, interrupted
+
+
+async def _settle_durable_ledger_transition[Result](
+    operation: Callable[[], Awaitable[Result]],
+) -> Result:
+    """Join one started ledger transition before propagating cancellation."""
+
+    result, interrupted = await _capture_durable_ledger_transition(operation)
+    if interrupted:
+        raise asyncio.CancelledError from None
+    return result
 
 
 class _HostedProviderAttempt:
@@ -237,7 +249,7 @@ class _HostedProviderAttempt:
             raise HostedProviderLedgerError
         return value
 
-    async def _fail_count(self, failure: HostedCountFailure) -> NoReturn:
+    async def _record_count_failure(self, failure: HostedCountFailure) -> None:
         reservation = self._count
         assert reservation is not None
         self._planner_failure = (
@@ -251,14 +263,22 @@ class _HostedProviderAttempt:
             )
         )
         try:
-            await self._ledger.fail_count_tokens(reservation, failure)
+            await _settle_durable_ledger_transition(
+                lambda: self._ledger.fail_count_tokens(reservation, failure)
+            )
         except asyncio.CancelledError:
             raise
         except Exception:
             _ledger_failure()
+
+    async def _fail_count(self, failure: HostedCountFailure) -> NoReturn:
+        await self._record_count_failure(failure)
         raise HostedProviderLedgerError from None
 
-    async def _fail_generation(self, failure: HostedGenerationFailure) -> NoReturn:
+    async def _record_generation_failure(
+        self,
+        failure: HostedGenerationFailure,
+    ) -> None:
         reservation = self._generation
         assert reservation is not None
         self._generation_failed = True
@@ -272,11 +292,16 @@ class _HostedProviderAttempt:
             )
         )
         try:
-            await self._ledger.fail_generation(reservation, failure)
+            await _settle_durable_ledger_transition(
+                lambda: self._ledger.fail_generation(reservation, failure)
+            )
         except asyncio.CancelledError:
             raise
         except Exception:
             _ledger_failure()
+
+    async def _fail_generation(self, failure: HostedGenerationFailure) -> NoReturn:
+        await self._record_generation_failure(failure)
         raise HostedProviderLedgerError from None
 
     async def dispatch(
@@ -294,14 +319,19 @@ class _HostedProviderAttempt:
         )
         self._dispatch = dispatch
         try:
-            reserved_count = await self._ledger.reserve_count_tokens(
-                self._candidate,
-                dispatch,
+            reserved_count, interrupted = await _capture_durable_ledger_transition(
+                lambda: self._ledger.reserve_count_tokens(
+                    self._candidate,
+                    dispatch,
+                )
             )
             self._count = self._validate_count_reservation(
                 reserved_count,
                 dispatch,
             )
+            if interrupted:
+                await self._record_count_failure(HostedCountFailure.TIMEOUT)
+                raise asyncio.CancelledError from None
         except asyncio.CancelledError:
             raise
         except HostedProviderLedgerError:
@@ -312,6 +342,7 @@ class _HostedProviderAttempt:
         try:
             await context.count_tokens()
         except asyncio.CancelledError:
+            await self._record_count_failure(HostedCountFailure.TIMEOUT)
             raise
         except GuardedInputTokenLimitExceeded:
             await self._fail_count(HostedCountFailure.LIMIT_EXCEEDED)
@@ -329,7 +360,10 @@ class _HostedProviderAttempt:
             await self._fail_count(HostedCountFailure.INVALID)
 
         try:
-            reserved_generation = await _settle_durable_ledger_transition(
+            (
+                reserved_generation,
+                interrupted,
+            ) = await _capture_durable_ledger_transition(
                 lambda: self._ledger.complete_count_and_reserve_generation(
                     self._count,
                     count_usage,
@@ -339,6 +373,9 @@ class _HostedProviderAttempt:
                 reserved_generation,
                 dispatch,
             )
+            if interrupted:
+                await self._record_generation_failure(HostedGenerationFailure.TIMEOUT)
+                raise asyncio.CancelledError from None
         except asyncio.CancelledError:
             raise
         except HostedProviderLedgerError:
@@ -349,6 +386,7 @@ class _HostedProviderAttempt:
         try:
             response = await context.generate_content()
         except asyncio.CancelledError:
+            await self._record_generation_failure(HostedGenerationFailure.TIMEOUT)
             raise
         except TimeoutError:
             await self._fail_generation(HostedGenerationFailure.TIMEOUT)
@@ -359,17 +397,20 @@ class _HostedProviderAttempt:
         except Exception:
             await self._fail_generation(HostedGenerationFailure.USAGE_INVALID)
         try:
-            await _settle_durable_ledger_transition(
+            _, interrupted = await _capture_durable_ledger_transition(
                 lambda: self._ledger.record_generation_usage(
                     self._generation,
                     usage,
                 )
             )
+            self._usage = usage
+            if interrupted:
+                await self._record_generation_failure(HostedGenerationFailure.TIMEOUT)
+                raise asyncio.CancelledError from None
         except asyncio.CancelledError:
             raise
         except Exception:
             _ledger_failure()
-        self._usage = usage
         if (
             usage.prompt_tokens > self._candidate.maximum_input_tokens
             or usage.output_tokens_including_thoughts
@@ -408,12 +449,14 @@ class _HostedProviderAttempt:
             PlannerFailureKind.SCHEMA_INVALID: HostedPlannerOutcome.SCHEMA_INVALID,
         }[turn.failure]
         try:
-            await self._ledger.finalize_generation(
-                reservation,
-                outcome,
-                output_sha256=turn.output_sha256,
-                reported_model=turn.metadata.reported_model,
-                reported_model_raw_sha256=(turn.metadata.reported_model_raw_sha256),
+            await _settle_durable_ledger_transition(
+                lambda: self._ledger.finalize_generation(
+                    reservation,
+                    outcome,
+                    output_sha256=turn.output_sha256,
+                    reported_model=turn.metadata.reported_model,
+                    reported_model_raw_sha256=(turn.metadata.reported_model_raw_sha256),
+                )
             )
         except asyncio.CancelledError:
             raise
@@ -505,7 +548,7 @@ class HostedGeminiPlanner:
             except Exception:
                 consumed = None
         if consumed is not True:
-            return _failure_turn(self.metadata, input_sha256)
+            return await attempt.finalize(_failure_turn(self.metadata, input_sha256))
         if attempt.planner_failure is not None:
             measured = attempt.usage
             turn = _failure_turn(

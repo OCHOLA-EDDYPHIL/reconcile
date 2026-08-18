@@ -11,10 +11,11 @@ from reconcile.hosted.config import Component, HostedConfigError, load_config
 pytestmark = pytest.mark.unit
 
 _PROJECT = "reconcile-dev-260813-14fa6d"
-_API_CALLER = "eddyphilochola13@gmail.com"
+_API_CALLER = f"rec-p5-apply@{_PROJECT}.iam.gserviceaccount.com"
 _INTERNAL_CALLER = f"rec-p5-api@{_PROJECT}.iam.gserviceaccount.com"
 _SANDBOX_READ_CALLER = f"rec-p5-controller@{_PROJECT}.iam.gserviceaccount.com"
 _SANDBOX_MUTATION_CALLER = f"rec-p5-fault@{_PROJECT}.iam.gserviceaccount.com"
+_PROMPT_SHA256 = "a18ac5bbd22570562acc6dfbc49437a82f0db6a265a4de737c1371b6ef2ca2d3"
 
 
 def _audience(component: Component) -> str:
@@ -41,6 +42,7 @@ def _environment(component: Component) -> dict[str, str]:
             {
                 "RECONCILE_ALLOWED_CALLER_EMAILS": _API_CALLER,
                 "RECONCILE_RUNTIME_DATABASE": "reconcile-p5-runtime",
+                "RECONCILE_TARGET_BUCKET": f"{_PROJECT}-p5-target",
                 "RECONCILE_CONTROLLER_URL": "https://controller.example.run.app",
                 "RECONCILE_CONTROLLER_AUDIENCE": _audience(Component.CONTROLLER),
                 "RECONCILE_FAULT_PROXY_URL": ("https://fault-proxy.example.run.app"),
@@ -58,7 +60,10 @@ def _environment(component: Component) -> dict[str, str]:
                 "RECONCILE_SANDBOX_AUDIENCE": _audience(Component.SANDBOX),
                 "RECONCILE_VERTEX_LOCATION": "us",
                 "RECONCILE_VERTEX_MODEL": "gemini-3.5-flash",
-                "RECONCILE_VERTEX_MAX_CALLS": "1",
+                "RECONCILE_VERTEX_PROMPT_VERSION": "adaptive-planner-v3",
+                "RECONCILE_VERTEX_PROMPT_SHA256": _PROMPT_SHA256,
+                "RECONCILE_VERTEX_MAX_COUNT_TOKENS_ATTEMPTS": "1",
+                "RECONCILE_VERTEX_MAX_GENERATION_ATTEMPTS": "1",
                 "RECONCILE_VERTEX_MAX_INPUT_TOKENS": "12000",
                 "RECONCILE_VERTEX_MAX_OUTPUT_TOKENS": "1024",
                 "RECONCILE_VERTEX_THINKING_LEVEL": "MINIMAL",
@@ -68,6 +73,7 @@ def _environment(component: Component) -> dict[str, str]:
         environment.update(
             {
                 "RECONCILE_ALLOWED_CALLER_EMAILS": _INTERNAL_CALLER,
+                "RECONCILE_RUNTIME_DATABASE": "reconcile-p5-runtime",
                 "RECONCILE_TARGET_DATABASE": "reconcile-p5-target",
                 "RECONCILE_TARGET_BUCKET": f"{_PROJECT}-p5-target",
                 "RECONCILE_SANDBOX_URL": "https://sandbox.example.run.app",
@@ -77,7 +83,8 @@ def _environment(component: Component) -> dict[str, str]:
     else:
         environment.update(
             {
-                "RECONCILE_TARGET_DATABASE": "reconcile-p5-target",
+                "RECONCILE_RUNTIME_DATABASE": "reconcile-p5-runtime",
+                "RECONCILE_TARGET_DATABASE": "reconcile-p5-sandbox",
                 "RECONCILE_SANDBOX_READ_CALLER_EMAIL": _SANDBOX_READ_CALLER,
                 "RECONCILE_SANDBOX_MUTATION_CALLER_EMAIL": (_SANDBOX_MUTATION_CALLER),
             }
@@ -116,6 +123,7 @@ def test_every_component_loads_only_its_exact_fields(component: Component) -> No
     if component is Component.API:
         assert config.allowed_caller_emails == (_API_CALLER,)
         assert config.runtime_database == "reconcile-p5-runtime"
+        assert config.target_bucket == f"{_PROJECT}-p5-target"
         assert config.controller_url == "https://controller.example.run.app"
         assert config.controller_audience == _audience(Component.CONTROLLER)
         assert config.fault_proxy_url == "https://fault-proxy.example.run.app"
@@ -123,13 +131,16 @@ def test_every_component_loads_only_its_exact_fields(component: Component) -> No
     elif component is Component.CONTROLLER:
         assert config.allowed_caller_emails == (_INTERNAL_CALLER,)
         assert config.sandbox_url == "https://sandbox.example.run.app"
-        assert config.vertex_max_calls == 1
+        assert config.vertex_prompt_version == "adaptive-planner-v3"
+        assert config.vertex_prompt_sha256 == _PROMPT_SHA256
+        assert config.vertex_max_count_tokens_attempts == 1
+        assert config.vertex_max_generation_attempts == 1
         assert config.vertex_thinking_level == "MINIMAL"
         assert config.controller_url is None
     elif component is Component.FAULT_PROXY:
         assert config.allowed_caller_emails == (_INTERNAL_CALLER,)
         assert config.target_bucket == f"{_PROJECT}-p5-target"
-        assert config.runtime_database is None
+        assert config.runtime_database == "reconcile-p5-runtime"
     else:
         assert config.allowed_caller_emails == (
             _SANDBOX_READ_CALLER,
@@ -137,6 +148,8 @@ def test_every_component_loads_only_its_exact_fields(component: Component) -> No
         )
         assert config.sandbox_read_caller_email == _SANDBOX_READ_CALLER
         assert config.sandbox_mutation_caller_email == _SANDBOX_MUTATION_CALLER
+        assert config.runtime_database == "reconcile-p5-runtime"
+        assert config.target_database == "reconcile-p5-sandbox"
         assert config.target_bucket is None
 
 
@@ -162,7 +175,11 @@ def test_every_declared_field_is_required_for_its_component(
             "RECONCILE_CONTROLLER_URL",
             "https://controller.example.run.app",
         ),
-        (Component.FAULT_PROXY, "RECONCILE_RUNTIME_DATABASE", "reconcile-p5-runtime"),
+        (
+            Component.FAULT_PROXY,
+            "RECONCILE_CONTROLLER_URL",
+            "https://controller.example.run.app",
+        ),
         (Component.SANDBOX, "RECONCILE_ALLOWED_CALLER_EMAILS", _INTERNAL_CALLER),
     ),
 )
@@ -197,7 +214,10 @@ def test_port_is_canonical_and_bounded(port: str) -> None:
         ("RECONCILE_TARGET_BUCKET", "other-target-bucket"),
         ("RECONCILE_VERTEX_LOCATION", "us-central1"),
         ("RECONCILE_VERTEX_MODEL", "another-model"),
-        ("RECONCILE_VERTEX_MAX_CALLS", "2"),
+        ("RECONCILE_VERTEX_PROMPT_VERSION", "adaptive-planner-v4"),
+        ("RECONCILE_VERTEX_PROMPT_SHA256", "0" * 64),
+        ("RECONCILE_VERTEX_MAX_COUNT_TOKENS_ATTEMPTS", "2"),
+        ("RECONCILE_VERTEX_MAX_GENERATION_ATTEMPTS", "2"),
         ("RECONCILE_VERTEX_MAX_INPUT_TOKENS", "12001"),
         ("RECONCILE_VERTEX_MAX_OUTPUT_TOKENS", "1025"),
         ("RECONCILE_VERTEX_THINKING_LEVEL", "LOW"),
@@ -209,6 +229,25 @@ def test_controller_rejects_values_outside_the_frozen_boundary(
 ) -> None:
     environment = _environment(Component.CONTROLLER)
     environment[name] = value
+
+    with pytest.raises(HostedConfigError, match="is invalid"):
+        load_config(environment)
+
+
+@pytest.mark.parametrize(
+    ("component", "database"),
+    (
+        (Component.CONTROLLER, "reconcile-p5-sandbox"),
+        (Component.FAULT_PROXY, "reconcile-p5-sandbox"),
+        (Component.SANDBOX, "reconcile-p5-target"),
+    ),
+)
+def test_component_database_boundaries_cannot_be_crossed(
+    component: Component,
+    database: str,
+) -> None:
+    environment = _environment(component)
+    environment["RECONCILE_TARGET_DATABASE"] = database
 
     with pytest.raises(HostedConfigError, match="is invalid"):
         load_config(environment)

@@ -43,7 +43,7 @@ from reconcile.scenarios.local_order import (
 SANDBOX_INGRESS_SCHEMA_VERSION = "reconcile/sandbox-ingress-observation/v1"
 SANDBOX_AGGREGATE_SCHEMA_VERSION = "reconcile/sandbox-aggregate-observation/v1"
 SANDBOX_FIRESTORE_TIMEOUT_SECONDS = 5.0
-SANDBOX_TARGET_DATABASE_ID = "reconcile-p5-target"
+SANDBOX_TARGET_DATABASE_ID = "reconcile-p5-sandbox"
 
 _ROOT_COLLECTION = "reconcile-sandbox-observations"
 _OBSERVATION_COLLECTION = "weak-observations"

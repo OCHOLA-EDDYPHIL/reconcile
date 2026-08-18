@@ -4,15 +4,15 @@ from __future__ import annotations
 
 import uvicorn
 
-from reconcile.hosted.apps import create_component_app
 from reconcile.hosted.config import load_config
+from reconcile.hosted.runtime import create_runtime_component_app
 
 
 def main() -> None:
     """Bind the selected Cloud Run component to its injected port."""
 
     config = load_config()
-    application = create_component_app(config)
+    application = create_runtime_component_app(config)
     uvicorn.run(
         application,
         host="0.0.0.0",

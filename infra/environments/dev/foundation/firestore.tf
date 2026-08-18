@@ -1,6 +1,7 @@
 resource "google_firestore_database" "phase5" {
   for_each = {
     runtime = local.runtime_database_name
+    sandbox = local.sandbox_database_name
     target  = local.target_database_name
   }
 

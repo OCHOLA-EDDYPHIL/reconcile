@@ -6,6 +6,7 @@ resource "google_cloud_run_v2_service" "sandbox" {
   invoker_iam_disabled = false
   deletion_protection  = false
   deletion_policy      = "DELETE"
+  custom_audiences     = [local.audiences.sandbox]
   labels               = merge(local.labels, { component = "sandbox" })
 
   template {
@@ -21,7 +22,7 @@ resource "google_cloud_run_v2_service" "sandbox" {
 
     containers {
       name  = "sandbox"
-      image = var.image_references.sandbox
+      image = local.image_reference
 
       ports {
         name           = "http1"
@@ -38,11 +39,14 @@ resource "google_cloud_run_v2_service" "sandbox" {
       }
 
       dynamic "env" {
-        for_each = {
-          GOOGLE_CLOUD_PROJECT      = var.project_id
-          RECONCILE_COMPONENT       = "sandbox"
-          RECONCILE_TARGET_DATABASE = local.target_database_name
-        }
+        for_each = merge(local.common_runtime_environment, {
+          RECONCILE_AUTH_AUDIENCE                 = local.audiences.sandbox
+          RECONCILE_COMPONENT                     = "sandbox"
+          RECONCILE_RUNTIME_DATABASE              = local.runtime_database_name
+          RECONCILE_SANDBOX_MUTATION_CALLER_EMAIL = local.caller_emails.fault_proxy
+          RECONCILE_SANDBOX_READ_CALLER_EMAIL     = local.caller_emails.controller
+          RECONCILE_TARGET_DATABASE               = local.sandbox_database_name
+        })
 
         content {
           name  = env.key
@@ -61,6 +65,7 @@ resource "google_cloud_run_v2_service" "fault_proxy" {
   invoker_iam_disabled = false
   deletion_protection  = false
   deletion_policy      = "DELETE"
+  custom_audiences     = [local.audiences.fault_proxy]
   labels               = merge(local.labels, { component = "fault-proxy" })
 
   template {
@@ -76,7 +81,7 @@ resource "google_cloud_run_v2_service" "fault_proxy" {
 
     containers {
       name  = "fault-proxy"
-      image = var.image_references.fault_proxy
+      image = local.image_reference
 
       ports {
         name           = "http1"
@@ -93,13 +98,16 @@ resource "google_cloud_run_v2_service" "fault_proxy" {
       }
 
       dynamic "env" {
-        for_each = {
-          GOOGLE_CLOUD_PROJECT      = var.project_id
-          RECONCILE_COMPONENT       = "fault-proxy"
-          RECONCILE_SANDBOX_URL     = google_cloud_run_v2_service.sandbox.uri
-          RECONCILE_TARGET_BUCKET   = local.target_bucket_name
-          RECONCILE_TARGET_DATABASE = local.target_database_name
-        }
+        for_each = merge(local.common_runtime_environment, {
+          RECONCILE_ALLOWED_CALLER_EMAILS = local.caller_emails.api
+          RECONCILE_AUTH_AUDIENCE         = local.audiences.fault_proxy
+          RECONCILE_COMPONENT             = "fault-proxy"
+          RECONCILE_RUNTIME_DATABASE      = local.runtime_database_name
+          RECONCILE_SANDBOX_AUDIENCE      = local.audiences.sandbox
+          RECONCILE_SANDBOX_URL           = google_cloud_run_v2_service.sandbox.uri
+          RECONCILE_TARGET_BUCKET         = local.target_bucket_name
+          RECONCILE_TARGET_DATABASE       = local.target_database_name
+        })
 
         content {
           name  = env.key
@@ -118,6 +126,7 @@ resource "google_cloud_run_v2_service" "controller" {
   invoker_iam_disabled = false
   deletion_protection  = false
   deletion_policy      = "DELETE"
+  custom_audiences     = [local.audiences.controller]
   labels               = merge(local.labels, { component = "controller" })
 
   template {
@@ -133,7 +142,7 @@ resource "google_cloud_run_v2_service" "controller" {
 
     containers {
       name  = "controller"
-      image = var.image_references.controller
+      image = local.image_reference
 
       ports {
         name           = "http1"
@@ -150,20 +159,25 @@ resource "google_cloud_run_v2_service" "controller" {
       }
 
       dynamic "env" {
-        for_each = {
-          GOOGLE_CLOUD_PROJECT               = var.project_id
-          RECONCILE_COMPONENT                = "controller"
-          RECONCILE_RUNTIME_DATABASE         = local.runtime_database_name
-          RECONCILE_SANDBOX_URL              = google_cloud_run_v2_service.sandbox.uri
-          RECONCILE_TARGET_BUCKET            = local.target_bucket_name
-          RECONCILE_TARGET_DATABASE          = local.target_database_name
-          RECONCILE_VERTEX_LOCATION          = var.vertex_location
-          RECONCILE_VERTEX_MAX_CALLS         = "1"
-          RECONCILE_VERTEX_MAX_INPUT_TOKENS  = "12000"
-          RECONCILE_VERTEX_MAX_OUTPUT_TOKENS = "1024"
-          RECONCILE_VERTEX_MODEL             = var.vertex_model
-          RECONCILE_VERTEX_THINKING_LEVEL    = "MINIMAL"
-        }
+        for_each = merge(local.common_runtime_environment, {
+          RECONCILE_ALLOWED_CALLER_EMAILS            = local.caller_emails.api
+          RECONCILE_AUTH_AUDIENCE                    = local.audiences.controller
+          RECONCILE_COMPONENT                        = "controller"
+          RECONCILE_RUNTIME_DATABASE                 = local.runtime_database_name
+          RECONCILE_SANDBOX_AUDIENCE                 = local.audiences.sandbox
+          RECONCILE_SANDBOX_URL                      = google_cloud_run_v2_service.sandbox.uri
+          RECONCILE_TARGET_BUCKET                    = local.target_bucket_name
+          RECONCILE_TARGET_DATABASE                  = local.target_database_name
+          RECONCILE_VERTEX_LOCATION                  = var.vertex_location
+          RECONCILE_VERTEX_MAX_COUNT_TOKENS_ATTEMPTS = "1"
+          RECONCILE_VERTEX_MAX_GENERATION_ATTEMPTS   = "1"
+          RECONCILE_VERTEX_MAX_INPUT_TOKENS          = "12000"
+          RECONCILE_VERTEX_MAX_OUTPUT_TOKENS         = "1024"
+          RECONCILE_VERTEX_MODEL                     = var.vertex_model
+          RECONCILE_VERTEX_PROMPT_SHA256             = var.vertex_prompt_sha256
+          RECONCILE_VERTEX_PROMPT_VERSION            = var.vertex_prompt_version
+          RECONCILE_VERTEX_THINKING_LEVEL            = "MINIMAL"
+        })
 
         content {
           name  = env.key
@@ -182,6 +196,7 @@ resource "google_cloud_run_v2_service" "api" {
   invoker_iam_disabled = false
   deletion_protection  = false
   deletion_policy      = "DELETE"
+  custom_audiences     = [local.audiences.api]
   labels               = merge(local.labels, { component = "api" })
 
   template {
@@ -197,7 +212,7 @@ resource "google_cloud_run_v2_service" "api" {
 
     containers {
       name  = "api"
-      image = var.image_references.api
+      image = local.image_reference
 
       ports {
         name           = "http1"
@@ -214,13 +229,17 @@ resource "google_cloud_run_v2_service" "api" {
       }
 
       dynamic "env" {
-        for_each = {
-          GOOGLE_CLOUD_PROJECT       = var.project_id
-          RECONCILE_COMPONENT        = "api"
-          RECONCILE_CONTROLLER_URL   = google_cloud_run_v2_service.controller.uri
-          RECONCILE_FAULT_PROXY_URL  = google_cloud_run_v2_service.fault_proxy.uri
-          RECONCILE_RUNTIME_DATABASE = local.runtime_database_name
-        }
+        for_each = merge(local.common_runtime_environment, {
+          RECONCILE_ALLOWED_CALLER_EMAILS = local.caller_emails.operator
+          RECONCILE_AUTH_AUDIENCE         = local.audiences.api
+          RECONCILE_COMPONENT             = "api"
+          RECONCILE_CONTROLLER_AUDIENCE   = local.audiences.controller
+          RECONCILE_CONTROLLER_URL        = google_cloud_run_v2_service.controller.uri
+          RECONCILE_FAULT_PROXY_AUDIENCE  = local.audiences.fault_proxy
+          RECONCILE_FAULT_PROXY_URL       = google_cloud_run_v2_service.fault_proxy.uri
+          RECONCILE_RUNTIME_DATABASE      = local.runtime_database_name
+          RECONCILE_TARGET_BUCKET         = local.target_bucket_name
+        })
 
         content {
           name  = env.key

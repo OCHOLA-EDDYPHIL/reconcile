@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import hashlib
 import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import tempfile
 from dataclasses import dataclass
@@ -18,56 +20,124 @@ _PROJECT_NUMBER = "669727977920"
 _REGION = "us-central1"
 _STATE_BUCKET = f"{_PROJECT}-p5-state"
 _TARGET_BUCKET = f"{_PROJECT}-p5-target"
+_SANDBOX_DATABASE = "reconcile-p5-sandbox"
 _OWNER = "user:eddyphilochola13@gmail.com"
 _APPLY_EMAIL = f"rec-p5-apply@{_PROJECT}.iam.gserviceaccount.com"
 _APPLY_MEMBER = f"serviceAccount:{_APPLY_EMAIL}"
+_OPERATOR_MEMBER = _APPLY_MEMBER
 _PROVIDER = "registry.terraform.io/hashicorp/google"
 _DIGEST = "0" * 64
+_IMAGE_DIGEST = f"sha256:{_DIGEST}"
+_IMAGE_REFERENCE = (
+    f"{_REGION}-docker.pkg.dev/{_PROJECT}/reconcile-p5/reconcile@{_IMAGE_DIGEST}"
+)
+_SOURCE_REVISION = "a" * 40
+_INFRASTRUCTURE_REVISION = "b" * 64
+_SEMANTIC_CONFIG_SHA256 = "c" * 64
+_VERTEX_PROMPT_VERSION = "adaptive-planner-v3"
+_VERTEX_PROMPT_SHA256 = (
+    "a18ac5bbd22570562acc6dfbc49437a82f0db6a265a4de737c1371b6ef2ca2d3"
+)
 _RUNTIME_EMAILS = {
     "api": f"rec-p5-api@{_PROJECT}.iam.gserviceaccount.com",
     "controller": f"rec-p5-controller@{_PROJECT}.iam.gserviceaccount.com",
     "fault_proxy": f"rec-p5-fault@{_PROJECT}.iam.gserviceaccount.com",
     "sandbox": f"rec-p5-sandbox@{_PROJECT}.iam.gserviceaccount.com",
 }
+_SERVICE_NAMES = {
+    "api": "reconcile-p5-api",
+    "controller": "reconcile-p5-controller",
+    "fault_proxy": "reconcile-p5-fault-proxy",
+    "sandbox": "reconcile-p5-sandbox",
+}
+_SERVICE_CONTAINERS = {
+    "api": "api",
+    "controller": "controller",
+    "fault_proxy": "fault-proxy",
+    "sandbox": "sandbox",
+}
+_SERVICE_MEMORY = {
+    "api": "512Mi",
+    "controller": "1Gi",
+    "fault_proxy": "512Mi",
+    "sandbox": "512Mi",
+}
+_SERVICE_TIMEOUTS = {
+    "api": "300s",
+    "controller": "300s",
+    "fault_proxy": "60s",
+    "sandbox": "60s",
+}
+_AUDIENCES = {
+    component: f"https://reconcile.invalid/phase5/{_PROJECT}/{component.replace('_', '-')}"
+    for component in _RUNTIME_EMAILS
+}
+_COMMON_RUNTIME_ENVIRONMENT = {
+    "GOOGLE_CLOUD_PROJECT": _PROJECT,
+    "RECONCILE_IMAGE_DIGEST": _IMAGE_DIGEST,
+    "RECONCILE_INFRA_REVISION": _INFRASTRUCTURE_REVISION,
+    "RECONCILE_SEMANTIC_CONFIG_SHA256": _SEMANTIC_CONFIG_SHA256,
+    "RECONCILE_SOURCE_REVISION": _SOURCE_REVISION,
+}
 _RUNTIME_ENVIRONMENT = {
-    "api": {
-        "GOOGLE_CLOUD_PROJECT": _PROJECT,
+    "api": _COMMON_RUNTIME_ENVIRONMENT
+    | {
+        "RECONCILE_ALLOWED_CALLER_EMAILS": _APPLY_EMAIL,
+        "RECONCILE_AUTH_AUDIENCE": _AUDIENCES["api"],
         "RECONCILE_COMPONENT": "api",
+        "RECONCILE_CONTROLLER_AUDIENCE": _AUDIENCES["controller"],
         "RECONCILE_CONTROLLER_URL": None,
+        "RECONCILE_FAULT_PROXY_AUDIENCE": _AUDIENCES["fault_proxy"],
         "RECONCILE_FAULT_PROXY_URL": None,
         "RECONCILE_RUNTIME_DATABASE": "reconcile-p5-runtime",
+        "RECONCILE_TARGET_BUCKET": _TARGET_BUCKET,
     },
-    "controller": {
-        "GOOGLE_CLOUD_PROJECT": _PROJECT,
+    "controller": _COMMON_RUNTIME_ENVIRONMENT
+    | {
+        "RECONCILE_ALLOWED_CALLER_EMAILS": _RUNTIME_EMAILS["api"],
+        "RECONCILE_AUTH_AUDIENCE": _AUDIENCES["controller"],
         "RECONCILE_COMPONENT": "controller",
         "RECONCILE_RUNTIME_DATABASE": "reconcile-p5-runtime",
+        "RECONCILE_SANDBOX_AUDIENCE": _AUDIENCES["sandbox"],
         "RECONCILE_SANDBOX_URL": None,
         "RECONCILE_TARGET_BUCKET": _TARGET_BUCKET,
         "RECONCILE_TARGET_DATABASE": "reconcile-p5-target",
         "RECONCILE_VERTEX_LOCATION": "us",
-        "RECONCILE_VERTEX_MAX_CALLS": "1",
+        "RECONCILE_VERTEX_MAX_COUNT_TOKENS_ATTEMPTS": "1",
+        "RECONCILE_VERTEX_MAX_GENERATION_ATTEMPTS": "1",
         "RECONCILE_VERTEX_MAX_INPUT_TOKENS": "12000",
         "RECONCILE_VERTEX_MAX_OUTPUT_TOKENS": "1024",
         "RECONCILE_VERTEX_MODEL": "gemini-3.5-flash",
+        "RECONCILE_VERTEX_PROMPT_SHA256": _VERTEX_PROMPT_SHA256,
+        "RECONCILE_VERTEX_PROMPT_VERSION": _VERTEX_PROMPT_VERSION,
         "RECONCILE_VERTEX_THINKING_LEVEL": "MINIMAL",
     },
-    "fault_proxy": {
-        "GOOGLE_CLOUD_PROJECT": _PROJECT,
+    "fault_proxy": _COMMON_RUNTIME_ENVIRONMENT
+    | {
+        "RECONCILE_ALLOWED_CALLER_EMAILS": _RUNTIME_EMAILS["api"],
+        "RECONCILE_AUTH_AUDIENCE": _AUDIENCES["fault_proxy"],
         "RECONCILE_COMPONENT": "fault-proxy",
+        "RECONCILE_RUNTIME_DATABASE": "reconcile-p5-runtime",
+        "RECONCILE_SANDBOX_AUDIENCE": _AUDIENCES["sandbox"],
         "RECONCILE_SANDBOX_URL": None,
         "RECONCILE_TARGET_BUCKET": _TARGET_BUCKET,
         "RECONCILE_TARGET_DATABASE": "reconcile-p5-target",
     },
-    "sandbox": {
-        "GOOGLE_CLOUD_PROJECT": _PROJECT,
+    "sandbox": _COMMON_RUNTIME_ENVIRONMENT
+    | {
+        "RECONCILE_AUTH_AUDIENCE": _AUDIENCES["sandbox"],
         "RECONCILE_COMPONENT": "sandbox",
-        "RECONCILE_TARGET_DATABASE": "reconcile-p5-target",
+        "RECONCILE_RUNTIME_DATABASE": "reconcile-p5-runtime",
+        "RECONCILE_SANDBOX_MUTATION_CALLER_EMAIL": _RUNTIME_EMAILS["fault_proxy"],
+        "RECONCILE_SANDBOX_READ_CALLER_EMAIL": _RUNTIME_EMAILS["controller"],
+        "RECONCILE_TARGET_DATABASE": _SANDBOX_DATABASE,
     },
 }
 _APPLY_ROLES = {
     "roles/artifactregistry.admin",
     "roles/datastore.owner",
     "roles/iam.serviceAccountAdmin",
+    "roles/logging.viewer",
     "roles/resourcemanager.projectIamAdmin",
     "roles/run.admin",
     "roles/serviceusage.serviceUsageAdmin",
@@ -122,11 +192,14 @@ _FOUNDATION_ADDRESSES = frozenset(
         "google_artifact_registry_repository.runtime",
         "google_billing_budget.phase5",
         'google_firestore_database.phase5["runtime"]',
+        'google_firestore_database.phase5["sandbox"]',
         'google_firestore_database.phase5["target"]',
         'google_project_iam_member.runtime_database_user["api"]',
         'google_project_iam_member.runtime_database_user["controller"]',
+        'google_project_iam_member.runtime_database_viewer["fault_proxy"]',
+        'google_project_iam_member.runtime_database_viewer["sandbox"]',
         'google_project_iam_member.target_database_user["fault_proxy"]',
-        'google_project_iam_member.target_database_user["sandbox"]',
+        "google_project_iam_member.sandbox_database_user",
         "google_project_iam_member.target_database_viewer",
         "google_project_iam_member.vertex_user",
         "google_storage_bucket.target",
@@ -145,7 +218,7 @@ _RUNTIME_ADDRESSES = frozenset(
         "google_cloud_run_v2_service.controller",
         "google_cloud_run_v2_service.fault_proxy",
         "google_cloud_run_v2_service.sandbox",
-        f'google_cloud_run_v2_service_iam_member.api_owner["{_OWNER}"]',
+        f'google_cloud_run_v2_service_iam_member.api_operator["{_OPERATOR_MEMBER}"]',
         'google_cloud_run_v2_service_iam_member.internal["api_to_controller"]',
         'google_cloud_run_v2_service_iam_member.internal["api_to_fault_proxy"]',
         'google_cloud_run_v2_service_iam_member.internal["controller_to_sandbox"]',
@@ -165,15 +238,12 @@ _STACKS = (
         _ROOT / "infra" / "environments" / "dev" / "runtime",
         _RUNTIME_ADDRESSES,
         {
-            "api_invoker_members": [_OWNER],
-            "image_references": {
-                component: (
-                    f"{_REGION}-docker.pkg.dev/{_PROJECT}/reconcile-p5/"
-                    f"reconcile@sha256:{_DIGEST}"
-                )
-                for component in _RUNTIME_EMAILS
-            },
+            "api_invoker_members": [_OPERATOR_MEMBER],
+            "image_digest": _IMAGE_DIGEST,
+            "infrastructure_revision": _INFRASTRUCTURE_REVISION,
+            "semantic_config_sha256": _SEMANTIC_CONFIG_SHA256,
             "service_account_emails": _RUNTIME_EMAILS,
+            "source_revision": _SOURCE_REVISION,
         },
     ),
 )
@@ -195,13 +265,18 @@ _VARIABLE_NAMES = {
     },
     "runtime": {
         "api_invoker_members",
-        "image_references",
+        "image_digest",
+        "infrastructure_revision",
         "project_id",
         "region",
         "request_timeout_seconds",
+        "semantic_config_sha256",
         "service_account_emails",
+        "source_revision",
         "vertex_location",
         "vertex_model",
+        "vertex_prompt_sha256",
+        "vertex_prompt_version",
     },
 }
 _OUTPUT_NAMES = {
@@ -246,6 +321,22 @@ def _iam_expectations() -> dict[str, dict[str, Any]]:
                 f'resource.name == "projects/{_PROJECT}/databases/reconcile-p5-runtime"'
             ),
         },
+        'google_project_iam_member.runtime_database_viewer["fault_proxy"]': {
+            "member": f"serviceAccount:{_RUNTIME_EMAILS['fault_proxy']}",
+            "project": _PROJECT,
+            "role": "roles/datastore.viewer",
+            "condition_expression": (
+                f'resource.name == "projects/{_PROJECT}/databases/reconcile-p5-runtime"'
+            ),
+        },
+        'google_project_iam_member.runtime_database_viewer["sandbox"]': {
+            "member": f"serviceAccount:{_RUNTIME_EMAILS['sandbox']}",
+            "project": _PROJECT,
+            "role": "roles/datastore.viewer",
+            "condition_expression": (
+                f'resource.name == "projects/{_PROJECT}/databases/reconcile-p5-runtime"'
+            ),
+        },
         "google_project_iam_member.target_database_viewer": {
             "member": f"serviceAccount:{_RUNTIME_EMAILS['controller']}",
             "project": _PROJECT,
@@ -262,12 +353,12 @@ def _iam_expectations() -> dict[str, dict[str, Any]]:
                 f'resource.name == "projects/{_PROJECT}/databases/reconcile-p5-target"'
             ),
         },
-        'google_project_iam_member.target_database_user["sandbox"]': {
+        "google_project_iam_member.sandbox_database_user": {
             "member": f"serviceAccount:{_RUNTIME_EMAILS['sandbox']}",
             "project": _PROJECT,
             "role": "roles/datastore.user",
             "condition_expression": (
-                f'resource.name == "projects/{_PROJECT}/databases/reconcile-p5-target"'
+                f'resource.name == "projects/{_PROJECT}/databases/{_SANDBOX_DATABASE}"'
             ),
         },
         "google_project_iam_member.vertex_user": {
@@ -285,9 +376,9 @@ def _iam_expectations() -> dict[str, dict[str, Any]]:
             "member": f"serviceAccount:{_RUNTIME_EMAILS['controller']}",
             "role": "roles/storage.objectViewer",
         },
-        f'google_cloud_run_v2_service_iam_member.api_owner["{_OWNER}"]': {
+        f'google_cloud_run_v2_service_iam_member.api_operator["{_OPERATOR_MEMBER}"]': {
             "location": _REGION,
-            "member": _OWNER,
+            "member": _OPERATOR_MEMBER,
             "name": "reconcile-p5-api",
             "project": _PROJECT,
             "role": "roles/run.invoker",
@@ -441,6 +532,69 @@ def _verify_iam(resources: dict[str, dict[str, Any]]) -> None:
                 _fail(f"{address} has an unexpected {key}")
 
 
+def _verify_project_services(resources: dict[str, dict[str, Any]]) -> None:
+    expected = {
+        **{
+            f'google_project_service.bootstrap_required["{service}"]': service
+            for service in _BOOTSTRAP_SERVICES
+        },
+        **{
+            f'google_project_service.required["{service}"]': service
+            for service in _FOUNDATION_SERVICES
+        },
+    }
+    for address, resource in resources.items():
+        if resource["type"] != "google_project_service":
+            continue
+        service = expected.get(address)
+        if service is None:
+            _fail(f"{address} enables an unapproved service")
+        _expect_fields(
+            resource["change"]["after"],
+            {
+                "deletion_policy": "DELETE",
+                "disable_dependent_services": False,
+                "disable_on_destroy": False,
+                "project": _PROJECT,
+                "service": service,
+            },
+            address,
+        )
+
+
+def _verify_service_accounts(resources: dict[str, dict[str, Any]]) -> None:
+    expected = {
+        "google_service_account.phase5_apply": ("rec-p5-apply", _APPLY_EMAIL),
+        **{
+            f'google_service_account.runtime["{component}"]': (
+                email.split("@", 1)[0],
+                email,
+            )
+            for component, email in _RUNTIME_EMAILS.items()
+        },
+    }
+    for address, resource in resources.items():
+        if resource["type"] != "google_service_account":
+            continue
+        identity = expected.get(address)
+        if identity is None:
+            _fail(f"{address} creates an unapproved service account")
+        account_id, email = identity
+        _expect_fields(
+            resource["change"]["after"],
+            {
+                "account_id": account_id,
+                "create_ignore_already_exists": None,
+                "deletion_policy": "DELETE",
+                "disabled": False,
+                "email": email,
+                "member": f"serviceAccount:{email}",
+                "project": _PROJECT,
+            },
+            address,
+        )
+
+
 def _one_block(after: dict[str, Any], key: str, address: str) -> dict[str, Any]:
     value = after.get(key)
     if not isinstance(value, list) or len(value) != 1 or not isinstance(value[0], dict):
@@ -448,27 +602,150 @@ def _one_block(after: dict[str, Any], key: str, address: str) -> dict[str, Any]:
     return value[0]
 
 
-def _verify_cloud_run(resources: dict[str, dict[str, Any]]) -> None:
+def _expect_fields(
+    actual: dict[str, Any], expected: dict[str, Any], address: str
+) -> None:
+    for key, value in expected.items():
+        if actual.get(key) != value:
+            _fail(f"{address} has an unexpected {key}")
+
+
+def _is_disabled(value: Any) -> bool:
+    return value is None or value is False or value == [] or value == {}
+
+
+def _require_disabled_fields(
+    actual: dict[str, Any], fields: tuple[str, ...], address: str
+) -> None:
+    for field in fields:
+        if not _is_disabled(actual.get(field)):
+            _fail(f"{address} enables unapproved {field}")
+
+
+def _rendered_variables(plan: dict[str, Any]) -> dict[str, Any]:
+    variables = plan.get("variables")
+    if not isinstance(variables, dict):
+        _fail("Terraform plan variables are absent")
+    rendered = {
+        name: item.get("value")
+        for name, item in variables.items()
+        if isinstance(name, str) and isinstance(item, dict) and set(item) == {"value"}
+    }
+    if len(rendered) != len(variables):
+        _fail("Terraform plan variables are malformed")
+    return rendered
+
+
+def _verify_cloud_run(
+    resources: dict[str, dict[str, Any]], plan: dict[str, Any] | None = None
+) -> None:
     if not any(
         resource["type"] == "google_cloud_run_v2_service"
         for resource in resources.values()
     ):
         return
+    variables = (
+        _rendered_variables(plan)
+        if plan is not None
+        else {
+            "image_digest": _IMAGE_DIGEST,
+            "infrastructure_revision": _INFRASTRUCTURE_REVISION,
+            "semantic_config_sha256": _SEMANTIC_CONFIG_SHA256,
+            "source_revision": _SOURCE_REVISION,
+            "vertex_location": "us",
+            "vertex_model": "gemini-3.5-flash",
+            "vertex_prompt_sha256": _VERTEX_PROMPT_SHA256,
+            "vertex_prompt_version": _VERTEX_PROMPT_VERSION,
+        }
+    )
+    image_digest = variables.get("image_digest")
+    if (
+        not isinstance(image_digest, str)
+        or re.fullmatch(r"sha256:[0-9a-f]{64}", image_digest) is None
+    ):
+        _fail("runtime image digest variable is invalid")
+    image_reference = (
+        f"{_REGION}-docker.pkg.dev/{_PROJECT}/reconcile-p5/reconcile@{image_digest}"
+    )
+    runtime_environment = copy.deepcopy(_RUNTIME_ENVIRONMENT)
+    dynamic_environment = {
+        "RECONCILE_IMAGE_DIGEST": image_digest,
+        "RECONCILE_INFRA_REVISION": variables.get("infrastructure_revision"),
+        "RECONCILE_SEMANTIC_CONFIG_SHA256": variables.get("semantic_config_sha256"),
+        "RECONCILE_SOURCE_REVISION": variables.get("source_revision"),
+    }
+    for environment in runtime_environment.values():
+        environment.update(dynamic_environment)
+    runtime_environment["controller"].update(
+        {
+            "RECONCILE_VERTEX_LOCATION": variables.get("vertex_location"),
+            "RECONCILE_VERTEX_MODEL": variables.get("vertex_model"),
+            "RECONCILE_VERTEX_PROMPT_SHA256": variables.get("vertex_prompt_sha256"),
+            "RECONCILE_VERTEX_PROMPT_VERSION": variables.get("vertex_prompt_version"),
+        }
+    )
     images: set[str] = set()
     for component in _RUNTIME_EMAILS:
         address = f"google_cloud_run_v2_service.{component}"
         after = resources[address]["change"]["after"]
-        if after.get("project") != _PROJECT or after.get("location") != _REGION:
-            _fail(f"{address} escaped the approved project or region")
-        if after.get("invoker_iam_disabled") is not False:
-            _fail(f"{address} disables invoker IAM")
-        if after.get("ingress") != "INGRESS_TRAFFIC_ALL":
-            _fail(f"{address} has unexpected ingress")
+        _expect_fields(
+            after,
+            {
+                "custom_audiences": [_AUDIENCES[component]],
+                "deletion_policy": "DELETE",
+                "deletion_protection": False,
+                "ingress": "INGRESS_TRAFFIC_ALL",
+                "invoker_iam_disabled": False,
+                "labels": {
+                    "app": "reconcile",
+                    "component": component.replace("_", "-"),
+                    "environment": "phase5",
+                },
+                "location": _REGION,
+                "name": _SERVICE_NAMES[component],
+                "project": _PROJECT,
+            },
+            address,
+        )
+        _require_disabled_fields(
+            after,
+            (
+                "annotations",
+                "binary_authorization",
+                "build_config",
+                "default_uri_disabled",
+                "iap_enabled",
+                "multi_region_settings",
+                "tags",
+            ),
+            address,
+        )
         template = _one_block(after, "template", address)
-        if template.get("service_account") != _RUNTIME_EMAILS[component]:
-            _fail(f"{address} has an unexpected runtime identity")
-        if template.get("max_instance_request_concurrency") != 1:
-            _fail(f"{address} has unexpected concurrency")
+        _expect_fields(
+            template,
+            {
+                "execution_environment": "EXECUTION_ENVIRONMENT_GEN2",
+                "max_instance_request_concurrency": 1,
+                "service_account": _RUNTIME_EMAILS[component],
+                "timeout": _SERVICE_TIMEOUTS[component],
+            },
+            f"{address}.template",
+        )
+        _require_disabled_fields(
+            template,
+            (
+                "annotations",
+                "encryption_key",
+                "health_check_disabled",
+                "labels",
+                "node_selector",
+                "revision",
+                "session_affinity",
+                "volumes",
+                "vpc_access",
+            ),
+            f"{address}.template",
+        )
         scaling = _one_block(template, "scaling", address)
         if (
             scaling.get("min_instance_count") != 0
@@ -481,7 +758,11 @@ def _verify_cloud_run(resources: dict[str, dict[str, Any]]) -> None:
             rf"^{re.escape(_REGION)}-docker[.]pkg[.]dev/{re.escape(_PROJECT)}/"
             rf"reconcile-p5/reconcile@sha256:[0-9a-f]{{64}}$"
         )
-        if not isinstance(image, str) or re.fullmatch(pattern, image) is None:
+        if (
+            not isinstance(image, str)
+            or re.fullmatch(pattern, image) is None
+            or image != image_reference
+        ):
             _fail(f"{address} has a mutable or external image")
         images.add(image)
         if container.get("args") not in (None, []) or container.get("command") not in (
@@ -489,19 +770,50 @@ def _verify_cloud_run(resources: dict[str, dict[str, Any]]) -> None:
             [],
         ):
             _fail(f"{address} overrides its image-owned command")
+        _expect_fields(
+            container,
+            {
+                "name": _SERVICE_CONTAINERS[component],
+                "ports": [{"container_port": 8080, "name": "http1"}],
+            },
+            f"{address}.container",
+        )
+        _require_disabled_fields(
+            container,
+            (
+                "base_image_uri",
+                "depends_on",
+                "liveness_probe",
+                "readiness_probe",
+                "sandbox_launcher",
+                "volume_mounts",
+                "working_dir",
+            ),
+            f"{address}.container",
+        )
+        container_resources = _one_block(container, "resources", address)
+        _expect_fields(
+            container_resources,
+            {
+                "cpu_idle": True,
+                "limits": {"cpu": "1", "memory": _SERVICE_MEMORY[component]},
+                "startup_cpu_boost": False,
+            },
+            f"{address}.container.resources",
+        )
         environments = container.get("env") or []
         environment_by_name = {
             environment.get("name"): environment for environment in environments
         }
         if len(environment_by_name) != len(environments) or set(
             environment_by_name
-        ) != set(_RUNTIME_ENVIRONMENT[component]):
+        ) != set(runtime_environment[component]):
             _fail(f"{address} has an unexpected environment contract")
         for name, environment in environment_by_name.items():
             name = environment.get("name")
             if not isinstance(name, str) or _SECRET_KEY.search(name):
                 _fail(f"{address} has a secret-bearing environment name")
-            expected_value = _RUNTIME_ENVIRONMENT[component][name]
+            expected_value = runtime_environment[component][name]
             actual_value = environment.get("value")
             if expected_value is None:
                 if actual_value is not None:
@@ -510,56 +822,226 @@ def _verify_cloud_run(resources: dict[str, dict[str, Any]]) -> None:
                 _fail(f"{address} has an unexpected environment value")
             if environment.get("value_source") not in (None, []):
                 _fail(f"{address} has an undeclared environment value source")
-    if len(images) > 2:
-        _fail("runtime references more than two distinct image digests")
+    if images != {image_reference}:
+        _fail("runtime does not use exactly one approved image digest")
 
 
 def _verify_storage(resources: dict[str, dict[str, Any]]) -> None:
-    for address in {
-        "google_storage_bucket.terraform_state",
-        "google_storage_bucket.target",
-    } & set(resources):
+    expected = {
+        "google_storage_bucket.terraform_state": {
+            "component": "terraform-state",
+            "deletion_policy": "PREVENT",
+            "force_destroy": False,
+            "name": _STATE_BUCKET,
+            "versioning": [{"enabled": True}],
+        },
+        "google_storage_bucket.target": {
+            "component": "target",
+            "deletion_policy": "DELETE",
+            "force_destroy": True,
+            "name": _TARGET_BUCKET,
+            "versioning": [{"enabled": False}],
+        },
+    }
+    for address in set(expected) & set(resources):
         after = resources[address]["change"]["after"]
-        if after.get("uniform_bucket_level_access") is not True:
-            _fail(f"{address} lacks uniform bucket-level access")
-        if after.get("public_access_prevention") != "enforced":
-            _fail(f"{address} lacks public access prevention")
-    if "google_storage_bucket.terraform_state" in resources:
-        after = resources["google_storage_bucket.terraform_state"]["change"]["after"]
-        if (
-            after.get("name") != _STATE_BUCKET
-            or after.get("force_destroy") is not False
-        ):
-            _fail("state bucket is not fail-closed")
-        if after.get("deletion_policy") != "PREVENT":
-            _fail("state bucket deletion policy is not PREVENT")
-    if "google_storage_bucket.target" in resources:
-        after = resources["google_storage_bucket.target"]["change"]["after"]
-        if (
-            after.get("name") != _TARGET_BUCKET
-            or after.get("force_destroy") is not True
-        ):
-            _fail("target bucket is not the approved disposable bucket")
+        contract = expected[address]
+        _expect_fields(
+            after,
+            {
+                "deletion_policy": contract["deletion_policy"],
+                "force_destroy": contract["force_destroy"],
+                "labels": {
+                    "app": "reconcile",
+                    "component": contract["component"],
+                    "environment": "phase5",
+                },
+                "location": "US-CENTRAL1",
+                "name": contract["name"],
+                "project": _PROJECT,
+                "public_access_prevention": "enforced",
+                "soft_delete_policy": [{"retention_duration_seconds": 0}],
+                "storage_class": "STANDARD",
+                "uniform_bucket_level_access": True,
+                "versioning": contract["versioning"],
+            },
+            address,
+        )
+        _require_disabled_fields(
+            after,
+            (
+                "autoclass",
+                "cors",
+                "custom_placement_config",
+                "default_event_based_hold",
+                "enable_object_retention",
+                "encryption",
+                "hierarchical_namespace",
+                "ip_filter",
+                "lifecycle_rule",
+                "logging",
+                "requester_pays",
+                "retention_policy",
+            ),
+            address,
+        )
 
 
 def _verify_foundation(resources: dict[str, dict[str, Any]]) -> None:
     if "google_artifact_registry_repository.runtime" not in resources:
         return
+    database_names = {
+        'google_firestore_database.phase5["runtime"]': "reconcile-p5-runtime",
+        'google_firestore_database.phase5["sandbox"]': _SANDBOX_DATABASE,
+        'google_firestore_database.phase5["target"]': "reconcile-p5-target",
+    }
+    for address, name in database_names.items():
+        database = resources[address]["change"]["after"]
+        _expect_fields(
+            database,
+            {
+                "app_engine_integration_mode": "DISABLED",
+                "concurrency_mode": "OPTIMISTIC",
+                "database_edition": "STANDARD",
+                "delete_protection_state": "DELETE_PROTECTION_DISABLED",
+                "deletion_policy": "DELETE",
+                "location_id": _REGION,
+                "name": name,
+                "point_in_time_recovery_enablement": (
+                    "POINT_IN_TIME_RECOVERY_DISABLED"
+                ),
+                "project": _PROJECT,
+                "type": "FIRESTORE_NATIVE",
+            },
+            address,
+        )
+        _require_disabled_fields(database, ("cmek_config", "tags"), address)
     repository = resources["google_artifact_registry_repository.runtime"]["change"][
         "after"
     ]
+    repository_address = "google_artifact_registry_repository.runtime"
+    _expect_fields(
+        repository,
+        {
+            "cleanup_policy_dry_run": False,
+            "deletion_policy": "DELETE",
+            "description": "RECONCILE Phase 5 runtime images",
+            "format": "DOCKER",
+            "labels": {
+                "app": "reconcile",
+                "component": "runtime-images",
+                "environment": "phase5",
+            },
+            "location": _REGION,
+            "mode": "STANDARD_REPOSITORY",
+            "project": _PROJECT,
+            "repository_id": "reconcile-p5",
+        },
+        repository_address,
+    )
+    _require_disabled_fields(
+        repository,
+        (
+            "kms_key_name",
+            "maven_config",
+            "remote_repository_config",
+            "virtual_repository_config",
+        ),
+        repository_address,
+    )
     docker = _one_block(
         repository,
         "docker_config",
-        "google_artifact_registry_repository.runtime",
+        repository_address,
     )
-    if docker.get("immutable_tags") is not True:
-        _fail("artifact tags are not immutable")
+    if docker != {"immutable_tags": True}:
+        _fail("artifact Docker configuration is not the approved immutable contract")
+    cleanup_policies = repository.get("cleanup_policies")
+    if not isinstance(cleanup_policies, list) or any(
+        not isinstance(policy, dict) for policy in cleanup_policies
+    ):
+        _fail("artifact cleanup policies are malformed")
+    cleanup_by_id = {policy.get("id"): policy for policy in cleanup_policies}
+    expected_cleanup = {
+        "delete-old-untagged": {
+            "action": "DELETE",
+            "condition": [
+                {
+                    "newer_than": "",
+                    "older_than": "1d",
+                    "package_name_prefixes": ["reconcile"],
+                    "tag_prefixes": [],
+                    "tag_state": "UNTAGGED",
+                    "version_name_prefixes": [],
+                }
+            ],
+            "id": "delete-old-untagged",
+            "most_recent_versions": [],
+        },
+        "keep-at-least-two-recent": {
+            "action": "KEEP",
+            "condition": [],
+            "id": "keep-at-least-two-recent",
+            "most_recent_versions": [
+                {
+                    "keep_count": 2,
+                    "package_name_prefixes": ["reconcile"],
+                }
+            ],
+        },
+    }
+    if len(cleanup_by_id) != len(cleanup_policies) or cleanup_by_id != expected_cleanup:
+        _fail("artifact cleanup policies are not the approved bounded contract")
     budget = resources["google_billing_budget.phase5"]["change"]["after"]
+    budget_address = "google_billing_budget.phase5"
+    _expect_fields(
+        budget,
+        {
+            "all_updates_rule": [],
+            "billing_account": "01029C-95939A-70E448",
+            "budget_filter": [
+                {
+                    "calendar_period": None,
+                    "credit_types": None,
+                    "credit_types_treatment": "EXCLUDE_ALL_CREDITS",
+                    "custom_period": [],
+                    "projects": [f"projects/{_PROJECT_NUMBER}"],
+                    "resource_ancestors": None,
+                    "subaccounts": None,
+                }
+            ],
+            "deletion_policy": "DELETE",
+            "display_name": "RECONCILE Phase 5 USD 5",
+            "ownership_scope": None,
+            "threshold_rules": [
+                {"spend_basis": "CURRENT_SPEND", "threshold_percent": 0.5},
+                {"spend_basis": "CURRENT_SPEND", "threshold_percent": 0.8},
+                {"spend_basis": "CURRENT_SPEND", "threshold_percent": 1.0},
+                {"spend_basis": "FORECASTED_SPEND", "threshold_percent": 1.0},
+            ],
+        },
+        budget_address,
+    )
     amount = _one_block(budget, "amount", "google_billing_budget.phase5")
     specified = _one_block(amount, "specified_amount", "google_billing_budget.phase5")
-    if specified.get("currency_code") != "USD" or specified.get("units") != "5":
+    if amount.get("last_period_amount") is not None or specified != {
+        "currency_code": "USD",
+        "nanos": None,
+        "units": "5",
+    }:
         _fail("billing budget is not exactly USD 5")
+
+
+def _resource_semantics_digest(resources: dict[str, dict[str, Any]]) -> str:
+    canonical_resources = [resources[address] for address in sorted(resources)]
+    encoded = json.dumps(
+        canonical_resources,
+        allow_nan=False,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def verify_create_plan(stack: _Stack, plan: dict[str, Any]) -> str:
@@ -567,20 +1049,218 @@ def verify_create_plan(stack: _Stack, plan: dict[str, Any]) -> str:
     resources = _resources(plan)
     _verify_inventory(stack, resources)
     _verify_iam(resources)
-    _verify_cloud_run(resources)
+    _verify_project_services(resources)
+    _verify_service_accounts(resources)
+    _verify_cloud_run(resources, plan)
     _verify_storage(resources)
     _verify_foundation(resources)
-    inventory = [
-        (
-            address,
-            resource["type"],
-            resource["provider_name"],
-            resource["change"]["actions"],
+    return _resource_semantics_digest(resources)
+
+
+def _operator_stacks(
+    runtime_identity: dict[str, Any] | None,
+    source_root: Path | None = None,
+) -> tuple[_Stack, ...]:
+    root = _ROOT if source_root is None else source_root
+    base_stacks = tuple(
+        _Stack(
+            name=stack.name,
+            source=root / stack.source.relative_to(_ROOT),
+            addresses=stack.addresses,
+            variables=stack.variables,
         )
-        for address, resource in sorted(resources.items())
-    ]
-    encoded = json.dumps(inventory, separators=(",", ":")).encode()
-    return hashlib.sha256(encoded).hexdigest()
+        for stack in _STACKS
+    )
+    if runtime_identity is None:
+        return base_stacks
+    required = {
+        "image_digest",
+        "infrastructure_revision",
+        "semantic_config_sha256",
+        "source_revision",
+        "vertex_prompt_sha256",
+        "vertex_prompt_version",
+    }
+    if set(runtime_identity) != required:
+        _fail("operator runtime identity is incomplete")
+    if (
+        re.fullmatch(r"sha256:[0-9a-f]{64}", runtime_identity["image_digest"]) is None
+        or re.fullmatch(r"[0-9a-f]{64}", runtime_identity["infrastructure_revision"])
+        is None
+        or re.fullmatch(r"[0-9a-f]{64}", runtime_identity["semantic_config_sha256"])
+        is None
+        or re.fullmatch(r"[0-9a-f]{40}", runtime_identity["source_revision"]) is None
+        or re.fullmatch(r"[0-9a-f]{64}", runtime_identity["vertex_prompt_sha256"])
+        is None
+        or not isinstance(runtime_identity["vertex_prompt_version"], str)
+        or not runtime_identity["vertex_prompt_version"]
+    ):
+        _fail("operator runtime identity is invalid")
+    stacks: list[_Stack] = []
+    for stack in base_stacks:
+        if stack.name != "runtime":
+            stacks.append(stack)
+            continue
+        stacks.append(
+            _Stack(
+                name=stack.name,
+                source=stack.source,
+                addresses=stack.addresses,
+                variables=stack.variables | runtime_identity,
+            )
+        )
+    return tuple(stacks)
+
+
+def _operator_plan_projection(plan: dict[str, Any]) -> dict[str, Any]:
+    resources = plan.get("resource_changes")
+    if not isinstance(resources, list) or not resources:
+        _fail("operator qualification plan has no resources")
+    projected: list[dict[str, Any]] = []
+    for resource in resources:
+        if not isinstance(resource, dict) or not isinstance(
+            resource.get("change"), dict
+        ):
+            _fail("operator qualification resource is malformed")
+        change = resource["change"]
+        projected.append(
+            {
+                "address": resource.get("address"),
+                "change": {
+                    "actions": change.get("actions"),
+                    "after": change.get("after"),
+                    "after_sensitive": change.get("after_sensitive"),
+                    "after_unknown": change.get("after_unknown"),
+                    "before": change.get("before"),
+                    "before_sensitive": change.get("before_sensitive"),
+                },
+                "provider_name": resource.get("provider_name"),
+                "type": resource.get("type"),
+            }
+        )
+    return {
+        "resource_changes": projected,
+        "terraform_version": plan.get("terraform_version"),
+        "variables": {
+            name: {"value": value}
+            for name, value in sorted(_rendered_variables(plan).items())
+        },
+    }
+
+
+def _destroy_projection(
+    create_plan: dict[str, Any],
+    *,
+    enable_state_bucket_destroy: bool = False,
+) -> dict[str, Any]:
+    projected = copy.deepcopy(create_plan)
+    variables = _rendered_variables(projected)
+    if enable_state_bucket_destroy:
+        variables["allow_state_bucket_destroy"] = True
+    projected["variables"] = {
+        name: {"value": value} for name, value in sorted(variables.items())
+    }
+    for resource in projected["resource_changes"]:
+        source_change = resource["change"]
+        after = copy.deepcopy(source_change.get("after"))
+        after_unknown = copy.deepcopy(source_change.get("after_unknown"))
+        after_sensitive = copy.deepcopy(source_change.get("after_sensitive"))
+        if (
+            enable_state_bucket_destroy
+            and resource["address"] == "google_storage_bucket.terraform_state"
+        ):
+            if not isinstance(after, dict):
+                _fail("state bucket qualification value is malformed")
+            after["deletion_policy"] = "DELETE"
+            after["force_destroy"] = True
+        resource["change"] = {
+            "actions": ["delete"],
+            "after": None,
+            "before": after,
+        }
+        if after_unknown is not None:
+            resource["change"]["reconcile_before_unknown"] = after_unknown
+        if after_sensitive is not None:
+            resource["change"]["reconcile_before_sensitive"] = after_sensitive
+    return projected
+
+
+def _state_protection_projection(create_plan: dict[str, Any]) -> dict[str, Any]:
+    return _destroy_projection(create_plan, enable_state_bucket_destroy=True)
+
+
+def _write_immutable_json(path: Path, value: object) -> None:
+    payload = json.dumps(
+        value,
+        allow_nan=False,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    descriptor = os.open(
+        path,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC | os.O_NOFOLLOW,
+        0o600,
+    )
+    try:
+        view = memoryview(payload)
+        while view:
+            written = os.write(descriptor, view)
+            if written < 1:
+                raise RuntimeError("operator artifact write did not progress")
+            view = view[written:]
+        os.fsync(descriptor)
+        os.fchmod(descriptor, 0o400)
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _write_operator_artifacts(
+    destination: Path,
+    create_plans: dict[str, dict[str, Any]],
+) -> None:
+    if not destination.is_absolute():
+        _fail("operator artifact directory must be absolute")
+    target = destination.resolve(strict=False)
+    if target != destination.absolute():
+        _fail("operator artifact directory must be canonical")
+    if not target.exists():
+        target.mkdir(mode=0o700)
+    metadata = os.lstat(target)
+    if (
+        not target.is_dir()
+        or target.is_symlink()
+        or metadata.st_uid != os.getuid()
+        or stat.S_IMODE(metadata.st_mode) != 0o700
+        or any(target.iterdir())
+    ):
+        _fail("operator artifact directory must be empty and private")
+    qualifications = {
+        "bootstrap-create": create_plans["bootstrap"],
+        "foundation-create": create_plans["foundation"],
+        "runtime-create": create_plans["runtime"],
+        "runtime-destroy": _destroy_projection(create_plans["runtime"]),
+        "foundation-destroy": _destroy_projection(create_plans["foundation"]),
+        "bootstrap-disable-protection": _state_protection_projection(
+            create_plans["bootstrap"]
+        ),
+        "bootstrap-destroy": _destroy_projection(
+            create_plans["bootstrap"], enable_state_bucket_destroy=True
+        ),
+    }
+    for stem, qualification in qualifications.items():
+        variables = _rendered_variables(qualification)
+        _write_immutable_json(target / f"{stem}.tfplan.json", qualification)
+        _write_immutable_json(target / f"{stem}.tfvars.json", variables)
+    directory = os.open(
+        target,
+        os.O_RDONLY | os.O_CLOEXEC | os.O_DIRECTORY | os.O_NOFOLLOW,
+    )
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
 
 
 def _validate_stack_source(stack: _Stack) -> tuple[Path, ...]:
@@ -701,6 +1381,7 @@ def _offline_command(command: list[str], working_directory: Path) -> list[str]:
     bwrap = shutil.which("bwrap")
     if bwrap is None:
         raise RuntimeError("bwrap is required for network-isolated plans")
+    temporary_directory = working_directory.parent / "tmp"
     return [
         bwrap,
         "--die-with-parent",
@@ -712,6 +1393,9 @@ def _offline_command(command: list[str], working_directory: Path) -> list[str]:
         "--bind",
         str(working_directory.parent),
         str(working_directory.parent),
+        "--setenv",
+        "TMPDIR",
+        str(temporary_directory),
         "--dev",
         "/dev",
         "--proc",
@@ -730,6 +1414,9 @@ def _minimal_environment(*, network: bool) -> dict[str, str]:
         "TF_IN_AUTOMATION": "1",
         "TF_INPUT": "0",
     }
+    terraform_cli_config = os.environ.get("TF_CLI_CONFIG_FILE")
+    if terraform_cli_config:
+        environment["TF_CLI_CONFIG_FILE"] = terraform_cli_config
     if network:
         for key in (
             "ALL_PROXY",
@@ -758,7 +1445,11 @@ def _verify_provider_mirror(provider_mirror: Path) -> Path:
     return provider_mirror
 
 
-def _create_provider_mirror(terraform: Path, root: Path) -> Path:
+def _create_provider_mirror(
+    terraform: Path,
+    root: Path,
+    source_root: Path | None = None,
+) -> Path:
     mirror_configuration = root / "mirror-configuration"
     mirror_configuration.mkdir()
     (mirror_configuration / "versions.tf").write_text(
@@ -768,7 +1459,7 @@ def _create_provider_mirror(terraform: Path, root: Path) -> Path:
         encoding="utf-8",
     )
     shutil.copy2(
-        _ROOT / "infra" / "bootstrap" / ".terraform.lock.hcl",
+        (source_root or _ROOT) / "infra" / "bootstrap" / ".terraform.lock.hcl",
         mirror_configuration,
     )
     provider_mirror = root / "provider-mirror"
@@ -786,8 +1477,16 @@ def _create_provider_mirror(terraform: Path, root: Path) -> Path:
     return _verify_provider_mirror(provider_mirror)
 
 
-def _offline_create(terraform: Path, provider_mirror: Path | None) -> None:
-    for stack in _STACKS:
+def _offline_create(
+    terraform: Path,
+    provider_mirror: Path | None,
+    *,
+    artifact_output: Path | None = None,
+    runtime_identity: dict[str, Any] | None = None,
+    source_root: Path | None = None,
+) -> None:
+    stacks = _operator_stacks(runtime_identity, source_root)
+    for stack in stacks:
         _validate_stack_source(stack)
     runner_temporary = os.environ.get("RUNNER_TEMP")
     temporary_parent = Path(runner_temporary) if runner_temporary else None
@@ -796,7 +1495,7 @@ def _offline_create(terraform: Path, provider_mirror: Path | None) -> None:
     ) as temporary:
         root = Path(temporary)
         if provider_mirror is None:
-            provider_mirror = _create_provider_mirror(terraform, root)
+            provider_mirror = _create_provider_mirror(terraform, root, source_root)
         else:
             provider_mirror = _verify_provider_mirror(provider_mirror)
         base_environment = _minimal_environment(network=False)
@@ -824,7 +1523,8 @@ def _offline_create(terraform: Path, provider_mirror: Path | None) -> None:
             encoding="utf-8",
         )
         base_environment["TF_CLI_CONFIG_FILE"] = str(cli_config)
-        for stack in _STACKS:
+        create_plans: dict[str, dict[str, Any]] = {}
+        for stack in stacks:
             working = root / stack.name
             _copy_stack(stack, working)
             if stack.variables:
@@ -911,17 +1611,28 @@ def _offline_create(terraform: Path, provider_mirror: Path | None) -> None:
                 environment=environment,
             )
             plan_path.unlink()
-            digest = verify_create_plan(stack, json.loads(rendered.stdout))
+            rendered_plan = json.loads(rendered.stdout)
+            digest = verify_create_plan(stack, rendered_plan)
+            create_plans[stack.name] = _operator_plan_projection(rendered_plan)
             print(
                 f"{stack.name}: {len(stack.addresses)} create-only resources; "
                 f"inventory_sha256={digest}"
             )
+        if artifact_output is not None:
+            _write_operator_artifacts(artifact_output, create_plans)
 
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--provider-mirror", type=Path)
     parser.add_argument("--terraform", type=Path, default=Path("terraform"))
+    parser.add_argument("--artifact-output", type=Path)
+    parser.add_argument("--image-digest")
+    parser.add_argument("--infrastructure-revision")
+    parser.add_argument("--semantic-config-sha256")
+    parser.add_argument("--source-revision")
+    parser.add_argument("--vertex-prompt-sha256")
+    parser.add_argument("--vertex-prompt-version")
     return parser.parse_args()
 
 
@@ -941,7 +1652,31 @@ def main() -> int:
     )
     if json.loads(version.stdout).get("terraform_version") != "1.15.8":
         raise RuntimeError("terraform 1.15.8 is required")
-    _offline_create(executable, provider_mirror)
+    identity_values = {
+        "image_digest": arguments.image_digest,
+        "infrastructure_revision": arguments.infrastructure_revision,
+        "semantic_config_sha256": arguments.semantic_config_sha256,
+        "source_revision": arguments.source_revision,
+        "vertex_prompt_sha256": arguments.vertex_prompt_sha256,
+        "vertex_prompt_version": arguments.vertex_prompt_version,
+    }
+    supplied = {name for name, value in identity_values.items() if value is not None}
+    if arguments.artifact_output is None:
+        if supplied:
+            raise RuntimeError("runtime identity requires --artifact-output")
+        runtime_identity = None
+    else:
+        if supplied != set(identity_values):
+            raise RuntimeError(
+                "--artifact-output requires the complete runtime identity"
+            )
+        runtime_identity = identity_values
+    _offline_create(
+        executable,
+        provider_mirror,
+        artifact_output=arguments.artifact_output,
+        runtime_identity=runtime_identity,
+    )
     return 0
 
 

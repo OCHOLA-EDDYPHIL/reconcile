@@ -125,6 +125,7 @@ _ASSEMBLED_SYSTEM_INSTRUCTION = (
     'evidence-planning payload.".'
 )
 _PROMPT_SHA256 = hashlib.sha256(_PLANNER_INSTRUCTION.encode("utf-8")).hexdigest()
+ADK_PLANNER_PROMPT_SHA256 = _PROMPT_SHA256
 
 
 def _validate_resource_value(value: str, label: str, *, maximum: int = 128) -> str:
@@ -1997,6 +1998,7 @@ class AdkGeminiPlanner:
 
 
 __all__ = [
+    "ADK_PLANNER_PROMPT_SHA256",
     "ADK_PLANNER_PROMPT_VERSION",
     "QUALIFICATION_INPUT_TOKEN_CEILING",
     "QUALIFICATION_REQUEST_BYTE_CEILING",

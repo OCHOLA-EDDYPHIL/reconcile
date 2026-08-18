@@ -101,6 +101,45 @@ class _RecoverableProbeRecordingError(DurableApplicationError):
     pass
 
 
+def _allows_zero_provider_receipts(
+    strategy: DurableExecutionStrategy,
+    run: DurableRunRecord,
+    report: InvestigationReport,
+) -> bool:
+    """Admit only sealed sandbox outcomes that stopped before provider dispatch."""
+
+    if strategy is not DurableExecutionStrategy.ADAPTIVE:
+        return False
+
+    # Keep the durable core independent of scenario imports during module loading.
+    # This boundary is reached only after the report and its envelope are sealed.
+    from reconcile.adapters.sandbox_order import SANDBOX_ORDER_TARGET_KIND
+    from reconcile.contracts import (
+        Classification,
+        ScenarioHybridOutcome,
+        ScenarioHybridRoute,
+    )
+    from reconcile.scenarios.service import bounded_hybrid_route_provenance
+
+    if run.envelope.target.target_kind != SANDBOX_ORDER_TARGET_KIND:
+        return False
+    provenance = bounded_hybrid_route_provenance(report)
+    if (
+        provenance is None
+        or provenance.route is not ScenarioHybridRoute.PLANNER_HETEROGENEOUS
+        or provenance.planner_invoked
+    ):
+        return False
+    if provenance.outcome is ScenarioHybridOutcome.FIXED_FALLBACK:
+        return provenance.fixed_connector_invoked and provenance.provider_failure
+    return (
+        provenance.outcome is ScenarioHybridOutcome.EXPLICIT_UNKNOWN
+        and report.classification is Classification.UNKNOWN
+        and not provenance.fixed_connector_invoked
+        and not provenance.provider_failure
+    )
+
+
 _EXECUTION_OUTCOME_SEAL = object()
 
 
@@ -522,7 +561,7 @@ class DurableExecutionContext(ProbeDurabilityObserver):
         estimated_cost_microunits: int,
         operation: Callable[[], Awaitable[Result]],
     ) -> Result:
-        """Charge one advisory provider call before invoking it exactly once."""
+        """Charge one advisory provider call before one bounded invocation attempt."""
 
         if type(call_id) is not str or not call_id:
             raise ValueError("provider call identifier must be a nonempty string")
@@ -1531,6 +1570,7 @@ class DurableInvestigationApplicationService:
                 DurableExecutionStrategy.COMPARE,
             }
             and not candidate.provider_call_receipts
+            and not _allows_zero_provider_receipts(self._strategy, run, report)
         ):
             raise ValueError("adaptive execution omitted provider precharge")
         cumulative = (

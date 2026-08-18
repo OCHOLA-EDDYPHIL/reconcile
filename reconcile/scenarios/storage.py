@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import time
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Protocol
@@ -13,10 +14,13 @@ from typing import Protocol
 from pydantic import JsonValue
 
 from reconcile.adapters.storage import (
+    CLOUD_STORAGE_PROFILE,
+    LOCAL_STORAGE_PROFILE,
     STORAGE_AUTHORITY_POLICY_VERSION,
     STORAGE_CAPABILITY_NAME,
     STORAGE_CAPABILITY_VERSION,
     STORAGE_CLASSIFICATION_POLICY_VERSION,
+    StorageAdapterProfile,
     build_storage_capability_registration,
     build_storage_rule_registration,
     build_storage_target,
@@ -64,6 +68,7 @@ from reconcile.scenarios.local_storage import (
     LocalStorageCleanupTarget,
     LocalStorageMutationTarget,
     LocalStorageReadTarget,
+    StorageReadPort,
 )
 from reconcile.scenarios.runner import (
     MutationBoundary,
@@ -150,7 +155,20 @@ def _aware_utc(value: datetime) -> datetime:
     return value.astimezone(UTC)
 
 
-def _material(plan: ScenarioPlan) -> tuple[str, bytes, dict[str, str]]:
+@dataclass(frozen=True, slots=True)
+class StorageOperationMaterial:
+    """Exact provider coordinates and bytes derived from one scenario plan."""
+
+    object_name: str
+    content: bytes
+    correlation: dict[str, str]
+
+
+def build_storage_operation_material(plan: ScenarioPlan) -> StorageOperationMaterial:
+    """Derive target arguments without consulting mutable or provider state."""
+
+    if type(plan) is not ScenarioPlan:
+        raise TypeError("storage material requires an exact scenario plan")
     identifiers = plan.identifiers
     object_name = f"runs/{plan.namespace_id}/object.json"
     content = canonical_json_value_bytes(
@@ -165,7 +183,16 @@ def _material(plan: ScenarioPlan) -> tuple[str, bytes, dict[str, str]]:
         "operation_id": identifiers.operation_id,
         "run_id": identifiers.run_id,
     }
-    return object_name, content, correlation
+    return StorageOperationMaterial(
+        object_name=object_name,
+        content=content,
+        correlation=correlation,
+    )
+
+
+def _material(plan: ScenarioPlan) -> tuple[str, bytes, dict[str, str]]:
+    material = build_storage_operation_material(plan)
+    return material.object_name, material.content, dict(material.correlation)
 
 
 def _mutation_arguments(
@@ -182,6 +209,111 @@ def _mutation_arguments(
         "size_bytes": len(content),
         "correlation": dict(correlation),
     }
+
+
+def build_storage_scenario_preparation(
+    plan: ScenarioPlan,
+    *,
+    bucket_name: str,
+    invoked_at: datetime,
+    profile: StorageAdapterProfile = CLOUD_STORAGE_PROFILE,
+) -> ScenarioPreparation:
+    """Build a sealed Storage envelope under an explicit adapter profile."""
+
+    if type(plan) is not ScenarioPlan:
+        raise TypeError("storage preparation requires an exact scenario plan")
+    identifiers = plan.identifiers
+    if identifiers.function_call_id is None:
+        raise ValueError("the Storage ADK scenario requires a function-call identifier")
+    material = build_storage_operation_material(plan)
+    arguments = _mutation_arguments(
+        bucket_name=bucket_name,
+        object_name=material.object_name,
+        content=material.content,
+        correlation=material.correlation,
+    )
+    target = build_storage_target(
+        bucket_name=bucket_name,
+        object_name=material.object_name,
+        profile=profile,
+    )
+    timestamp = _aware_utc(invoked_at)
+    environment_label = (
+        "local SQLite Storage-shaped target"
+        if profile is LOCAL_STORAGE_PROFILE
+        else "Google Cloud Storage target"
+    )
+    envelope = ExecutionEnvelope(
+        schema_version=EXECUTION_ENVELOPE_VERSION,
+        investigation_id=identifiers.investigation_id,
+        operation_id=identifiers.operation_id,
+        target=target,
+        invoked_at=timestamp,
+        ambiguity=AmbiguousExecution(
+            kind=AmbiguityKind.OTHER,
+            observed_at=timestamp,
+            detail=f"Sealed {environment_label} scenario envelope template.",
+        ),
+        expected_effects=(
+            ExpectedEffect(
+                schema_version=EXPECTED_EFFECT_VERSION,
+                effect_id=STORAGE_EFFECT_ID,
+                commit_scope="object-create",
+                predicate={
+                    "content_sha256": arguments["content_sha256"],
+                    "size_bytes": arguments["size_bytes"],
+                    "correlation": arguments["correlation"],
+                },
+                description=(
+                    "The exact correlated object generation exists in the "
+                    f"{environment_label}."
+                ),
+            ),
+        ),
+        context=EnvelopeContext(
+            invocation=OriginalInvocation(
+                invocation_id=identifiers.invocation_id,
+                function_call_id=identifiers.function_call_id,
+                tool_name=STORAGE_TOOL_NAME,
+                tool_version=STORAGE_TOOL_VERSION,
+                arguments=arguments,
+                arguments_sha256=hashlib.sha256(
+                    canonical_json_value_bytes(arguments)
+                ).hexdigest(),
+            ),
+            enabled_capabilities=(
+                CapabilityRef(
+                    name=STORAGE_CAPABILITY_NAME,
+                    version=STORAGE_CAPABILITY_VERSION,
+                ),
+            ),
+            correlation_fields=material.correlation,
+            evidence_budget=EvidenceBudget(
+                max_probes=1,
+                max_elapsed_ms=5_000,
+                max_total_result_bytes=16_384,
+                max_cost_units=1,
+            ),
+            freshness=FreshnessPolicy(
+                max_age_seconds=_MAX_AGE_SECONDS,
+                clock_skew_seconds=_CLOCK_SKEW_SECONDS,
+            ),
+            policies=PolicyReferences(
+                authority=profile.authority_policy_version,
+                classification=STORAGE_CLASSIFICATION_POLICY_VERSION,
+                action=STORAGE_ACTION_POLICY_VERSION,
+            ),
+        ),
+    )
+    return ScenarioPreparation(
+        execution_envelope=envelope,
+        cleanup_manifest=ScenarioCleanupManifest(
+            resource_ids=(
+                f"storage-object:{bucket_name}/{material.object_name}",
+                f"storage-receipt:{identifiers.operation_id}",
+            )
+        ),
+    )
 
 
 class StorageScenarioDefinition:
@@ -448,9 +580,10 @@ class StorageScenarioDefinition:
 
 def _storage_registries(
     envelope: ExecutionEnvelope,
-    read_target: LocalStorageReadTarget,
+    read_target: StorageReadPort,
     *,
     clock: InvestigationClock,
+    profile: StorageAdapterProfile = LOCAL_STORAGE_PROFILE,
 ) -> tuple[CapabilityRegistry, TargetRuleRegistry]:
     capabilities = CapabilityRegistry()
     capabilities.register(
@@ -458,10 +591,11 @@ def _storage_registries(
             read_target=read_target,
             target=envelope.target,
             clock=clock.now,
+            profile=profile,
         )
     )
     rules = TargetRuleRegistry()
-    rules.register(build_storage_rule_registration())
+    rules.register(build_storage_rule_registration(profile=profile))
     return capabilities, rules
 
 
@@ -495,6 +629,47 @@ async def execute_storage_baseline(
         revision=revision,
         cancellation_event=cancellation_event,
         progress_emitter=progress_emitter,
+        durability_observer=durability_observer,
+    )
+
+
+async def execute_cloud_storage_baseline(
+    envelope: ExecutionEnvelope,
+    read_target: StorageReadPort,
+    *,
+    clock: InvestigationClock | None = None,
+    revision: int = 1,
+    cancellation_event: asyncio.Event | None = None,
+    progress_emitter: ProgressEmitter | None = None,
+    durability_observer: ProbeDurabilityObserver | None = None,
+) -> FixedBaselineResult:
+    """Execute the authoritative one-read Cloud Storage fixed connector."""
+
+    from reconcile.hosted.storage import CloudStorageReadTarget
+
+    envelope = decode_contract(canonical_json_bytes(envelope), ExecutionEnvelope)
+    if type(read_target) is not CloudStorageReadTarget:
+        raise TypeError("the cloud Storage investigation requires the sealed reader")
+    selected_clock = clock or _SystemInvestigationClock()
+    capabilities, rules = _storage_registries(
+        envelope,
+        read_target,
+        clock=selected_clock,
+        profile=CLOUD_STORAGE_PROFILE,
+    )
+    return await execute_fixed_plan(
+        envelope,
+        capabilities,
+        rules,
+        STORAGE_FIXED_PROBE_PLAN,
+        clock=selected_clock,
+        revision=revision,
+        cancellation_event=cancellation_event,
+        progress_emitter=progress_emitter,
+        additional_limitations=(
+            "Evidence is one exact generation-and-receipt read from Google Cloud Storage.",
+            "No provider planner participates in classification or action authority.",
+        ),
         durability_observer=durability_observer,
     )
 
@@ -608,7 +783,11 @@ __all__ = [
     "STORAGE_TOOL_NAME",
     "STORAGE_TOOL_VERSION",
     "InvestigationClock",
+    "StorageOperationMaterial",
     "StorageScenarioDefinition",
+    "build_storage_operation_material",
+    "build_storage_scenario_preparation",
+    "execute_cloud_storage_baseline",
     "execute_storage_adaptive",
     "execute_storage_baseline",
     "investigate_storage",

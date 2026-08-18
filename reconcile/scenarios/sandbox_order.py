@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import time
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Protocol
@@ -208,6 +209,31 @@ def _owner_token(plan: ScenarioPlan) -> str:
     return f"sandbox-owner-{digest[:32]}"
 
 
+@dataclass(frozen=True, slots=True)
+class SandboxOrderOperationMaterial:
+    """Private mutation coordinates derived only behind sandbox authority."""
+
+    sandbox_id: str
+    owner_token: str
+    item_code: str
+    quantity: int
+
+
+def build_sandbox_order_operation_material(
+    plan: ScenarioPlan,
+) -> SandboxOrderOperationMaterial:
+    """Derive the exact sandbox mutation without placing its owner on the wire."""
+
+    if type(plan) is not ScenarioPlan:
+        raise TypeError("sandbox material requires an exact scenario plan")
+    return SandboxOrderOperationMaterial(
+        sandbox_id=plan.namespace_id,
+        owner_token=_owner_token(plan),
+        item_code=SANDBOX_ORDER_ITEM_CODE,
+        quantity=SANDBOX_ORDER_QUANTITY,
+    )
+
+
 def _cleanup_resource_ids(plan: ScenarioPlan) -> tuple[str, ...]:
     owner_token = _owner_token(plan)
     prefix = f"sandbox-order:{plan.namespace_id}/{owner_token}"
@@ -215,6 +241,105 @@ def _cleanup_resource_ids(plan: ScenarioPlan) -> tuple[str, ...]:
         f"{prefix}/order",
         f"{prefix}/ingress",
         f"{prefix}/receipt",
+    )
+
+
+def build_hosted_sandbox_order_scenario_preparation(
+    plan: ScenarioPlan,
+    *,
+    invoked_at: datetime,
+) -> ScenarioPreparation:
+    """Build the sealed hosted weak-evidence envelope and exact cleanup scope."""
+
+    if type(plan) is not ScenarioPlan:
+        raise TypeError("sandbox preparation requires an exact scenario plan")
+    identifiers = plan.identifiers
+    if identifiers.function_call_id is None:
+        raise ValueError(
+            "the sandbox-order ADK scenario requires a function-call identifier"
+        )
+    material = build_sandbox_order_operation_material(plan)
+    arguments = _mutation_arguments()
+    target = build_sandbox_order_target(
+        sandbox_id=material.sandbox_id,
+        profile=SANDBOX_ORDER_CLOUD_PROFILE,
+    )
+    timestamp = _aware_utc(invoked_at)
+    envelope = ExecutionEnvelope(
+        schema_version=EXECUTION_ENVELOPE_VERSION,
+        investigation_id=identifiers.investigation_id,
+        operation_id=identifiers.operation_id,
+        target=target,
+        invoked_at=timestamp,
+        ambiguity=AmbiguousExecution(
+            kind=AmbiguityKind.OTHER,
+            observed_at=timestamp,
+            detail="Sealed hosted sandbox-order scenario envelope template.",
+        ),
+        expected_effects=(
+            ExpectedEffect(
+                schema_version=EXPECTED_EFFECT_VERSION,
+                effect_id=SANDBOX_ORDER_EFFECT_ID,
+                commit_scope="sandbox-order",
+                predicate={
+                    "item_code": SANDBOX_ORDER_ITEM_CODE,
+                    "quantity": SANDBOX_ORDER_QUANTITY,
+                },
+                description=(
+                    "The sandbox accepted the requested order as one private "
+                    "business effect."
+                ),
+            ),
+        ),
+        context=EnvelopeContext(
+            invocation=OriginalInvocation(
+                invocation_id=identifiers.invocation_id,
+                function_call_id=identifiers.function_call_id,
+                tool_name=SANDBOX_ORDER_TOOL_NAME,
+                tool_version=SANDBOX_ORDER_TOOL_VERSION,
+                arguments=arguments,
+                arguments_sha256=hashlib.sha256(
+                    canonical_json_value_bytes(arguments)
+                ).hexdigest(),
+            ),
+            enabled_capabilities=(
+                CapabilityRef(
+                    name=SANDBOX_ORDER_INGRESS_CAPABILITY_NAME,
+                    version=SANDBOX_ORDER_CAPABILITY_VERSION,
+                ),
+                CapabilityRef(
+                    name=SANDBOX_ORDER_AGGREGATE_CAPABILITY_NAME,
+                    version=SANDBOX_ORDER_CAPABILITY_VERSION,
+                ),
+            ),
+            correlation_fields={},
+            evidence_budget=EvidenceBudget(
+                max_probes=2,
+                max_elapsed_ms=5_000,
+                max_total_result_bytes=8_192,
+                max_cost_units=2,
+            ),
+            freshness=FreshnessPolicy(
+                max_age_seconds=_MAX_AGE_SECONDS,
+                clock_skew_seconds=_CLOCK_SKEW_SECONDS,
+            ),
+            policies=PolicyReferences(
+                authority=SANDBOX_ORDER_CLOUD_PROFILE.authority_policy_version,
+                classification=SANDBOX_ORDER_CLASSIFICATION_POLICY_VERSION,
+                action=SANDBOX_ORDER_ACTION_POLICY_VERSION,
+            ),
+        ),
+    )
+    prefix = f"reconcile-sandbox-observations/{material.sandbox_id}/weak-observations"
+    return ScenarioPreparation(
+        execution_envelope=envelope,
+        cleanup_manifest=ScenarioCleanupManifest(
+            resource_ids=(
+                f"reconcile-sandbox-private-state/{material.sandbox_id}",
+                f"{prefix}/ingress",
+                f"{prefix}/aggregate",
+            )
+        ),
     )
 
 
@@ -600,6 +725,48 @@ async def execute_sandbox_order_baseline(
     )
 
 
+async def execute_hosted_sandbox_order_fixed(
+    envelope: ExecutionEnvelope,
+    read_target: SandboxOrderReadPort,
+    *,
+    probe_order: SandboxOrderProbeOrder = SANDBOX_ORDER_INGRESS_FIRST,
+    clock: SandboxOrderInvestigationClock | None = None,
+    revision: int = 1,
+    cancellation_event: asyncio.Event | None = None,
+    progress_emitter: ProgressEmitter | None = None,
+    durability_observer: ProbeDurabilityObserver | None = None,
+    elapsed_offset_ms: int = 0,
+) -> FixedBaselineResult:
+    """Execute the deterministic hosted two-read weak-evidence path."""
+
+    from reconcile.hosted.sandbox import HostedSandboxEvidenceTarget
+
+    envelope = decode_contract(canonical_json_bytes(envelope), ExecutionEnvelope)
+    if type(read_target) is not HostedSandboxEvidenceTarget:
+        raise TypeError("the hosted sandbox investigation requires the sealed reader")
+    plan = _sandbox_order_plan(probe_order)
+    selected_clock = clock or _SystemInvestigationClock()
+    capabilities, rules = _sandbox_order_registries(
+        envelope,
+        read_target,
+        clock=selected_clock,
+        profile=SANDBOX_ORDER_CLOUD_PROFILE,
+    )
+    return await execute_fixed_plan(
+        envelope,
+        capabilities,
+        rules,
+        plan,
+        clock=selected_clock,
+        revision=revision,
+        cancellation_event=cancellation_event,
+        progress_emitter=progress_emitter,
+        additional_limitations=_HOSTED_SANDBOX_ORDER_LIMITATIONS,
+        durability_observer=durability_observer,
+        elapsed_offset_ms=elapsed_offset_ms,
+    )
+
+
 async def execute_sandbox_order_adaptive(
     envelope: ExecutionEnvelope,
     read_target: LocalOrderReadTarget,
@@ -768,8 +935,12 @@ __all__ = [
     "SANDBOX_ORDER_TOOL_NAME",
     "SANDBOX_ORDER_TOOL_VERSION",
     "SandboxOrderInvestigationClock",
+    "SandboxOrderOperationMaterial",
     "SandboxOrderProbeOrder",
     "SandboxOrderScenarioDefinition",
+    "build_hosted_sandbox_order_scenario_preparation",
+    "build_sandbox_order_operation_material",
+    "execute_hosted_sandbox_order_fixed",
     "execute_sandbox_order_adaptive",
     "execute_sandbox_order_baseline",
     "execute_sandbox_order_conditional",

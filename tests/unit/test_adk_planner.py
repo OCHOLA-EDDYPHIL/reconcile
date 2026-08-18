@@ -86,12 +86,14 @@ class _FakeQualificationModels:
         count_callback: Callable[[], Awaitable[None] | None] | None = None,
         count_failure: Exception | None = None,
         generation_response: types.GenerateContentResponse | None = None,
+        generation_callback: Callable[[], Awaitable[None] | None] | None = None,
         generation_failure: Exception | None = None,
     ) -> None:
         self.total_tokens = total_tokens
         self.count_callback = count_callback
         self.count_failure = count_failure
         self.generation_response = generation_response
+        self.generation_callback = generation_callback
         self.generation_failure = generation_failure
         self.operations: list[str] = []
         self.count_requests: list[tuple[str, list[types.Content], object]] = []
@@ -133,6 +135,10 @@ class _FakeQualificationModels:
                 config.model_copy(deep=True),
             )
         )
+        if self.generation_callback is not None:
+            result = self.generation_callback()
+            if isinstance(result, Awaitable):
+                await result
         if self.generation_failure is not None:
             raise self.generation_failure
         return self.generation_response or _raw_response()
@@ -492,13 +498,14 @@ def _qualification_planner(
     *,
     models: _FakeQualificationModels | None = None,
     guarded: bool = False,
+    timeout_seconds: float = 30,
 ) -> tuple[AdkGeminiPlanner, _FakeQualificationClient]:
     credentials = AnonymousCredentials()
     config = VertexAdcPlannerConfig(
         project="reconcile-qualification",
         location="global",
         model="gemini-3.5-flash",
-        timeout_seconds=30,
+        timeout_seconds=timeout_seconds,
         max_output_tokens=1_024,
         credentials=credentials,
     )
@@ -931,6 +938,70 @@ def test_hosted_actual_guard_maps_provider_failure_and_fences_replay(
         assert ledger.generation_failures == (
             [] if expected_generation_failure is None else [expected_generation_failure]
         )
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    ("failure_stage", "expected_operations"),
+    (("count", ["count"]), ("generation", ["count", "generate"])),
+)
+def test_hosted_guarded_turn_timeout_settles_started_provider_attempt(
+    monkeypatch: pytest.MonkeyPatch,
+    failure_stage: str,
+    expected_operations: list[str],
+) -> None:
+    async def scenario() -> None:
+        blocker = asyncio.Event()
+        models = _FakeQualificationModels(
+            count_callback=blocker.wait if failure_stage == "count" else None,
+            generation_callback=(
+                blocker.wait if failure_stage == "generation" else None
+            ),
+        )
+        planner, _ = _qualification_planner(
+            monkeypatch,
+            models=models,
+            guarded=True,
+            timeout_seconds=0.25,
+        )
+        ledger = _HostedLedger()
+        hosted = HostedGeminiPlanner(planner, _hosted_candidate(planner), ledger)
+        try:
+            turn = await hosted.plan(_planner_input(planner))
+        finally:
+            await hosted.aclose()
+
+        assert turn.output is None
+        assert turn.failure is PlannerFailureKind.TIMEOUT
+        assert turn.usage is None
+        assert models.operations == expected_operations
+        assert ledger.count_failures == (
+            [HostedCountFailure.TIMEOUT] if failure_stage == "count" else []
+        )
+        assert ledger.generation_failures == (
+            [HostedGenerationFailure.TIMEOUT] if failure_stage == "generation" else []
+        )
+        assert ledger.generation_used is (failure_stage == "generation")
+
+        restarted_models = _FakeQualificationModels()
+        restarted_planner, _ = _qualification_planner(
+            monkeypatch,
+            models=restarted_models,
+            guarded=True,
+        )
+        restarted = HostedGeminiPlanner(
+            restarted_planner,
+            _hosted_candidate(restarted_planner),
+            ledger,
+        )
+        try:
+            replay = await restarted.plan(_planner_input(restarted_planner))
+        finally:
+            await restarted.aclose()
+
+        assert replay.failure is PlannerFailureKind.UNAVAILABLE
+        assert restarted_models.operations == []
 
     asyncio.run(scenario())
 
