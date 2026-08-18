@@ -868,6 +868,10 @@ def _image_source_tag(source_revision: str) -> str:
     )
 
 
+def _oci_source_tag(source_revision: str) -> str:
+    return f"git-{source_revision}"
+
+
 def _plan_inventory_hash(plans: tuple[TerraformPlanBinding, ...]) -> str:
     return _hash_value(
         [
@@ -2336,7 +2340,7 @@ def _capture_image_artifact(
             annotations = (
                 descriptor.get("annotations") if isinstance(descriptor, dict) else None
             )
-            source_tag = _image_source_tag(source_revision)
+            source_tag = _oci_source_tag(source_revision)
             if (
                 digest != expected_digest
                 or not isinstance(annotations, dict)
