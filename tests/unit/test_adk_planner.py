@@ -33,6 +33,20 @@ from reconcile.adk_planner import (
 )
 from reconcile.contracts import canonical_json_bytes
 from reconcile.contracts.planning import AdaptivePlannerInput, AdaptivePlannerOutput
+from reconcile.hosted.planner import HostedGeminiPlanner
+from reconcile.hosted.provider import (
+    HOSTED_CANDIDATE_IDENTITY_VERSION,
+    HostedCandidateIdentity,
+    HostedCountFailure,
+    HostedCountReservation,
+    HostedCountTokensUsage,
+    HostedGenerationFailure,
+    HostedGenerationReservation,
+    HostedGenerationUsage,
+    HostedPlannerOutcome,
+    HostedProviderDispatch,
+    HostedProviderLedgerError,
+)
 from tests.contract._factories import make_planner_input, make_planner_output
 
 pytestmark = pytest.mark.unit
@@ -70,9 +84,15 @@ class _FakeQualificationModels:
         *,
         total_tokens: int = 321,
         count_callback: Callable[[], Awaitable[None] | None] | None = None,
+        count_failure: Exception | None = None,
+        generation_response: types.GenerateContentResponse | None = None,
+        generation_failure: Exception | None = None,
     ) -> None:
         self.total_tokens = total_tokens
         self.count_callback = count_callback
+        self.count_failure = count_failure
+        self.generation_response = generation_response
+        self.generation_failure = generation_failure
         self.operations: list[str] = []
         self.count_requests: list[tuple[str, list[types.Content], object]] = []
         self.generation_requests: list[
@@ -94,6 +114,8 @@ class _FakeQualificationModels:
             result = self.count_callback()
             if isinstance(result, Awaitable):
                 await result
+        if self.count_failure is not None:
+            raise self.count_failure
         return types.CountTokensResponse(total_tokens=self.total_tokens)
 
     async def generate_content(
@@ -111,7 +133,9 @@ class _FakeQualificationModels:
                 config.model_copy(deep=True),
             )
         )
-        return _raw_response()
+        if self.generation_failure is not None:
+            raise self.generation_failure
+        return self.generation_response or _raw_response()
 
 
 @dataclass(slots=True)
@@ -145,6 +169,83 @@ class _FakeQualificationClient:
 
     def close(self) -> None:
         self.closed = True
+
+
+class _HostedLedger:
+    def __init__(self) -> None:
+        self.count_used = False
+        self.generation_used = False
+        self.count_failures: list[HostedCountFailure] = []
+        self.generation_failures: list[HostedGenerationFailure] = []
+        self.generation_usage: HostedGenerationUsage | None = None
+        self.outcome: HostedPlannerOutcome | None = None
+
+    async def reserve_count_tokens(
+        self,
+        candidate: HostedCandidateIdentity,
+        dispatch: HostedProviderDispatch,
+    ) -> HostedCountReservation:
+        if self.count_used:
+            raise HostedProviderLedgerError
+        self.count_used = True
+        return HostedCountReservation(
+            candidate_id=candidate.candidate_id,
+            reservation_id="count-hosted",
+            revision=1,
+            dispatch=dispatch,
+        )
+
+    async def fail_count_tokens(
+        self,
+        reservation: HostedCountReservation,
+        failure: HostedCountFailure,
+    ) -> None:
+        del reservation
+        self.count_failures.append(failure)
+
+    async def complete_count_and_reserve_generation(
+        self,
+        reservation: HostedCountReservation,
+        usage: HostedCountTokensUsage,
+    ) -> HostedGenerationReservation:
+        del usage
+        if self.generation_used:
+            raise HostedProviderLedgerError
+        self.generation_used = True
+        return HostedGenerationReservation(
+            candidate_id=reservation.candidate_id,
+            reservation_id="generation-hosted",
+            revision=2,
+            dispatch=reservation.dispatch,
+        )
+
+    async def fail_generation(
+        self,
+        reservation: HostedGenerationReservation,
+        failure: HostedGenerationFailure,
+    ) -> None:
+        del reservation
+        self.generation_failures.append(failure)
+
+    async def record_generation_usage(
+        self,
+        reservation: HostedGenerationReservation,
+        usage: HostedGenerationUsage,
+    ) -> None:
+        del reservation
+        self.generation_usage = usage
+
+    async def finalize_generation(
+        self,
+        reservation: HostedGenerationReservation,
+        outcome: HostedPlannerOutcome,
+        *,
+        output_sha256: str | None,
+        reported_model: str | None,
+        reported_model_raw_sha256: str | None,
+    ) -> None:
+        del reservation, output_sha256, reported_model, reported_model_raw_sha256
+        self.outcome = outcome
 
 
 class _FakeLlm(BaseLlm):
@@ -390,6 +491,7 @@ def _qualification_planner(
     monkeypatch: pytest.MonkeyPatch,
     *,
     models: _FakeQualificationModels | None = None,
+    guarded: bool = False,
 ) -> tuple[AdkGeminiPlanner, _FakeQualificationClient]:
     credentials = AnonymousCredentials()
     config = VertexAdcPlannerConfig(
@@ -407,7 +509,33 @@ def _qualification_planner(
         models=models,
     )
     monkeypatch.setattr("google.genai.Client", lambda **kwargs: client)
-    return AdkGeminiPlanner.from_vertex_adc_qualification(config), client
+    constructor = (
+        AdkGeminiPlanner.from_vertex_adc_guarded
+        if guarded
+        else AdkGeminiPlanner.from_vertex_adc_qualification
+    )
+    return constructor(config), client
+
+
+def _hosted_candidate(planner: AdkGeminiPlanner) -> HostedCandidateIdentity:
+    metadata = planner.metadata
+    return HostedCandidateIdentity(
+        schema_version=HOSTED_CANDIDATE_IDENTITY_VERSION,
+        source_revision="a" * 40,
+        image_digest=f"sha256:{'b' * 64}",
+        infrastructure_revision="c" * 64,
+        semantic_config_sha256="d" * 64,
+        project_id="reconcile-qualification",
+        vertex_location="global",
+        configured_model="gemini-3.5-flash",
+        prompt_version=metadata.prompt_version,
+        prompt_sha256=metadata.prompt_sha256,
+        maximum_input_tokens=12_000,
+        maximum_output_tokens=1_024,
+        thinking_level="MINIMAL",
+        maximum_count_tokens_attempts=1,
+        maximum_generation_attempts=1,
+    )
 
 
 def test_structured_success_uses_one_stateless_tool_free_adk_turn() -> None:
@@ -563,6 +691,271 @@ def test_qualification_facade_intercepts_and_seals_the_final_sdk_request(
         )
         assert client.aio.closed is True
         assert client.closed is True
+
+    asyncio.run(scenario())
+
+
+def test_hosted_guard_binds_minimal_thinking_and_exposes_complete_count(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def scenario() -> None:
+        planner, client = _qualification_planner(monkeypatch, guarded=True)
+        metadata = planner.metadata
+        planner.validate_guarded_candidate_identity(
+            project="reconcile-qualification",
+            location="global",
+            configured_model="gemini-3.5-flash",
+            prompt_version=metadata.prompt_version,
+            prompt_sha256=metadata.prompt_sha256,
+            maximum_output_tokens=1_024,
+            thinking_level="MINIMAL",
+        )
+        with pytest.raises(RuntimeError, match="identity drifted"):
+            planner.validate_guarded_candidate_identity(
+                project="foreign-project",
+                location="global",
+                configured_model="gemini-3.5-flash",
+                prompt_version=metadata.prompt_version,
+                prompt_sha256=metadata.prompt_sha256,
+                maximum_output_tokens=1_024,
+                thinking_level="MINIMAL",
+            )
+
+        async def dispatch(
+            context: QualificationDispatchContext,
+        ) -> types.GenerateContentResponse:
+            with pytest.raises(RuntimeError, match="unavailable"):
+                _ = context.count_tokens_response
+            assert await context.count_tokens() == 321
+            first = context.count_tokens_response
+            second = context.count_tokens_response
+            assert first is not second
+            assert first.total_tokens == second.total_tokens == 321
+            return await context.generate_content()
+
+        async with planner:
+            planner.bind_guarded_dispatch_hook(dispatch)
+            try:
+                turn = await planner.plan(_planner_input(planner))
+            finally:
+                consumed = planner.clear_guarded_dispatch_hook(dispatch)
+
+        assert consumed is True
+        assert turn.failure is None
+        generated_config = client.aio.models.generation_requests[0][2]
+        assert generated_config.thinking_config is not None
+        assert generated_config.thinking_config.model_dump(exclude_none=True) == {
+            "include_thoughts": False,
+            "thinking_level": "MINIMAL",
+        }
+
+    asyncio.run(scenario())
+
+
+def test_hosted_meter_runs_one_actual_guarded_pair_and_restart_cannot_replay(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def scenario() -> None:
+        response = _raw_response().model_copy(
+            update={
+                "usage_metadata": types.GenerateContentResponseUsageMetadata(
+                    prompt_token_count=11,
+                    candidates_token_count=18,
+                    thoughts_token_count=0,
+                    tool_use_prompt_token_count=0,
+                    cached_content_token_count=0,
+                    total_token_count=29,
+                    traffic_type=types.TrafficType.ON_DEMAND,
+                )
+            }
+        )
+        models = _FakeQualificationModels(generation_response=response)
+        planner, client = _qualification_planner(
+            monkeypatch,
+            models=models,
+            guarded=True,
+        )
+        candidate = _hosted_candidate(planner)
+        ledger = _HostedLedger()
+        hosted = HostedGeminiPlanner(planner, candidate, ledger)
+        try:
+            turn = await hosted.plan(_planner_input(planner))
+        finally:
+            await hosted.aclose()
+
+        assert turn.failure is None
+        assert models.operations == ["count", "generate"]
+        assert ledger.count_used is True
+        assert ledger.generation_used is True
+        assert ledger.generation_usage is not None
+        assert ledger.generation_usage.total_tokens == 29
+        assert ledger.outcome is HostedPlannerOutcome.SUCCEEDED
+        assert client.aio.closed is True
+
+        restarted_models = _FakeQualificationModels(generation_response=response)
+        restarted_planner, _ = _qualification_planner(
+            monkeypatch,
+            models=restarted_models,
+            guarded=True,
+        )
+        restarted = HostedGeminiPlanner(
+            restarted_planner,
+            _hosted_candidate(restarted_planner),
+            ledger,
+        )
+        try:
+            replay = await restarted.plan(_planner_input(restarted_planner))
+        finally:
+            await restarted.aclose()
+
+        assert replay.failure is PlannerFailureKind.UNAVAILABLE
+        assert restarted_models.operations == []
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    (
+        "failure_stage",
+        "failure_type",
+        "expected_outward_failure",
+        "expected_count_failure",
+        "expected_generation_failure",
+        "expected_operations",
+    ),
+    (
+        (
+            "count",
+            TimeoutError,
+            PlannerFailureKind.TIMEOUT,
+            HostedCountFailure.TIMEOUT,
+            None,
+            ["count"],
+        ),
+        (
+            "count",
+            RuntimeError,
+            PlannerFailureKind.UNAVAILABLE,
+            HostedCountFailure.UNAVAILABLE,
+            None,
+            ["count"],
+        ),
+        (
+            "generation",
+            TimeoutError,
+            PlannerFailureKind.TIMEOUT,
+            None,
+            HostedGenerationFailure.TIMEOUT,
+            ["count", "generate"],
+        ),
+        (
+            "generation",
+            RuntimeError,
+            PlannerFailureKind.UNAVAILABLE,
+            None,
+            HostedGenerationFailure.UNAVAILABLE,
+            ["count", "generate"],
+        ),
+    ),
+    ids=(
+        "count-timeout",
+        "count-unavailable",
+        "generation-timeout",
+        "generation-unavailable",
+    ),
+)
+def test_hosted_actual_guard_maps_provider_failure_and_fences_replay(
+    monkeypatch: pytest.MonkeyPatch,
+    failure_stage: str,
+    failure_type: type[Exception],
+    expected_outward_failure: PlannerFailureKind,
+    expected_count_failure: HostedCountFailure | None,
+    expected_generation_failure: HostedGenerationFailure | None,
+    expected_operations: list[str],
+) -> None:
+    async def scenario() -> None:
+        failure = failure_type("private provider detail")
+        models = _FakeQualificationModels(
+            count_failure=failure if failure_stage == "count" else None,
+            generation_failure=(failure if failure_stage == "generation" else None),
+        )
+        planner, _ = _qualification_planner(
+            monkeypatch,
+            models=models,
+            guarded=True,
+        )
+        ledger = _HostedLedger()
+        hosted = HostedGeminiPlanner(planner, _hosted_candidate(planner), ledger)
+        try:
+            turn = await hosted.plan(_planner_input(planner))
+        finally:
+            await hosted.aclose()
+
+        assert turn.output is None
+        assert turn.failure is expected_outward_failure
+        assert turn.usage is None
+        assert models.operations == expected_operations
+        assert ledger.count_failures == (
+            [] if expected_count_failure is None else [expected_count_failure]
+        )
+        assert ledger.generation_failures == (
+            [] if expected_generation_failure is None else [expected_generation_failure]
+        )
+        assert ledger.generation_used is (failure_stage == "generation")
+        assert ledger.generation_usage is None
+        assert ledger.outcome is None
+
+        restarted_models = _FakeQualificationModels()
+        restarted_planner, _ = _qualification_planner(
+            monkeypatch,
+            models=restarted_models,
+            guarded=True,
+        )
+        restarted = HostedGeminiPlanner(
+            restarted_planner,
+            _hosted_candidate(restarted_planner),
+            ledger,
+        )
+        try:
+            replay = await restarted.plan(_planner_input(restarted_planner))
+        finally:
+            await restarted.aclose()
+
+        assert replay.output is None
+        assert replay.failure is PlannerFailureKind.UNAVAILABLE
+        assert replay.usage is None
+        assert restarted_models.operations == []
+        assert ledger.count_failures == (
+            [] if expected_count_failure is None else [expected_count_failure]
+        )
+        assert ledger.generation_failures == (
+            [] if expected_generation_failure is None else [expected_generation_failure]
+        )
+
+    asyncio.run(scenario())
+
+
+def test_hosted_actual_guard_maps_over_limit_count_without_generation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def scenario() -> None:
+        models = _FakeQualificationModels(total_tokens=12_001)
+        planner, _ = _qualification_planner(
+            monkeypatch,
+            models=models,
+            guarded=True,
+        )
+        ledger = _HostedLedger()
+        hosted = HostedGeminiPlanner(planner, _hosted_candidate(planner), ledger)
+        try:
+            turn = await hosted.plan(_planner_input(planner))
+        finally:
+            await hosted.aclose()
+
+        assert turn.failure is PlannerFailureKind.SCHEMA_INVALID
+        assert models.operations == ["count"]
+        assert ledger.count_failures == [HostedCountFailure.LIMIT_EXCEEDED]
+        assert ledger.generation_used is False
 
     asyncio.run(scenario())
 

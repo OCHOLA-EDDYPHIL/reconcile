@@ -15,6 +15,10 @@ from reconcile.adapters.firestore_business import (
     FIRESTORE_BUSINESS_CAPABILITY_NAME,
     FIRESTORE_BUSINESS_CAPABILITY_VERSION,
     FIRESTORE_BUSINESS_CLASSIFICATION_POLICY_VERSION,
+    FIRESTORE_BUSINESS_CLOUD_AUTHORITY_POLICY_VERSION,
+    FIRESTORE_BUSINESS_CLOUD_ENVIRONMENT,
+    FIRESTORE_BUSINESS_CLOUD_PROFILE,
+    FIRESTORE_BUSINESS_CLOUD_SOURCE,
     FIRESTORE_BUSINESS_ENVIRONMENT,
     FIRESTORE_BUSINESS_SOURCE,
     FIRESTORE_BUSINESS_TARGET_KIND,
@@ -52,6 +56,7 @@ from reconcile.controller import (
     ProbeObservation,
 )
 from reconcile.evidence import RuleInput, RuleRejected, RuleVerdict
+from reconcile.hosted.firestore_business import build_google_firestore_business_targets
 from reconcile.scenarios.local_firestore import (
     BusinessDocumentCoordinate,
     BusinessDocumentWrite,
@@ -389,6 +394,59 @@ def test_capability_is_empty_argument_read_only_and_exactly_bound(
     ]
     descriptor = build_firestore_business_rule_registration().descriptor
     assert descriptor.source == FIRESTORE_BUSINESS_SOURCE
+
+
+def test_cloud_profile_accepts_only_the_sealed_cloud_read_target() -> None:
+    class CloudReadPort:
+        async def read_business_operation(
+            self,
+            **kwargs: object,
+        ) -> BusinessOperationReadback:
+            assert kwargs["namespace_id"] == _NAMESPACE
+            return BusinessOperationReadback(manifest=None, documents=())
+
+    target = build_firestore_business_target(
+        namespace_id=_NAMESPACE,
+        manifest_collection=_MANIFEST_COLLECTION,
+        manifest_document_id=_MANIFEST_DOCUMENT,
+        document_coordinates=_COORDINATES,
+        profile=FIRESTORE_BUSINESS_CLOUD_PROFILE,
+    )
+    with pytest.raises(TypeError, match="sealed read target"):
+        build_firestore_business_capability_registration(
+            read_target=CloudReadPort(),
+            target=target,
+            clock=lambda: _NOW,
+            profile=FIRESTORE_BUSINESS_CLOUD_PROFILE,
+        )
+    cloud_targets = build_google_firestore_business_targets(
+        project_id="reconcile-dev-260813-14fa6d",
+        client_factory=lambda: object(),  # type: ignore[arg-type]
+        server_timestamp_factory=object,
+    )
+    registration = build_firestore_business_capability_registration(
+        read_target=cloud_targets.read,
+        target=target,
+        clock=lambda: _NOW,
+        profile=FIRESTORE_BUSINESS_CLOUD_PROFILE,
+    )
+    assert registration.handler is not None
+    descriptor = build_firestore_business_rule_registration(
+        FIRESTORE_BUSINESS_CLOUD_PROFILE
+    ).descriptor
+
+    assert target.scope["environment"] == FIRESTORE_BUSINESS_CLOUD_ENVIRONMENT
+    assert registration.capability.timeout_ms == 5_000
+    assert (
+        descriptor.authority_policy_version
+        == FIRESTORE_BUSINESS_CLOUD_AUTHORITY_POLICY_VERSION
+    )
+    assert descriptor.source == FIRESTORE_BUSINESS_CLOUD_SOURCE
+    _assert_rejected(
+        _observation((_EFFECT_IDS[0],)),
+        EvidenceReason.UNVERIFIABLE_AUTHORITY,
+        envelope=_envelope().model_copy(update={"target": target}),
+    )
 
 
 def test_handler_rejects_changed_target_or_incomplete_effect_request(

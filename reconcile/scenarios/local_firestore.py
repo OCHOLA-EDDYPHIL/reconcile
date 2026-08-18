@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import re
@@ -12,6 +13,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
+from typing import Protocol, runtime_checkable
 
 _SQLITE_TIMEOUT_SECONDS = 30.0
 _EFFECT_COUNT = 3
@@ -263,6 +265,21 @@ class BusinessOperationReadback:
             type(document) is not BusinessDocument for document in self.documents
         ):
             raise TypeError("readback documents must be an immutable document tuple")
+
+
+@runtime_checkable
+class FirestoreBusinessReadPort(Protocol):
+    """Trusted async composite-read boundary shared by local and cloud targets."""
+
+    async def read_business_operation(
+        self,
+        *,
+        namespace_id: str,
+        operation_id: str,
+        manifest_collection: str,
+        manifest_document_id: str,
+        document_coordinates: tuple[BusinessDocumentCoordinate, ...],
+    ) -> BusinessOperationReadback: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -555,6 +572,30 @@ def expected_effects_sha256(
     """Hash the ordered declarations for three requested document writes."""
 
     return expected_effect_declarations_sha256(_declarations_from_writes(documents))
+
+
+def business_effect_declarations(
+    documents: tuple[BusinessDocumentWrite, ...],
+) -> tuple[EffectDeclaration, ...]:
+    """Return the validated ordered declarations used by every target."""
+
+    return _declarations_from_writes(documents)
+
+
+def business_correlation_items(
+    correlation: Mapping[str, str],
+) -> tuple[tuple[str, str], ...]:
+    """Validate and canonically order secret-free operation correlation."""
+
+    return _correlation_items(correlation)
+
+
+def validate_business_document_coordinates(
+    document_coordinates: tuple[BusinessDocumentCoordinate, ...],
+) -> tuple[BusinessDocumentCoordinate, ...]:
+    """Validate the exact three-effect coordinate set."""
+
+    return _document_coordinates(document_coordinates)
 
 
 def _declarations_text(declarations: tuple[EffectDeclaration, ...]) -> str:
@@ -1550,6 +1591,29 @@ def _validate_operation_input(
     return documents
 
 
+def validate_business_operation_input(
+    *,
+    namespace_id: str,
+    operation_id: str,
+    manifest_collection: str,
+    manifest_document_id: str,
+    documents: tuple[BusinessDocumentWrite, ...],
+    selected_effect_ids: tuple[str, ...],
+    correlation: Mapping[str, str],
+) -> tuple[BusinessDocumentWrite, ...]:
+    """Validate one mutation identically for local and hosted targets."""
+
+    return _validate_operation_input(
+        namespace_id=namespace_id,
+        operation_id=operation_id,
+        manifest_collection=manifest_collection,
+        manifest_document_id=manifest_document_id,
+        documents=documents,
+        selected_effect_ids=selected_effect_ids,
+        correlation=correlation,
+    )
+
+
 class LocalFirestoreMutationTarget:
     """Mutation-only handle for separately committed business effects."""
 
@@ -1638,6 +1702,26 @@ class LocalFirestoreReadTarget:
         document_coordinates: tuple[BusinessDocumentCoordinate, ...],
     ) -> BusinessOperationReadback:
         return self._database.read(
+            namespace_id=namespace_id,
+            operation_id=operation_id,
+            manifest_collection=manifest_collection,
+            manifest_document_id=manifest_document_id,
+            document_coordinates=document_coordinates,
+        )
+
+    async def read_business_operation(
+        self,
+        *,
+        namespace_id: str,
+        operation_id: str,
+        manifest_collection: str,
+        manifest_document_id: str,
+        document_coordinates: tuple[BusinessDocumentCoordinate, ...],
+    ) -> BusinessOperationReadback:
+        """Run the blocking local snapshot behind the shared async port."""
+
+        return await asyncio.to_thread(
+            self.read,
             namespace_id=namespace_id,
             operation_id=operation_id,
             manifest_collection=manifest_collection,
@@ -1824,6 +1908,7 @@ __all__ = [
     "BusinessOperationManifest",
     "BusinessOperationReadback",
     "BusinessOperationStatus",
+    "FirestoreBusinessReadPort",
     "FirestoreOwnershipError",
     "FirestoreResourceAlreadyExists",
     "FirestoreResourceNotFound",
@@ -1832,6 +1917,10 @@ __all__ = [
     "LocalFirestoreHarness",
     "LocalFirestoreMutationTarget",
     "LocalFirestoreReadTarget",
+    "business_correlation_items",
+    "business_effect_declarations",
     "expected_effect_declarations_sha256",
     "expected_effects_sha256",
+    "validate_business_document_coordinates",
+    "validate_business_operation_input",
 ]

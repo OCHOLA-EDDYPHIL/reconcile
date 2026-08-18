@@ -482,12 +482,17 @@ _QualificationDispatchValidator = Callable[
 ]
 
 
+class GuardedInputTokenLimitExceeded(RuntimeError):
+    """The exact provider count exceeded the sealed input allowance."""
+
+
 class _QualificationDispatchState:
     __slots__ = (
         "_config",
         "_contents",
         "_count_config",
         "_count_request_bytes",
+        "_count_response",
         "_count_started",
         "_counted_tokens",
         "_expected_input",
@@ -546,6 +551,7 @@ class _QualificationDispatchState:
             model, sealed_contents, count_config
         )
         self._count_started = False
+        self._count_response: types.CountTokensResponse | None = None
         self._counted_tokens: int | None = None
         self._generation_started = False
         self._generation_response: types.GenerateContentResponse | None = None
@@ -569,6 +575,13 @@ class _QualificationDispatchState:
     @property
     def generation_response(self) -> types.GenerateContentResponse | None:
         return self._generation_response
+
+    @property
+    def count_response(self) -> types.CountTokensResponse:
+        response = self._count_response
+        if response is None:
+            raise RuntimeError("qualification token count is unavailable")
+        return response.model_copy(deep=True)
 
     def _revalidate(self) -> None:
         if asyncio.current_task() is not self._owner_task:
@@ -616,11 +629,13 @@ class _QualificationDispatchState:
         if type(response) is not types.CountTokensResponse:
             raise RuntimeError("qualification token count response type drifted")
         total_tokens = response.total_tokens
-        if (
-            type(total_tokens) is not int
-            or not 1 <= total_tokens <= QUALIFICATION_INPUT_TOKEN_CEILING
-        ):
+        if type(total_tokens) is not int or total_tokens < 1:
             raise RuntimeError("qualification token count response is invalid")
+        if total_tokens > QUALIFICATION_INPUT_TOKEN_CEILING:
+            raise GuardedInputTokenLimitExceeded(
+                "qualification token count exceeds its input allowance"
+            )
+        self._count_response = response.model_copy(deep=True)
         self._counted_tokens = total_tokens
         return total_tokens
 
@@ -680,6 +695,12 @@ class QualificationDispatchContext:
     async def count_tokens(self) -> int:
         return await self._state.count_tokens()
 
+    @property
+    def count_tokens_response(self) -> types.CountTokensResponse:
+        """Return a defensive copy of the completed provider count response."""
+
+        return self._state.count_response
+
     async def generate_content(self) -> types.GenerateContentResponse:
         return await self._state.generate_content()
 
@@ -688,6 +709,11 @@ QualificationDispatchHook = Callable[
     [QualificationDispatchContext],
     Awaitable[types.GenerateContentResponse],
 ]
+
+# The hosted runtime reuses the qualification transport's sealed, one-shot
+# request boundary without changing the consumed qualification protocol.
+GuardedDispatchContext = QualificationDispatchContext
+GuardedDispatchHook = QualificationDispatchHook
 
 
 @dataclass(frozen=True, slots=True)
@@ -1166,6 +1192,7 @@ class AdkGeminiPlanner:
         max_output_tokens: int = 4_096,
         session_service: InMemorySessionService | None = None,
         vertex_config: VertexAdcPlannerConfig | None = None,
+        hosted_guarded: bool = False,
     ) -> None:
         if not isinstance(model, BaseLlm):
             raise TypeError("ADK planner requires a BaseLlm model")
@@ -1181,11 +1208,16 @@ class AdkGeminiPlanner:
             InMemorySessionService,
         ):
             raise TypeError("ADK planner sessions must be in-memory")
+        if type(hosted_guarded) is not bool or (
+            hosted_guarded and vertex_config is None
+        ):
+            raise TypeError("hosted guard requires exact Vertex settings")
 
         self._model = model
         self._timeout_seconds = timeout_seconds
         self._max_output_tokens = max_output_tokens
         self._vertex_config = vertex_config
+        self._hosted_guarded = hosted_guarded
         self._qualification_dispatch_hook: QualificationDispatchHook | None = None
         self._qualification_dispatch_active = False
         self._qualification_last_dispatch_consumed: bool | None = None
@@ -1211,7 +1243,12 @@ class AdkGeminiPlanner:
                 candidate_count=1,
                 max_output_tokens=max_output_tokens,
                 temperature=0,
-                thinking_config=types.ThinkingConfig(include_thoughts=False),
+                thinking_config=types.ThinkingConfig(
+                    include_thoughts=False,
+                    thinking_level=(
+                        types.ThinkingLevel.MINIMAL if hosted_guarded else None
+                    ),
+                ),
                 automatic_function_calling=(
                     types.AutomaticFunctionCallingConfig(disable=True)
                     if vertex_config is not None
@@ -1326,6 +1363,48 @@ class AdkGeminiPlanner:
         finally:
             _end_provider_log_suppression()
 
+    @classmethod
+    def from_vertex_adc_guarded(
+        cls,
+        config: VertexAdcPlannerConfig,
+    ) -> AdkGeminiPlanner:
+        """Configure the reusable sealed one-shot Vertex transport."""
+
+        if type(config) is not VertexAdcPlannerConfig:
+            raise TypeError("Vertex planner configuration must be exact")
+        client_kwargs: dict[str, object] = {
+            "vertexai": True,
+            "project": config.project,
+            "location": config.location,
+        }
+        if config.credentials is not None:
+            client_kwargs["credentials"] = config.credentials
+        _begin_provider_log_suppression()
+        try:
+            model = _QualificationGemini(
+                model=config.model,
+                client_kwargs=client_kwargs,
+                retry_options=types.HttpRetryOptions(attempts=1),
+            )
+            model._qualification_client_configuration = (
+                _QualificationClientConfiguration(
+                    project=config.project,
+                    location=config.location,
+                    credentials=config.credentials,
+                )
+            )
+            return cls(
+                model,
+                provider_name="google-vertex-ai",
+                prompt_version=config.prompt_version,
+                timeout_seconds=config.timeout_seconds,
+                max_output_tokens=config.max_output_tokens,
+                vertex_config=config,
+                hosted_guarded=True,
+            )
+        finally:
+            _end_provider_log_suppression()
+
     @property
     def metadata(self) -> AdvisoryPlannerMetadata:
         """Return immutable configuration metadata for typed planner inputs."""
@@ -1362,6 +1441,45 @@ class AdkGeminiPlanner:
         self._qualification_dispatch_hook = None
         self._qualification_last_dispatch_consumed = None
         return consumed
+
+    def bind_guarded_dispatch_hook(self, hook: GuardedDispatchHook) -> None:
+        """Bind one hosted dispatch to the sealed provider request."""
+
+        self.bind_qualification_dispatch_hook(hook)
+
+    def clear_guarded_dispatch_hook(self, hook: GuardedDispatchHook) -> bool:
+        """Clear one hosted dispatch and report whether ADK consumed it."""
+
+        return self.clear_qualification_dispatch_hook(hook)
+
+    def validate_guarded_candidate_identity(
+        self,
+        *,
+        project: str,
+        location: str,
+        configured_model: str,
+        prompt_version: str,
+        prompt_sha256: str,
+        maximum_output_tokens: int,
+        thinking_level: str,
+    ) -> None:
+        """Bind a hosted candidate identity to the effective sealed request."""
+
+        config = self._vertex_config
+        if (
+            not self._hosted_guarded
+            or config is None
+            or project != config.project
+            or location != config.location
+            or configured_model != config.model
+            or configured_model != self._metadata.configured_model
+            or prompt_version != self._metadata.prompt_version
+            or prompt_sha256 != self._metadata.prompt_sha256
+            or maximum_output_tokens != config.max_output_tokens
+            or maximum_output_tokens != self._max_output_tokens
+            or thinking_level != types.ThinkingLevel.MINIMAL.value
+        ):
+            raise RuntimeError("hosted guarded candidate identity drifted")
 
     def validate_qualification_runtime_configuration(self) -> None:
         config = self._vertex_config
@@ -1509,7 +1627,14 @@ class AdkGeminiPlanner:
             or request_config.temperature != 0
             or request_config.thinking_config is None
             or request_config.thinking_config.model_dump(exclude_none=True)
-            != {"include_thoughts": False}
+            != (
+                {
+                    "include_thoughts": False,
+                    "thinking_level": types.ThinkingLevel.MINIMAL.value,
+                }
+                if self._hosted_guarded
+                else {"include_thoughts": False}
+            )
             or request_config.automatic_function_calling is None
             or request_config.automatic_function_calling.model_dump(exclude_none=True)
             != {"disable": True, "maximum_remote_calls": 10}
@@ -1876,6 +2001,9 @@ __all__ = [
     "QUALIFICATION_INPUT_TOKEN_CEILING",
     "QUALIFICATION_REQUEST_BYTE_CEILING",
     "AdkGeminiPlanner",
+    "GuardedDispatchContext",
+    "GuardedDispatchHook",
+    "GuardedInputTokenLimitExceeded",
     "QualificationDispatchContext",
     "QualificationDispatchHook",
     "VertexAdcPlannerConfig",

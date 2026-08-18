@@ -1,4 +1,4 @@
-"""Local Storage metadata readback and deterministic evidence rules."""
+"""Storage metadata readback and deterministic evidence rules."""
 
 from __future__ import annotations
 
@@ -51,21 +51,53 @@ from reconcile.scenarios.local_storage import (
     StorageGenerationReceipt,
     StorageObjectMetadata,
     StorageReadback,
+    StorageReadPort,
     correlation_sha256,
 )
 
 STORAGE_TARGET_KIND = "storage.object"
-STORAGE_ENVIRONMENT = "local-sqlite"
 STORAGE_CAPABILITY_NAME = "storage-object-metadata-readback"
 STORAGE_CAPABILITY_VERSION = "1.0.0"
-STORAGE_AUTHORITY_POLICY_VERSION = "authority-local-storage-v1"
 STORAGE_CLASSIFICATION_POLICY_VERSION = "classification-v1"
-STORAGE_ADAPTER_VERSION = "1.0.0"
-STORAGE_SOURCE = "local-storage-sqlite"
+
+
+@dataclass(frozen=True, slots=True)
+class StorageAdapterProfile:
+    """One sealed target identity for the shared deterministic Storage rule."""
+
+    environment: str
+    authority_policy_version: str
+    source: str
+    adapter_version: str
+    timeout_ms: int
+
+
+LOCAL_STORAGE_PROFILE = StorageAdapterProfile(
+    environment="local-sqlite",
+    authority_policy_version="authority-local-storage-v1",
+    source="local-storage-sqlite",
+    adapter_version="1.0.0",
+    timeout_ms=2_000,
+)
+CLOUD_STORAGE_PROFILE = StorageAdapterProfile(
+    environment="google-cloud-storage",
+    authority_policy_version="authority-cloud-storage-v1",
+    source="google-cloud-storage-json-v1",
+    adapter_version="1.0.0",
+    timeout_ms=5_000,
+)
+
+STORAGE_ENVIRONMENT = LOCAL_STORAGE_PROFILE.environment
+STORAGE_AUTHORITY_POLICY_VERSION = LOCAL_STORAGE_PROFILE.authority_policy_version
+STORAGE_ADAPTER_VERSION = LOCAL_STORAGE_PROFILE.adapter_version
+STORAGE_SOURCE = LOCAL_STORAGE_PROFILE.source
+CLOUD_STORAGE_ENVIRONMENT = CLOUD_STORAGE_PROFILE.environment
+CLOUD_STORAGE_AUTHORITY_POLICY_VERSION = CLOUD_STORAGE_PROFILE.authority_policy_version
+CLOUD_STORAGE_ADAPTER_VERSION = CLOUD_STORAGE_PROFILE.adapter_version
+CLOUD_STORAGE_SOURCE = CLOUD_STORAGE_PROFILE.source
 
 _ARGUMENT_BYTE_CEILING = 2
 _RESULT_BYTE_CEILING = 16_384
-_TIMEOUT_MS = 2_000
 _PREDICATE_KEYS = frozenset({"content_sha256", "size_bytes", "correlation"})
 _TARGET_SCOPE_KEYS = frozenset({"bucket_name", "environment"})
 _TARGET_RESOURCE_KEYS = frozenset({"object_name"})
@@ -112,18 +144,26 @@ def _bounded_coordinate(value: object, label: str) -> str:
     return value
 
 
+def _require_profile(profile: StorageAdapterProfile) -> StorageAdapterProfile:
+    if profile is not LOCAL_STORAGE_PROFILE and profile is not CLOUD_STORAGE_PROFILE:
+        raise TypeError("storage adapter profile is not supported")
+    return profile
+
+
 def build_storage_target(
     *,
     bucket_name: str,
     object_name: str,
+    profile: StorageAdapterProfile = LOCAL_STORAGE_PROFILE,
 ) -> TargetBinding:
-    """Build the exact local SQLite target used by the Storage scenario."""
+    """Build one exact target under a sealed Storage adapter profile."""
 
+    profile = _require_profile(profile)
     return TargetBinding(
         target_kind=STORAGE_TARGET_KIND,
         scope={
             "bucket_name": _bounded_coordinate(bucket_name, "bucket name"),
-            "environment": STORAGE_ENVIRONMENT,
+            "environment": profile.environment,
         },
         resource={
             "object_name": _bounded_coordinate(object_name, "object name"),
@@ -131,13 +171,17 @@ def build_storage_target(
     )
 
 
-def _target_coordinates(target: TargetBinding) -> tuple[str, str]:
+def _target_coordinates(
+    target: TargetBinding,
+    profile: StorageAdapterProfile,
+) -> tuple[str, str]:
+    profile = _require_profile(profile)
     if target.target_kind != STORAGE_TARGET_KIND:
         raise ValueError("storage target kind is not supported")
     if set(target.scope) != _TARGET_SCOPE_KEYS:
         raise ValueError("storage target scope is not exact")
-    if target.scope.get("environment") != STORAGE_ENVIRONMENT:
-        raise ValueError("storage target is not the local SQLite target")
+    if target.scope.get("environment") != profile.environment:
+        raise ValueError("storage target does not match its adapter profile")
     bucket_name = _bounded_coordinate(target.scope.get("bucket_name"), "bucket name")
     if set(target.resource) != _TARGET_RESOURCE_KEYS:
         raise ValueError("storage target resource is not exact")
@@ -148,10 +192,15 @@ def _target_coordinates(target: TargetBinding) -> tuple[str, str]:
     return bucket_name, object_name
 
 
-def build_storage_capability(target: TargetBinding) -> ObservationCapability:
+def build_storage_capability(
+    target: TargetBinding,
+    *,
+    profile: StorageAdapterProfile = LOCAL_STORAGE_PROFILE,
+) -> ObservationCapability:
     """Build one empty-argument read capability bound to an exact target scope."""
 
-    _target_coordinates(target)
+    profile = _require_profile(profile)
+    _target_coordinates(target, profile)
     return ObservationCapability(
         schema_version=OBSERVATION_CAPABILITY_VERSION,
         name=STORAGE_CAPABILITY_NAME,
@@ -170,7 +219,7 @@ def build_storage_capability(target: TargetBinding) -> ObservationCapability:
                 scope=dict(target.scope),
             ),
         ),
-        timeout_ms=_TIMEOUT_MS,
+        timeout_ms=profile.timeout_ms,
         result_byte_ceiling=_RESULT_BYTE_CEILING,
         cost_units=1,
     )
@@ -216,7 +265,8 @@ def _readback_payload(readback: StorageReadback) -> dict[str, object]:
 
 @dataclass(frozen=True, slots=True)
 class _StorageReadHandler:
-    read_target: LocalStorageReadTarget = field(repr=False, compare=False)
+    read_target: StorageReadPort = field(repr=False, compare=False)
+    profile: StorageAdapterProfile
     target_bytes: bytes = field(repr=False)
     clock: Callable[[], datetime] = field(repr=False, compare=False)
 
@@ -229,7 +279,7 @@ class _StorageReadHandler:
             or probe.arguments != {}
         ):
             raise CapabilityUnavailable
-        bucket_name, object_name = _target_coordinates(target)
+        bucket_name, object_name = _target_coordinates(target, self.profile)
         readback = await asyncio.to_thread(
             self.read_target.read,
             bucket=bucket_name,
@@ -249,21 +299,30 @@ class _StorageReadHandler:
 
 def build_storage_capability_registration(
     *,
-    read_target: LocalStorageReadTarget,
+    read_target: StorageReadPort,
     target: TargetBinding,
     clock: Callable[[], datetime] | None = None,
+    profile: StorageAdapterProfile = LOCAL_STORAGE_PROFILE,
 ) -> CapabilityRegistration:
-    """Register the exact local metadata read as an enabled read-only probe."""
+    """Register one trusted exact metadata read as an enabled read-only probe."""
 
-    if type(read_target) is not LocalStorageReadTarget:
-        raise TypeError("storage capability requires the restricted read target")
+    profile = _require_profile(profile)
+    if profile is LOCAL_STORAGE_PROFILE:
+        trusted = type(read_target) is LocalStorageReadTarget
+    else:
+        from reconcile.hosted.storage import CloudStorageReadTarget
+
+        trusted = type(read_target) is CloudStorageReadTarget
+    if not trusted:
+        raise TypeError("storage capability requires the sealed read target")
     handler = _StorageReadHandler(
         read_target=read_target,
+        profile=profile,
         target_bytes=canonical_json_bytes(target),
         clock=clock or (lambda: datetime.now(UTC)),
     )
     return CapabilityRegistration(
-        capability=build_storage_capability(target),
+        capability=build_storage_capability(target, profile=profile),
         semantics=CapabilitySemantics.READ_ONLY,
         enabled=True,
         argument_byte_ceiling=_ARGUMENT_BYTE_CEILING,
@@ -375,8 +434,14 @@ def _weak_observation(
     )
 
 
+@dataclass(frozen=True, slots=True)
 class StorageReadbackNormalizer:
     """Admit only a fresh exact object generation bound by its receipt."""
+
+    profile: StorageAdapterProfile = LOCAL_STORAGE_PROFILE
+
+    def __post_init__(self) -> None:
+        _require_profile(self.profile)
 
     def __call__(self, rule_input: RuleInput) -> RuleObservation:
         if type(rule_input) is not RuleInput:
@@ -390,7 +455,10 @@ class StorageReadbackNormalizer:
         ):
             raise RuleRejected(EvidenceReason.MALFORMED_OBSERVATION)
         try:
-            bucket_name, object_name = _target_coordinates(envelope.target)
+            bucket_name, object_name = _target_coordinates(
+                envelope.target,
+                self.profile,
+            )
         except (TypeError, ValueError) as error:
             raise RuleRejected(EvidenceReason.UNVERIFIABLE_AUTHORITY) from error
 
@@ -463,30 +531,44 @@ class StorageReadbackNormalizer:
         )
 
 
-def build_storage_rule_descriptor() -> TargetRuleDescriptor:
-    """Build the exact deterministic rule identity for local Storage evidence."""
+def build_storage_rule_descriptor(
+    *,
+    profile: StorageAdapterProfile = LOCAL_STORAGE_PROFILE,
+) -> TargetRuleDescriptor:
+    """Build the exact deterministic rule identity for one Storage profile."""
 
+    profile = _require_profile(profile)
     return TargetRuleDescriptor(
         target_kind=STORAGE_TARGET_KIND,
         capability_name=STORAGE_CAPABILITY_NAME,
         capability_version=STORAGE_CAPABILITY_VERSION,
-        authority_policy_version=STORAGE_AUTHORITY_POLICY_VERSION,
+        authority_policy_version=profile.authority_policy_version,
         classification_policy_version=STORAGE_CLASSIFICATION_POLICY_VERSION,
-        source=STORAGE_SOURCE,
-        adapter_version=STORAGE_ADAPTER_VERSION,
+        source=profile.source,
+        adapter_version=profile.adapter_version,
     )
 
 
-def build_storage_rule_registration() -> TargetRuleRegistration:
-    """Register the local Storage normalizer under its sealed rule identity."""
+def build_storage_rule_registration(
+    *,
+    profile: StorageAdapterProfile = LOCAL_STORAGE_PROFILE,
+) -> TargetRuleRegistration:
+    """Register the Storage normalizer under one sealed target identity."""
 
+    profile = _require_profile(profile)
     return TargetRuleRegistration(
-        descriptor=build_storage_rule_descriptor(),
-        normalizer=StorageReadbackNormalizer(),
+        descriptor=build_storage_rule_descriptor(profile=profile),
+        normalizer=StorageReadbackNormalizer(profile=profile),
     )
 
 
 __all__ = [
+    "CLOUD_STORAGE_ADAPTER_VERSION",
+    "CLOUD_STORAGE_AUTHORITY_POLICY_VERSION",
+    "CLOUD_STORAGE_ENVIRONMENT",
+    "CLOUD_STORAGE_PROFILE",
+    "CLOUD_STORAGE_SOURCE",
+    "LOCAL_STORAGE_PROFILE",
     "STORAGE_ADAPTER_VERSION",
     "STORAGE_AUTHORITY_POLICY_VERSION",
     "STORAGE_CAPABILITY_NAME",
@@ -495,6 +577,7 @@ __all__ = [
     "STORAGE_ENVIRONMENT",
     "STORAGE_SOURCE",
     "STORAGE_TARGET_KIND",
+    "StorageAdapterProfile",
     "StorageReadbackNormalizer",
     "build_storage_capability",
     "build_storage_capability_registration",
