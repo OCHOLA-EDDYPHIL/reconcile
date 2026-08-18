@@ -40,6 +40,7 @@ _PROJECT_NUMBER = "669727977920"
 _REGION = "us-central1"
 _ORIGIN_URL = "git@github.com:OCHOLA-EDDYPHIL/reconcile.git"
 _OWNER = "user:eddyphilochola13@gmail.com"
+_OWNER_ACCOUNT = "eddyphilochola13@gmail.com"
 _OPERATOR_SERVICE_ACCOUNT = (
     "rec-p5-apply@reconcile-dev-260813-14fa6d.iam.gserviceaccount.com"
 )
@@ -994,6 +995,18 @@ def _fixed_commands(
                 str(execution_plan),
             ),
         )
+        if action is Phase5Action.BOOTSTRAP_APPLY:
+            commands += (
+                (
+                    "/usr/bin/gcloud",
+                    "services",
+                    "enable",
+                    "cloudresourcemanager.googleapis.com",
+                    f"--project={_PROJECT_ID}",
+                    f"--account={_OWNER_ACCOUNT}",
+                    "--quiet",
+                ),
+            )
         if action is not Phase5Action.STATE_PROTECTION_CHANGE:
             commands += (
                 (
@@ -4264,6 +4277,11 @@ def _verify_approved_artifacts(
             raise OperatorError("EXECUTION_PLAN_PATH_INVALID") from error
         else:
             raise OperatorError("EXECUTION_PLAN_ALREADY_EXISTS")
+    if action in {
+        Phase5Action.BOOTSTRAP_APPLY,
+        Phase5Action.IMAGE_PUSH,
+    }:
+        _verify_gcloud_binary(repo_root, runner)
     if action is Phase5Action.IMAGE_PUSH:
         docker_directory = state.root / "docker"
         try:
@@ -4272,7 +4290,6 @@ def _verify_approved_artifacts(
         except OSError as error:
             raise OperatorError("DOCKER_CONFIG_INVALID") from error
         _verify_docker_binary(repo_root, runner)
-        _verify_gcloud_binary(repo_root, runner)
     if action in {
         Phase5Action.PROVIDER_ACCEPTANCE,
         Phase5Action.HOSTED_ACCEPTANCE,
@@ -4798,11 +4815,14 @@ def _run_descriptor_once(
     final_code = 0
     environment = _minimal_subprocess_environment(descriptor.environment)
     execution_identity: ExecutionPlanIdentity | None = None
+    terraform_apply_index = (
+        4 if descriptor.action is Phase5Action.BOOTSTRAP_APPLY else 3
+    )
     for index, command in enumerate(descriptor.commands):
         remaining_seconds = int((_utc(deadline) - _utc(clock())).total_seconds())
         if remaining_seconds < 1:
             return object()
-        if terraform_plan is not None and index == 3:
+        if terraform_plan is not None and index == terraform_apply_index:
             if execution_identity is None:
                 return object()
             _verify_execution_plan(

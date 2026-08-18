@@ -723,6 +723,17 @@ def test_manifest_freezes_exact_identity_limits_estimates_and_commands(
         "reconcile-dev-260813-14fa6d.iam.gserviceaccount.com",
     )
     assert manifest.gcloud_version == "580.0.0"
+    bootstrap = manifest.command_for(operator.Phase5Action.BOOTSTRAP_APPLY)
+    assert bootstrap.commands[3] == (
+        "/usr/bin/gcloud",
+        "services",
+        "enable",
+        "cloudresourcemanager.googleapis.com",
+        "--project=reconcile-dev-260813-14fa6d",
+        "--account=eddyphilochola13@gmail.com",
+        "--quiet",
+    )
+    assert "apply" in bootstrap.commands[4]
     image = manifest.command_for(operator.Phase5Action.IMAGE_PUSH)
     assert {item.name: item.value for item in image.environment} == {
         "CLOUDSDK_AUTH_IMPERSONATE_SERVICE_ACCOUNT": (
@@ -2398,7 +2409,7 @@ def test_apply_rechecks_deadline_after_immediate_source_verification(
         nonlocal current, source_checks
         original(binding)
         source_checks += 1
-        if source_checks == 4:
+        if source_checks == 5:
             current = deadline
 
     monkeypatch.setattr(operator, "_verify_execution_source_binding", verify)
@@ -2415,7 +2426,7 @@ def test_apply_rechecks_deadline_after_immediate_source_verification(
     )
 
     assert not isinstance(result, subprocess.CompletedProcess)
-    assert source_checks == 4
+    assert source_checks == 5
     assert not any("apply" in command for command in runner.calls)
 
 
@@ -2468,14 +2479,14 @@ def test_execution_records_only_output_hashes(tmp_path: Path) -> None:
     persisted = b"".join(path.read_bytes() for path in state.root.glob("*.json"))
     assert secret_output not in persisted
     assert b"private diagnostic" not in persisted
-    assert len(_mutating_calls(runner)) == 3
+    assert len(_mutating_calls(runner)) == 4
     source = Path(manifest.execution_source.root)
     mutating_cwds = [
         cwd
         for call, cwd in zip(runner.calls, runner.cwds, strict=True)
         if call in _mutating_calls(runner)
     ]
-    assert mutating_cwds == [source, source, source]
+    assert mutating_cwds == [source, source, source, source]
 
 
 @pytest.mark.parametrize(
@@ -2505,7 +2516,61 @@ def test_action_time_plan_drift_prevents_apply(tmp_path: Path, runner: _Runner) 
     assert any(
         call[:3] == (operator._TERRAFORM, "show", "-json") for call in runner.calls
     )
+    assert not any(
+        call[:4]
+        == (
+            "/usr/bin/gcloud",
+            "services",
+            "enable",
+            "cloudresourcemanager.googleapis.com",
+        )
+        for call in runner.calls
+    )
     assert not any("apply" in call for call in runner.calls)
+
+
+def test_cloud_resource_manager_enable_failure_prevents_terraform_apply(
+    tmp_path: Path,
+) -> None:
+    _, manifest, _, base_runner = _records(tmp_path)
+    enable = manifest.command_for(operator.Phase5Action.BOOTSTRAP_APPLY).commands[3]
+    observed: list[tuple[str, ...]] = []
+
+    def runner(
+        argv: tuple[str, ...],
+        *,
+        cwd: Path,
+        environment: dict[str, str] | Any,
+        timeout_seconds: int,
+    ) -> object:
+        observed.append(argv)
+        if argv == enable:
+            return subprocess.CompletedProcess(list(argv), 1, b"", b"unavailable")
+        return base_runner(
+            argv,
+            cwd=cwd,
+            environment=environment,
+            timeout_seconds=timeout_seconds,
+        )
+
+    result = operator._run_descriptor_once(
+        manifest.command_for(operator.Phase5Action.BOOTSTRAP_APPLY),
+        repo_root=Path(manifest.execution_source.root),
+        execution_source=manifest.execution_source,
+        runner=runner,
+        image_artifact=manifest.image_artifact,
+        terraform_plan=manifest.terraform_plan_for(
+            operator.Phase5Action.BOOTSTRAP_APPLY
+        ),
+        python_dependencies=manifest.python_dependencies,
+        deadline=manifest.work_deadline,
+        clock=lambda: _NOW + timedelta(minutes=3),
+    )
+
+    assert isinstance(result, subprocess.CompletedProcess)
+    assert result.returncode == 1
+    assert enable in observed
+    assert not any("apply" in call for call in observed)
 
 
 def test_loaded_image_id_mismatch_prevents_push(tmp_path: Path) -> None:
