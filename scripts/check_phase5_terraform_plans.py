@@ -1381,6 +1381,7 @@ def _offline_command(command: list[str], working_directory: Path) -> list[str]:
     bwrap = shutil.which("bwrap")
     if bwrap is None:
         raise RuntimeError("bwrap is required for network-isolated plans")
+    temporary_directory = working_directory.parent / "tmp"
     return [
         bwrap,
         "--die-with-parent",
@@ -1392,6 +1393,9 @@ def _offline_command(command: list[str], working_directory: Path) -> list[str]:
         "--bind",
         str(working_directory.parent),
         str(working_directory.parent),
+        "--setenv",
+        "TMPDIR",
+        str(temporary_directory),
         "--dev",
         "/dev",
         "--proc",

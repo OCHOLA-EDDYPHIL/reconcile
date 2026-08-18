@@ -612,6 +612,9 @@ def test_sandbox_is_read_only_offline_and_receives_a_minimal_environment(
     assert ["--bind", str(tmp_path.parent), str(tmp_path.parent)] == command[
         command.index("--bind") : command.index("--bind") + 3
     ]
+    assert ["--setenv", "TMPDIR", str(tmp_path.parent / "tmp")] == command[
+        command.index("--setenv") : command.index("--setenv") + 3
+    ]
 
 
 def test_provider_mirror_uses_generated_fixed_configuration(
