@@ -2649,19 +2649,28 @@ def _read_oci_archive_member(
     return payload
 
 
-def _canonical_oci_path(value: str) -> PurePosixPath:
+def _canonical_oci_path(
+    value: str,
+    *,
+    allow_non_ascii: bool = False,
+) -> PurePosixPath:
     raw = value[2:] if value.startswith("./") else value
     try:
         raw.encode("utf-8", errors="strict")
         path = PurePosixPath(raw)
     except (UnicodeError, ValueError) as error:
         raise OperatorError("OCI_IMAGE_INVALID") from error
+    invalid_character = (
+        any(not character.isprintable() or character.isspace() for character in raw)
+        if allow_non_ascii
+        else any(not 0x21 <= ord(character) <= 0x7E for character in raw)
+    )
     if (
         not raw
         or len(raw) > 4096
         or raw.startswith("./")
         or "\\" in raw
-        or any(not 0x21 <= ord(character) <= 0x7E for character in raw)
+        or invalid_character
         or path.is_absolute()
         or path.as_posix() != raw
         or len(path.parts) > _MAX_OCI_PATH_COMPONENTS
@@ -2864,7 +2873,21 @@ def _materialize_python_dependencies(
                     ):
                         raise OperatorError("OCI_IMAGE_INVALID")
                     for item in layer_members:
-                        path = _canonical_oci_path(item.name)
+                        contains_non_ascii = any(
+                            ord(character) > 0x7E for character in item.name
+                        )
+                        path = _canonical_oci_path(
+                            item.name,
+                            allow_non_ascii=contains_non_ascii,
+                        )
+                        if contains_non_ascii:
+                            if (
+                                path == _PYTHON_DEPENDENCY_PREFIX
+                                or path in _PYTHON_DEPENDENCY_PREFIX.parents
+                                or _PYTHON_DEPENDENCY_PREFIX in path.parents
+                            ):
+                                raise OperatorError("OCI_IMAGE_INVALID")
+                            continue
                         if _whiteout_affects_python_dependencies(path):
                             raise OperatorError("PYTHON_DEPENDENCY_CLOSURE_INVALID")
                         if (
