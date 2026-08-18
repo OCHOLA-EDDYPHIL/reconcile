@@ -11,6 +11,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Protocol, runtime_checkable
 
 _SQLITE_TIMEOUT_SECONDS = 30.0
 _MAX_COORDINATE_LENGTH = 1_024
@@ -148,6 +149,49 @@ class StorageDeletion:
         return int(self.object_removed) + int(self.receipt_removed)
 
 
+@runtime_checkable
+class StorageMutationPort(Protocol):
+    """Trusted create-only boundary supplied by one configured target."""
+
+    def commit_object(
+        self,
+        *,
+        operation_id: str,
+        bucket: str,
+        name: str,
+        content: bytes,
+        correlation: Mapping[str, str],
+    ) -> None: ...
+
+
+@runtime_checkable
+class StorageReadPort(Protocol):
+    """Trusted exact-object read boundary supplied by one configured target."""
+
+    def read(
+        self,
+        *,
+        bucket: str,
+        name: str,
+        operation_id: str,
+    ) -> StorageReadback: ...
+
+
+@runtime_checkable
+class StorageCleanupPort(Protocol):
+    """Trusted receipt-bound cleanup boundary supplied by one configured target."""
+
+    def count_owned(self, *, bucket: str, name: str, operation_id: str) -> int: ...
+
+    def delete_owned(
+        self,
+        *,
+        bucket: str,
+        name: str,
+        operation_id: str,
+    ) -> StorageDeletion: ...
+
+
 def correlation_sha256(correlation: Mapping[str, str]) -> str:
     """Return the canonical digest used to bind correlation metadata."""
 
@@ -159,6 +203,14 @@ def correlation_sha256(correlation: Mapping[str, str]) -> str:
         sort_keys=True,
     ).encode("utf-8")
     return hashlib.sha256(payload).hexdigest()
+
+
+def storage_correlation_items(
+    correlation: Mapping[str, str],
+) -> tuple[tuple[str, str], ...]:
+    """Validate and canonically order provider-neutral correlation metadata."""
+
+    return _correlation_items(correlation)
 
 
 def _validate_coordinate(value: str, label: str) -> None:
@@ -1083,14 +1135,18 @@ __all__ = [
     "LocalStorageHarness",
     "LocalStorageMutationTarget",
     "LocalStorageReadTarget",
+    "StorageCleanupPort",
     "StorageDeletion",
     "StorageGenerationReceipt",
+    "StorageMutationPort",
     "StorageObjectAlreadyExists",
     "StorageObjectMetadata",
     "StorageObjectNotFound",
     "StorageOwnershipError",
+    "StorageReadPort",
     "StorageReadback",
     "StorageReceiptAlreadyExists",
     "StorageReceiptNotFound",
     "correlation_sha256",
+    "storage_correlation_items",
 ]

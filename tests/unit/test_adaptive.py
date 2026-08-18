@@ -22,6 +22,7 @@ from reconcile.adaptive import (
     PlannerFailureKind,
     ProposalDisposition,
     execute_adaptive_investigation,
+    execute_conditional_adaptive_investigation,
 )
 from reconcile.contracts import (
     OBSERVATION_CAPABILITY_VERSION,
@@ -434,6 +435,259 @@ def _policy(
         planner_timeout_ms=100,
         include_explanation=include_explanation,
     )
+
+
+@_async_test
+async def test_conditional_bootstrap_seeds_one_planner_turn_and_one_complement() -> (
+    None
+):
+    clock = _Clock()
+    call_order: list[str] = []
+    bootstrap = _Handler(
+        clock,
+        (_observation("weak", "bootstrap-weak"),),
+        call_order=call_order,
+    )
+    complement = _Handler(
+        clock,
+        (_observation("committed", "complement-committed"),),
+        call_order=call_order,
+    )
+    capabilities, rules = _registries(
+        {
+            "bootstrap-read": (bootstrap, 1),
+            "complement-read": (complement, 1),
+        }
+    )
+    planner = _FakePlanner([_output((_request("complement-read"),))])
+    envelope = _envelope(("bootstrap-read", "complement-read"))
+    progress = []
+
+    result = await execute_conditional_adaptive_investigation(
+        envelope,
+        capabilities,
+        rules,
+        planner,
+        _policy(max_turns=1),
+        _request("bootstrap-read"),
+        clock=clock,
+        progress_emitter=progress.append,
+    )
+
+    assert call_order == ["bootstrap-read", "complement-read"]
+    assert result.stop_reason is AdaptiveStopReason.SUFFICIENT_EVIDENCE
+    assert result.classification is Classification.COMMITTED
+    assert result.attempted_probe_count == 2
+    assert result.acquisition_turn_count == result.model_invocation_count == 1
+    assert result.explanation_valid is None
+    assert len(planner.calls) == 1
+    planner_input = planner.calls[0]
+    assert tuple(item.name for item in planner_input.capabilities) == (
+        "bootstrap-read",
+        "complement-read",
+    )
+    assert tuple(item.remaining_invocations for item in planner_input.capabilities) == (
+        0,
+        8,
+    )
+    assert len(planner_input.weak_evidence) == 1
+    assert planner_input.weak_evidence[0].capability_name == "bootstrap-read"
+    assert planner_input.prior_executable_request_hashes == (
+        result.report.probe_audit[0].request_sha256,
+    )
+    assert planner_input.remaining_budget.probes == 7
+    assert result.turns[0].selected_request_sha256 == (
+        result.report.probe_audit[1].request_sha256
+    )
+    assert [type(item) for item in progress] == [
+        StrategyProgress,
+        ProbeProgress,
+        ProbeProgress,
+        EvidenceProgress,
+        AdvisoryProgress,
+        AdvisoryProgress,
+        ProbeProgress,
+        ProbeProgress,
+        EvidenceProgress,
+        StrategyProgress,
+    ]
+
+
+@_async_test
+@pytest.mark.parametrize(
+    ("failure", "expected"),
+    (
+        (PlannerFailureKind.UNAVAILABLE, AdaptiveStopReason.PLANNER_UNAVAILABLE),
+        (PlannerFailureKind.TIMEOUT, AdaptiveStopReason.PLANNER_TIMEOUT),
+        (
+            PlannerFailureKind.SCHEMA_INVALID,
+            AdaptiveStopReason.PLANNER_SCHEMA_INVALID,
+        ),
+    ),
+)
+async def test_conditional_provider_failure_retains_bootstrap_without_replay(
+    failure: PlannerFailureKind,
+    expected: AdaptiveStopReason,
+) -> None:
+    clock = _Clock()
+    bootstrap = _Handler(clock, (_observation("weak", "bootstrap-weak"),))
+    complement = _Handler(clock, (_observation("committed", "unused"),))
+    capabilities, rules = _registries(
+        {
+            "bootstrap-read": (bootstrap, 1),
+            "complement-read": (complement, 1),
+        }
+    )
+    planner = _FakePlanner([failure])
+
+    result = await execute_conditional_adaptive_investigation(
+        _envelope(("bootstrap-read", "complement-read")),
+        capabilities,
+        rules,
+        planner,
+        _policy(max_turns=1),
+        _request("bootstrap-read"),
+        clock=clock,
+    )
+
+    assert result.stop_reason is expected
+    assert result.classification is Classification.UNKNOWN
+    assert result.attempted_probe_count == 1
+    assert result.model_invocation_count == 1
+    assert len(bootstrap.calls) == 1
+    assert not complement.calls
+    assert len(result.report.probe_audit) == 1
+
+
+@_async_test
+async def test_conditional_unavailable_bootstrap_skips_planner_and_complement() -> None:
+    clock = _Clock()
+    bootstrap = _Handler(clock, ())
+    complement = _Handler(clock, (_observation("committed", "unused"),))
+    capabilities, rules = _registries(
+        {
+            "bootstrap-read": (bootstrap, 1),
+            "complement-read": (complement, 1),
+        }
+    )
+    planner = _FakePlanner([_output((_request("complement-read"),))])
+
+    result = await execute_conditional_adaptive_investigation(
+        _envelope(("bootstrap-read", "complement-read")),
+        capabilities,
+        rules,
+        planner,
+        _policy(max_turns=1),
+        _request("bootstrap-read"),
+        clock=clock,
+    )
+
+    assert result.stop_reason is AdaptiveStopReason.REQUIRED_CAPABILITY_UNAVAILABLE
+    assert result.classification is Classification.UNKNOWN
+    assert result.attempted_probe_count == 1
+    assert result.model_invocation_count == 0
+    assert len(bootstrap.calls) == 1
+    assert not complement.calls
+    assert not planner.calls
+
+
+@_async_test
+async def test_conditional_unsafe_bootstrap_catalog_skips_all_dispatch() -> None:
+    clock = _Clock()
+    complement = _Handler(clock, (_observation("committed", "unused"),))
+    capabilities, rules = _registries({"complement-read": (complement, 1)})
+    capabilities.register(
+        CapabilityRegistration(
+            capability=_capability("bootstrap-read"),
+            semantics=CapabilitySemantics.MUTATING,
+            enabled=True,
+            argument_byte_ceiling=4_096,
+            max_invocations=1,
+            handler=None,
+        )
+    )
+    planner = _FakePlanner([_output((_request("complement-read"),))])
+
+    result = await execute_conditional_adaptive_investigation(
+        _envelope(("bootstrap-read", "complement-read")),
+        capabilities,
+        rules,
+        planner,
+        _policy(max_turns=1),
+        _request("bootstrap-read"),
+        clock=clock,
+    )
+
+    assert result.stop_reason is AdaptiveStopReason.CAPABILITY_CATALOG_UNSAFE
+    assert result.classification is Classification.UNKNOWN
+    assert result.attempted_probe_count == 0
+    assert result.model_invocation_count == 0
+    assert not complement.calls
+    assert not planner.calls
+
+
+@_async_test
+async def test_conditional_exhausted_read_budget_skips_planner() -> None:
+    clock = _Clock()
+    bootstrap = _Handler(clock, (_observation("weak", "bootstrap-weak"),))
+    complement = _Handler(clock, (_observation("committed", "unused"),))
+    capabilities, rules = _registries(
+        {
+            "bootstrap-read": (bootstrap, 1),
+            "complement-read": (complement, 1),
+        }
+    )
+    planner = _FakePlanner([_output((_request("complement-read"),))])
+
+    result = await execute_conditional_adaptive_investigation(
+        _envelope(
+            ("bootstrap-read", "complement-read"),
+            max_probes=1,
+            max_cost_units=1,
+        ),
+        capabilities,
+        rules,
+        planner,
+        _policy(max_turns=1),
+        _request("bootstrap-read"),
+        clock=clock,
+    )
+
+    assert result.stop_reason is AdaptiveStopReason.BUDGET_EXHAUSTED
+    assert result.classification is Classification.UNKNOWN
+    assert result.attempted_probe_count == 1
+    assert result.model_invocation_count == 0
+    assert not complement.calls
+    assert not planner.calls
+
+
+@_async_test
+async def test_conditional_policy_rejects_extra_turns_or_explanation() -> None:
+    clock = _Clock()
+    bootstrap = _Handler(clock, (_observation("weak", "bootstrap-weak"),))
+    complement = _Handler(clock, (_observation("committed", "unused"),))
+    capabilities, rules = _registries(
+        {
+            "bootstrap-read": (bootstrap, 1),
+            "complement-read": (complement, 1),
+        }
+    )
+    planner = _FakePlanner([_output((_request("complement-read"),))])
+
+    with pytest.raises(ValueError, match="one acquisition turn"):
+        await execute_conditional_adaptive_investigation(
+            _envelope(("bootstrap-read", "complement-read")),
+            capabilities,
+            rules,
+            planner,
+            _policy(max_turns=2, include_explanation=True),
+            _request("bootstrap-read"),
+            clock=clock,
+        )
+
+    assert not bootstrap.calls
+    assert not complement.calls
+    assert not planner.calls
 
 
 @_async_test

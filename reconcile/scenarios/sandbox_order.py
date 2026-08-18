@@ -17,7 +17,10 @@ from reconcile.adapters.sandbox_order import (
     SANDBOX_ORDER_AUTHORITY_POLICY_VERSION,
     SANDBOX_ORDER_CAPABILITY_VERSION,
     SANDBOX_ORDER_CLASSIFICATION_POLICY_VERSION,
+    SANDBOX_ORDER_CLOUD_PROFILE,
     SANDBOX_ORDER_INGRESS_CAPABILITY_NAME,
+    SANDBOX_ORDER_LOCAL_PROFILE,
+    SandboxOrderAdapterProfile,
     build_sandbox_order_aggregate_capability_registration,
     build_sandbox_order_aggregate_rule_registration,
     build_sandbox_order_ingress_capability_registration,
@@ -29,6 +32,7 @@ from reconcile.adaptive import (
     AdaptiveInvestigationResult,
     AdvisoryPlanner,
     execute_adaptive_investigation,
+    execute_conditional_adaptive_investigation,
 )
 from reconcile.baseline import (
     FixedBaselineResult,
@@ -68,6 +72,7 @@ from reconcile.scenarios.local_order import (
     LocalOrderCleanupTarget,
     LocalOrderMutationTarget,
     LocalOrderReadTarget,
+    SandboxOrderReadPort,
 )
 from reconcile.scenarios.runner import (
     MutationBoundary,
@@ -107,6 +112,18 @@ SANDBOX_ORDER_ADAPTIVE_POLICY = AdaptiveInvestigationPolicy(
     include_explanation=True,
 )
 
+SANDBOX_ORDER_CONDITIONAL_POLICY = AdaptiveInvestigationPolicy(
+    name="sandbox-order-conditional-investigation",
+    version="1.0.0",
+    sufficient_classifications=(
+        Classification.COMMITTED,
+        Classification.NOT_COMMITTED,
+    ),
+    max_turns=1,
+    planner_timeout_ms=4_000,
+    include_explanation=False,
+)
+
 _MAX_AGE_SECONDS = 60
 _CLOCK_SKEW_SECONDS = 2
 
@@ -126,6 +143,25 @@ _SANDBOX_ORDER_LIMITATIONS = (
     (
         "Evidence comes only from a local SQLite sandbox and does not establish "
         "third-party API, network, latency, or hosted isolation behavior."
+    ),
+)
+
+_HOSTED_SANDBOX_ORDER_LIMITATIONS = (
+    (
+        "The hosted sandbox exposes no authoritative order-status lookup or "
+        "durable unique order correlation."
+    ),
+    (
+        "Ingress logs and coarse aggregate counts are weak, non-discriminating "
+        "observations and cannot establish order commitment."
+    ),
+    (
+        "A human operator may escalate the indeterminate result; deterministic "
+        "action gates deny automatic retry and compensation."
+    ),
+    (
+        "The controller performs only the allowlisted authenticated weak reads; "
+        "the sandbox route cannot expose private order state."
     ),
 )
 
@@ -481,9 +517,10 @@ def _sandbox_order_plan(
 
 def _sandbox_order_registries(
     envelope: ExecutionEnvelope,
-    read_target: LocalOrderReadTarget,
+    read_target: SandboxOrderReadPort,
     *,
     clock: SandboxOrderInvestigationClock,
+    profile: SandboxOrderAdapterProfile = SANDBOX_ORDER_LOCAL_PROFILE,
 ) -> tuple[CapabilityRegistry, TargetRuleRegistry]:
     capabilities = CapabilityRegistry()
     capabilities.register(
@@ -491,6 +528,7 @@ def _sandbox_order_registries(
             read_target=read_target,
             target=envelope.target,
             clock=clock.now,
+            profile=profile,
         )
     )
     capabilities.register(
@@ -498,12 +536,27 @@ def _sandbox_order_registries(
             read_target=read_target,
             target=envelope.target,
             clock=clock.now,
+            profile=profile,
         )
     )
     rules = TargetRuleRegistry()
-    rules.register(build_sandbox_order_ingress_rule_registration())
-    rules.register(build_sandbox_order_aggregate_rule_registration())
+    rules.register(build_sandbox_order_ingress_rule_registration(profile=profile))
+    rules.register(build_sandbox_order_aggregate_rule_registration(profile=profile))
     return capabilities, rules
+
+
+def _conditional_profile(
+    read_target: SandboxOrderReadPort,
+) -> SandboxOrderAdapterProfile:
+    if type(read_target) is LocalOrderReadTarget:
+        return SANDBOX_ORDER_LOCAL_PROFILE
+    from reconcile.hosted.sandbox import HostedSandboxEvidenceTarget
+
+    if type(read_target) is HostedSandboxEvidenceTarget:
+        return SANDBOX_ORDER_CLOUD_PROFILE
+    raise TypeError(
+        "the conditional sandbox-order investigation requires a sealed read target"
+    )
 
 
 async def execute_sandbox_order_baseline(
@@ -586,6 +639,48 @@ async def execute_sandbox_order_adaptive(
     )
 
 
+async def execute_sandbox_order_conditional(
+    envelope: ExecutionEnvelope,
+    read_target: SandboxOrderReadPort,
+    planner: AdvisoryPlanner,
+    *,
+    clock: SandboxOrderInvestigationClock | None = None,
+    revision: int = 1,
+    cancellation_event: asyncio.Event | None = None,
+    progress_emitter: ProgressEmitter | None = None,
+    durability_observer: ProbeDurabilityObserver | None = None,
+) -> AdaptiveInvestigationResult:
+    """Read ingress first, then allow one advisory aggregate-read selection."""
+
+    envelope = decode_contract(canonical_json_bytes(envelope), ExecutionEnvelope)
+    profile = _conditional_profile(read_target)
+    selected_clock = clock or _SystemInvestigationClock()
+    capabilities, rules = _sandbox_order_registries(
+        envelope,
+        read_target,
+        clock=selected_clock,
+        profile=profile,
+    )
+    return await execute_conditional_adaptive_investigation(
+        envelope,
+        capabilities,
+        rules,
+        planner,
+        SANDBOX_ORDER_CONDITIONAL_POLICY,
+        _probe_request(SANDBOX_ORDER_INGRESS_CAPABILITY_NAME),
+        clock=selected_clock,
+        revision=revision,
+        cancellation_event=cancellation_event,
+        progress_emitter=progress_emitter,
+        additional_limitations=(
+            _SANDBOX_ORDER_LIMITATIONS
+            if profile is SANDBOX_ORDER_LOCAL_PROFILE
+            else _HOSTED_SANDBOX_ORDER_LIMITATIONS
+        ),
+        durability_observer=durability_observer,
+    )
+
+
 def run_sandbox_order_baseline(
     envelope: ExecutionEnvelope,
     read_target: LocalOrderReadTarget,
@@ -663,6 +758,7 @@ __all__ = [
     "SANDBOX_ORDER_ACTION_POLICY_VERSION",
     "SANDBOX_ORDER_ADAPTIVE_POLICY",
     "SANDBOX_ORDER_AGGREGATE_FIRST",
+    "SANDBOX_ORDER_CONDITIONAL_POLICY",
     "SANDBOX_ORDER_EFFECT_ID",
     "SANDBOX_ORDER_FIXED_PROBE_PLAN",
     "SANDBOX_ORDER_INGRESS_FIRST",
@@ -676,6 +772,7 @@ __all__ = [
     "SandboxOrderScenarioDefinition",
     "execute_sandbox_order_adaptive",
     "execute_sandbox_order_baseline",
+    "execute_sandbox_order_conditional",
     "investigate_sandbox_order",
     "run_sandbox_order_baseline",
     "run_sandbox_order_investigation",

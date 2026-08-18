@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -42,6 +41,7 @@ from reconcile.evidence import (
 )
 from reconcile.scenarios.local_order import (
     LocalOrderReadTarget,
+    SandboxOrderReadPort,
     WeakIngressObservation,
     WeakOrderAggregateObservation,
     WeakOrderCountBand,
@@ -57,6 +57,11 @@ SANDBOX_ORDER_CLASSIFICATION_POLICY_VERSION = "classification-v1"
 SANDBOX_ORDER_ADAPTER_VERSION = "1.0.0"
 SANDBOX_ORDER_INGRESS_SOURCE = "local-sandbox-order-weak-ingress"
 SANDBOX_ORDER_AGGREGATE_SOURCE = "local-sandbox-order-weak-aggregate"
+SANDBOX_ORDER_CLOUD_ENVIRONMENT = "google-cloud-firestore-sandbox"
+SANDBOX_ORDER_CLOUD_AUTHORITY_POLICY_VERSION = "authority-cloud-sandbox-order-weak-v1"
+SANDBOX_ORDER_CLOUD_ADAPTER_VERSION = "1.0.0"
+SANDBOX_ORDER_CLOUD_INGRESS_SOURCE = "hosted-sandbox-order-weak-ingress"
+SANDBOX_ORDER_CLOUD_AGGREGATE_SOURCE = "hosted-sandbox-order-weak-aggregate"
 
 _ARGUMENT_BYTE_CEILING = 2
 _RESULT_BYTE_CEILING = 4_096
@@ -64,6 +69,45 @@ _TIMEOUT_MS = 2_000
 _OBSERVATION_SET = "weak-order-observations"
 _TARGET_SCOPE_KEYS = frozenset({"environment", "sandbox_id"})
 _TARGET_RESOURCE_KEYS = frozenset({"observation_set"})
+
+
+@dataclass(frozen=True, slots=True)
+class SandboxOrderAdapterProfile:
+    environment: str
+    authority_policy_version: str
+    adapter_version: str
+    ingress_source: str
+    aggregate_source: str
+    timeout_ms: int
+
+
+SANDBOX_ORDER_LOCAL_PROFILE = SandboxOrderAdapterProfile(
+    environment=SANDBOX_ORDER_ENVIRONMENT,
+    authority_policy_version=SANDBOX_ORDER_AUTHORITY_POLICY_VERSION,
+    adapter_version=SANDBOX_ORDER_ADAPTER_VERSION,
+    ingress_source=SANDBOX_ORDER_INGRESS_SOURCE,
+    aggregate_source=SANDBOX_ORDER_AGGREGATE_SOURCE,
+    timeout_ms=_TIMEOUT_MS,
+)
+SANDBOX_ORDER_CLOUD_PROFILE = SandboxOrderAdapterProfile(
+    environment=SANDBOX_ORDER_CLOUD_ENVIRONMENT,
+    authority_policy_version=SANDBOX_ORDER_CLOUD_AUTHORITY_POLICY_VERSION,
+    adapter_version=SANDBOX_ORDER_CLOUD_ADAPTER_VERSION,
+    ingress_source=SANDBOX_ORDER_CLOUD_INGRESS_SOURCE,
+    aggregate_source=SANDBOX_ORDER_CLOUD_AGGREGATE_SOURCE,
+    timeout_ms=5_000,
+)
+
+
+def _trusted_profile(
+    profile: SandboxOrderAdapterProfile,
+) -> SandboxOrderAdapterProfile:
+    if (
+        profile is not SANDBOX_ORDER_LOCAL_PROFILE
+        and profile is not SANDBOX_ORDER_CLOUD_PROFILE
+    ):
+        raise TypeError("sandbox-order adapter profile is not trusted")
+    return profile
 
 
 class _IngressObservationPayload(StrictModel):
@@ -94,26 +138,35 @@ def _bounded_coordinate(value: object, label: str) -> str:
     return value
 
 
-def build_sandbox_order_target(*, sandbox_id: str) -> TargetBinding:
-    """Build the exact local weak-observation target for one sandbox."""
+def build_sandbox_order_target(
+    *,
+    sandbox_id: str,
+    profile: SandboxOrderAdapterProfile = SANDBOX_ORDER_LOCAL_PROFILE,
+) -> TargetBinding:
+    """Build the exact weak-observation target for one trusted sandbox."""
 
+    profile = _trusted_profile(profile)
     return TargetBinding(
         target_kind=SANDBOX_ORDER_TARGET_KIND,
         scope={
-            "environment": SANDBOX_ORDER_ENVIRONMENT,
+            "environment": profile.environment,
             "sandbox_id": _bounded_coordinate(sandbox_id, "sandbox identifier"),
         },
         resource={"observation_set": _OBSERVATION_SET},
     )
 
 
-def _target_coordinates(target: TargetBinding) -> str:
+def _target_coordinates(
+    target: TargetBinding,
+    profile: SandboxOrderAdapterProfile = SANDBOX_ORDER_LOCAL_PROFILE,
+) -> str:
+    profile = _trusted_profile(profile)
     if target.target_kind != SANDBOX_ORDER_TARGET_KIND:
         raise ValueError("sandbox-order target kind is not supported")
     if set(target.scope) != _TARGET_SCOPE_KEYS:
         raise ValueError("sandbox-order target scope is not exact")
-    if target.scope.get("environment") != SANDBOX_ORDER_ENVIRONMENT:
-        raise ValueError("sandbox-order target is not the local sandbox")
+    if target.scope.get("environment") != profile.environment:
+        raise ValueError("sandbox-order target does not match its adapter profile")
     sandbox_id = _bounded_coordinate(
         target.scope.get("sandbox_id"),
         "sandbox identifier",
@@ -130,8 +183,10 @@ def _empty_argument_capability(
     *,
     target: TargetBinding,
     name: str,
+    profile: SandboxOrderAdapterProfile,
 ) -> ObservationCapability:
-    _target_coordinates(target)
+    profile = _trusted_profile(profile)
+    _target_coordinates(target, profile)
     return ObservationCapability(
         schema_version=OBSERVATION_CAPABILITY_VERSION,
         name=name,
@@ -150,7 +205,7 @@ def _empty_argument_capability(
                 scope=dict(target.scope),
             ),
         ),
-        timeout_ms=_TIMEOUT_MS,
+        timeout_ms=profile.timeout_ms,
         result_byte_ceiling=_RESULT_BYTE_CEILING,
         cost_units=1,
     )
@@ -158,23 +213,29 @@ def _empty_argument_capability(
 
 def build_sandbox_order_ingress_capability(
     target: TargetBinding,
+    *,
+    profile: SandboxOrderAdapterProfile = SANDBOX_ORDER_LOCAL_PROFILE,
 ) -> ObservationCapability:
     """Build the allowlisted generic-ingress read for one local sandbox."""
 
     return _empty_argument_capability(
         target=target,
         name=SANDBOX_ORDER_INGRESS_CAPABILITY_NAME,
+        profile=profile,
     )
 
 
 def build_sandbox_order_aggregate_capability(
     target: TargetBinding,
+    *,
+    profile: SandboxOrderAdapterProfile = SANDBOX_ORDER_LOCAL_PROFILE,
 ) -> ObservationCapability:
     """Build the allowlisted coarse-count read for one local sandbox."""
 
     return _empty_argument_capability(
         target=target,
         name=SANDBOX_ORDER_AGGREGATE_CAPABILITY_NAME,
+        profile=profile,
     )
 
 
@@ -233,7 +294,7 @@ def _read_at(clock: Callable[[], datetime]) -> datetime:
 
 @dataclass(frozen=True, slots=True)
 class _SandboxOrderIngressReadHandler:
-    read_target: LocalOrderReadTarget = field(repr=False, compare=False)
+    read_target: SandboxOrderReadPort = field(repr=False, compare=False)
     target_bytes: bytes = field(repr=False)
     clock: Callable[[], datetime] = field(repr=False, compare=False)
 
@@ -245,7 +306,7 @@ class _SandboxOrderIngressReadHandler:
         ):
             raise CapabilityUnavailable
         try:
-            ingress = await asyncio.to_thread(self.read_target.read_ingress)
+            ingress = await self.read_target.read_ingress_observation()
         except Exception as error:
             raise CapabilityUnavailable from error
         if ingress is not None and type(ingress) is not WeakIngressObservation:
@@ -258,7 +319,7 @@ class _SandboxOrderIngressReadHandler:
 
 @dataclass(frozen=True, slots=True)
 class _SandboxOrderAggregateReadHandler:
-    read_target: LocalOrderReadTarget = field(repr=False, compare=False)
+    read_target: SandboxOrderReadPort = field(repr=False, compare=False)
     target_bytes: bytes = field(repr=False)
     clock: Callable[[], datetime] = field(repr=False, compare=False)
 
@@ -270,7 +331,7 @@ class _SandboxOrderAggregateReadHandler:
         ):
             raise CapabilityUnavailable
         try:
-            aggregate = await asyncio.to_thread(self.read_target.read_aggregate)
+            aggregate = await self.read_target.read_aggregate_observation()
         except Exception as error:
             raise CapabilityUnavailable from error
         if (
@@ -286,13 +347,24 @@ class _SandboxOrderAggregateReadHandler:
 
 def _capability_registration(
     *,
-    read_target: LocalOrderReadTarget,
-    target: TargetBinding,
+    read_target: SandboxOrderReadPort,
     capability: ObservationCapability,
     handler: _SandboxOrderIngressReadHandler | _SandboxOrderAggregateReadHandler,
+    profile: SandboxOrderAdapterProfile,
 ) -> CapabilityRegistration:
-    if type(read_target) is not LocalOrderReadTarget:
-        raise TypeError("sandbox-order capability requires the restricted read target")
+    profile = _trusted_profile(profile)
+    if profile is SANDBOX_ORDER_LOCAL_PROFILE:
+        if type(read_target) is not LocalOrderReadTarget:
+            raise TypeError(
+                "local sandbox-order capability requires the sealed restricted read target"
+            )
+    else:
+        from reconcile.hosted.sandbox import HostedSandboxEvidenceTarget
+
+        if type(read_target) is not HostedSandboxEvidenceTarget:
+            raise TypeError(
+                "cloud sandbox-order capability requires the sealed hosted read target"
+            )
     return CapabilityRegistration(
         capability=capability,
         semantics=CapabilitySemantics.READ_ONLY,
@@ -305,45 +377,45 @@ def _capability_registration(
 
 def build_sandbox_order_ingress_capability_registration(
     *,
-    read_target: LocalOrderReadTarget,
+    read_target: SandboxOrderReadPort,
     target: TargetBinding,
     clock: Callable[[], datetime] | None = None,
+    profile: SandboxOrderAdapterProfile = SANDBOX_ORDER_LOCAL_PROFILE,
 ) -> CapabilityRegistration:
     """Register the generic ingress read without private order access."""
 
-    if type(read_target) is not LocalOrderReadTarget:
-        raise TypeError("sandbox-order capability requires the restricted read target")
+    profile = _trusted_profile(profile)
     return _capability_registration(
         read_target=read_target,
-        target=target,
-        capability=build_sandbox_order_ingress_capability(target),
+        capability=build_sandbox_order_ingress_capability(target, profile=profile),
         handler=_SandboxOrderIngressReadHandler(
             read_target=read_target,
             target_bytes=canonical_json_bytes(target),
             clock=clock or (lambda: datetime.now(UTC)),
         ),
+        profile=profile,
     )
 
 
 def build_sandbox_order_aggregate_capability_registration(
     *,
-    read_target: LocalOrderReadTarget,
+    read_target: SandboxOrderReadPort,
     target: TargetBinding,
     clock: Callable[[], datetime] | None = None,
+    profile: SandboxOrderAdapterProfile = SANDBOX_ORDER_LOCAL_PROFILE,
 ) -> CapabilityRegistration:
     """Register the coarse aggregate read without private order access."""
 
-    if type(read_target) is not LocalOrderReadTarget:
-        raise TypeError("sandbox-order capability requires the restricted read target")
+    profile = _trusted_profile(profile)
     return _capability_registration(
         read_target=read_target,
-        target=target,
-        capability=build_sandbox_order_aggregate_capability(target),
+        capability=build_sandbox_order_aggregate_capability(target, profile=profile),
         handler=_SandboxOrderAggregateReadHandler(
             read_target=read_target,
             target_bytes=canonical_json_bytes(target),
             clock=clock or (lambda: datetime.now(UTC)),
         ),
+        profile=profile,
     )
 
 
@@ -378,6 +450,7 @@ def _validate_request(
     envelope: ExecutionEnvelope,
     request: RuleRequest,
     capability_name: str,
+    profile: SandboxOrderAdapterProfile,
 ) -> None:
     if (
         request.capability_name != capability_name
@@ -386,7 +459,7 @@ def _validate_request(
     ):
         raise RuleRejected(EvidenceReason.MALFORMED_OBSERVATION)
     try:
-        _target_coordinates(envelope.target)
+        _target_coordinates(envelope.target, profile)
     except (TypeError, ValueError) as error:
         raise RuleRejected(EvidenceReason.UNVERIFIABLE_AUTHORITY) from error
     expected_effect_ids = tuple(
@@ -444,8 +517,17 @@ def _weak_observation(
     )
 
 
+@dataclass(frozen=True, slots=True)
 class SandboxOrderIngressNormalizer:
     """Normalize a generic ingress log without assigning target authority."""
+
+    profile: SandboxOrderAdapterProfile = field(
+        default=SANDBOX_ORDER_LOCAL_PROFILE,
+        repr=False,
+    )
+
+    def __post_init__(self) -> None:
+        _trusted_profile(self.profile)
 
     def __call__(self, rule_input: RuleInput) -> RuleObservation:
         if type(rule_input) is not RuleInput:
@@ -456,6 +538,7 @@ class SandboxOrderIngressNormalizer:
             envelope=envelope,
             request=request,
             capability_name=SANDBOX_ORDER_INGRESS_CAPABILITY_NAME,
+            profile=self.profile,
         )
         observation, payload = _parse_ingress_observation(rule_input)
         ingress = payload.ingress
@@ -486,8 +569,17 @@ class SandboxOrderIngressNormalizer:
         )
 
 
+@dataclass(frozen=True, slots=True)
 class SandboxOrderAggregateNormalizer:
     """Normalize a coarse order count without assigning target authority."""
+
+    profile: SandboxOrderAdapterProfile = field(
+        default=SANDBOX_ORDER_LOCAL_PROFILE,
+        repr=False,
+    )
+
+    def __post_init__(self) -> None:
+        _trusted_profile(self.profile)
 
     def __call__(self, rule_input: RuleInput) -> RuleObservation:
         if type(rule_input) is not RuleInput:
@@ -498,6 +590,7 @@ class SandboxOrderAggregateNormalizer:
             envelope=envelope,
             request=request,
             capability_name=SANDBOX_ORDER_AGGREGATE_CAPABILITY_NAME,
+            profile=self.profile,
         )
         observation, payload = _parse_aggregate_observation(rule_input)
         aggregate = payload.aggregate
@@ -528,51 +621,71 @@ class SandboxOrderAggregateNormalizer:
         )
 
 
-def _rule_descriptor(*, capability_name: str, source: str) -> TargetRuleDescriptor:
+def _rule_descriptor(
+    *,
+    capability_name: str,
+    source: str,
+    profile: SandboxOrderAdapterProfile,
+) -> TargetRuleDescriptor:
+    profile = _trusted_profile(profile)
     return TargetRuleDescriptor(
         target_kind=SANDBOX_ORDER_TARGET_KIND,
         capability_name=capability_name,
         capability_version=SANDBOX_ORDER_CAPABILITY_VERSION,
-        authority_policy_version=SANDBOX_ORDER_AUTHORITY_POLICY_VERSION,
+        authority_policy_version=profile.authority_policy_version,
         classification_policy_version=SANDBOX_ORDER_CLASSIFICATION_POLICY_VERSION,
         source=source,
-        adapter_version=SANDBOX_ORDER_ADAPTER_VERSION,
+        adapter_version=profile.adapter_version,
     )
 
 
-def build_sandbox_order_ingress_rule_descriptor() -> TargetRuleDescriptor:
+def build_sandbox_order_ingress_rule_descriptor(
+    *,
+    profile: SandboxOrderAdapterProfile = SANDBOX_ORDER_LOCAL_PROFILE,
+) -> TargetRuleDescriptor:
     """Build the deterministic generic-ingress rule identity."""
 
     return _rule_descriptor(
         capability_name=SANDBOX_ORDER_INGRESS_CAPABILITY_NAME,
-        source=SANDBOX_ORDER_INGRESS_SOURCE,
+        source=_trusted_profile(profile).ingress_source,
+        profile=profile,
     )
 
 
-def build_sandbox_order_aggregate_rule_descriptor() -> TargetRuleDescriptor:
+def build_sandbox_order_aggregate_rule_descriptor(
+    *,
+    profile: SandboxOrderAdapterProfile = SANDBOX_ORDER_LOCAL_PROFILE,
+) -> TargetRuleDescriptor:
     """Build the deterministic coarse-aggregate rule identity."""
 
     return _rule_descriptor(
         capability_name=SANDBOX_ORDER_AGGREGATE_CAPABILITY_NAME,
-        source=SANDBOX_ORDER_AGGREGATE_SOURCE,
+        source=_trusted_profile(profile).aggregate_source,
+        profile=profile,
     )
 
 
-def build_sandbox_order_ingress_rule_registration() -> TargetRuleRegistration:
+def build_sandbox_order_ingress_rule_registration(
+    *,
+    profile: SandboxOrderAdapterProfile = SANDBOX_ORDER_LOCAL_PROFILE,
+) -> TargetRuleRegistration:
     """Register the weak ingress normalizer under its sealed identity."""
 
     return TargetRuleRegistration(
-        descriptor=build_sandbox_order_ingress_rule_descriptor(),
-        normalizer=SandboxOrderIngressNormalizer(),
+        descriptor=build_sandbox_order_ingress_rule_descriptor(profile=profile),
+        normalizer=SandboxOrderIngressNormalizer(profile=profile),
     )
 
 
-def build_sandbox_order_aggregate_rule_registration() -> TargetRuleRegistration:
+def build_sandbox_order_aggregate_rule_registration(
+    *,
+    profile: SandboxOrderAdapterProfile = SANDBOX_ORDER_LOCAL_PROFILE,
+) -> TargetRuleRegistration:
     """Register the weak aggregate normalizer under its sealed identity."""
 
     return TargetRuleRegistration(
-        descriptor=build_sandbox_order_aggregate_rule_descriptor(),
-        normalizer=SandboxOrderAggregateNormalizer(),
+        descriptor=build_sandbox_order_aggregate_rule_descriptor(profile=profile),
+        normalizer=SandboxOrderAggregateNormalizer(profile=profile),
     )
 
 
@@ -583,10 +696,16 @@ __all__ = [
     "SANDBOX_ORDER_AUTHORITY_POLICY_VERSION",
     "SANDBOX_ORDER_CAPABILITY_VERSION",
     "SANDBOX_ORDER_CLASSIFICATION_POLICY_VERSION",
+    "SANDBOX_ORDER_CLOUD_ADAPTER_VERSION",
+    "SANDBOX_ORDER_CLOUD_AUTHORITY_POLICY_VERSION",
+    "SANDBOX_ORDER_CLOUD_ENVIRONMENT",
+    "SANDBOX_ORDER_CLOUD_PROFILE",
     "SANDBOX_ORDER_ENVIRONMENT",
     "SANDBOX_ORDER_INGRESS_CAPABILITY_NAME",
     "SANDBOX_ORDER_INGRESS_SOURCE",
+    "SANDBOX_ORDER_LOCAL_PROFILE",
     "SANDBOX_ORDER_TARGET_KIND",
+    "SandboxOrderAdapterProfile",
     "SandboxOrderAggregateNormalizer",
     "SandboxOrderIngressNormalizer",
     "build_sandbox_order_aggregate_capability",

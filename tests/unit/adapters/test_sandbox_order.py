@@ -15,6 +15,7 @@ from reconcile.adapters.sandbox_order import (
     SANDBOX_ORDER_AUTHORITY_POLICY_VERSION,
     SANDBOX_ORDER_CAPABILITY_VERSION,
     SANDBOX_ORDER_CLASSIFICATION_POLICY_VERSION,
+    SANDBOX_ORDER_CLOUD_PROFILE,
     SANDBOX_ORDER_ENVIRONMENT,
     SANDBOX_ORDER_INGRESS_CAPABILITY_NAME,
     SANDBOX_ORDER_INGRESS_SOURCE,
@@ -57,6 +58,8 @@ from reconcile.controller import (
     ProbeObservation,
 )
 from reconcile.evidence import RuleInput, RuleRejected, RuleVerdict
+from reconcile.hosted.sandbox import HostedSandboxEvidenceTarget
+from reconcile.hosted.transport import HostedHttpTransport
 from reconcile.scenarios.local_order import (
     HiddenOrderOutcome,
     LocalOrderError,
@@ -326,6 +329,47 @@ def test_capability_registration_accepts_only_the_observation_read_handle(
             read_target=mutation,  # type: ignore[arg-type]
             target=_target(),
         )
+
+
+def test_cloud_profile_accepts_only_the_sealed_hosted_read_target() -> None:
+    class ForgedReadPort:
+        async def read_ingress_observation(self):
+            return None
+
+        async def read_aggregate_observation(self):
+            return None
+
+    target = build_sandbox_order_target(
+        sandbox_id=_SANDBOX_ID,
+        profile=SANDBOX_ORDER_CLOUD_PROFILE,
+    )
+    with pytest.raises(TypeError, match="sealed hosted read target"):
+        build_sandbox_order_ingress_capability_registration(
+            read_target=ForgedReadPort(),
+            target=target,
+            profile=SANDBOX_ORDER_CLOUD_PROFILE,
+        )
+
+    hosted = HostedSandboxEvidenceTarget(
+        sandbox_url="https://sandbox.example.test",
+        sandbox_audience="https://sandbox.example.test",
+        sandbox_id=_SANDBOX_ID,
+        transport=HostedHttpTransport(lambda _audience: "header.payload.signature"),
+    )
+    registration = build_sandbox_order_ingress_capability_registration(
+        read_target=hosted,
+        target=target,
+        profile=SANDBOX_ORDER_CLOUD_PROFILE,
+    )
+    rule = build_sandbox_order_ingress_rule_registration(
+        profile=SANDBOX_ORDER_CLOUD_PROFILE,
+    )
+
+    assert registration.capability.timeout_ms == SANDBOX_ORDER_CLOUD_PROFILE.timeout_ms
+    assert rule.descriptor.authority_policy_version == (
+        SANDBOX_ORDER_CLOUD_PROFILE.authority_policy_version
+    )
+    assert rule.descriptor.source == SANDBOX_ORDER_CLOUD_PROFILE.ingress_source
 
 
 @pytest.mark.parametrize(

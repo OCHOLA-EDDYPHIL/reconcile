@@ -953,12 +953,18 @@ def _catalog(
             registration=registration,
             descriptor=descriptor,
         )
+
+    return entries, set(entries) == enabled, _catalog_sha256(entries)
+
+
+def _catalog_sha256(
+    entries: Mapping[tuple[str, str], _CatalogEntry],
+) -> str:
     material = [
         json.loads(canonical_json_bytes(entries[key].descriptor))
         for key in sorted(entries)
     ]
-    digest = hashlib.sha256(canonical_json_value_bytes(material)).hexdigest()
-    return entries, set(entries) == enabled, digest
+    return hashlib.sha256(canonical_json_value_bytes(material)).hexdigest()
 
 
 def _remaining_budget(
@@ -1631,7 +1637,7 @@ def _emit_advisory_completed(
     )
 
 
-async def execute_adaptive_investigation(
+async def _execute_adaptive_investigation(
     envelope: ExecutionEnvelope,
     capabilities: CapabilityRegistry,
     rules: TargetRuleRegistry,
@@ -1644,6 +1650,7 @@ async def execute_adaptive_investigation(
     additional_limitations: tuple[str, ...] = (),
     progress_emitter: ProgressEmitter | None = None,
     durability_observer: ProbeDurabilityObserver | None = None,
+    bootstrap_request: ProbeRequest | None = None,
 ) -> AdaptiveInvestigationResult:
     """Run bounded advisory acquisition through deterministic safety boundaries."""
 
@@ -1655,6 +1662,17 @@ async def execute_adaptive_investigation(
         raise TypeError("adaptive execution requires an exact target-rule registry")
     if type(policy) is not AdaptiveInvestigationPolicy:
         raise TypeError("adaptive execution requires an exact adaptive policy")
+    if bootstrap_request is not None:
+        if type(bootstrap_request) is not ProbeRequest:
+            raise TypeError("conditional execution requires an exact bootstrap request")
+        if policy.max_turns != 1 or policy.include_explanation:
+            raise ValueError(
+                "conditional execution requires one acquisition turn without explanation"
+            )
+        bootstrap_request = decode_contract(
+            canonical_json_bytes(bootstrap_request),
+            ProbeRequest,
+        )
     try:
         configured_metadata = planner.metadata
         plan_method = planner.plan
@@ -1691,6 +1709,27 @@ async def execute_adaptive_investigation(
         sealed_envelope,
         capabilities,
     )
+    planner_catalog = catalog
+    bootstrap_identity: tuple[str, str] | None = None
+    conditional_catalog_safe = True
+    if bootstrap_request is not None:
+        bootstrap_identity = (
+            bootstrap_request.capability_name,
+            bootstrap_request.capability_version,
+        )
+        planner_catalog = dict(catalog)
+        bootstrap_entry = catalog.get(bootstrap_identity)
+        if bootstrap_entry is not None:
+            planner_catalog[bootstrap_identity] = _CatalogEntry(
+                registration=bootstrap_entry.registration,
+                descriptor=bootstrap_entry.descriptor.model_copy(
+                    update={"remaining_invocations": 1}
+                ),
+            )
+        conditional_catalog_safe = (
+            bootstrap_identity in catalog and len(planner_catalog) == 2
+        )
+        catalog_sha256 = _catalog_sha256(planner_catalog)
     controller = ProbeController(
         sealed_envelope,
         capabilities,
@@ -1705,6 +1744,9 @@ async def execute_adaptive_investigation(
     required_identities = {
         (item.name, item.version) for item in policy.required_capabilities
     }
+    planner_required_identities = required_identities - (
+        set() if bootstrap_identity is None else {bootstrap_identity}
+    )
 
     stop_reason: AdaptiveStopReason | None = None
     sufficient_sequence: int | None = None
@@ -1735,8 +1777,121 @@ async def execute_adaptive_investigation(
         stop_reason = AdaptiveStopReason.CANCELLED
     elif not required_identities <= set(catalog):
         stop_reason = AdaptiveStopReason.REQUIRED_CAPABILITY_UNAVAILABLE
-    elif not catalog_safe:
+    elif not catalog_safe or not conditional_catalog_safe:
         stop_reason = AdaptiveStopReason.CAPABILITY_CATALOG_UNSAFE
+
+    if stop_reason is None and bootstrap_request is not None:
+        request = bootstrap_request
+        request_sha256 = probe_request_sha256(request)
+        identity = (request.capability_name, request.capability_version)
+        prior_request_hashes.append(request_sha256)
+        selected_counts[identity] = selected_counts.get(identity, 0) + 1
+        previous_progress = _progress_sha256(evaluation)
+        if progress_emitter is not None:
+            progress_emitter(
+                ProbeProgress(
+                    occurred_at=_progress_occurred_at(),
+                    investigation_id=sealed_envelope.investigation_id,
+                    strategy=ComparisonStrategyKind.ADAPTIVE,
+                    stage=ProbeProgressStage.REQUESTED,
+                    attempt_sequence=1,
+                    capability_name=request.capability_name,
+                    capability_version=request.capability_version,
+                    request_sha256=request_sha256,
+                    relevant_effect_ids=request.relevant_effect_ids,
+                )
+            )
+        execution = await _execute_with_cancellation(
+            controller,
+            request,
+            cancellation_event,
+        )
+        audit = execution.audit
+        processed_sequences.add(audit.sequence)
+        request_by_sequence[audit.sequence] = request
+        engine.process(ProbeRun(request=request, execution=execution))
+        evaluation = engine.evaluate(controller.audit_trail)
+        decision = evaluation.attempts[-1].decision
+        if progress_emitter is not None:
+            progress_emitter(
+                ProbeProgress(
+                    occurred_at=_progress_occurred_at(),
+                    investigation_id=sealed_envelope.investigation_id,
+                    strategy=ComparisonStrategyKind.ADAPTIVE,
+                    stage=ProbeProgressStage.COMPLETED,
+                    attempt_sequence=1,
+                    capability_name=audit.capability_name,
+                    capability_version=audit.capability_version,
+                    request_sha256=audit.request_sha256,
+                    relevant_effect_ids=request.relevant_effect_ids,
+                    controller_sequence=audit.sequence,
+                    controller_sequence_reused=False,
+                    outcome=audit.outcome,
+                    controller_stop_reason=audit.stop_reason,
+                    session_elapsed_ms=audit.session_elapsed_ms,
+                    probe_count_used=audit.probe_count_used,
+                    cost_units_used=audit.cost_units_used,
+                    result_bytes_acquired=audit.result_bytes_acquired,
+                    result_sha256=audit.result_sha256,
+                    result_byte_count=(
+                        audit.result_byte_count
+                        if audit.outcome is ProbeOutcome.COMPLETED
+                        else None
+                    ),
+                    evidence_ids=(decision.evidence_id,),
+                )
+            )
+            (
+                classification,
+                continue_allowed,
+                escalation_required,
+                missing_effect_ids,
+            ) = _progress_state(
+                evaluation.classification,
+                evaluation.action_gates,
+                evaluation.missing_evidence,
+            )
+            progress_emitter(
+                EvidenceProgress(
+                    occurred_at=_progress_occurred_at(),
+                    investigation_id=sealed_envelope.investigation_id,
+                    strategy=ComparisonStrategyKind.ADAPTIVE,
+                    attempt_sequence=1,
+                    controller_sequence=audit.sequence,
+                    evidence_id=decision.evidence_id,
+                    disposition=decision.disposition,
+                    reason=decision.reason,
+                    classification=classification,
+                    continue_allowed=continue_allowed,
+                    escalation_required=escalation_required,
+                    missing_effect_ids=missing_effect_ids,
+                )
+            )
+        if audit.stop_reason is ProbeStopReason.CAPABILITY_UNAVAILABLE:
+            unavailable_sequences.add(audit.sequence)
+        if decision.reason is EvidenceReason.DUPLICATE_CANDIDATES:
+            redundant_sequences.add(audit.sequence)
+
+        progress = _progress_sha256(evaluation)
+        unchanged_progress_count = 1 if progress == previous_progress else 0
+        if evaluation.classification in policy.sufficient_classifications:
+            stop_reason = AdaptiveStopReason.SUFFICIENT_EVIDENCE
+            sufficient_sequence = audit.sequence
+            sufficient_elapsed_ms = audit.session_elapsed_ms
+        elif audit.stop_reason is ProbeStopReason.CAPABILITY_UNAVAILABLE:
+            stop_reason = AdaptiveStopReason.REQUIRED_CAPABILITY_UNAVAILABLE
+        elif (
+            audit.stop_reason in _UNSUPPORTED_REASONS
+            or audit.outcome in {ProbeOutcome.REJECTED, ProbeOutcome.MALFORMED}
+            or decision.reason is EvidenceReason.UNSUPPORTED_CAPABILITY
+        ):
+            stop_reason = AdaptiveStopReason.REQUIRED_PROBE_FAILED
+        elif audit.stop_reason in _BUDGET_REASONS:
+            stop_reason = AdaptiveStopReason.BUDGET_EXHAUSTED
+        elif audit.stop_reason in _DEADLINE_REASONS:
+            stop_reason = AdaptiveStopReason.DEADLINE_EXHAUSTED
+        elif audit.stop_reason is ProbeStopReason.PROBE_CANCELLED:
+            stop_reason = AdaptiveStopReason.CANCELLED
 
     for _ in range(policy.max_turns):
         if stop_reason is not None:
@@ -1766,8 +1921,8 @@ async def execute_adaptive_investigation(
             break
         if any(
             selected_counts.get(identity, 0)
-            >= catalog[identity].descriptor.remaining_invocations
-            for identity in required_identities
+            >= planner_catalog[identity].descriptor.remaining_invocations
+            for identity in planner_required_identities
         ):
             stop_reason = AdaptiveStopReason.REQUIRED_CAPABILITY_UNAVAILABLE
             break
@@ -1776,7 +1931,7 @@ async def execute_adaptive_investigation(
             planner_input = _planner_input(
                 phase=AdaptivePlannerPhase.ACQUIRE_EVIDENCE,
                 envelope=sealed_envelope,
-                catalog=catalog,
+                catalog=planner_catalog,
                 selected_counts=selected_counts,
                 evaluation=evaluation,
                 request_by_sequence=request_by_sequence,
@@ -1861,7 +2016,7 @@ async def execute_adaptive_investigation(
         output = turn.output
         selection = _select_proposal(
             output.probe_proposals,
-            catalog=catalog,
+            catalog=planner_catalog,
             remaining=remaining,
             selected_counts=selected_counts,
             expected_effect_ids=expected_effect_ids,
@@ -2054,12 +2209,12 @@ async def execute_adaptive_investigation(
             sufficient_elapsed_ms = audit.session_elapsed_ms
             break
         if (
-            identity in required_identities
+            identity in planner_required_identities
             and audit.stop_reason is ProbeStopReason.CAPABILITY_UNAVAILABLE
         ):
             stop_reason = AdaptiveStopReason.REQUIRED_CAPABILITY_UNAVAILABLE
             break
-        if identity in required_identities and (
+        if identity in planner_required_identities and (
             audit.stop_reason in _UNSUPPORTED_REASONS
             or audit.outcome in {ProbeOutcome.REJECTED, ProbeOutcome.MALFORMED}
             or decision.reason is EvidenceReason.UNSUPPORTED_CAPABILITY
@@ -2108,7 +2263,7 @@ async def execute_adaptive_investigation(
                 explanation_input = _planner_input(
                     phase=AdaptivePlannerPhase.EXPLAIN_EVIDENCE,
                     envelope=sealed_envelope,
-                    catalog=catalog,
+                    catalog=planner_catalog,
                     selected_counts=selected_counts,
                     evaluation=evaluation,
                     request_by_sequence=request_by_sequence,
@@ -2348,6 +2503,70 @@ async def execute_adaptive_investigation(
     return result
 
 
+async def execute_adaptive_investigation(
+    envelope: ExecutionEnvelope,
+    capabilities: CapabilityRegistry,
+    rules: TargetRuleRegistry,
+    planner: AdvisoryPlanner,
+    policy: AdaptiveInvestigationPolicy,
+    *,
+    clock: ControllerClock | None = None,
+    revision: int = 1,
+    cancellation_event: asyncio.Event | None = None,
+    additional_limitations: tuple[str, ...] = (),
+    progress_emitter: ProgressEmitter | None = None,
+    durability_observer: ProbeDurabilityObserver | None = None,
+) -> AdaptiveInvestigationResult:
+    """Run the existing planner-first bounded adaptive investigation."""
+
+    return await _execute_adaptive_investigation(
+        envelope,
+        capabilities,
+        rules,
+        planner,
+        policy,
+        clock=clock,
+        revision=revision,
+        cancellation_event=cancellation_event,
+        additional_limitations=additional_limitations,
+        progress_emitter=progress_emitter,
+        durability_observer=durability_observer,
+    )
+
+
+async def execute_conditional_adaptive_investigation(
+    envelope: ExecutionEnvelope,
+    capabilities: CapabilityRegistry,
+    rules: TargetRuleRegistry,
+    planner: AdvisoryPlanner,
+    policy: AdaptiveInvestigationPolicy,
+    bootstrap_request: ProbeRequest,
+    *,
+    clock: ControllerClock | None = None,
+    revision: int = 1,
+    cancellation_event: asyncio.Event | None = None,
+    additional_limitations: tuple[str, ...] = (),
+    progress_emitter: ProgressEmitter | None = None,
+    durability_observer: ProbeDurabilityObserver | None = None,
+) -> AdaptiveInvestigationResult:
+    """Run one fixed bootstrap read before one bounded acquisition turn."""
+
+    return await _execute_adaptive_investigation(
+        envelope,
+        capabilities,
+        rules,
+        planner,
+        policy,
+        clock=clock,
+        revision=revision,
+        cancellation_event=cancellation_event,
+        additional_limitations=additional_limitations,
+        progress_emitter=progress_emitter,
+        durability_observer=durability_observer,
+        bootstrap_request=bootstrap_request,
+    )
+
+
 def run_adaptive_investigation(
     envelope: ExecutionEnvelope,
     capabilities: CapabilityRegistry,
@@ -2398,5 +2617,6 @@ __all__ = [
     "ProposalDisposition",
     "ProposalRecord",
     "execute_adaptive_investigation",
+    "execute_conditional_adaptive_investigation",
     "run_adaptive_investigation",
 ]

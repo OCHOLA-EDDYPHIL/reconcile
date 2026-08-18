@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -52,6 +51,7 @@ from reconcile.scenarios.local_firestore import (
     BusinessOperationManifest,
     BusinessOperationReadback,
     BusinessOperationStatus,
+    FirestoreBusinessReadPort,
     LocalFirestoreReadTarget,
     expected_effect_declarations_sha256,
 )
@@ -64,6 +64,12 @@ FIRESTORE_BUSINESS_AUTHORITY_POLICY_VERSION = "authority-local-business-document
 FIRESTORE_BUSINESS_CLASSIFICATION_POLICY_VERSION = "classification-v1"
 FIRESTORE_BUSINESS_ADAPTER_VERSION = "1.0.0"
 FIRESTORE_BUSINESS_SOURCE = "local-business-documents-sqlite"
+FIRESTORE_BUSINESS_CLOUD_ENVIRONMENT = "google-cloud-firestore"
+FIRESTORE_BUSINESS_CLOUD_AUTHORITY_POLICY_VERSION = (
+    "authority-cloud-firestore-business-documents-v1"
+)
+FIRESTORE_BUSINESS_CLOUD_ADAPTER_VERSION = "1.0.0"
+FIRESTORE_BUSINESS_CLOUD_SOURCE = "google-cloud-firestore-v1"
 
 _ARGUMENT_BYTE_CEILING = 2
 _RESULT_BYTE_CEILING = 32_768
@@ -77,6 +83,53 @@ _TARGET_RESOURCE_KEYS = frozenset(
     {"manifest_collection", "manifest_document_id", "effect_documents"}
 )
 _COORDINATE_KEYS = frozenset({"effect_id", "collection_name", "document_id"})
+
+
+@dataclass(frozen=True, slots=True)
+class FirestoreBusinessTargetProfile:
+    """Trusted target and rule identity for one deterministic read provider."""
+
+    environment: str
+    authority_policy_version: str
+    source: str
+    adapter_version: str
+    timeout_ms: int
+
+
+FIRESTORE_BUSINESS_LOCAL_PROFILE = FirestoreBusinessTargetProfile(
+    environment=FIRESTORE_BUSINESS_ENVIRONMENT,
+    authority_policy_version=FIRESTORE_BUSINESS_AUTHORITY_POLICY_VERSION,
+    source=FIRESTORE_BUSINESS_SOURCE,
+    adapter_version=FIRESTORE_BUSINESS_ADAPTER_VERSION,
+    timeout_ms=_TIMEOUT_MS,
+)
+FIRESTORE_BUSINESS_CLOUD_PROFILE = FirestoreBusinessTargetProfile(
+    environment=FIRESTORE_BUSINESS_CLOUD_ENVIRONMENT,
+    authority_policy_version=FIRESTORE_BUSINESS_CLOUD_AUTHORITY_POLICY_VERSION,
+    source=FIRESTORE_BUSINESS_CLOUD_SOURCE,
+    adapter_version=FIRESTORE_BUSINESS_CLOUD_ADAPTER_VERSION,
+    timeout_ms=5_000,
+)
+_TRUSTED_PROFILES = (
+    FIRESTORE_BUSINESS_LOCAL_PROFILE,
+    FIRESTORE_BUSINESS_CLOUD_PROFILE,
+)
+
+
+def _trusted_profile(
+    profile: FirestoreBusinessTargetProfile,
+) -> FirestoreBusinessTargetProfile:
+    if not any(profile is candidate for candidate in _TRUSTED_PROFILES):
+        raise TypeError("business target profile is not trusted")
+    return profile
+
+
+def _target_profile(target: TargetBinding) -> FirestoreBusinessTargetProfile:
+    environment = target.scope.get("environment")
+    for profile in _TRUSTED_PROFILES:
+        if environment == profile.environment:
+            return profile
+    raise ValueError("business-document target environment is not supported")
 
 
 class _BusinessDocumentPayload(StrictModel):
@@ -184,14 +237,16 @@ def build_firestore_business_target(
     manifest_collection: str,
     manifest_document_id: str,
     document_coordinates: tuple[BusinessDocumentCoordinate, ...],
+    profile: FirestoreBusinessTargetProfile = FIRESTORE_BUSINESS_LOCAL_PROFILE,
 ) -> TargetBinding:
-    """Build the exact local SQLite business-document target."""
+    """Build one exact trusted business-document target."""
 
+    profile = _trusted_profile(profile)
     coordinates = _validate_coordinates(document_coordinates)
     return TargetBinding(
         target_kind=FIRESTORE_BUSINESS_TARGET_KIND,
         scope={
-            "environment": FIRESTORE_BUSINESS_ENVIRONMENT,
+            "environment": profile.environment,
             "namespace_id": _bounded_coordinate(namespace_id, "namespace identifier"),
         },
         resource={
@@ -217,18 +272,20 @@ def build_firestore_business_target(
 
 def _target_coordinates(
     target: TargetBinding,
+    profile: FirestoreBusinessTargetProfile | None = None,
 ) -> tuple[
     str,
     str,
     str,
     tuple[BusinessDocumentCoordinate, ...],
 ]:
+    profile = _target_profile(target) if profile is None else _trusted_profile(profile)
     if target.target_kind != FIRESTORE_BUSINESS_TARGET_KIND:
         raise ValueError("business-document target kind is not supported")
     if set(target.scope) != _TARGET_SCOPE_KEYS:
         raise ValueError("business-document target scope is not exact")
-    if target.scope.get("environment") != FIRESTORE_BUSINESS_ENVIRONMENT:
-        raise ValueError("business-document target is not the local SQLite target")
+    if target.scope.get("environment") != profile.environment:
+        raise ValueError("business-document target profile does not match")
     namespace_id = _bounded_coordinate(
         target.scope.get("namespace_id"),
         "namespace identifier",
@@ -283,7 +340,8 @@ def build_firestore_business_capability(
 ) -> ObservationCapability:
     """Build one empty-argument composite read bound to one exact operation."""
 
-    _target_coordinates(target)
+    profile = _target_profile(target)
+    _target_coordinates(target, profile)
     return ObservationCapability(
         schema_version=OBSERVATION_CAPABILITY_VERSION,
         name=FIRESTORE_BUSINESS_CAPABILITY_NAME,
@@ -302,7 +360,7 @@ def build_firestore_business_capability(
                 scope=dict(target.scope),
             ),
         ),
-        timeout_ms=_TIMEOUT_MS,
+        timeout_ms=profile.timeout_ms,
         result_byte_ceiling=_RESULT_BYTE_CEILING,
         cost_units=1,
     )
@@ -350,7 +408,8 @@ def _readback_payload(readback: BusinessOperationReadback) -> dict[str, object]:
 
 @dataclass(frozen=True, slots=True)
 class _FirestoreBusinessReadHandler:
-    read_target: LocalFirestoreReadTarget = field(repr=False, compare=False)
+    read_target: FirestoreBusinessReadPort = field(repr=False, compare=False)
+    profile: FirestoreBusinessTargetProfile = field(repr=False)
     target_bytes: bytes = field(repr=False)
     clock: Callable[[], datetime] = field(repr=False, compare=False)
 
@@ -361,7 +420,7 @@ class _FirestoreBusinessReadHandler:
             manifest_collection,
             manifest_document_id,
             document_coordinates,
-        ) = _target_coordinates(target)
+        ) = _target_coordinates(target, self.profile)
         if (
             probe.capability_name != FIRESTORE_BUSINESS_CAPABILITY_NAME
             or probe.capability_version != FIRESTORE_BUSINESS_CAPABILITY_VERSION
@@ -371,8 +430,7 @@ class _FirestoreBusinessReadHandler:
             != tuple(item.effect_id for item in document_coordinates)
         ):
             raise CapabilityUnavailable
-        readback = await asyncio.to_thread(
-            self.read_target.read,
+        readback = await self.read_target.read_business_operation(
             namespace_id=namespace_id,
             operation_id=probe.operation_id,
             manifest_collection=manifest_collection,
@@ -392,16 +450,28 @@ class _FirestoreBusinessReadHandler:
 
 def build_firestore_business_capability_registration(
     *,
-    read_target: LocalFirestoreReadTarget,
+    read_target: FirestoreBusinessReadPort,
     target: TargetBinding,
     clock: Callable[[], datetime] | None = None,
+    profile: FirestoreBusinessTargetProfile = FIRESTORE_BUSINESS_LOCAL_PROFILE,
 ) -> CapabilityRegistration:
-    """Register the exact local composite read as an enabled read-only probe."""
+    """Register an exact trusted composite read as a read-only probe."""
 
-    if type(read_target) is not LocalFirestoreReadTarget:
-        raise TypeError("business capability requires the restricted read target")
+    profile = _trusted_profile(profile)
+    if profile is FIRESTORE_BUSINESS_LOCAL_PROFILE:
+        trusted = type(read_target) is LocalFirestoreReadTarget
+    else:
+        from reconcile.hosted.firestore_business import (
+            GoogleFirestoreBusinessReadTarget,
+        )
+
+        trusted = type(read_target) is GoogleFirestoreBusinessReadTarget
+    if not trusted:
+        raise TypeError("business capability requires the sealed read target")
+    _target_coordinates(target, profile)
     handler = _FirestoreBusinessReadHandler(
         read_target=read_target,
+        profile=profile,
         target_bytes=canonical_json_bytes(target),
         clock=clock or (lambda: datetime.now(UTC)),
     )
@@ -651,8 +721,14 @@ def _validate_documents(
             raise RuleRejected(EvidenceReason.UNVERIFIABLE_AUTHORITY)
 
 
+@dataclass(frozen=True, slots=True)
 class FirestoreBusinessReadbackNormalizer:
     """Admit only a coherent manifest and all corresponding exact documents."""
+
+    profile: FirestoreBusinessTargetProfile = FIRESTORE_BUSINESS_LOCAL_PROFILE
+
+    def __post_init__(self) -> None:
+        _trusted_profile(self.profile)
 
     def __call__(self, rule_input: RuleInput) -> RuleObservation:
         if type(rule_input) is not RuleInput:
@@ -671,7 +747,7 @@ class FirestoreBusinessReadbackNormalizer:
                 manifest_collection,
                 manifest_document_id,
                 document_coordinates,
-            ) = _target_coordinates(envelope.target)
+            ) = _target_coordinates(envelope.target, self.profile)
         except (TypeError, ValueError) as error:
             raise RuleRejected(EvidenceReason.UNVERIFIABLE_AUTHORITY) from error
         expected = _expected_effects(envelope, request, document_coordinates)
@@ -752,26 +828,31 @@ class FirestoreBusinessReadbackNormalizer:
         )
 
 
-def build_firestore_business_rule_descriptor() -> TargetRuleDescriptor:
-    """Build the deterministic local business-document rule identity."""
+def build_firestore_business_rule_descriptor(
+    profile: FirestoreBusinessTargetProfile = FIRESTORE_BUSINESS_LOCAL_PROFILE,
+) -> TargetRuleDescriptor:
+    """Build the deterministic rule identity for one trusted provider."""
 
+    profile = _trusted_profile(profile)
     return TargetRuleDescriptor(
         target_kind=FIRESTORE_BUSINESS_TARGET_KIND,
         capability_name=FIRESTORE_BUSINESS_CAPABILITY_NAME,
         capability_version=FIRESTORE_BUSINESS_CAPABILITY_VERSION,
-        authority_policy_version=FIRESTORE_BUSINESS_AUTHORITY_POLICY_VERSION,
+        authority_policy_version=profile.authority_policy_version,
         classification_policy_version=FIRESTORE_BUSINESS_CLASSIFICATION_POLICY_VERSION,
-        source=FIRESTORE_BUSINESS_SOURCE,
-        adapter_version=FIRESTORE_BUSINESS_ADAPTER_VERSION,
+        source=profile.source,
+        adapter_version=profile.adapter_version,
     )
 
 
-def build_firestore_business_rule_registration() -> TargetRuleRegistration:
+def build_firestore_business_rule_registration(
+    profile: FirestoreBusinessTargetProfile = FIRESTORE_BUSINESS_LOCAL_PROFILE,
+) -> TargetRuleRegistration:
     """Register the composite normalizer under its sealed rule identity."""
 
     return TargetRuleRegistration(
-        descriptor=build_firestore_business_rule_descriptor(),
-        normalizer=FirestoreBusinessReadbackNormalizer(),
+        descriptor=build_firestore_business_rule_descriptor(profile),
+        normalizer=FirestoreBusinessReadbackNormalizer(profile=profile),
     )
 
 
@@ -781,10 +862,17 @@ __all__ = [
     "FIRESTORE_BUSINESS_CAPABILITY_NAME",
     "FIRESTORE_BUSINESS_CAPABILITY_VERSION",
     "FIRESTORE_BUSINESS_CLASSIFICATION_POLICY_VERSION",
+    "FIRESTORE_BUSINESS_CLOUD_ADAPTER_VERSION",
+    "FIRESTORE_BUSINESS_CLOUD_AUTHORITY_POLICY_VERSION",
+    "FIRESTORE_BUSINESS_CLOUD_ENVIRONMENT",
+    "FIRESTORE_BUSINESS_CLOUD_PROFILE",
+    "FIRESTORE_BUSINESS_CLOUD_SOURCE",
     "FIRESTORE_BUSINESS_ENVIRONMENT",
+    "FIRESTORE_BUSINESS_LOCAL_PROFILE",
     "FIRESTORE_BUSINESS_SOURCE",
     "FIRESTORE_BUSINESS_TARGET_KIND",
     "FirestoreBusinessReadbackNormalizer",
+    "FirestoreBusinessTargetProfile",
     "build_firestore_business_capability",
     "build_firestore_business_capability_registration",
     "build_firestore_business_rule_descriptor",

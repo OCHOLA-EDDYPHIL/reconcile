@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import re
@@ -12,6 +13,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
+from typing import Protocol, runtime_checkable
 
 _SQLITE_TIMEOUT_SECONDS = 30.0
 _MAX_TEXT_LENGTH = 1_024
@@ -98,6 +100,17 @@ class WeakOrderObservationSnapshot:
             and type(self.aggregate) is not WeakOrderAggregateObservation
         ):
             raise TypeError("the aggregate observation has an invalid type")
+
+
+@runtime_checkable
+class SandboxOrderReadPort(Protocol):
+    """Trusted async boundary exposing only the two weak observations."""
+
+    async def read_ingress_observation(self) -> WeakIngressObservation | None: ...
+
+    async def read_aggregate_observation(
+        self,
+    ) -> WeakOrderAggregateObservation | None: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -1068,6 +1081,14 @@ class LocalOrderReadTarget:
     def read_aggregate(self) -> WeakOrderAggregateObservation | None:
         return self._database.read_aggregate()
 
+    async def read_ingress_observation(self) -> WeakIngressObservation | None:
+        return await asyncio.to_thread(self.read_ingress)
+
+    async def read_aggregate_observation(
+        self,
+    ) -> WeakOrderAggregateObservation | None:
+        return await asyncio.to_thread(self.read_aggregate)
+
     def read_snapshot(self) -> WeakOrderObservationSnapshot:
         return self._database.read_snapshot()
 
@@ -1178,6 +1199,7 @@ __all__ = [
     "OrderExecutionAlreadyExists",
     "OrderOracleNotFound",
     "OrderOwnershipError",
+    "SandboxOrderReadPort",
     "WeakIngressObservation",
     "WeakOrderAggregateObservation",
     "WeakOrderCountBand",
