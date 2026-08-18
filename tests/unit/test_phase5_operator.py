@@ -1106,6 +1106,42 @@ def test_dependency_extractor_rejects_non_ascii_or_noncanonical_paths(
         )
 
 
+def test_dependency_extractor_ignores_safe_utf8_path_outside_dependency_prefix(
+    tmp_path: Path,
+) -> None:
+    prefix = "opt/reconcile/lib/python3.12/site-packages"
+    state, artifact = _dependency_artifact(
+        tmp_path,
+        layer_entries=(
+            (
+                "etc/ssl/certs/NetLock_Arany_=Class_Gold=_F\u0151tan\u00fas\u00edtv\u00e1ny.pem",
+                "symlink",
+                "/usr/share/ca-certificates/mozilla/NetLock.pem",
+            ),
+            *(
+                (name, "directory", None)
+                for name in (
+                    "opt",
+                    "opt/reconcile",
+                    "opt/reconcile/lib",
+                    "opt/reconcile/lib/python3.12",
+                    prefix,
+                )
+            ),
+            (f"{prefix}/module.py", "file", b"payload"),
+        ),
+    )
+
+    binding = operator._materialize_python_dependencies(
+        state_root=state.root,
+        image_artifact=artifact,
+        python_lock_sha256="a" * 64,
+    )
+
+    assert binding.file_count == 1
+    assert (Path(binding.root) / "module.py").read_bytes() == b"payload"
+
+
 @pytest.mark.parametrize(
     "name",
     (
