@@ -579,6 +579,36 @@ def test_copy_rewrites_only_the_verified_remote_backend(tmp_path: Path) -> None:
         assert "impersonate_service_account" not in provider
 
 
+def test_copy_rewrites_private_working_files_from_read_only_source(
+    tmp_path: Path,
+) -> None:
+    original = plans._STACKS[1]
+    source = tmp_path / "source"
+    shutil.copytree(original.source, source)
+    source_files = tuple(path for path in source.iterdir() if path.is_file())
+    for path in source_files:
+        path.chmod(0o400)
+    stack = plans._Stack(
+        original.name,
+        source,
+        original.addresses,
+        original.variables,
+    )
+
+    destination = tmp_path / "destination"
+    plans._copy_stack(stack, destination)
+
+    assert all(stat.S_IMODE(path.stat().st_mode) == 0o400 for path in source_files)
+    assert all(
+        stat.S_IMODE(path.stat().st_mode) == 0o600
+        for path in destination.iterdir()
+        if path.is_file()
+    )
+    assert 'backend "local" {}' in (destination / "versions.tf").read_text(
+        encoding="utf-8"
+    )
+
+
 def test_copy_rejects_bootstrap_local_backend_path_drift(tmp_path: Path) -> None:
     source = tmp_path / "source"
     shutil.copytree(plans._STACKS[0].source, source)

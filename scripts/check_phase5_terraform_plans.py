@@ -1318,8 +1318,12 @@ def _string_attribute(block: str, name: str) -> str:
 def _copy_stack(stack: _Stack, destination: Path) -> None:
     destination.mkdir()
     for source in _validate_stack_source(stack):
-        shutil.copy2(source, destination / source.name)
-    shutil.copy2(stack.source / ".terraform.lock.hcl", destination)
+        copied = destination / source.name
+        shutil.copy2(source, copied)
+        copied.chmod(0o600)
+    copied_lock = destination / ".terraform.lock.hcl"
+    shutil.copy2(stack.source / ".terraform.lock.hcl", copied_lock)
+    copied_lock.chmod(0o600)
     versions = destination / "versions.tf"
     source = versions.read_text(encoding="utf-8")
     if stack.name == "bootstrap":
