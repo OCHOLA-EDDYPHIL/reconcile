@@ -19,6 +19,7 @@ pytestmark = pytest.mark.unit
 
 _REVISION = "a" * 40
 _SOURCE_TAG = container._image_source_tag(_REVISION)
+_OCI_SOURCE_TAG = container._oci_source_tag(_REVISION)
 
 
 def _canonical(value: object) -> bytes:
@@ -50,7 +51,7 @@ def _archive(
     layer_name: str = "opt/reconcile/application.py",
     user: str = "65532:65532",
     environment: list[str] | None = None,
-    source_tag: str = _SOURCE_TAG,
+    source_tag: str = _OCI_SOURCE_TAG,
 ) -> str:
     config = _canonical(
         {
@@ -126,12 +127,12 @@ def test_exact_oci_archive_is_verified_without_extraction(tmp_path: Path) -> Non
     image = container.verify_oci_archive(
         path,
         _REVISION,
-        expected_source_tag=_SOURCE_TAG,
+        expected_source_tag=_OCI_SOURCE_TAG,
     )
 
     assert image.manifest_digest == expected
     assert image.config_digest.startswith("sha256:")
-    assert image.source_tag == _SOURCE_TAG
+    assert image.source_tag == _OCI_SOURCE_TAG
     assert image.archive_sha256 == hashlib.sha256(path.read_bytes()).hexdigest()
     assert image.config["config"]["User"] == "65532:65532"
 
@@ -486,7 +487,7 @@ def _mock_gate_runtime(
         del builder, metadata, source_date_epoch
         assert source_revision == _REVISION
         built.append(destination)
-        _archive(destination, source_tag=image_tag)
+        _archive(destination, source_tag=image_tag.rsplit(":", 1)[-1])
 
     monkeypatch.setattr(container, "_build_archive", build)
 
@@ -679,7 +680,7 @@ def test_source_tamper_is_rejected_without_publishing(
     expected = container.verify_oci_archive(
         source,
         _REVISION,
-        expected_source_tag=_SOURCE_TAG,
+        expected_source_tag=_OCI_SOURCE_TAG,
     )
     source.write_bytes(source.read_bytes() + b"tamper")
     parent = tmp_path / "private"
@@ -708,7 +709,7 @@ def test_post_staging_tamper_is_caught_by_final_reverification(
     expected = container.verify_oci_archive(
         source,
         _REVISION,
-        expected_source_tag=_SOURCE_TAG,
+        expected_source_tag=_OCI_SOURCE_TAG,
     )
     parent = tmp_path / "private"
     parent.mkdir(mode=0o700)

@@ -775,6 +775,12 @@ def _image_source_tag(source_revision: str) -> str:
     )
 
 
+def _oci_source_tag(source_revision: str) -> str:
+    if _SOURCE_REVISION.fullmatch(source_revision) is None:
+        _fail("source revision is invalid")
+    return f"git-{source_revision}"
+
+
 def _validate_artifact_destination(destination: Path) -> Path:
     candidate = Path(destination)
     if not candidate.is_absolute():
@@ -825,7 +831,7 @@ def _seal_verified_archive(
     expected: OciImage,
 ) -> OciImage:
     target = _validate_artifact_destination(destination)
-    if expected.source_tag != _image_source_tag(source_revision):
+    if expected.source_tag != _oci_source_tag(source_revision):
         _fail("verified OCI source tag is not the operator source tag")
 
     parent_descriptor = -1
@@ -1285,7 +1291,9 @@ def run_gate(
                         archive,
                         source_revision,
                         expected_source_tag=(
-                            image_tag if artifact_destination is not None else None
+                            _oci_source_tag(source_revision)
+                            if artifact_destination is not None
+                            else None
                         ),
                     )
                 )
@@ -1348,7 +1356,9 @@ def run_gate(
             config_digest=(
                 sealed_image.config_digest if sealed_image is not None else None
             ),
-            source_tag=sealed_image.source_tag if sealed_image is not None else None,
+            source_tag=(
+                _image_source_tag(source_revision) if sealed_image is not None else None
+            ),
         )
 
 

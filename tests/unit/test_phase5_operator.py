@@ -145,11 +145,7 @@ def _write_oci_archive(
             "manifests": [
                 {
                     "annotations": {
-                        "org.opencontainers.image.ref.name": (
-                            "us-central1-docker.pkg.dev/"
-                            "reconcile-dev-260813-14fa6d/reconcile-p5/"
-                            f"reconcile:git-{_SOURCE}"
-                        )
+                        "org.opencontainers.image.ref.name": (f"git-{_SOURCE}")
                     },
                     "digest": digest,
                     "mediaType": "application/vnd.oci.image.manifest.v1+json",
