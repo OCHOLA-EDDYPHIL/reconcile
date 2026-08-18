@@ -6,7 +6,7 @@ import asyncio
 import hashlib
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
@@ -855,6 +855,179 @@ class DurableInvestigationApplicationService:
             created=result.created,
         )
 
+    async def create_and_wait(
+        self,
+        envelope: ExecutionEnvelope,
+        *,
+        started_at: datetime | None = None,
+    ) -> InvestigationReport:
+        """Create or replay one run and join its exact owned durable execution."""
+
+        return (
+            await self.create_and_wait_result(envelope, started_at=started_at)
+        ).report
+
+    async def create_and_wait_result(
+        self,
+        envelope: ExecutionEnvelope,
+        *,
+        started_at: datetime | None = None,
+    ) -> CreateInvestigationResult:
+        """Join one owned request and retain whether it first created the run."""
+
+        sealed_envelope = self._validated_envelope(envelope)
+        if started_at is not None:
+            normalized_start = _aware_utc(started_at)
+            if normalized_start > self._now():
+                raise ValueError("durable investigation start cannot be in the future")
+            started_at = normalized_start
+        investigation_id = sealed_envelope.investigation_id
+        task: asyncio.Task[None] | None = None
+        terminal_before_wait = False
+        created = False
+        try:
+            creation = await self.create(sealed_envelope, started_at=started_at)
+            created = creation.created
+            async with self._task_lock:
+                task = self._tasks.get(investigation_id)
+            current = await self._sealed_run(investigation_id)
+            terminal_before_wait = current.state is DurableRunState.TERMINAL
+            if task is None:
+                if current.state not in {
+                    DurableRunState.TERMINAL,
+                    DurableRunState.ESCALATION_REQUIRED,
+                }:
+                    raise RuntimeError("durable request lost its owned task")
+            else:
+                try:
+                    await self._await_owned_task(task, current.limits.deadline_at)
+                except TimeoutError:
+                    if not terminal_before_wait:
+                        raise
+        except asyncio.CancelledError:
+            settlement = asyncio.create_task(
+                self._settle_owned_task(investigation_id, task, cancel=True),
+                name=f"reconcile-request-cancel-{investigation_id}",
+            )
+            await self._join_owned_tasks((settlement,))
+            raise
+        except DurableEscalationRequired:
+            await self._settle_owned_task(investigation_id, task, cancel=True)
+            raise
+        except DurableDependencyDrift:
+            await self._settle_owned_task(investigation_id, task, cancel=True)
+            raise
+        except Exception:
+            await self._settle_owned_task(investigation_id, task, cancel=True)
+            raise DurableServiceUnavailable from None
+
+        await self._settle_owned_task(
+            investigation_id,
+            task,
+            cancel=task is not None and not task.done(),
+        )
+        try:
+            run = await self._sealed_run(investigation_id)
+            if canonical_json_bytes(run.envelope) != canonical_json_bytes(
+                sealed_envelope
+            ):
+                raise DurableDependencyDrift(investigation_id)
+            if run.state is DurableRunState.ESCALATION_REQUIRED:
+                raise DurableEscalationRequired(investigation_id)
+            if (
+                run.state is not DurableRunState.TERMINAL
+                or run.established_report is None
+            ):
+                raise DurableServiceUnavailable
+            report = decode_contract(
+                canonical_json_bytes(run.established_report),
+                InvestigationReport,
+            )
+            if (
+                report != run.established_report
+                or report.investigation_id != investigation_id
+                or report.envelope_sha256 != run.envelope_sha256
+                or report.status is not InvestigationStatus.COMPLETED
+                or report.revision != 2
+                or report.classification is None
+                or report.proof is None
+            ):
+                raise DurableDependencyDrift(investigation_id)
+            return CreateInvestigationResult(report=report, created=created)
+        except (DurableDependencyDrift, DurableEscalationRequired):
+            raise
+        except Exception:
+            raise DurableServiceUnavailable from None
+
+    async def _sealed_run(self, investigation_id: str) -> DurableRunRecord:
+        run = await self._store.get_run(investigation_id)
+        if type(run) is not DurableRunRecord:
+            raise TypeError("durable store returned an inexact run")
+        return decode_contract(canonical_json_bytes(run), DurableRunRecord)
+
+    async def _await_owned_task(
+        self,
+        task: asyncio.Task[None],
+        deadline_at: datetime,
+    ) -> None:
+        if not task.done():
+            remaining = (deadline_at - self._now()).total_seconds()
+            if remaining <= 0:
+                raise TimeoutError
+            done, _ = await asyncio.wait({task}, timeout=remaining)
+            if not done:
+                raise TimeoutError
+        if task.cancelled():
+            raise RuntimeError("durable request task was cancelled")
+        failure = task.exception()
+        if failure is not None:
+            raise failure
+
+    @staticmethod
+    async def _join_owned_tasks(tasks: tuple[asyncio.Task[None], ...]) -> None:
+        for task in tasks:
+            while not task.done():
+                try:
+                    await asyncio.shield(task)
+                except asyncio.CancelledError:
+                    if task.done():
+                        break
+                    continue
+                except Exception:
+                    break
+            if task.done():
+                with suppress(asyncio.CancelledError):
+                    task.exception()
+
+    async def _settle_owned_task(
+        self,
+        investigation_id: str,
+        task: asyncio.Task[None] | None,
+        *,
+        cancel: bool,
+    ) -> None:
+        async with self._task_lock:
+            current = self._tasks.pop(investigation_id, None)
+            cancellation_event = self._cancellation_events.pop(
+                investigation_id,
+                None,
+            )
+            candidates = tuple(
+                dict.fromkeys(item for item in (task, current) if item is not None)
+            )
+            if any(not item.done() for item in candidates):
+                cancel = True
+            if cancel and cancellation_event is not None:
+                cancellation_event.set()
+            if cancel:
+                for item in candidates:
+                    if not item.done():
+                        item.cancel()
+            self._task_exits.pop(investigation_id, None)
+        await self._join_owned_tasks(candidates)
+        async with self._task_lock:
+            self._task_exits.pop(investigation_id, None)
+
     async def _ensure_task(self, investigation_id: str, *, recovering: bool) -> None:
         async with self._task_lock:
             if self._closed:
@@ -875,6 +1048,8 @@ class DurableInvestigationApplicationService:
             )
 
     def _task_done(self, investigation_id: str, task: asyncio.Task[None]) -> None:
+        if self._tasks.get(investigation_id) is not task:
+            return
         if task.cancelled():
             failure = RuntimeError(
                 "durable child task was cancelled before the waiter observed terminal state"
@@ -884,9 +1059,8 @@ class DurableInvestigationApplicationService:
                 "durable child task exited before the waiter observed terminal state"
             )
         self._task_exits[investigation_id] = failure
-        if self._tasks.get(investigation_id) is task:
-            self._tasks.pop(investigation_id, None)
-            self._cancellation_events.pop(investigation_id, None)
+        self._tasks.pop(investigation_id, None)
+        self._cancellation_events.pop(investigation_id, None)
 
     @staticmethod
     def _report_for(run: DurableRunRecord) -> InvestigationReport:

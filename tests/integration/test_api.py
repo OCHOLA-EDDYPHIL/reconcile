@@ -152,6 +152,7 @@ class _FakeService:
         self.snapshot_error: Exception | None = None
         self.wait_results: deque[EventJournalSnapshot] = deque()
         self.create_envelopes: list[ExecutionEnvelope] = []
+        self.wait_create_envelopes: list[ExecutionEnvelope] = []
         self.snapshot_cursors: list[int] = []
         self.wait_cursors: list[int] = []
         self.cancellation_events: list[Any] = []
@@ -161,6 +162,13 @@ class _FakeService:
         if self.create_error is not None:
             raise self.create_error
         self.create_envelopes.append(envelope)
+        return _CreateResult(report=self.report, created=self.created)
+
+    async def create_and_wait_result(
+        self,
+        envelope: ExecutionEnvelope,
+    ) -> _CreateResult:
+        self.wait_create_envelopes.append(envelope)
         return _CreateResult(report=self.report, created=self.created)
 
     async def get(self, investigation_id: str) -> InvestigationReport:
@@ -282,6 +290,26 @@ def test_exact_create_replay_is_http_200_with_the_existing_report() -> None:
 
     assert response.status_code == 200
     assert response.content == canonical_json_bytes(service.report)
+
+
+def test_hosted_create_uses_the_request_scoped_terminal_waiter() -> None:
+    class HostedService(_FakeService):
+        async def start(self) -> None:
+            raise AssertionError("hosted service must not enumerate startup work")
+
+    service = HostedService()
+    envelope = make_envelope()
+    with TestClient(create_app(service, hosted=True)) as client:
+        response = client.post(
+            "/api/v1/investigations",
+            content=canonical_json_bytes(envelope),
+            headers={"content-type": "application/json"},
+        )
+
+    assert response.status_code == 201
+    assert response.content == canonical_json_bytes(service.report)
+    assert service.wait_create_envelopes == [envelope]
+    assert service.create_envelopes == []
 
 
 def test_default_service_requires_an_explicit_durable_database(

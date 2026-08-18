@@ -44,6 +44,7 @@ from reconcile.operator import (
     OperatorApplicationService,
     OperatorCapacityExceeded,
     OperatorServiceClosed,
+    OperatorServiceUnavailable,
     ScenarioEnvelopeUnavailable,
     ScenarioEventJournalFull,
     ScenarioLaunchConflict,
@@ -403,6 +404,189 @@ def test_concurrent_identical_launches_create_exactly_one_run() -> None:
             results[0].snapshot.investigation_id,
         )
         assert terminal.lifecycle is ScenarioRunLifecycle.COMPLETED
+        await service.aclose()
+
+    asyncio.run(check())
+
+
+def test_request_scoped_launch_returns_exact_terminal_and_replay_without_tasks() -> (
+    None
+):
+    async def check() -> None:
+        runner = _Runner()
+        service = OperatorApplicationService(runner=runner, clock=_TickClock())
+        request = _launch(launch_id="request-terminal")
+        investigation_id = scenario_investigation_id(
+            ScenarioName.STORAGE,
+            request.launch_id,
+        )
+
+        terminal = await service.launch_and_wait(request)
+        assert terminal == await service.get(investigation_id)
+        assert terminal.lifecycle is ScenarioRunLifecycle.COMPLETED
+        state = service._by_investigation_id[investigation_id]
+        assert state.task is None
+        assert state.task_exit_notifier is None
+
+        replay = await service.launch_and_wait(request)
+        assert replay == terminal
+        assert len(runner.calls) == 1
+        assert state.task is None
+        assert state.task_exit_notifier is None
+        assert not any(
+            task.get_name() == f"reconcile-scenario-{investigation_id}"
+            for task in asyncio.all_tasks()
+        )
+        await service.aclose()
+
+    asyncio.run(check())
+
+
+def test_request_scoped_escalation_snapshot_leaves_no_task_or_notifier() -> None:
+    async def check() -> None:
+        runner = _Runner(
+            lambda investigation_id: _report(
+                investigation_id,
+                Classification.UNKNOWN,
+            )
+        )
+        service = OperatorApplicationService(runner=runner, clock=_TickClock())
+        request = _launch(launch_id="request-escalation")
+        investigation_id = scenario_investigation_id(
+            ScenarioName.STORAGE,
+            request.launch_id,
+        )
+
+        terminal = await service.launch_and_wait(request)
+        assert terminal.lifecycle is ScenarioRunLifecycle.COMPLETED
+        assert terminal.report is not None
+        assert terminal.report.classification is Classification.UNKNOWN
+        state = service._by_investigation_id[investigation_id]
+        assert state.task is None
+        assert state.task_exit_notifier is None
+        await service.aclose()
+
+    asyncio.run(check())
+
+
+def test_request_scoped_dependency_failure_is_sanitized_and_joins_notifier(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def check() -> None:
+        service = OperatorApplicationService(runner=_Runner(), clock=_TickClock())
+        request = _launch(launch_id="request-dependency-failure")
+        investigation_id = scenario_investigation_id(
+            ScenarioName.STORAGE,
+            request.launch_id,
+        )
+
+        async def fail_execution(*args, **kwargs) -> None:
+            del args, kwargs
+            raise RuntimeError("private task failure")
+
+        monkeypatch.setattr(service, "_execute", fail_execution)
+        with pytest.raises(OperatorServiceUnavailable) as failure:
+            await service.launch_and_wait(request)
+        assert "private" not in str(failure.value)
+        assert failure.value.__cause__ is None
+        state = service._by_investigation_id[investigation_id]
+        assert state.task is None
+        assert state.task_exit_notifier is None
+        assert not any(
+            task.get_name() == f"reconcile-scenario-{investigation_id}"
+            for task in asyncio.all_tasks()
+        )
+        await service.aclose()
+
+    asyncio.run(check())
+
+
+def test_request_scoped_cancellation_signals_joins_and_clears_notifier() -> None:
+    async def check() -> None:
+        runner = _Runner(hold=True)
+        service = OperatorApplicationService(runner=runner, clock=_TickClock())
+        request = _launch(launch_id="request-cancelled")
+        investigation_id = scenario_investigation_id(
+            ScenarioName.STORAGE,
+            request.launch_id,
+        )
+        pending = asyncio.create_task(service.launch_and_wait(request))
+        await runner.started.wait()
+
+        pending.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await pending
+
+        state = service._by_investigation_id[investigation_id]
+        assert state.task is None
+        assert state.task_exit_notifier is None
+        assert runner.cleanup_reached is True
+        assert runner.cancel_was_signalled is True
+        assert (await service.get(investigation_id)).lifecycle is (
+            ScenarioRunLifecycle.CANCELLED
+        )
+        assert not any(
+            task.get_name() == f"reconcile-scenario-{investigation_id}"
+            for task in asyncio.all_tasks()
+        )
+        await service.aclose()
+
+    asyncio.run(check())
+
+
+def test_request_scoped_wait_is_bounded_after_the_envelope_is_known() -> None:
+    async def check() -> None:
+        cancellation_observed = False
+
+        async def deadline_runner(
+            scenario: ScenarioName,
+            mode: ScenarioMode,
+            *,
+            vertex_config: VertexAdcPlannerConfig | None,
+            run_id: str,
+            progress_callback: ProgressCallback | None,
+            cancellation_event: asyncio.Event | None,
+        ) -> ScenarioWorkflowResult:
+            nonlocal cancellation_observed
+            del mode, vertex_config
+            investigation_id = scenario_investigation_id(scenario, run_id)
+            summary_values = _summary(investigation_id).model_dump(mode="python")
+            summary_values["evidence_budget"]["max_elapsed_ms"] = 25  # type: ignore[index]
+            summary = ExecutionEnvelopeSummary.model_validate(summary_values)
+            assert progress_callback is not None
+            await progress_callback(
+                EnvelopeProgress(
+                    occurred_at=NOW,
+                    investigation_id=investigation_id,
+                    summary=summary,
+                )
+            )
+            try:
+                await asyncio.Future()
+            finally:
+                cancellation_observed = bool(
+                    cancellation_event is not None and cancellation_event.is_set()
+                )
+
+        service = OperatorApplicationService(
+            runner=deadline_runner,
+            clock=_TickClock(),
+        )
+        request = _launch(launch_id="request-deadline")
+        investigation_id = scenario_investigation_id(
+            ScenarioName.STORAGE,
+            request.launch_id,
+        )
+
+        with pytest.raises(OperatorServiceUnavailable):
+            await asyncio.wait_for(
+                service.launch_and_wait(request),
+                timeout=2,
+            )
+        state = service._by_investigation_id[investigation_id]
+        assert state.task is None
+        assert state.task_exit_notifier is None
+        assert cancellation_observed is True
         await service.aclose()
 
     asyncio.run(check())

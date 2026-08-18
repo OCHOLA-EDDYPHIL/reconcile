@@ -6,7 +6,7 @@ import asyncio
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from functools import partial
 from typing import Protocol
 
@@ -65,9 +65,10 @@ from reconcile.contracts.report import (
 from reconcile.persistence import (
     CreateScenarioWorkResult,
     ScenarioInvestigationState,
+    ScenarioStore,
     ScenarioWorkConflict,
     ScenarioWorkItem,
-    SqliteScenarioStore,
+    ScenarioWorkNotFound,
 )
 from reconcile.progress import (
     AdvisoryProgress,
@@ -439,7 +440,7 @@ class OperatorApplicationService:
         runner: ScenarioWorkflowRunner = run_one,
         vertex_config: VertexAdcPlannerConfig | None = None,
         clock: Callable[[], datetime] | None = None,
-        projection_store: SqliteScenarioStore | None = None,
+        projection_store: ScenarioStore | None = None,
     ) -> None:
         if not callable(runner):
             raise TypeError("operator scenario runner must be callable")
@@ -753,10 +754,191 @@ class OperatorApplicationService:
 
         if existing is None:  # pragma: no cover - protected by the registry lock.
             raise RuntimeError("operator launch registry lost its state")
+        if not existing.terminal and (existing.task is None or existing.task.done()):
+            self._start_task(existing, request, scenario, mode)
         return LaunchScenarioResult(
             snapshot=await self._current_snapshot(existing),
             created=False,
         )
+
+    async def launch_and_wait(
+        self,
+        request: ScenarioLaunchRequest,
+    ) -> ScenarioRunSnapshot:
+        """Launch or replay one scenario and join its exact terminal projection."""
+
+        return (await self.launch_and_wait_result(request)).snapshot
+
+    async def launch_and_wait_result(
+        self,
+        request: ScenarioLaunchRequest,
+    ) -> LaunchScenarioResult:
+        """Join one owned request and retain whether it first bound the launch."""
+
+        if type(request) is not ScenarioLaunchRequest:
+            raise TypeError("scenario launch requires an exact request")
+        sealed_request, _ = _sealed(request, ScenarioLaunchRequest)
+        investigation_id = scenario_investigation_id(
+            _scenario_name(sealed_request.scenario),
+            sealed_request.launch_id,
+        )
+        state: _RunState | None = None
+        task: asyncio.Task[None] | None = None
+        try:
+            launched = await self.launch(sealed_request)
+            state = await self._lookup(investigation_id)
+            task = state.task
+            if task is not None:
+                await self._await_request_task(state, task)
+            await self._settle_request_state(state, task, cancel=False)
+            snapshot = await self._terminal_request_snapshot(state, investigation_id)
+            return LaunchScenarioResult(snapshot=snapshot, created=launched.created)
+        except asyncio.CancelledError:
+            if state is not None:
+                await self._settle_request_state(state, task, cancel=True)
+            raise
+        except (
+            OperatorCapacityExceeded,
+            OperatorServiceClosed,
+            ScenarioLaunchConflict,
+        ):
+            if state is not None:
+                await self._settle_request_state(state, task, cancel=True)
+            raise
+        except OperatorServiceUnavailable:
+            if state is not None:
+                await self._settle_request_state(state, task, cancel=True)
+            raise OperatorServiceUnavailable(investigation_id) from None
+        except Exception:
+            if state is not None:
+                await self._settle_request_state(state, task, cancel=True)
+            raise OperatorServiceUnavailable(investigation_id) from None
+
+    async def _await_request_task(
+        self,
+        state: _RunState,
+        task: asyncio.Task[None],
+    ) -> None:
+        while not task.done():
+            async with state.condition:
+                snapshot = decode_contract(
+                    state.snapshot_bytes,
+                    ScenarioRunSnapshot,
+                )
+                generation = state.generation
+            timeout: float | None = None
+            if snapshot.envelope_summary is not None:
+                lane_ceiling = 1 if snapshot.mode is ScenarioRunMode.FIXED else 2
+                deadline_at = snapshot.accepted_at + timedelta(
+                    milliseconds=(
+                        snapshot.envelope_summary.evidence_budget.max_elapsed_ms
+                        * lane_ceiling
+                    )
+                )
+                timeout = (deadline_at - self._now()).total_seconds()
+                if timeout <= 0:
+                    raise TimeoutError
+
+            change_task = asyncio.create_task(
+                self._wait_for_change(state, generation, None)
+            )
+            try:
+                done, _ = await asyncio.wait(
+                    {task, change_task},
+                    timeout=timeout,
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if not done:
+                    raise TimeoutError
+            finally:
+                if not change_task.done():
+                    change_task.cancel()
+                await asyncio.gather(change_task, return_exceptions=True)
+        if task.cancelled():
+            raise RuntimeError("operator request task was cancelled")
+        failure = task.exception()
+        if failure is not None:
+            raise failure
+
+    @staticmethod
+    async def _join_request_tasks(
+        tasks: tuple[asyncio.Task[None], ...],
+    ) -> None:
+        for task in tasks:
+            while not task.done():
+                try:
+                    await asyncio.shield(task)
+                except asyncio.CancelledError:
+                    if task.done():
+                        break
+                    continue
+                except Exception:
+                    break
+            if task.done():
+                with suppress(asyncio.CancelledError):
+                    task.exception()
+
+    async def _settle_request_state(
+        self,
+        state: _RunState,
+        task: asyncio.Task[None] | None,
+        *,
+        cancel: bool,
+    ) -> None:
+        current = state.task
+        candidates = tuple(
+            dict.fromkeys(item for item in (task, current) if item is not None)
+        )
+        if any(not item.done() for item in candidates):
+            cancel = True
+        if cancel:
+            state.cancellation_event.set()
+            for item in candidates:
+                if not item.done():
+                    item.cancel()
+        if current in candidates:
+            state.task = None
+        notifier = state.task_exit_notifier
+        state.task_exit_notifier = None
+        await self._join_request_tasks(candidates)
+        if notifier is not None:
+            await self._join_request_tasks((notifier,))
+        trailing = state.task_exit_notifier
+        state.task_exit_notifier = None
+        if trailing is not None:
+            await self._join_request_tasks((trailing,))
+
+    async def _terminal_request_snapshot(
+        self,
+        state: _RunState,
+        investigation_id: str,
+    ) -> ScenarioRunSnapshot:
+        await self._refresh_durable_state(state, investigation_id)
+        async with state.condition:
+            terminal = state.terminal
+            snapshot = decode_contract(
+                state.snapshot_bytes,
+                ScenarioRunSnapshot,
+            )
+        if not terminal or snapshot.lifecycle not in {
+            ScenarioRunLifecycle.COMPLETED,
+            ScenarioRunLifecycle.FAILED,
+            ScenarioRunLifecycle.CANCELLED,
+        }:
+            raise OperatorServiceUnavailable(investigation_id)
+        if self._coordinator is not None:
+            await self._coordinator.audit_terminal_projection(investigation_id)
+            work = await self._projection_store.get_work(investigation_id)  # type: ignore[union-attr]
+            if (
+                work.investigation_state is ScenarioInvestigationState.RECORDED
+                and not self._terminal_projection_matches_authority(snapshot, work)
+            ) or (
+                work.investigation_state
+                is ScenarioInvestigationState.ESCALATION_REQUIRED
+                and snapshot.lifecycle is not ScenarioRunLifecycle.FAILED
+            ):
+                raise OperatorServiceUnavailable(investigation_id)
+        return decode_contract(canonical_json_bytes(snapshot), ScenarioRunSnapshot)
 
     def _start_task(
         self,
@@ -776,8 +958,9 @@ class OperatorApplicationService:
         task.add_done_callback(partial(self._task_done, state))
 
     def _task_done(self, state: _RunState, task: asyncio.Task[None]) -> None:
-        if state.task is task:
-            state.task = None
+        if state.task is not task:
+            return
+        state.task = None
         if task.cancelled():
             failure = RuntimeError(
                 "operator task was cancelled before durable terminal state"
@@ -809,9 +992,55 @@ class OperatorApplicationService:
     async def _lookup(self, investigation_id: str) -> _RunState:
         async with self._registry_lock:
             state = self._by_investigation_id.get(investigation_id)
-        if state is None:
+        if state is not None:
+            return state
+        store = self._projection_store
+        if store is None:
             raise ScenarioRunNotFound(investigation_id)
-        return state
+        try:
+            work = await store.get_work(investigation_id)
+            projection = await store.snapshot_projection(investigation_id)
+            launch = work.launch_request
+            snapshot = projection.snapshot
+            if (
+                work.scenario_request.investigation_id != investigation_id
+                or snapshot.investigation_id != investigation_id
+                or snapshot.launch_id != launch.launch_id
+                or snapshot.scenario is not launch.scenario
+                or snapshot.mode is not launch.mode
+                or projection.cursor != len(projection.events)
+                or snapshot.event_cursor != projection.cursor
+            ):
+                raise ValueError("durable operator projection identity changed")
+            hydrated = _RunState(
+                launch_bytes=canonical_json_bytes(launch),
+                condition=asyncio.Condition(),
+                snapshot_bytes=canonical_json_bytes(snapshot),
+                events=[canonical_json_bytes(event) for event in projection.events],
+                cancellation_event=asyncio.Event(),
+                generation=projection.cursor,
+                terminal=projection.terminal,
+            )
+        except asyncio.CancelledError:
+            raise
+        except ScenarioWorkNotFound:
+            raise ScenarioRunNotFound(investigation_id) from None
+        except Exception as error:
+            raise OperatorServiceUnavailable(investigation_id) from error
+        async with self._registry_lock:
+            if self._closed:
+                raise OperatorServiceClosed
+            state = self._by_investigation_id.get(investigation_id)
+            if state is not None:
+                return state
+            collision = self._by_launch_id.get(launch.launch_id)
+            if collision is not None:
+                raise OperatorServiceUnavailable(investigation_id)
+            if len(self._by_launch_id) >= MAX_RETAINED_SCENARIO_RUNS:
+                raise OperatorCapacityExceeded
+            self._by_launch_id[launch.launch_id] = hydrated
+            self._by_investigation_id[investigation_id] = hydrated
+            return hydrated
 
     @staticmethod
     async def _current_snapshot(state: _RunState) -> ScenarioRunSnapshot:

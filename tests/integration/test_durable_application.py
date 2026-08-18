@@ -17,6 +17,7 @@ from reconcile.contracts import (
     EffectAssertion,
     EffectAssertionState,
     ExecutionEnvelope,
+    InvestigationReport,
     InvestigationStatus,
     ObservationCapability,
     OperationStatus,
@@ -926,6 +927,145 @@ async def _wait_for(
 
 async def _call_count_is(handler: _ReadHandler, expected: int) -> bool:
     return len(handler.calls) == expected
+
+
+def test_request_scoped_create_waits_for_exact_terminal_and_replay(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        store = SqliteDurableRuntimeStore(tmp_path / "request-terminal.sqlite3")
+        envelope = _envelope()
+        service = _service(
+            store,
+            _FixedExecutor(_ReadHandler()),
+            owner_id="request-terminal",
+        )
+
+        report = await service.create_and_wait(envelope)
+        persisted = await store.get_run(envelope.investigation_id)
+        assert type(report) is InvestigationReport
+        assert report == persisted.established_report
+        assert report.status is InvestigationStatus.COMPLETED
+        assert service._tasks == {}
+        assert service._cancellation_events == {}
+        assert service._task_exits == {}
+
+        replay = await service.create_and_wait(envelope)
+        assert replay == report
+        assert service._tasks == {}
+        assert service._cancellation_events == {}
+        assert service._task_exits == {}
+        assert not any(
+            task.get_name() == f"reconcile-durable-{envelope.investigation_id}"
+            for task in asyncio.all_tasks()
+        )
+        await service.aclose()
+
+    asyncio.run(scenario())
+
+
+def test_request_scoped_escalation_leaves_no_owned_state(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        store = SqliteDurableRuntimeStore(tmp_path / "request-escalation.sqlite3")
+        envelope = _envelope()
+        service = _service(
+            store,
+            _PauseBeforeWorkExecutor(pause=False),
+            owner_id="request-escalation",
+        )
+
+        with pytest.raises(DurableEscalationRequired):
+            await service.create_and_wait(envelope)
+        assert (await store.get_run(envelope.investigation_id)).state is (
+            DurableRunState.ESCALATION_REQUIRED
+        )
+        assert service._tasks == {}
+        assert service._cancellation_events == {}
+        assert service._task_exits == {}
+        await service.aclose()
+
+    asyncio.run(scenario())
+
+
+def test_request_scoped_dependency_failure_is_sanitized_without_owned_state() -> None:
+    class _CreateFailureStore:
+        async def create_run(self, *args, **kwargs):
+            del args, kwargs
+            raise RuntimeError("private storage failure")
+
+    async def scenario() -> None:
+        service = _service(
+            _CreateFailureStore(),
+            _PauseBeforeWorkExecutor(pause=False),
+            owner_id="request-dependency-failure",
+        )
+        with pytest.raises(DurableServiceUnavailable) as failure:
+            await service.create_and_wait(_envelope())
+        assert "private" not in str(failure.value)
+        assert failure.value.__cause__ is None
+        assert service._tasks == {}
+        assert service._cancellation_events == {}
+        assert service._task_exits == {}
+        await service.aclose()
+
+    asyncio.run(scenario())
+
+
+def test_request_scoped_cancellation_signals_joins_and_clears_owned_state(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        store = SqliteDurableRuntimeStore(tmp_path / "request-cancelled.sqlite3")
+        envelope = _envelope()
+        handler = _ReadHandler(blocking=True)
+        service = _service(
+            store,
+            _FixedExecutor(handler),
+            owner_id="request-cancelled",
+        )
+        request = asyncio.create_task(service.create_and_wait(envelope))
+        await asyncio.wait_for(handler.started.wait(), timeout=2)
+
+        request.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await request
+
+        assert service._tasks == {}
+        assert service._cancellation_events == {}
+        assert service._task_exits == {}
+        assert not any(
+            task.get_name() == f"reconcile-durable-{envelope.investigation_id}"
+            for task in asyncio.all_tasks()
+        )
+        await service.aclose()
+
+    asyncio.run(scenario())
+
+
+def test_request_scoped_wait_is_bounded_by_the_durable_deadline(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        store = SqliteDurableRuntimeStore(tmp_path / "request-deadline.sqlite3")
+        envelope = _envelope(max_elapsed_ms=25)
+        executor = _PauseBeforeWorkExecutor()
+        service = _service(
+            store,
+            executor,
+            owner_id="request-deadline",
+        )
+
+        with pytest.raises(DurableServiceUnavailable):
+            await asyncio.wait_for(
+                service.create_and_wait(envelope),
+                timeout=2,
+            )
+        assert service._tasks == {}
+        assert service._cancellation_events == {}
+        assert service._task_exits == {}
+        await service.aclose()
+
+    asyncio.run(scenario())
 
 
 @pytest.mark.integration

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import re
-from collections.abc import Collection
+from collections.abc import Collection, Mapping
 from http import HTTPStatus
 from typing import Protocol
 
@@ -89,6 +89,23 @@ class _Verifier(Protocol):
         expected_audience: str,
         allowed_emails: Collection[str],
     ) -> VerifiedCaller: ...
+
+
+class InternalOperationHandler(Protocol):
+    """Handle one authenticated, exact internal operation request."""
+
+    async def __call__(
+        self,
+        caller: VerifiedCaller,
+        request: InternalOperationRequest,
+    ) -> InternalOperationResponse: ...
+
+
+class InternalOperationDenied(Exception):
+    """An authenticated internal request was denied by its operation handler."""
+
+    def __init__(self) -> None:
+        super().__init__("internal operation denied")
 
 
 def _single_header(scope: Scope, name: bytes) -> str | None:
@@ -177,6 +194,15 @@ def _unauthorized() -> Response:
     return Response(
         content=b'{"code":"unauthorized"}',
         status_code=HTTPStatus.UNAUTHORIZED,
+        media_type="application/json",
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+def _internal_error(*, code: str, status_code: HTTPStatus) -> Response:
+    return Response(
+        content=f'{{"code":"{code}"}}'.encode("ascii"),
+        status_code=status_code,
         media_type="application/json",
         headers={"Cache-Control": "no-store"},
     )
@@ -301,6 +327,70 @@ def _install_placeholder(
     )
 
 
+def _install_handler(
+    application: FastAPI,
+    path: str,
+    operation: InternalOperation,
+    handler: InternalOperationHandler,
+) -> None:
+    async def invoke(request: Request) -> Response:
+        try:
+            internal = await _read_internal_request(request)
+        except (TypeError, ValueError):
+            return _internal_error(
+                code="invalid-contract",
+                status_code=HTTPStatus.BAD_REQUEST,
+            )
+        if internal.operation is not operation:
+            return _internal_error(
+                code="invalid-operation",
+                status_code=HTTPStatus.UNPROCESSABLE_ENTITY,
+            )
+        try:
+            caller = request.state.verified_caller
+            if type(caller) is not VerifiedCaller:
+                raise TypeError("verified caller is unavailable")
+            response = await handler(caller, internal)
+            if type(response) is not InternalOperationResponse:
+                raise TypeError("internal handler response must be exact")
+            if (
+                response.request_id != internal.request_id
+                or response.operation is not operation
+            ):
+                raise ValueError("internal handler response identity changed")
+            encoded = canonical_internal_json_bytes(response)
+        except asyncio.CancelledError:
+            raise
+        except InternalOperationDenied:
+            return _internal_error(
+                code="operation-denied",
+                status_code=HTTPStatus.FORBIDDEN,
+            )
+        except Exception:
+            return _internal_error(
+                code="operation-unavailable",
+                status_code=HTTPStatus.SERVICE_UNAVAILABLE,
+            )
+        if response.accepted is not True:
+            return _internal_error(
+                code="operation-denied",
+                status_code=HTTPStatus.FORBIDDEN,
+            )
+        return Response(
+            content=encoded,
+            status_code=HTTPStatus.OK,
+            media_type="application/json",
+            headers={"Cache-Control": "no-store"},
+        )
+
+    application.add_api_route(
+        path,
+        invoke,
+        methods=["POST"],
+        response_model=None,
+    )
+
+
 def _install_sandbox_evidence(
     application: FastAPI,
     reader: SandboxEvidenceReader,
@@ -364,6 +454,7 @@ def _internal_app(
     config: HostedConfig,
     *,
     sandbox_evidence_reader: SandboxEvidenceReader | None,
+    handlers: Mapping[InternalOperation, InternalOperationHandler],
 ) -> FastAPI:
     application = FastAPI(
         title=f"RECONCILE {config.component.value}",
@@ -378,14 +469,45 @@ def _internal_app(
         return Response(content=b'{"status":"ok"}', media_type="application/json")
 
     if config.component is Component.CONTROLLER:
-        _install_placeholder(
-            application,
-            _CONTROLLER_PATH,
-            InternalOperation.INVESTIGATE,
-        )
+        handler = handlers.get(InternalOperation.INVESTIGATE)
+        if handler is None:
+            _install_placeholder(
+                application,
+                _CONTROLLER_PATH,
+                InternalOperation.INVESTIGATE,
+            )
+        else:
+            _install_handler(
+                application,
+                _CONTROLLER_PATH,
+                InternalOperation.INVESTIGATE,
+                handler,
+            )
     elif config.component is Component.FAULT_PROXY:
-        _install_placeholder(application, _FAULT_PATH, InternalOperation.EXECUTE_FAULT)
-        _install_placeholder(application, _CLEANUP_PATH, InternalOperation.CLEANUP)
+        fault_handler = handlers.get(InternalOperation.EXECUTE_FAULT)
+        if fault_handler is None:
+            _install_placeholder(
+                application,
+                _FAULT_PATH,
+                InternalOperation.EXECUTE_FAULT,
+            )
+        else:
+            _install_handler(
+                application,
+                _FAULT_PATH,
+                InternalOperation.EXECUTE_FAULT,
+                fault_handler,
+            )
+        cleanup_handler = handlers.get(InternalOperation.CLEANUP)
+        if cleanup_handler is None:
+            _install_placeholder(application, _CLEANUP_PATH, InternalOperation.CLEANUP)
+        else:
+            _install_handler(
+                application,
+                _CLEANUP_PATH,
+                InternalOperation.CLEANUP,
+                cleanup_handler,
+            )
     elif config.component is Component.SANDBOX:
         if sandbox_evidence_reader is None:
             _install_placeholder(
@@ -395,12 +517,30 @@ def _internal_app(
             )
         else:
             _install_sandbox_evidence(application, sandbox_evidence_reader)
-        _install_placeholder(
-            application,
-            _MUTATION_PATH,
-            InternalOperation.EXECUTE_FAULT,
-        )
-        _install_placeholder(application, _CLEANUP_PATH, InternalOperation.CLEANUP)
+        mutation_handler = handlers.get(InternalOperation.EXECUTE_FAULT)
+        if mutation_handler is None:
+            _install_placeholder(
+                application,
+                _MUTATION_PATH,
+                InternalOperation.EXECUTE_FAULT,
+            )
+        else:
+            _install_handler(
+                application,
+                _MUTATION_PATH,
+                InternalOperation.EXECUTE_FAULT,
+                mutation_handler,
+            )
+        cleanup_handler = handlers.get(InternalOperation.CLEANUP)
+        if cleanup_handler is None:
+            _install_placeholder(application, _CLEANUP_PATH, InternalOperation.CLEANUP)
+        else:
+            _install_handler(
+                application,
+                _CLEANUP_PATH,
+                InternalOperation.CLEANUP,
+                cleanup_handler,
+            )
     else:  # pragma: no cover - caller dispatches API separately.
         raise TypeError("internal app requires an internal component")
     return application
@@ -414,6 +554,8 @@ def create_component_app(
     investigation_service: object | None = None,
     operator_service: object | None = None,
     sandbox_evidence_reader: SandboxEvidenceReader | None = None,
+    internal_operation_handlers: Mapping[InternalOperation, InternalOperationHandler]
+    | None = None,
 ) -> FastAPI:
     """Build one exact component boundary without resolving credentials eagerly."""
 
@@ -424,6 +566,27 @@ def create_component_app(
         and config.component is not Component.SANDBOX
     ):
         raise ValueError("only the sandbox component accepts an evidence reader")
+    if internal_operation_handlers is None:
+        handlers: dict[InternalOperation, InternalOperationHandler] = {}
+    else:
+        if not isinstance(internal_operation_handlers, Mapping):
+            raise TypeError("internal operation handlers must be a mapping")
+        handlers = dict(internal_operation_handlers)
+        for operation, handler in handlers.items():
+            if type(operation) is not InternalOperation or not callable(handler):
+                raise TypeError("internal operation handler entries must be exact")
+    allowed_handler_operations = {
+        Component.API: frozenset(),
+        Component.CONTROLLER: frozenset({InternalOperation.INVESTIGATE}),
+        Component.FAULT_PROXY: frozenset(
+            {InternalOperation.EXECUTE_FAULT, InternalOperation.CLEANUP}
+        ),
+        Component.SANDBOX: frozenset(
+            {InternalOperation.EXECUTE_FAULT, InternalOperation.CLEANUP}
+        ),
+    }[config.component]
+    if not handlers.keys() <= allowed_handler_operations:
+        raise ValueError("component received an unsupported operation handler")
     if config.component is Component.API:
         application = create_app(
             investigation_service,  # type: ignore[arg-type]
@@ -436,6 +599,7 @@ def create_component_app(
         application = _internal_app(
             config,
             sandbox_evidence_reader=sandbox_evidence_reader,
+            handlers=handlers,
         )
     application.state.hosted_config = config
     application.state.hosted_transport = transport or HostedHttpTransport()
@@ -447,4 +611,9 @@ def create_component_app(
     return application
 
 
-__all__ = ["ApplicationIdentityMiddleware", "create_component_app"]
+__all__ = [
+    "ApplicationIdentityMiddleware",
+    "InternalOperationDenied",
+    "InternalOperationHandler",
+    "create_component_app",
+]

@@ -631,6 +631,7 @@ class SqliteScenarioStore(SqliteDurableRuntimeStore):
         self,
         token: ScenarioLeaseToken,
         *,
+        prepared_envelope: ExecutionEnvelope | None = None,
         prepared_envelope_sha256: str,
         cleanup_manifest_sha256: str,
         occurred_at: datetime,
@@ -638,6 +639,7 @@ class SqliteScenarioStore(SqliteDurableRuntimeStore):
         return await asyncio.to_thread(
             self._record_mutation_started,
             token,
+            prepared_envelope,
             prepared_envelope_sha256,
             cleanup_manifest_sha256,
             occurred_at,
@@ -646,6 +648,7 @@ class SqliteScenarioStore(SqliteDurableRuntimeStore):
     def _record_mutation_started(
         self,
         token: ScenarioLeaseToken,
+        prepared_envelope: ExecutionEnvelope | None,
         prepared_envelope_sha256: str,
         cleanup_manifest_sha256: str,
         occurred_at: datetime,
@@ -655,6 +658,23 @@ class SqliteScenarioStore(SqliteDurableRuntimeStore):
             current = self._work_locked(connection, token.investigation_id)
             if current.mutation_state is not ScenarioMutationState.NOT_STARTED:
                 raise ScenarioStateConflict(token.investigation_id, "start mutation")
+            digest = _digest(prepared_envelope_sha256, "prepared envelope")
+            if prepared_envelope is not None:
+                if type(prepared_envelope) is not ExecutionEnvelope:
+                    raise TypeError("prepared scenario envelope must be exact")
+                request = current.scenario_request
+                invocation = prepared_envelope.context.invocation
+                if (
+                    canonical_sha256(prepared_envelope) != digest
+                    or prepared_envelope.investigation_id != request.investigation_id
+                    or prepared_envelope.operation_id != request.operation_id
+                    or invocation.invocation_id != request.invocation_id
+                    or invocation.function_call_id != request.function_call_id
+                ):
+                    raise ScenarioStateConflict(
+                        token.investigation_id,
+                        "start mutation",
+                    )
             return self._transition_locked(
                 connection,
                 token,
@@ -662,10 +682,7 @@ class SqliteScenarioStore(SqliteDurableRuntimeStore):
                 "start mutation",
                 {
                     "mutation_state": ScenarioMutationState.STARTED,
-                    "prepared_envelope_sha256": _digest(
-                        prepared_envelope_sha256,
-                        "prepared envelope",
-                    ),
+                    "prepared_envelope_sha256": digest,
                     "cleanup_manifest_sha256": _digest(
                         cleanup_manifest_sha256,
                         "cleanup manifest",
