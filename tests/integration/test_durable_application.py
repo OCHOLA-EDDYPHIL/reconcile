@@ -2634,7 +2634,7 @@ def test_terminal_restart_repairs_partial_telemetry_and_event_projection(
         async def projection_complete() -> bool:
             return (await reopened.snapshot_events(envelope.investigation_id)).terminal
 
-        await _wait_for(projection_complete)
+        await _wait_for(projection_complete, timeout=10.0)
         telemetry = await reopened.telemetry_records(envelope.investigation_id)
         assert len(handler.calls) == 1
         assert any(item.kind is RuntimeTelemetryKind.CLASSIFIER for item in telemetry)
