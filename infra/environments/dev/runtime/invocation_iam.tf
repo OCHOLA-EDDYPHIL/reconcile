@@ -1,4 +1,4 @@
-resource "google_cloud_run_v2_service_iam_member" "api_owner" {
+resource "google_cloud_run_v2_service_iam_member" "api_operator" {
   for_each = var.api_invoker_members
 
   project  = var.project_id

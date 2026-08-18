@@ -507,6 +507,28 @@ def _assert_no_operator_tasks(
     assert not any(task.get_name() in owned_names for task in asyncio.all_tasks())
 
 
+def test_compare_is_rejected_before_work_or_mutation_authority_exists() -> None:
+    async def scenario() -> None:
+        cas_store = _MemoryCasStore()
+        preparer = _Preparer()
+        gateway = _Gateway(cas_store, mutation_behavior="forbidden")
+        _, workflow, operator = _stack(cas_store, preparer, gateway)
+        launch = _launch("hosted-compare-denied").model_copy(
+            update={"mode": ScenarioRunMode.COMPARE}
+        )
+
+        with pytest.raises(ValueError, match="comparison"):
+            await _bind_only(workflow, launch)
+
+        assert cas_store.documents == {}
+        assert cas_store.writes == []
+        assert preparer.calls == []
+        assert gateway.calls == []
+        await operator.aclose()
+
+    asyncio.run(scenario())
+
+
 def test_success_is_ordered_durable_and_exact_replay_never_redispatches() -> None:
     async def check() -> None:
         cas_store = _MemoryCasStore()

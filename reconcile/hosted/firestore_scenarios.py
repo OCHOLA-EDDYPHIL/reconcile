@@ -99,12 +99,26 @@ class FirestoreScenarioOperationAuthority:
     """Read-only persisted authority for one hosted internal operation."""
 
     work: ScenarioWorkItem
+    candidate: HostedCandidateIdentity
+    prepared_envelope: ExecutionEnvelope | None
     lease_fence: int
     current_lease: ScenarioLeaseToken | None
 
     def __post_init__(self) -> None:
         if type(self.work) is not ScenarioWorkItem:
             raise TypeError("scenario operation work must be exact")
+        if type(self.candidate) is not HostedCandidateIdentity:
+            raise TypeError("scenario operation candidate must be exact")
+        if self.prepared_envelope is not None and (
+            type(self.prepared_envelope) is not ExecutionEnvelope
+            or self.work.prepared_envelope_sha256
+            != canonical_sha256(self.prepared_envelope)
+        ):
+            raise ValueError("scenario operation prepared envelope is invalid")
+        if (self.work.prepared_envelope_sha256 is None) is not (
+            self.prepared_envelope is None
+        ):
+            raise ValueError("scenario operation prepared envelope is incomplete")
         if type(self.lease_fence) is not int or not 0 <= self.lease_fence <= 2**63 - 1:
             raise ValueError("scenario operation lease fence is invalid")
         if self.current_lease is not None and (
@@ -956,6 +970,8 @@ class FirestoreScenarioStore:
         _, _, _, aggregate = await self._load(investigation_id)
         return FirestoreScenarioOperationAuthority(
             work=aggregate.work,
+            candidate=aggregate.candidate,
+            prepared_envelope=aggregate.prepared_envelope,
             lease_fence=aggregate.lease_fence,
             current_lease=aggregate.current_lease,
         )

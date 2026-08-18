@@ -37,27 +37,39 @@ variable "service_account_emails" {
   }
 }
 
-variable "image_references" {
-  type = object({
-    api         = string
-    controller  = string
-    fault_proxy = string
-    sandbox     = string
-  })
+variable "source_revision" {
+  type = string
 
   validation {
-    condition = alltrue([
-      for image in values(var.image_references) : can(regex(
-        "^us-central1-docker[.]pkg[.]dev/reconcile-dev-260813-14fa6d/reconcile-p5/reconcile@sha256:[0-9a-f]{64}$",
-        image,
-      ))
-    ])
-    error_message = "Every image must use the approved repository and an immutable lowercase sha256 digest."
+    condition     = can(regex("^[0-9a-f]{40}$", var.source_revision))
+    error_message = "The source revision must be one exact lowercase Git object ID."
   }
+}
+
+variable "image_digest" {
+  type = string
 
   validation {
-    condition     = length(toset(values(var.image_references))) <= 2
-    error_message = "The runtime may reference at most two distinct images."
+    condition     = can(regex("^sha256:[0-9a-f]{64}$", var.image_digest))
+    error_message = "The single runtime image digest must be immutable lowercase sha256."
+  }
+}
+
+variable "infrastructure_revision" {
+  type = string
+
+  validation {
+    condition     = can(regex("^[0-9a-f]{64}$", var.infrastructure_revision))
+    error_message = "The infrastructure revision must be one lowercase sha256 digest."
+  }
+}
+
+variable "semantic_config_sha256" {
+  type = string
+
+  validation {
+    condition     = can(regex("^[0-9a-f]{64}$", var.semantic_config_sha256))
+    error_message = "The semantic configuration must be bound by one lowercase sha256 digest."
   }
 }
 
@@ -66,9 +78,9 @@ variable "api_invoker_members" {
 
   validation {
     condition = var.api_invoker_members == toset([
-      "user:eddyphilochola13@gmail.com",
+      "serviceAccount:rec-p5-apply@reconcile-dev-260813-14fa6d.iam.gserviceaccount.com",
     ])
-    error_message = "The API invoker must be the exact approved owner principal."
+    error_message = "The API invoker must be the exact approval-bound operator identity."
   }
 }
 
@@ -111,5 +123,25 @@ variable "vertex_model" {
   validation {
     condition     = var.vertex_model == "gemini-3.5-flash"
     error_message = "The approved planner model is gemini-3.5-flash."
+  }
+}
+
+variable "vertex_prompt_version" {
+  type    = string
+  default = "adaptive-planner-v3"
+
+  validation {
+    condition     = var.vertex_prompt_version == "adaptive-planner-v3"
+    error_message = "The approved planner prompt version is adaptive-planner-v3."
+  }
+}
+
+variable "vertex_prompt_sha256" {
+  type    = string
+  default = "a18ac5bbd22570562acc6dfbc49437a82f0db6a265a4de737c1371b6ef2ca2d3"
+
+  validation {
+    condition     = var.vertex_prompt_sha256 == "a18ac5bbd22570562acc6dfbc49437a82f0db6a265a4de737c1371b6ef2ca2d3"
+    error_message = "The planner prompt digest must match the approved adaptive-planner-v3 instruction."
   }
 }

@@ -1,0 +1,10 @@
+**
+!.dockerignore
+!Dockerfile
+!pyproject.toml
+!uv.lock
+!reconcile/
+!reconcile/**
+reconcile/**/__pycache__/
+reconcile/**/*.pyc
+reconcile/**/*.pyo

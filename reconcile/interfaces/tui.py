@@ -43,6 +43,10 @@ from reconcile.interfaces.api_client import (
     ServiceUnavailableError,
     TransportError,
 )
+from reconcile.interfaces.google_identity import (
+    GoogleIdentityTokenError,
+    operator_client_identity,
+)
 from reconcile.interfaces.operator_api_client import (
     DEFAULT_OPERATOR_API_BASE_URL,
     LaunchOutcomeUnknownError,
@@ -93,6 +97,18 @@ _TERMINAL_LIFECYCLES = frozenset(
         ScenarioRunLifecycle.CANCELLED,
     }
 )
+
+
+def _operator_client(api_base_url: str) -> OperatorApiClient:
+    identity = operator_client_identity()
+    if identity is None:
+        return OperatorApiClient(api_base_url)
+    supplier, audience = identity
+    return OperatorApiClient(
+        api_base_url,
+        identity_token_supplier=supplier,
+        identity_audience=audience,
+    )
 
 
 class ReconcileApp(App[None]):
@@ -336,7 +352,14 @@ class ReconcileApp(App[None]):
         self._set_narrow(self.size.width < 90)
         if self._client is None:
             try:
-                self._client = OperatorApiClient(self._api_base_url)
+                self._client = _operator_client(self._api_base_url)
+            except GoogleIdentityTokenError:
+                self._view_state = self._view_state.set_connection(
+                    ConnectionPhase.REFUSED
+                )
+                self._operator_message = (
+                    "[REFUSED] Local Google identity configuration is invalid."
+                )
             except InvestigationApiClientError:
                 self._view_state = self._view_state.set_connection(
                     ConnectionPhase.REFUSED

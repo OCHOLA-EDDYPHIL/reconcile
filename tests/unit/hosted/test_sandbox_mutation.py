@@ -400,7 +400,7 @@ def test_public_projections_are_compatible_with_the_existing_read_boundary() -> 
         await _submit(client)
         reader = FirestoreSandboxEvidenceReader(
             project_id=_PROJECT,
-            database_id="reconcile-p5-target",
+            database_id="reconcile-p5-sandbox",
             client_factory=_Factory(client),
         )
 

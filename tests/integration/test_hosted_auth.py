@@ -21,7 +21,7 @@ from reconcile.hosted.identity import IdentityVerificationError, VerifiedCaller
 pytestmark = pytest.mark.integration
 
 _PROJECT = "reconcile-dev-260813-14fa6d"
-_OWNER = "eddyphilochola13@gmail.com"
+_OPERATOR = f"rec-p5-apply@{_PROJECT}.iam.gserviceaccount.com"
 _API = f"rec-p5-api@{_PROJECT}.iam.gserviceaccount.com"
 _CONTROLLER = f"rec-p5-controller@{_PROJECT}.iam.gserviceaccount.com"
 _FAULT = f"rec-p5-fault@{_PROJECT}.iam.gserviceaccount.com"
@@ -41,7 +41,7 @@ class _Verifier:
         allowed = tuple(allowed_emails)
         self.calls.append((authorization_header, expected_audience, allowed))
         identities = {
-            "Bearer hdr.owner.sig": _OWNER,
+            "Bearer hdr.operator.sig": _OPERATOR,
             "Bearer hdr.api.sig": _API,
             "Bearer hdr.controller.sig": _CONTROLLER,
             "Bearer hdr.fault.sig": _FAULT,
@@ -73,7 +73,7 @@ def _config(component: Component) -> HostedConfig:
     }
     if component is Component.API:
         specific = {
-            "allowed_caller_emails": (_OWNER,),
+            "allowed_caller_emails": (_OPERATOR,),
             "runtime_database": "reconcile-p5-runtime",
             "controller_url": "https://controller.example.com",
             "controller_audience": (
@@ -96,7 +96,12 @@ def _config(component: Component) -> HostedConfig:
             ),
             "vertex_location": "us",
             "vertex_model": "gemini-3.5-flash",
-            "vertex_max_calls": 1,
+            "vertex_prompt_version": "adaptive-planner-v3",
+            "vertex_prompt_sha256": (
+                "a18ac5bbd22570562acc6dfbc49437a82f0db6a265a4de737c1371b6ef2ca2d3"
+            ),
+            "vertex_max_count_tokens_attempts": 1,
+            "vertex_max_generation_attempts": 1,
             "vertex_max_input_tokens": 12_000,
             "vertex_max_output_tokens": 1_024,
             "vertex_thinking_level": "MINIMAL",
@@ -104,6 +109,7 @@ def _config(component: Component) -> HostedConfig:
     elif component is Component.FAULT_PROXY:
         specific = {
             "allowed_caller_emails": (_API,),
+            "runtime_database": "reconcile-p5-runtime",
             "target_database": "reconcile-p5-target",
             "target_bucket": f"{_PROJECT}-p5-target",
             "sandbox_url": "https://sandbox.example.com",
@@ -114,7 +120,8 @@ def _config(component: Component) -> HostedConfig:
     else:
         specific = {
             "allowed_caller_emails": (_CONTROLLER, _FAULT),
-            "target_database": "reconcile-p5-target",
+            "runtime_database": "reconcile-p5-runtime",
+            "target_database": "reconcile-p5-sandbox",
             "sandbox_read_caller_email": _CONTROLLER,
             "sandbox_mutation_caller_email": _FAULT,
         }
@@ -228,7 +235,7 @@ def test_controller_accepts_only_api_application_identity() -> None:
         denied = client.post(
             "/internal/v1/investigations",
             content=body,
-            headers=_headers("owner"),
+            headers=_headers("operator"),
         )
         accepted_boundary = client.post(
             "/internal/v1/investigations",
@@ -314,7 +321,7 @@ def test_sandbox_enforces_read_and_mutation_caller_routes() -> None:
             HTTPStatus.NOT_IMPLEMENTED,
         ),
         (
-            "owner",
+            "operator",
             "/internal/v1/evidence",
             InternalOperation.READ_EVIDENCE,
             HTTPStatus.UNAUTHORIZED,
@@ -326,7 +333,7 @@ def test_sandbox_enforces_read_and_mutation_caller_routes() -> None:
             HTTPStatus.UNAUTHORIZED,
         ),
         (
-            "owner",
+            "operator",
             "/internal/v1/mutations",
             InternalOperation.EXECUTE_FAULT,
             HTTPStatus.UNAUTHORIZED,
@@ -381,7 +388,7 @@ def test_fault_proxy_accepts_only_api_on_exact_fault_routes() -> None:
                 ).status_code
                 == HTTPStatus.NOT_IMPLEMENTED
             )
-            for identity in ("owner", "controller", "fault"):
+            for identity in ("operator", "controller", "fault"):
                 assert (
                     client.post(
                         path,
@@ -400,7 +407,7 @@ def test_fault_proxy_accepts_only_api_on_exact_fault_routes() -> None:
         )
 
 
-def test_hosted_api_disables_schema_routes_and_requires_owner_identity() -> None:
+def test_hosted_api_disables_schema_routes_and_requires_operator_identity() -> None:
     verifier = _Verifier()
     application = create_component_app(
         _config(Component.API),
@@ -408,12 +415,12 @@ def test_hosted_api_disables_schema_routes_and_requires_owner_identity() -> None
     )
     with TestClient(application) as client:
         assert client.get("/docs").status_code == HTTPStatus.UNAUTHORIZED
-        assert client.get("/docs", headers=_headers("owner")).status_code == (
+        assert client.get("/docs", headers=_headers("operator")).status_code == (
             HTTPStatus.UNAUTHORIZED
         )
-        assert client.get("/openapi.json", headers=_headers("owner")).status_code == (
-            HTTPStatus.UNAUTHORIZED
-        )
+        assert client.get(
+            "/openapi.json", headers=_headers("operator")
+        ).status_code == (HTTPStatus.UNAUTHORIZED)
         assert client.get("/health").status_code == HTTPStatus.OK
 
 
@@ -430,7 +437,7 @@ def test_hosted_api_disables_schema_routes_and_requires_owner_identity() -> None
         ("GET", "/api/v1/investigations/missing/events"),
     ),
 )
-def test_hosted_api_owner_reaches_each_exact_public_route(
+def test_hosted_api_operator_reaches_each_exact_public_route(
     method: str,
     path: str,
 ) -> None:
@@ -443,7 +450,7 @@ def test_hosted_api_owner_reaches_each_exact_public_route(
             method,
             path,
             content=b"{}" if method == "POST" else None,
-            headers=_headers("owner"),
+            headers=_headers("operator"),
         )
         cross_caller = client.request(
             method,
@@ -467,7 +474,7 @@ def test_hosted_api_owner_reaches_each_exact_public_route(
         ("GET", "/unknown"),
     ),
 )
-def test_hosted_api_denies_owner_on_nonallowlisted_routes(
+def test_hosted_api_denies_operator_on_nonallowlisted_routes(
     method: str,
     path: str,
 ) -> None:
@@ -476,6 +483,6 @@ def test_hosted_api_denies_owner_on_nonallowlisted_routes(
         verifier=_Verifier(),
     )
     with TestClient(application) as client:
-        response = client.request(method, path, headers=_headers("owner"))
+        response = client.request(method, path, headers=_headers("operator"))
 
     assert response.status_code == HTTPStatus.UNAUTHORIZED

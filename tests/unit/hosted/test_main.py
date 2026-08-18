@@ -20,7 +20,9 @@ def test_main_binds_selected_component_to_injected_port(
         auth_audience=(
             "https://reconcile.invalid/phase5/reconcile-dev-260813-14fa6d/api"
         ),
-        allowed_caller_emails=("eddyphilochola13@gmail.com",),
+        allowed_caller_emails=(
+            "rec-p5-apply@reconcile-dev-260813-14fa6d.iam.gserviceaccount.com",
+        ),
         source_revision="a" * 40,
         image_digest=f"sha256:{'b' * 64}",
         infra_revision="c" * 64,
@@ -32,7 +34,7 @@ def test_main_binds_selected_component_to_injected_port(
     monkeypatch.setattr(hosted_main, "load_config", lambda: config)
     monkeypatch.setattr(
         hosted_main,
-        "create_component_app",
+        "create_runtime_component_app",
         lambda selected: application if selected is config else None,
     )
 

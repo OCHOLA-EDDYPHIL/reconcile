@@ -172,6 +172,24 @@ class ScenarioRunnerError(RuntimeError):
     """The harness could not produce a trustworthy bounded result."""
 
 
+def build_scenario_plan(request: ScenarioRunRequest) -> ScenarioPlan:
+    """Derive the canonical fault-independent plan for one sealed request."""
+
+    request = decode_contract(canonical_json_bytes(request), ScenarioRunRequest)
+    return ScenarioPlan(
+        scenario=request.scenario,
+        identifiers=ScenarioIdentifiers(
+            run_id=request.run_id,
+            investigation_id=request.investigation_id,
+            operation_id=request.operation_id,
+            invocation_id=request.invocation_id,
+            function_call_id=request.function_call_id,
+        ),
+        seed=request.seed,
+        namespace_id=_namespace_id(request.scenario, request.run_id),
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class _InvocationResult:
     trace: ScenarioFaultTrace
@@ -370,7 +388,7 @@ class ScenarioRunner:
         request = decode_contract(canonical_json_bytes(request), ScenarioRunRequest)
         if type(prepared) is not PreparedScenario:
             raise TypeError("prepared scenario must be exact")
-        expected_plan = self._run_plan(request)
+        expected_plan = build_scenario_plan(request)
         if definition.scenario != request.scenario or prepared.plan != expected_plan:
             raise ValueError("prepared scenario does not match the run request")
         envelope = decode_contract(
@@ -556,22 +574,11 @@ class ScenarioRunner:
         request: ScenarioRunRequest,
         definition: ScenarioDefinition,
     ) -> PreparedScenario:
-        return self._seal(self._run_plan(request), definition)
+        return self._seal(build_scenario_plan(request), definition)
 
     @staticmethod
     def _run_plan(request: ScenarioRunRequest) -> ScenarioPlan:
-        return ScenarioPlan(
-            scenario=request.scenario,
-            identifiers=ScenarioIdentifiers(
-                run_id=request.run_id,
-                investigation_id=request.investigation_id,
-                operation_id=request.operation_id,
-                invocation_id=request.invocation_id,
-                function_call_id=request.function_call_id,
-            ),
-            seed=request.seed,
-            namespace_id=_namespace_id(request.scenario, request.run_id),
-        )
+        return build_scenario_plan(request)
 
     def _prepare_cleanup(
         self,
@@ -977,4 +984,5 @@ __all__ = [
     "ScenarioPreparation",
     "ScenarioRunner",
     "ScenarioRunnerError",
+    "build_scenario_plan",
 ]

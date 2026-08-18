@@ -3,6 +3,7 @@ locals {
     "roles/artifactregistry.admin",
     "roles/datastore.owner",
     "roles/iam.serviceAccountAdmin",
+    "roles/logging.viewer",
     "roles/resourcemanager.projectIamAdmin",
     "roles/run.admin",
     "roles/serviceusage.serviceUsageAdmin",

@@ -362,6 +362,8 @@ class HostedScenarioWorkflow:
             raise TypeError("hosted launch must be exact")
         scenario = _scenario(launch.scenario)
         mode = _mode(launch.mode)
+        if mode is ScenarioMode.COMPARE:
+            raise ValueError("hosted comparison is not an accepted Phase 5 mode")
         request = _request(scenario, launch.launch_id)
         if (
             snapshot.investigation_id != request.investigation_id

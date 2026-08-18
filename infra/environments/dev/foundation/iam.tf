@@ -16,6 +16,24 @@ resource "google_project_iam_member" "runtime_database_user" {
   ]
 }
 
+resource "google_project_iam_member" "runtime_database_viewer" {
+  for_each = toset(["fault_proxy", "sandbox"])
+
+  project = var.project_id
+  role    = "roles/datastore.viewer"
+  member  = "serviceAccount:${google_service_account.runtime[each.value].email}"
+
+  condition {
+    title       = "reconcile_p5_runtime_database_${each.value}"
+    description = "Restrict Phase 5 runtime authority reads to the runtime database"
+    expression  = "resource.name == \"projects/${var.project_id}/databases/${local.runtime_database_name}\""
+  }
+
+  depends_on = [
+    google_firestore_database.phase5["runtime"],
+  ]
+}
+
 resource "google_project_iam_member" "target_database_viewer" {
   project = var.project_id
   role    = "roles/datastore.viewer"
@@ -33,7 +51,7 @@ resource "google_project_iam_member" "target_database_viewer" {
 }
 
 resource "google_project_iam_member" "target_database_user" {
-  for_each = toset(["fault_proxy", "sandbox"])
+  for_each = toset(["fault_proxy"])
 
   project = var.project_id
   role    = "roles/datastore.user"
@@ -47,6 +65,22 @@ resource "google_project_iam_member" "target_database_user" {
 
   depends_on = [
     google_firestore_database.phase5["target"],
+  ]
+}
+
+resource "google_project_iam_member" "sandbox_database_user" {
+  project = var.project_id
+  role    = "roles/datastore.user"
+  member  = "serviceAccount:${google_service_account.runtime["sandbox"].email}"
+
+  condition {
+    title       = "reconcile_p5_sandbox_database_sandbox"
+    description = "Restrict Phase 5 sandbox state access to the sandbox database"
+    expression  = "resource.name == \"projects/${var.project_id}/databases/${local.sandbox_database_name}\""
+  }
+
+  depends_on = [
+    google_firestore_database.phase5["sandbox"],
   ]
 }
 

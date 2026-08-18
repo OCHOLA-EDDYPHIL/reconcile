@@ -157,9 +157,8 @@ class ScenarioRouteProvenance(StrictModel):
         else:
             valid = (
                 self.outcome is ScenarioHybridOutcome.EXPLICIT_UNKNOWN
-                and self.planner_invoked
                 and not self.fixed_connector_invoked
-                and self.provider_failure
+                and self.planner_invoked is self.provider_failure
             )
         if not valid:
             raise ValueError("hybrid route provenance is inconsistent")

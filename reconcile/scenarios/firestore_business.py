@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import time
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Protocol
@@ -17,6 +18,9 @@ from reconcile.adapters.firestore_business import (
     FIRESTORE_BUSINESS_CAPABILITY_NAME,
     FIRESTORE_BUSINESS_CAPABILITY_VERSION,
     FIRESTORE_BUSINESS_CLASSIFICATION_POLICY_VERSION,
+    FIRESTORE_BUSINESS_CLOUD_PROFILE,
+    FIRESTORE_BUSINESS_LOCAL_PROFILE,
+    FirestoreBusinessTargetProfile,
     build_firestore_business_capability_registration,
     build_firestore_business_rule_registration,
     build_firestore_business_target,
@@ -63,6 +67,7 @@ from reconcile.scenarios.adk_mutation import run_adk_mutation
 from reconcile.scenarios.local_firestore import (
     BusinessDocumentCoordinate,
     BusinessDocumentWrite,
+    FirestoreBusinessReadPort,
     LocalFirestoreCleanupTarget,
     LocalFirestoreMutationTarget,
     LocalFirestoreReadTarget,
@@ -243,6 +248,37 @@ def _mutation_arguments(plan: ScenarioPlan) -> dict[str, JsonValue]:
     }
 
 
+@dataclass(frozen=True, slots=True)
+class FirestoreBusinessOperationMaterial:
+    """Exact business-operation documents and deterministic effect selection."""
+
+    namespace_id: str
+    operation_id: str
+    manifest_collection: str
+    manifest_document_id: str
+    documents: tuple[BusinessDocumentWrite, ...]
+    selected_effect_ids: tuple[str, ...]
+    correlation: dict[str, str]
+
+
+def build_firestore_business_operation_material(
+    plan: ScenarioPlan,
+) -> FirestoreBusinessOperationMaterial:
+    """Derive the complete multi-effect mutation from a canonical plan."""
+
+    if type(plan) is not ScenarioPlan:
+        raise TypeError("business material requires an exact scenario plan")
+    return FirestoreBusinessOperationMaterial(
+        namespace_id=plan.namespace_id,
+        operation_id=plan.identifiers.operation_id,
+        manifest_collection=_MANIFEST_COLLECTION,
+        manifest_document_id=_manifest_document_id(plan),
+        documents=_document_writes(plan),
+        selected_effect_ids=_selected_effect_ids(plan),
+        correlation=_correlation(plan),
+    )
+
+
 def _cleanup_resource_ids(plan: ScenarioPlan) -> tuple[str, ...]:
     manifest = (
         f"business-manifest:{plan.namespace_id}/"
@@ -254,6 +290,110 @@ def _cleanup_resource_ids(plan: ScenarioPlan) -> tuple[str, ...]:
         for coordinate in _coordinates(plan)
     )
     return (manifest, *documents)
+
+
+def build_firestore_business_scenario_preparation(
+    plan: ScenarioPlan,
+    *,
+    invoked_at: datetime,
+    profile: FirestoreBusinessTargetProfile = FIRESTORE_BUSINESS_CLOUD_PROFILE,
+) -> ScenarioPreparation:
+    """Build the sealed business envelope under an explicit target profile."""
+
+    if type(plan) is not ScenarioPlan:
+        raise TypeError("business preparation requires an exact scenario plan")
+    identifiers = plan.identifiers
+    if identifiers.function_call_id is None:
+        raise ValueError(
+            "the business ADK scenario requires a function-call identifier"
+        )
+    material = build_firestore_business_operation_material(plan)
+    coordinates = tuple(document.coordinate for document in material.documents)
+    arguments = _mutation_arguments(plan)
+    target = build_firestore_business_target(
+        namespace_id=material.namespace_id,
+        manifest_collection=material.manifest_collection,
+        manifest_document_id=material.manifest_document_id,
+        document_coordinates=coordinates,
+        profile=profile,
+    )
+    expected_effects = tuple(
+        ExpectedEffect(
+            schema_version=EXPECTED_EFFECT_VERSION,
+            effect_id=document.effect_id,
+            commit_scope=document.effect_id,
+            predicate={
+                "collection_name": document.collection_name,
+                "document_id": document.document_id,
+                "content_sha256": document.content_sha256,
+                "correlation": material.correlation,
+            },
+            description=(
+                "This separately committed business-step document exists with "
+                "the exact operation correlation."
+            ),
+        )
+        for document in material.documents
+    )
+    timestamp = _aware_utc(invoked_at)
+    environment_label = (
+        "local business-operation target"
+        if profile is FIRESTORE_BUSINESS_LOCAL_PROFILE
+        else "Google Cloud Firestore business-operation target"
+    )
+    envelope = ExecutionEnvelope(
+        schema_version=EXECUTION_ENVELOPE_VERSION,
+        investigation_id=identifiers.investigation_id,
+        operation_id=identifiers.operation_id,
+        target=target,
+        invoked_at=timestamp,
+        ambiguity=AmbiguousExecution(
+            kind=AmbiguityKind.OTHER,
+            observed_at=timestamp,
+            detail=f"Sealed {environment_label} scenario envelope template.",
+        ),
+        expected_effects=expected_effects,
+        context=EnvelopeContext(
+            invocation=OriginalInvocation(
+                invocation_id=identifiers.invocation_id,
+                function_call_id=identifiers.function_call_id,
+                tool_name=FIRESTORE_BUSINESS_TOOL_NAME,
+                tool_version=FIRESTORE_BUSINESS_TOOL_VERSION,
+                arguments=arguments,
+                arguments_sha256=hashlib.sha256(
+                    canonical_json_value_bytes(arguments)
+                ).hexdigest(),
+            ),
+            enabled_capabilities=(
+                CapabilityRef(
+                    name=FIRESTORE_BUSINESS_CAPABILITY_NAME,
+                    version=FIRESTORE_BUSINESS_CAPABILITY_VERSION,
+                ),
+            ),
+            correlation_fields=material.correlation,
+            evidence_budget=EvidenceBudget(
+                max_probes=1,
+                max_elapsed_ms=5_000,
+                max_total_result_bytes=32_768,
+                max_cost_units=1,
+            ),
+            freshness=FreshnessPolicy(
+                max_age_seconds=_MAX_AGE_SECONDS,
+                clock_skew_seconds=_CLOCK_SKEW_SECONDS,
+            ),
+            policies=PolicyReferences(
+                authority=profile.authority_policy_version,
+                classification=FIRESTORE_BUSINESS_CLASSIFICATION_POLICY_VERSION,
+                action=FIRESTORE_BUSINESS_ACTION_POLICY_VERSION,
+            ),
+        ),
+    )
+    return ScenarioPreparation(
+        execution_envelope=envelope,
+        cleanup_manifest=ScenarioCleanupManifest(
+            resource_ids=_cleanup_resource_ids(plan)
+        ),
+    )
 
 
 class FirestoreBusinessScenarioDefinition:
@@ -541,9 +681,10 @@ class FirestoreBusinessScenarioDefinition:
 
 def _firestore_business_registries(
     envelope: ExecutionEnvelope,
-    read_target: LocalFirestoreReadTarget,
+    read_target: FirestoreBusinessReadPort,
     *,
     clock: BusinessInvestigationClock,
+    profile: FirestoreBusinessTargetProfile = FIRESTORE_BUSINESS_LOCAL_PROFILE,
 ) -> tuple[CapabilityRegistry, TargetRuleRegistry]:
     capabilities = CapabilityRegistry()
     capabilities.register(
@@ -551,10 +692,11 @@ def _firestore_business_registries(
             read_target=read_target,
             target=envelope.target,
             clock=clock.now,
+            profile=profile,
         )
     )
     rules = TargetRuleRegistry()
-    rules.register(build_firestore_business_rule_registration())
+    rules.register(build_firestore_business_rule_registration(profile))
     return capabilities, rules
 
 
@@ -591,6 +733,51 @@ async def execute_firestore_business_baseline(
         cancellation_event=cancellation_event,
         progress_emitter=progress_emitter,
         additional_limitations=_FIRESTORE_BUSINESS_LIMITATIONS,
+        durability_observer=durability_observer,
+    )
+
+
+async def execute_cloud_firestore_business_baseline(
+    envelope: ExecutionEnvelope,
+    read_target: FirestoreBusinessReadPort,
+    *,
+    clock: BusinessInvestigationClock | None = None,
+    revision: int = 1,
+    cancellation_event: asyncio.Event | None = None,
+    progress_emitter: ProgressEmitter | None = None,
+    durability_observer: ProbeDurabilityObserver | None = None,
+) -> FixedBaselineResult:
+    """Execute the authoritative one-read Cloud Firestore fixed connector."""
+
+    from reconcile.hosted.firestore_business import GoogleFirestoreBusinessReadTarget
+
+    envelope = decode_contract(canonical_json_bytes(envelope), ExecutionEnvelope)
+    if type(read_target) is not GoogleFirestoreBusinessReadTarget:
+        raise TypeError("the cloud business investigation requires the sealed reader")
+    selected_clock = clock or _SystemInvestigationClock()
+    capabilities, rules = _firestore_business_registries(
+        envelope,
+        read_target,
+        clock=selected_clock,
+        profile=FIRESTORE_BUSINESS_CLOUD_PROFILE,
+    )
+    return await execute_fixed_plan(
+        envelope,
+        capabilities,
+        rules,
+        FIRESTORE_BUSINESS_FIXED_PROBE_PLAN,
+        clock=selected_clock,
+        revision=revision,
+        cancellation_event=cancellation_event,
+        progress_emitter=progress_emitter,
+        additional_limitations=(
+            (
+                "A PARTIAL result means a partial multi-step business operation; "
+                "no atomic transaction is represented."
+            ),
+            "Evidence is one exact strong composite read from Google Cloud Firestore.",
+            "No provider planner participates in classification or action authority.",
+        ),
         durability_observer=durability_observer,
     )
 
@@ -710,7 +897,11 @@ __all__ = [
     "FIRESTORE_BUSINESS_TOOL_NAME",
     "FIRESTORE_BUSINESS_TOOL_VERSION",
     "BusinessInvestigationClock",
+    "FirestoreBusinessOperationMaterial",
     "FirestoreBusinessScenarioDefinition",
+    "build_firestore_business_operation_material",
+    "build_firestore_business_scenario_preparation",
+    "execute_cloud_firestore_business_baseline",
     "execute_firestore_business_adaptive",
     "execute_firestore_business_baseline",
     "investigate_firestore_business",

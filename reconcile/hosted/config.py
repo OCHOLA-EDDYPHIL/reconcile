@@ -49,7 +49,10 @@ class HostedConfig:
     sandbox_mutation_caller_email: str | None = None
     vertex_location: str | None = None
     vertex_model: str | None = None
-    vertex_max_calls: int | None = None
+    vertex_prompt_version: str | None = None
+    vertex_prompt_sha256: str | None = None
+    vertex_max_count_tokens_attempts: int | None = None
+    vertex_max_generation_attempts: int | None = None
     vertex_max_input_tokens: int | None = None
     vertex_max_output_tokens: int | None = None
     vertex_thinking_level: str | None = None
@@ -77,7 +80,10 @@ _SANDBOX_READ_CALLER = "RECONCILE_SANDBOX_READ_CALLER_EMAIL"
 _SANDBOX_MUTATION_CALLER = "RECONCILE_SANDBOX_MUTATION_CALLER_EMAIL"
 _VERTEX_LOCATION = "RECONCILE_VERTEX_LOCATION"
 _VERTEX_MODEL = "RECONCILE_VERTEX_MODEL"
-_VERTEX_MAX_CALLS = "RECONCILE_VERTEX_MAX_CALLS"
+_VERTEX_PROMPT_VERSION = "RECONCILE_VERTEX_PROMPT_VERSION"
+_VERTEX_PROMPT_SHA256 = "RECONCILE_VERTEX_PROMPT_SHA256"
+_VERTEX_MAX_COUNT_TOKENS_ATTEMPTS = "RECONCILE_VERTEX_MAX_COUNT_TOKENS_ATTEMPTS"
+_VERTEX_MAX_GENERATION_ATTEMPTS = "RECONCILE_VERTEX_MAX_GENERATION_ATTEMPTS"
 _VERTEX_MAX_INPUT_TOKENS = "RECONCILE_VERTEX_MAX_INPUT_TOKENS"
 _VERTEX_MAX_OUTPUT_TOKENS = "RECONCILE_VERTEX_MAX_OUTPUT_TOKENS"
 _VERTEX_THINKING_LEVEL = "RECONCILE_VERTEX_THINKING_LEVEL"
@@ -99,6 +105,7 @@ _COMPONENT_NAMES = {
         {
             _ALLOWED_CALLERS,
             _RUNTIME_DATABASE,
+            _TARGET_BUCKET,
             _CONTROLLER_URL,
             _CONTROLLER_AUDIENCE,
             _FAULT_PROXY_URL,
@@ -115,7 +122,10 @@ _COMPONENT_NAMES = {
             _SANDBOX_AUDIENCE,
             _VERTEX_LOCATION,
             _VERTEX_MODEL,
-            _VERTEX_MAX_CALLS,
+            _VERTEX_PROMPT_VERSION,
+            _VERTEX_PROMPT_SHA256,
+            _VERTEX_MAX_COUNT_TOKENS_ATTEMPTS,
+            _VERTEX_MAX_GENERATION_ATTEMPTS,
             _VERTEX_MAX_INPUT_TOKENS,
             _VERTEX_MAX_OUTPUT_TOKENS,
             _VERTEX_THINKING_LEVEL,
@@ -124,6 +134,7 @@ _COMPONENT_NAMES = {
     Component.FAULT_PROXY: frozenset(
         {
             _ALLOWED_CALLERS,
+            _RUNTIME_DATABASE,
             _TARGET_DATABASE,
             _TARGET_BUCKET,
             _SANDBOX_URL,
@@ -132,6 +143,7 @@ _COMPONENT_NAMES = {
     ),
     Component.SANDBOX: frozenset(
         {
+            _RUNTIME_DATABASE,
             _TARGET_DATABASE,
             _SANDBOX_READ_CALLER,
             _SANDBOX_MUTATION_CALLER,
@@ -157,8 +169,13 @@ _IMAGE_DIGEST_PATTERN = re.compile(r"sha256:[0-9a-f]{64}")
 _SHA256_PATTERN = re.compile(r"[0-9a-f]{64}")
 _APPROVED_PROJECT_ID = "reconcile-dev-260813-14fa6d"
 _APPROVED_RUNTIME_DATABASE = "reconcile-p5-runtime"
+_APPROVED_SANDBOX_DATABASE = "reconcile-p5-sandbox"
 _APPROVED_TARGET_DATABASE = "reconcile-p5-target"
 _APPROVED_TARGET_BUCKET = "reconcile-dev-260813-14fa6d-p5-target"
+_APPROVED_VERTEX_PROMPT_VERSION = "adaptive-planner-v3"
+_APPROVED_VERTEX_PROMPT_SHA256 = (
+    "a18ac5bbd22570562acc6dfbc49437a82f0db6a265a4de737c1371b6ef2ca2d3"
+)
 _APPROVED_AUDIENCES = {
     component: (
         f"https://reconcile.invalid/phase5/{_APPROVED_PROJECT_ID}/{component.value}"
@@ -166,7 +183,7 @@ _APPROVED_AUDIENCES = {
     for component in Component
 }
 _APPROVED_CALLERS = {
-    Component.API: "eddyphilochola13@gmail.com",
+    Component.API: ("rec-p5-apply@reconcile-dev-260813-14fa6d.iam.gserviceaccount.com"),
     Component.CONTROLLER: (
         "rec-p5-api@reconcile-dev-260813-14fa6d.iam.gserviceaccount.com"
     ),
@@ -341,6 +358,7 @@ def _load_config(environment: Mapping[str, str]) -> HostedConfig:
             "runtime_database": _exact(
                 managed, _RUNTIME_DATABASE, _APPROVED_RUNTIME_DATABASE
             ),
+            "target_bucket": _exact(managed, _TARGET_BUCKET, _APPROVED_TARGET_BUCKET),
             "controller_url": _https_origin(managed, _CONTROLLER_URL),
             "controller_audience": _audience(
                 managed, _CONTROLLER_AUDIENCE, Component.CONTROLLER
@@ -365,8 +383,27 @@ def _load_config(environment: Mapping[str, str]) -> HostedConfig:
             ),
             "vertex_location": _exact(managed, _VERTEX_LOCATION, "us"),
             "vertex_model": _exact(managed, _VERTEX_MODEL, "gemini-3.5-flash"),
-            "vertex_max_calls": _integer(
-                managed, _VERTEX_MAX_CALLS, minimum=1, maximum=1
+            "vertex_prompt_version": _exact(
+                managed,
+                _VERTEX_PROMPT_VERSION,
+                _APPROVED_VERTEX_PROMPT_VERSION,
+            ),
+            "vertex_prompt_sha256": _exact(
+                managed,
+                _VERTEX_PROMPT_SHA256,
+                _APPROVED_VERTEX_PROMPT_SHA256,
+            ),
+            "vertex_max_count_tokens_attempts": _integer(
+                managed,
+                _VERTEX_MAX_COUNT_TOKENS_ATTEMPTS,
+                minimum=1,
+                maximum=1,
+            ),
+            "vertex_max_generation_attempts": _integer(
+                managed,
+                _VERTEX_MAX_GENERATION_ATTEMPTS,
+                minimum=1,
+                maximum=1,
             ),
             "vertex_max_input_tokens": _integer(
                 managed,
@@ -384,6 +421,9 @@ def _load_config(environment: Mapping[str, str]) -> HostedConfig:
         }
     elif component is Component.FAULT_PROXY:
         specific = {
+            "runtime_database": _exact(
+                managed, _RUNTIME_DATABASE, _APPROVED_RUNTIME_DATABASE
+            ),
             "target_database": _exact(
                 managed, _TARGET_DATABASE, _APPROVED_TARGET_DATABASE
             ),
@@ -395,8 +435,11 @@ def _load_config(environment: Mapping[str, str]) -> HostedConfig:
         }
     else:
         specific = {
+            "runtime_database": _exact(
+                managed, _RUNTIME_DATABASE, _APPROVED_RUNTIME_DATABASE
+            ),
             "target_database": _exact(
-                managed, _TARGET_DATABASE, _APPROVED_TARGET_DATABASE
+                managed, _TARGET_DATABASE, _APPROVED_SANDBOX_DATABASE
             ),
             "sandbox_read_caller_email": sandbox_read_caller,
             "sandbox_mutation_caller_email": sandbox_mutation_caller,

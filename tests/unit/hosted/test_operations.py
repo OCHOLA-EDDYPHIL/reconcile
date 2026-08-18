@@ -105,7 +105,9 @@ def _api_config() -> HostedConfig:
         port=8080,
         project_id="reconcile-dev-260813-14fa6d",
         auth_audience="https://reconcile.invalid/phase5/api",
-        allowed_caller_emails=("eddyphilochola13@gmail.com",),
+        allowed_caller_emails=(
+            "rec-p5-apply@reconcile-dev-260813-14fa6d.iam.gserviceaccount.com",
+        ),
         source_revision="1" * 40,
         image_digest=f"sha256:{'2' * 64}",
         infra_revision="3" * 64,

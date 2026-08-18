@@ -40,11 +40,13 @@ _EXPECTED_RESOURCE_BLOCKS = {
     ("google_cloud_run_v2_service", "controller"),
     ("google_cloud_run_v2_service", "fault_proxy"),
     ("google_cloud_run_v2_service", "sandbox"),
-    ("google_cloud_run_v2_service_iam_member", "api_owner"),
+    ("google_cloud_run_v2_service_iam_member", "api_operator"),
     ("google_cloud_run_v2_service_iam_member", "internal"),
     ("google_firestore_database", "phase5"),
     ("google_project_iam_member", "phase5_apply"),
     ("google_project_iam_member", "runtime_database_user"),
+    ("google_project_iam_member", "runtime_database_viewer"),
+    ("google_project_iam_member", "sandbox_database_user"),
     ("google_project_iam_member", "target_database_user"),
     ("google_project_iam_member", "target_database_viewer"),
     ("google_project_iam_member", "vertex_user"),
@@ -63,6 +65,7 @@ _APPLY_PROJECT_ROLES = {
     "roles/artifactregistry.admin",
     "roles/datastore.owner",
     "roles/iam.serviceAccountAdmin",
+    "roles/logging.viewer",
     "roles/resourcemanager.projectIamAdmin",
     "roles/run.admin",
     "roles/serviceusage.serviceUsageAdmin",
@@ -299,7 +302,10 @@ def test_public_principals_and_secret_values_are_absent() -> None:
         )
         is None
     )
-    assert '"user:eddyphilochola13@gmail.com"' in invokers
+    assert (
+        '"serviceAccount:rec-p5-apply@reconcile-dev-260813-14fa6d.iam.gserviceaccount.com"'
+        in invokers
+    )
     assert "var.api_invoker_members == toset" in invokers
     assert set(run_resources) == _CLOUD_RUN_SERVICES
     for resource in run_resources.values():
@@ -312,7 +318,7 @@ def test_public_principals_and_secret_values_are_absent() -> None:
     ]
     for resource in iam_resources:
         member = _attribute(resource.body, "member")
-        if resource.name == "api_owner":
+        if resource.name == "api_operator":
             assert member == "each.value"
         elif resource.name == "owner_impersonation":
             assert member == "var.owner_principal"
@@ -324,19 +330,58 @@ def test_public_principals_and_secret_values_are_absent() -> None:
 
 def test_cloud_run_images_are_digest_pinned_and_bounded() -> None:
     variables = _STACKS[2] / "variables.tf"
-    image_variable = _named_block(variables, "variable", "image_references")
+    image_variable = _named_block(variables, "variable", "image_digest")
+    locals_source = (_STACKS[2] / "locals.tf").read_text(encoding="utf-8")
     run_resources = {
         resource.name: resource
         for resource in _resources()
         if resource.resource_type == "google_cloud_run_v2_service"
     }
 
-    assert "reconcile@sha256:[0-9a-f]{64}$" in image_variable
-    assert "length(toset(values(var.image_references))) <= 2" in image_variable
+    assert "^sha256:[0-9a-f]{64}$" in image_variable
+    assert "image_references" not in variables.read_text(encoding="utf-8")
+    assert locals_source.count("reconcile-p5/reconcile@${var.image_digest}") == 1
+    assert set(run_resources) == _CLOUD_RUN_SERVICES
+    for resource in run_resources.values():
+        assert _attribute(resource.body, "image") == "local.image_reference"
+        assert len(re.findall(r"(?m)^\s*image\s*=", resource.body)) == 1
+
+
+def test_cloud_run_audiences_and_candidate_environment_are_closed_world() -> None:
+    run_resources = {
+        resource.name: resource
+        for resource in _resources()
+        if resource.resource_type == "google_cloud_run_v2_service"
+    }
+    source = (_STACKS[2] / "cloud_run.tf").read_text(encoding="utf-8")
+    locals_source = (_STACKS[2] / "locals.tf").read_text(encoding="utf-8")
+
     assert set(run_resources) == _CLOUD_RUN_SERVICES
     for name, resource in run_resources.items():
-        assert _attribute(resource.body, "image") == f"var.image_references.{name}"
-        assert len(re.findall(r"(?m)^\s*image\s*=", resource.body)) == 1
+        assert _attribute(resource.body, "custom_audiences") == (
+            f"[local.audiences.{name}]"
+        )
+    for name in (
+        "GOOGLE_CLOUD_PROJECT",
+        "RECONCILE_IMAGE_DIGEST",
+        "RECONCILE_INFRA_REVISION",
+        "RECONCILE_SEMANTIC_CONFIG_SHA256",
+        "RECONCILE_SOURCE_REVISION",
+    ):
+        assert locals_source.count(f"{name}") == 1
+    for name in (
+        "RECONCILE_VERTEX_MAX_COUNT_TOKENS_ATTEMPTS",
+        "RECONCILE_VERTEX_MAX_GENERATION_ATTEMPTS",
+        "RECONCILE_VERTEX_MAX_INPUT_TOKENS",
+        "RECONCILE_VERTEX_MAX_OUTPUT_TOKENS",
+        "RECONCILE_VERTEX_PROMPT_SHA256",
+        "RECONCILE_VERTEX_PROMPT_VERSION",
+    ):
+        assert source.count(name) == 1
+    assert source.count("RECONCILE_TARGET_DATABASE") == 3
+    assert source.count("local.sandbox_database_name") == 1
+    assert source.count("local.target_database_name") == 2
+    assert 'sandbox_database_name = "reconcile-p5-sandbox"' in locals_source
 
 
 def test_runtime_commands_are_owned_by_the_pinned_images() -> None:
@@ -395,6 +440,24 @@ def test_budget_is_fixed_to_five_us_dollars_without_credits() -> None:
     )
 
 
+def test_firestore_database_inventory_separates_runtime_sandbox_and_target() -> None:
+    databases = [
+        resource
+        for resource in _resources()
+        if resource.resource_type == "google_firestore_database"
+    ]
+    foundation_locals = _compact((_STACKS[1] / "locals.tf").read_text(encoding="utf-8"))
+
+    assert len(databases) == 1
+    compact = _compact(databases[0].body)
+    assert "runtime = local.runtime_database_name" in compact
+    assert "sandbox = local.sandbox_database_name" in compact
+    assert "target = local.target_database_name" in compact
+    assert 'runtime_database_name = "reconcile-p5-runtime"' in foundation_locals
+    assert 'sandbox_database_name = "reconcile-p5-sandbox"' in foundation_locals
+    assert 'target_database_name = "reconcile-p5-target"' in foundation_locals
+
+
 def test_only_the_disposable_target_bucket_has_destructive_defaults() -> None:
     buckets = {
         resource.name: resource
@@ -429,6 +492,8 @@ def test_every_project_level_database_role_is_resource_conditioned() -> None:
     }
     expected_databases = {
         "runtime_database_user": "local.runtime_database_name",
+        "runtime_database_viewer": "local.runtime_database_name",
+        "sandbox_database_user": "local.sandbox_database_name",
         "target_database_user": "local.target_database_name",
         "target_database_viewer": "local.target_database_name",
     }
@@ -466,6 +531,8 @@ def test_apply_identity_and_runtime_iam_graph_are_closed_world() -> None:
     assert set(project_iam) == {
         "phase5_apply",
         "runtime_database_user",
+        "runtime_database_viewer",
+        "sandbox_database_user",
         "target_database_user",
         "target_database_viewer",
         "vertex_user",
@@ -494,10 +561,20 @@ def test_apply_identity_and_runtime_iam_graph_are_closed_world() -> None:
             '"serviceAccount:${google_service_account.runtime[each.value].email}"',
             'toset(["api", "controller"])',
         ),
+        "runtime_database_viewer": (
+            '"roles/datastore.viewer"',
+            '"serviceAccount:${google_service_account.runtime[each.value].email}"',
+            'toset(["fault_proxy", "sandbox"])',
+        ),
+        "sandbox_database_user": (
+            '"roles/datastore.user"',
+            '"serviceAccount:${google_service_account.runtime["sandbox"].email}"',
+            None,
+        ),
         "target_database_user": (
             '"roles/datastore.user"',
             '"serviceAccount:${google_service_account.runtime[each.value].email}"',
-            'toset(["fault_proxy", "sandbox"])',
+            'toset(["fault_proxy"])',
         ),
         "target_database_viewer": (
             '"roles/datastore.viewer"',
@@ -558,12 +635,12 @@ def test_apply_identity_and_runtime_iam_graph_are_closed_world() -> None:
         "google_service_account.phase5_apply.member"
     )
 
-    assert set(run_iam) == {"api_owner", "internal"}
-    api_owner = run_iam["api_owner"].body
-    assert _attribute(api_owner, "for_each") == "var.api_invoker_members"
-    assert _attribute(api_owner, "name") == "google_cloud_run_v2_service.api.name"
-    assert _attribute(api_owner, "role") == '"roles/run.invoker"'
-    assert _attribute(api_owner, "member") == "each.value"
+    assert set(run_iam) == {"api_operator", "internal"}
+    api_operator = run_iam["api_operator"].body
+    assert _attribute(api_operator, "for_each") == "var.api_invoker_members"
+    assert _attribute(api_operator, "name") == "google_cloud_run_v2_service.api.name"
+    assert _attribute(api_operator, "role") == '"roles/run.invoker"'
+    assert _attribute(api_operator, "member") == "each.value"
     internal = run_iam["internal"].body
     assert _attribute(internal, "for_each") == "local.internal_invocations"
     assert _attribute(internal, "name") == "each.value.service"
@@ -629,6 +706,7 @@ def test_outputs_are_closed_world_and_non_sensitive() -> None:
             ),
             "firestore_databases": (
                 'value = { runtime = google_firestore_database.phase5["runtime"].name '
+                'sandbox = google_firestore_database.phase5["sandbox"].name '
                 'target = google_firestore_database.phase5["target"].name }'
             ),
             "service_account_emails": (
