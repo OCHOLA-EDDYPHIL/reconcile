@@ -476,6 +476,26 @@ def _records(
     return state, manifest, approval, runner
 
 
+def _legacy_image_id_manifest(
+    manifest: operator.Phase5ApprovalManifest,
+) -> operator.Phase5ApprovalManifest:
+    values = {
+        name: getattr(manifest, name)
+        for name in type(manifest).model_fields
+        if name != "record_sha256"
+    }
+    values["commands"] = operator._fixed_commands(
+        manifest.source_revision,
+        manifest.image_digest,
+        manifest.infrastructure_revision,
+        manifest.semantic_config_sha256,
+        state_root=Path(manifest.operator_state_root),
+        image_archive=Path(manifest.image_artifact.archive_path),
+        image_identity_format="--format={{.Id}}",
+    )
+    return operator._seal(operator.Phase5ApprovalManifest, **values)
+
+
 class _Runner:
     def __init__(
         self,
@@ -903,6 +923,62 @@ def test_manifest_freezes_exact_identity_limits_estimates_and_commands(
         "--quiet",
     )
     assert image.commands[1][0] == operator._DOCKER
+
+
+def test_legacy_image_id_manifest_is_limited_to_the_exact_allowlist(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, manifest, _, _ = _records(tmp_path)
+
+    with pytest.raises(ValueError, match="command inventory differs"):
+        _legacy_image_id_manifest(manifest)
+
+    monkeypatch.setattr(
+        operator,
+        "_LEGACY_IMAGE_ID_SOURCE_REVISIONS",
+        frozenset({_SOURCE}),
+    )
+    legacy = _legacy_image_id_manifest(manifest)
+
+    assert (
+        legacy.command_for(operator.Phase5Action.IMAGE_PUSH).commands[2][3]
+        == "--format={{.Id}}"
+    )
+    assert (
+        manifest.command_for(operator.Phase5Action.IMAGE_PUSH).commands[2][3]
+        == "--format={{.Descriptor.digest}}"
+    )
+
+
+def test_legacy_manifest_is_read_only_even_when_allowlisted(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state, manifest, _, runner = _records(tmp_path)
+    monkeypatch.setattr(
+        operator,
+        "_LEGACY_IMAGE_ID_SOURCE_REVISIONS",
+        frozenset({_SOURCE}),
+    )
+    legacy = _legacy_image_id_manifest(manifest)
+    approval = operator.build_approval(
+        legacy,
+        approved_by="user:eddyphilochola13@gmail.com",
+        approved_at=_NOW + timedelta(minutes=1),
+    )
+
+    with pytest.raises(operator.OperatorError, match="LEGACY_MANIFEST_READ_ONLY"):
+        operator.authorize_action(
+            action=operator.Phase5Action.RUNTIME_TEARDOWN,
+            manifest=legacy,
+            approval=approval,
+            state=state,
+            repo_root=_REPO_ROOT,
+            now=_NOW + timedelta(minutes=2),
+            runner=runner,
+        )
+    assert _mutating_calls(runner) == []
 
 
 def test_execution_snapshot_is_closed_to_code_and_required_phase5_scripts(
