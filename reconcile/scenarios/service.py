@@ -150,8 +150,8 @@ BOUNDED_HYBRID_EXPLICIT_UNKNOWN_PROVENANCE = (
 BOUNDED_HYBRID_PREPLANNER_UNKNOWN_PROVENANCE = (
     f"Bounded hybrid route policy {BOUNDED_HYBRID_ROUTE_POLICY_VERSION} retained "
     "explicit UNKNOWN before advisory dispatch because the deterministic bootstrap "
-    "read could not safely support a planning turn; no planner or fresh fixed replay "
-    "was invoked."
+    "read could not safely support a planning turn; no advisory provider or fresh "
+    "fixed replay was invoked."
 )
 BOUNDED_HYBRID_PROVIDER_CLEANUP_PROVENANCE = (
     "Advisory provider cleanup failed after the deterministic result was "

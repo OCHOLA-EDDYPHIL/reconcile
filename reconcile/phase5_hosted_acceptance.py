@@ -917,9 +917,8 @@ def _validate_provider_scenario(scenario: ScenarioAcceptanceObservation) -> None
     ):
         raise ValueError("fixed fallback provenance changed")
     if route.outcome is ScenarioHybridOutcome.EXPLICIT_UNKNOWN and (
-        not route.planner_invoked
-        or route.fixed_connector_invoked
-        or not route.provider_failure
+        route.fixed_connector_invoked
+        or route.planner_invoked is not route.provider_failure
     ):
         raise ValueError("explicit UNKNOWN provenance changed")
     _validate_provider_event_provenance(scenario, route.outcome)

@@ -97,6 +97,12 @@ class DurableEscalationRequired(DurableApplicationError):
         super().__init__(f"durable recovery requires escalation: {investigation_id}")
 
 
+class DurableProviderWindowUnavailable(DurableApplicationError):
+    def __init__(self, investigation_id: str) -> None:
+        self.investigation_id = investigation_id
+        super().__init__("durable provider dispatch window is unavailable")
+
+
 class _RecoverableProbeRecordingError(DurableApplicationError):
     pass
 
@@ -560,19 +566,24 @@ class DurableExecutionContext(ProbeDurabilityObserver):
         *,
         estimated_cost_microunits: int,
         operation: Callable[[], Awaitable[Result]],
+        minimum_remaining_ms: int = 0,
     ) -> Result:
         """Charge one advisory provider call before one bounded invocation attempt."""
 
         if type(call_id) is not str or not call_id:
             raise ValueError("provider call identifier must be a nonempty string")
+        if type(minimum_remaining_ms) is not int or minimum_remaining_ms < 0:
+            raise ValueError("provider minimum remaining time must be nonnegative")
         if self._strategy is DurableExecutionStrategy.FIXED:
             raise DurableDependencyDrift(self._run.investigation_id)
 
         async with self._provider_call_lock:
             if call_id in self._provider_call_ids:
                 raise DurableDependencyDrift(self._run.investigation_id)
-            self._provider_call_ids.add(call_id)
             occurred_at = _aware_utc(self._clock())
+            if self.remaining_elapsed_ms(occurred_at) < minimum_remaining_ms:
+                raise DurableProviderWindowUnavailable(self._run.investigation_id)
+            self._provider_call_ids.add(call_id)
             async with self._authority.hold(occurred_at) as lease:
                 await self._store.reserve_provider_call(
                     lease,
@@ -1782,5 +1793,6 @@ __all__ = [
     "DurableExecutionStrategy",
     "DurableInvestigationApplicationService",
     "DurableInvestigationExecutor",
+    "DurableProviderWindowUnavailable",
     "DurableServiceUnavailable",
 ]
