@@ -2468,6 +2468,75 @@ def test_teardown_verifier_tolerates_only_approved_provider_computed_fields(
     )
 
 
+def test_teardown_verifier_accepts_observed_provider_normalization_only() -> None:
+    approved = {
+        "annotations": None,
+        "client": None,
+        "default_uri_disabled": None,
+        "location": "us-central1",
+        "name": "reconcile-p5-api",
+        "project": "reconcile-dev-260813-14fa6d",
+        "template": [
+            {
+                "annotations": None,
+                "containers": [{"args": None, "command": None}],
+            }
+        ],
+    }
+    observed = {
+        "annotations": {},
+        "client": "",
+        "default_uri_disabled": False,
+        "location": "us-central1",
+        "name": (
+            "projects/reconcile-dev-260813-14fa6d/locations/us-central1/"
+            "services/reconcile-p5-api"
+        ),
+        "project": "reconcile-dev-260813-14fa6d",
+        "template": [{"annotations": {}, "containers": [{"args": [], "command": []}]}],
+    }
+
+    assert operator._matches_approved_teardown_resource(
+        observed,
+        approved,
+        None,
+        resource_type="google_cloud_run_v2_service_iam_member",
+    )
+
+    for path, value in (
+        (("default_uri_disabled",), True),
+        (("client",), "terraform"),
+        (("name",), "projects/wrong/locations/us-central1/services/reconcile-p5-api"),
+        (
+            ("name",),
+            "projects/reconcile-dev-260813-14fa6d/locations/europe-west1/services/reconcile-p5-api",
+        ),
+        (
+            ("name",),
+            "projects/reconcile-dev-260813-14fa6d/locations/us-central1/services/other",
+        ),
+        (("template", 0, "containers", 0, "args"), ["unexpected"]),
+    ):
+        drifted = json.loads(json.dumps(observed))
+        target: Any = drifted
+        for item in path[:-1]:
+            target = target[item]
+        target[path[-1]] = value
+        assert not operator._matches_approved_teardown_resource(
+            drifted,
+            approved,
+            None,
+            resource_type="google_cloud_run_v2_service_iam_member",
+        )
+
+    assert not operator._matches_approved_teardown_resource(
+        observed,
+        approved,
+        None,
+        resource_type="google_project_iam_member",
+    )
+
+
 @pytest.mark.parametrize(
     ("mutation", "reason"),
     (
