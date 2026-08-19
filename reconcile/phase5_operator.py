@@ -752,6 +752,49 @@ class Phase5Evidence(_HasRecordHash):
         return self
 
 
+class Phase5ActionEvidenceBinding(StrictModel):
+    action: Phase5Action
+    admission_sha256: Sha256Digest
+    outcome_sha256: Sha256Digest
+    evidence_sha256: Sha256Digest
+    status: OutcomeStatus
+
+
+class Phase5Continuation(_HasRecordHash):
+    schema_version: Literal["reconcile/phase5-operator/v1"] = _SCHEMA
+    record_type: Literal["continuation"] = "continuation"
+    successor_manifest_sha256: Sha256Digest
+    successor_approval_sha256: Sha256Digest
+    predecessor_state_root: SafeArgument
+    predecessor_manifest_sha256: Sha256Digest
+    predecessor_approval_sha256: Sha256Digest
+    carried_successes: tuple[Phase5ActionEvidenceBinding, ...] = Field(
+        min_length=2,
+        max_length=2,
+    )
+    terminal_action: Phase5ActionEvidenceBinding
+    bootstrap_state_sha256: Sha256Digest
+    bootstrap_state_byte_count: Annotated[int, Field(ge=1, le=_MAX_ARTIFACT_BYTES)]
+    prepared_at: AwareDatetime
+
+    @model_validator(mode="after")
+    def _validate_continuation_shape(self) -> Phase5Continuation:
+        if tuple(item.action for item in self.carried_successes) != (
+            Phase5Action.BOOTSTRAP_APPLY,
+            Phase5Action.FOUNDATION_APPLY,
+        ) or any(
+            item.status is not OutcomeStatus.SUCCEEDED
+            for item in self.carried_successes
+        ):
+            raise ValueError("continuation may carry only successful prerequisites")
+        if (
+            self.terminal_action.action is not Phase5Action.IMAGE_PUSH
+            or self.terminal_action.status is not OutcomeStatus.UNKNOWN
+        ):
+            raise ValueError("continuation requires the terminal image-push outcome")
+        return self
+
+
 class CommandRunner(Protocol):
     def __call__(
         self,
@@ -1051,7 +1094,7 @@ def _fixed_commands(
                     _DOCKER,
                     "image",
                     "inspect",
-                    "--format={{.Id}}",
+                    "--format={{.Descriptor.digest}}",
                     image_tag,
                 ),
                 (_DOCKER, "image", "push", image_tag),
@@ -3863,6 +3906,38 @@ class Phase5StateStore:
                 approval,
             )
 
+    def write_continuation(self, continuation: Phase5Continuation) -> None:
+        with self._locked() as directory:
+            manifest = self._read(
+                directory,
+                f"manifest-{continuation.successor_manifest_sha256}.json",
+                Phase5ApprovalManifest,
+            )
+            approval = self._read(
+                directory,
+                f"approval-{continuation.successor_approval_sha256}.json",
+                Phase5Approval,
+            )
+            if self._names(directory, "continuation-"):
+                raise OperatorError("CONTINUATION_ALREADY_EXISTS")
+            attempted, successful = self._direct_action_history(
+                directory,
+                manifest.record_sha256,
+            )
+            if attempted or successful:
+                raise OperatorError("CONTINUATION_SUCCESSOR_NOT_FRESH")
+            _verify_continuation_record(
+                continuation,
+                successor_manifest=manifest,
+                successor_approval=approval,
+                successor_state_root=self.root,
+            )
+            self._write(
+                directory,
+                f"continuation-{continuation.record_sha256}.json",
+                continuation,
+            )
+
     def load_manifest(self, digest: str) -> Phase5ApprovalManifest:
         digest = _validate_digest(digest)
         with self._locked() as directory:
@@ -3937,7 +4012,7 @@ class Phase5StateStore:
             _validate_completion_chain(admission, outcome, evidence)
         return None
 
-    def _action_history(
+    def _direct_action_history(
         self,
         directory: int,
         manifest_sha256: str,
@@ -3967,6 +4042,148 @@ class Phase5StateStore:
             attempted.add(admission.action)
             if outcome.status is OutcomeStatus.SUCCEEDED:
                 successful.add(admission.action)
+        return attempted, successful
+
+    def _action_binding(
+        self,
+        directory: int,
+        manifest_sha256: str,
+        action: Phase5Action,
+    ) -> Phase5ActionEvidenceBinding:
+        matches = tuple(
+            admission
+            for name in self._names(directory, "admission-")
+            if (
+                (
+                    admission := self._read(directory, name, Phase5Admission)
+                ).manifest_sha256
+                == manifest_sha256
+                and admission.action is action
+            )
+        )
+        if len(matches) != 1:
+            raise OperatorError("CONTINUATION_ACTION_CHAIN_INVALID")
+        admission = matches[0]
+        outcome = self._read(
+            directory,
+            f"outcome-{admission.record_sha256}.json",
+            Phase5Outcome,
+        )
+        evidence = self._read(
+            directory,
+            f"evidence-{admission.record_sha256}.json",
+            Phase5Evidence,
+        )
+        _validate_completion_chain(admission, outcome, evidence)
+        return Phase5ActionEvidenceBinding(
+            action=action,
+            admission_sha256=admission.record_sha256,
+            outcome_sha256=outcome.record_sha256,
+            evidence_sha256=evidence.record_sha256,
+            status=outcome.status,
+        )
+
+    def continuation_source(
+        self,
+        *,
+        manifest_sha256: str,
+        approval_sha256: str,
+    ) -> tuple[
+        Phase5ApprovalManifest,
+        Phase5Approval,
+        tuple[Phase5ActionEvidenceBinding, ...],
+        Phase5ActionEvidenceBinding,
+    ]:
+        with self._locked() as directory:
+            manifest = self._read(
+                directory,
+                f"manifest-{_validate_digest(manifest_sha256)}.json",
+                Phase5ApprovalManifest,
+            )
+            approval = self._read(
+                directory,
+                f"approval-{_validate_digest(approval_sha256)}.json",
+                Phase5Approval,
+            )
+            _validate_approval_binding(manifest, approval)
+            if self._unfinished(directory) is not None:
+                raise OperatorError("CONTINUATION_PREDECESSOR_UNFINISHED")
+            if self._names(directory, "continuation-"):
+                raise OperatorError("CONTINUATION_PREDECESSOR_NOT_DIRECT")
+            attempted, successful = self._direct_action_history(
+                directory,
+                manifest.record_sha256,
+            )
+            expected_attempted = {
+                Phase5Action.BOOTSTRAP_APPLY,
+                Phase5Action.FOUNDATION_APPLY,
+                Phase5Action.IMAGE_PUSH,
+            }
+            expected_successful = {
+                Phase5Action.BOOTSTRAP_APPLY,
+                Phase5Action.FOUNDATION_APPLY,
+            }
+            if attempted != expected_attempted or successful != expected_successful:
+                raise OperatorError("CONTINUATION_PREDECESSOR_HISTORY_INVALID")
+            carried = tuple(
+                self._action_binding(directory, manifest.record_sha256, action)
+                for action in (
+                    Phase5Action.BOOTSTRAP_APPLY,
+                    Phase5Action.FOUNDATION_APPLY,
+                )
+            )
+            terminal = self._action_binding(
+                directory,
+                manifest.record_sha256,
+                Phase5Action.IMAGE_PUSH,
+            )
+            if (
+                any(item.status is not OutcomeStatus.SUCCEEDED for item in carried)
+                or terminal.status is not OutcomeStatus.UNKNOWN
+            ):
+                raise OperatorError("CONTINUATION_PREDECESSOR_HISTORY_INVALID")
+            return manifest, approval, carried, terminal
+
+    def _action_history(
+        self,
+        directory: int,
+        manifest_sha256: str,
+    ) -> tuple[set[Phase5Action], set[Phase5Action]]:
+        attempted, successful = self._direct_action_history(
+            directory,
+            manifest_sha256,
+        )
+        continuations = tuple(
+            continuation
+            for name in self._names(directory, "continuation-")
+            if (
+                continuation := self._read(directory, name, Phase5Continuation)
+            ).successor_manifest_sha256
+            == manifest_sha256
+        )
+        if len(continuations) > 1:
+            raise OperatorError("CONTINUATION_RECORD_SET_INVALID")
+        if continuations:
+            continuation = continuations[0]
+            manifest = self._read(
+                directory,
+                f"manifest-{manifest_sha256}.json",
+                Phase5ApprovalManifest,
+            )
+            approval = self._read(
+                directory,
+                f"approval-{continuation.successor_approval_sha256}.json",
+                Phase5Approval,
+            )
+            _verify_continuation_record(
+                continuation,
+                successor_manifest=manifest,
+                successor_approval=approval,
+                successor_state_root=self.root,
+            )
+            carried = {item.action for item in continuation.carried_successes}
+            attempted.update(carried)
+            successful.update(carried)
         return attempted, successful
 
     def admit(
@@ -4042,6 +4259,355 @@ class Phase5StateStore:
                 f"evidence-{admission.record_sha256}.json",
                 evidence,
             )
+
+
+def _bootstrap_state_identity(path: Path) -> tuple[str, int, int, int]:
+    try:
+        canonical = _canonical_absolute_path(path, require_exists=True)
+        descriptor = os.open(
+            canonical,
+            os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW,
+        )
+    except (OSError, OperatorError) as error:
+        raise OperatorError("CONTINUATION_BOOTSTRAP_STATE_INVALID") from error
+    try:
+        before = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or before.st_uid != os.getuid()
+            or stat.S_IMODE(before.st_mode) != 0o600
+            or before.st_nlink != 1
+            or before.st_size < 1
+            or before.st_size > _MAX_ARTIFACT_BYTES
+        ):
+            raise OperatorError("CONTINUATION_BOOTSTRAP_STATE_INVALID")
+        digest = hashlib.sha256()
+        observed = 0
+        while chunk := os.read(descriptor, 1_048_576):
+            observed += len(chunk)
+            if observed > _MAX_ARTIFACT_BYTES:
+                raise OperatorError("CONTINUATION_BOOTSTRAP_STATE_INVALID")
+            digest.update(chunk)
+        after = os.fstat(descriptor)
+        if (
+            observed != before.st_size
+            or (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)
+            != (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns)
+            or stat.S_IMODE(after.st_mode) != 0o600
+            or after.st_nlink != 1
+        ):
+            raise OperatorError("CONTINUATION_BOOTSTRAP_STATE_INVALID")
+        return digest.hexdigest(), observed, after.st_dev, after.st_ino
+    except OSError as error:
+        raise OperatorError("CONTINUATION_BOOTSTRAP_STATE_INVALID") from error
+    finally:
+        os.close(descriptor)
+
+
+def _copy_bootstrap_state(source: Path, destination: Path) -> tuple[str, int]:
+    expected_digest, expected_size, _, _ = _bootstrap_state_identity(source)
+    _verify_artifact_directory(destination.parent)
+    source_descriptor: int | None = None
+    destination_descriptor: int | None = None
+    try:
+        source_descriptor = os.open(
+            source,
+            os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW,
+        )
+        before = os.fstat(source_descriptor)
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or before.st_uid != os.getuid()
+            or stat.S_IMODE(before.st_mode) != 0o600
+            or before.st_nlink != 1
+            or before.st_size != expected_size
+        ):
+            raise OperatorError("CONTINUATION_BOOTSTRAP_STATE_INVALID")
+        destination_descriptor = os.open(
+            destination,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC | os.O_NOFOLLOW,
+            0o600,
+        )
+        digest = hashlib.sha256()
+        observed = 0
+        while chunk := os.read(source_descriptor, 1_048_576):
+            observed += len(chunk)
+            if observed > _MAX_ARTIFACT_BYTES:
+                raise OperatorError("CONTINUATION_BOOTSTRAP_STATE_INVALID")
+            digest.update(chunk)
+            offset = 0
+            while offset < len(chunk):
+                written = os.write(destination_descriptor, chunk[offset:])
+                if written < 1:
+                    raise OperatorError("CONTINUATION_BOOTSTRAP_STATE_COPY_FAILED")
+                offset += written
+        after = os.fstat(source_descriptor)
+        if (
+            observed != expected_size
+            or digest.hexdigest() != expected_digest
+            or (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)
+            != (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns)
+            or after.st_nlink != 1
+        ):
+            raise OperatorError("CONTINUATION_BOOTSTRAP_STATE_INVALID")
+        os.fchmod(destination_descriptor, 0o600)
+        os.fsync(destination_descriptor)
+    except FileExistsError as error:
+        raise OperatorError("CONTINUATION_BOOTSTRAP_STATE_EXISTS") from error
+    except OperatorError:
+        raise
+    except OSError as error:
+        raise OperatorError("CONTINUATION_BOOTSTRAP_STATE_COPY_FAILED") from error
+    finally:
+        if source_descriptor is not None:
+            os.close(source_descriptor)
+        if destination_descriptor is not None:
+            os.close(destination_descriptor)
+    directory = os.open(
+        destination.parent,
+        os.O_RDONLY | os.O_CLOEXEC | os.O_DIRECTORY | os.O_NOFOLLOW,
+    )
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
+    copied_digest, copied_size, _, _ = _bootstrap_state_identity(destination)
+    if (copied_digest, copied_size) != (expected_digest, expected_size):
+        raise OperatorError("CONTINUATION_BOOTSTRAP_STATE_COPY_FAILED")
+    return copied_digest, copied_size
+
+
+def _plan_continuation_identity(plan: TerraformPlanBinding) -> dict[str, Any]:
+    return plan.model_dump(
+        mode="json",
+        exclude={"qualification_path", "variables_path", "execution_plan_path"},
+    )
+
+
+def _source_changes(
+    predecessor: SourceGroupBinding | ExecutionSourceBinding,
+    successor: SourceGroupBinding | ExecutionSourceBinding,
+) -> set[str]:
+    predecessor_files = {item.path: item for item in predecessor.files}
+    successor_files = {item.path: item for item in successor.files}
+    if set(predecessor_files) != set(successor_files):
+        raise OperatorError("CONTINUATION_SOURCE_SCOPE_DRIFT")
+    return {
+        path
+        for path in predecessor_files
+        if predecessor_files[path] != successor_files[path]
+    }
+
+
+def _validate_continuation_bounds(
+    predecessor: Phase5ApprovalManifest,
+    successor: Phase5ApprovalManifest,
+) -> None:
+    fixed_fields = (
+        "origin_url",
+        "project_id",
+        "project_number",
+        "region",
+        "authenticated_exposure",
+        "terraform_version",
+        "terraform_executable",
+        "terraform_binary_sha256",
+        "terraform_cli_config_sha256",
+        "gcloud_version",
+        "git_version",
+        "git_binary_sha256",
+        "python_version",
+        "python_interpreter",
+        "python_interpreter_sha256",
+        "docker_client_sha256",
+        "docker_credential_gcloud_sha256",
+        "provider_source",
+        "provider_version",
+        "gemini_model",
+        "vertex_location",
+        "count_tokens_attempt_limit",
+        "billed_generation_limit",
+        "input_token_limit",
+        "output_token_limit",
+        "thinking_level",
+        "authorization_estimate_usd",
+        "contingency_authorization_estimate_usd",
+        "estimate_kind",
+        "infrastructure_revision",
+        "terraform_stacks",
+        "python_project_sha256",
+        "python_lock_sha256",
+        "prompt_sha256",
+        "prompt_version",
+    )
+    if any(
+        getattr(predecessor, field) != getattr(successor, field)
+        for field in fixed_fields
+    ):
+        raise OperatorError("CONTINUATION_BOUND_DRIFT")
+    execution_changes = _source_changes(
+        predecessor.execution_source,
+        successor.execution_source,
+    )
+    semantic_changes = _source_changes(
+        predecessor.semantic_sources,
+        successor.semantic_sources,
+    )
+    allowed_changes = {"reconcile/phase5_operator.py"}
+    if execution_changes != allowed_changes or semantic_changes != allowed_changes:
+        raise OperatorError("CONTINUATION_SOURCE_SCOPE_DRIFT")
+    predecessor_dependencies = predecessor.python_dependencies.model_dump(
+        mode="json",
+        exclude={"root", "source_image_digest", "source_archive_sha256"},
+    )
+    successor_dependencies = successor.python_dependencies.model_dump(
+        mode="json",
+        exclude={"root", "source_image_digest", "source_archive_sha256"},
+    )
+    if predecessor_dependencies != successor_dependencies:
+        raise OperatorError("CONTINUATION_DEPENDENCY_DRIFT")
+    for action in (
+        Phase5Action.BOOTSTRAP_APPLY,
+        Phase5Action.FOUNDATION_APPLY,
+        Phase5Action.FOUNDATION_TEARDOWN,
+        Phase5Action.STATE_PROTECTION_CHANGE,
+        Phase5Action.BOOTSTRAP_TEARDOWN,
+    ):
+        predecessor_plan = predecessor.terraform_plan_for(action)
+        successor_plan = successor.terraform_plan_for(action)
+        if (
+            predecessor_plan is None
+            or successor_plan is None
+            or _plan_continuation_identity(predecessor_plan)
+            != _plan_continuation_identity(successor_plan)
+        ):
+            raise OperatorError("CONTINUATION_INFRASTRUCTURE_PLAN_DRIFT")
+
+
+def _verify_continuation_record(
+    continuation: Phase5Continuation,
+    *,
+    successor_manifest: Phase5ApprovalManifest,
+    successor_approval: Phase5Approval,
+    successor_state_root: Path,
+) -> None:
+    _validate_approval_binding(successor_manifest, successor_approval)
+    successor_root = _canonical_absolute_path(
+        successor_state_root,
+        require_exists=True,
+    )
+    predecessor_root = _canonical_absolute_path(
+        Path(continuation.predecessor_state_root),
+        require_exists=True,
+    )
+    if (
+        predecessor_root == successor_root
+        or successor_manifest.operator_state_root != str(successor_root)
+        or continuation.successor_manifest_sha256 != successor_manifest.record_sha256
+        or continuation.successor_approval_sha256 != successor_approval.record_sha256
+        or continuation.prepared_at < successor_approval.approved_at
+        or continuation.prepared_at >= successor_approval.work_deadline
+    ):
+        raise OperatorError("CONTINUATION_SUCCESSOR_BINDING_INVALID")
+    predecessor_state = Phase5StateStore(predecessor_root, create=False)
+    (
+        predecessor_manifest,
+        predecessor_approval,
+        carried,
+        terminal,
+    ) = predecessor_state.continuation_source(
+        manifest_sha256=continuation.predecessor_manifest_sha256,
+        approval_sha256=continuation.predecessor_approval_sha256,
+    )
+    if (
+        predecessor_manifest.record_sha256 != continuation.predecessor_manifest_sha256
+        or predecessor_approval.record_sha256
+        != continuation.predecessor_approval_sha256
+        or carried != continuation.carried_successes
+        or terminal != continuation.terminal_action
+    ):
+        raise OperatorError("CONTINUATION_PREDECESSOR_BINDING_INVALID")
+    _validate_continuation_bounds(predecessor_manifest, successor_manifest)
+    predecessor_identity = _bootstrap_state_identity(
+        predecessor_root / "state" / "bootstrap.tfstate"
+    )
+    successor_identity = _bootstrap_state_identity(
+        successor_root / "state" / "bootstrap.tfstate"
+    )
+    expected = (
+        continuation.bootstrap_state_sha256,
+        continuation.bootstrap_state_byte_count,
+    )
+    if predecessor_identity[:2] != expected or successor_identity[:2] != expected:
+        raise OperatorError("CONTINUATION_BOOTSTRAP_STATE_DRIFT")
+    if predecessor_identity[2:] == successor_identity[2:]:
+        raise OperatorError("CONTINUATION_BOOTSTRAP_STATE_NOT_INDEPENDENT")
+
+
+def prepare_phase5_continuation(
+    *,
+    predecessor_state_root: Path,
+    predecessor_manifest_sha256: str,
+    predecessor_approval_sha256: str,
+    successor_state_root: Path,
+    successor_manifest_sha256: str,
+    successor_approval_sha256: str,
+    repo_root: Path,
+    prepared_at: datetime,
+    runner: CommandRunner | None = None,
+) -> Phase5Continuation:
+    selected_runner = _default_runner if runner is None else runner
+    predecessor_state = Phase5StateStore(predecessor_state_root, create=False)
+    successor_state = Phase5StateStore(successor_state_root)
+    if predecessor_state.root == successor_state.root:
+        raise OperatorError("CONTINUATION_STATE_ROOT_REUSED")
+    successor_manifest = successor_state.load_manifest(successor_manifest_sha256)
+    successor_approval = successor_state.load_approval(successor_approval_sha256)
+    _validate_approval_binding(successor_manifest, successor_approval)
+    moment = _utc(prepared_at)
+    if (
+        moment < successor_approval.approved_at
+        or moment >= successor_approval.work_deadline
+    ):
+        raise OperatorError("CONTINUATION_OUTSIDE_WORK_WINDOW")
+    _verify_exact_main(
+        successor_manifest,
+        repo_root=repo_root,
+        runner=selected_runner,
+    )
+    (
+        predecessor_manifest,
+        predecessor_approval,
+        carried,
+        terminal,
+    ) = predecessor_state.continuation_source(
+        manifest_sha256=predecessor_manifest_sha256,
+        approval_sha256=predecessor_approval_sha256,
+    )
+    _validate_continuation_bounds(predecessor_manifest, successor_manifest)
+    source_state = predecessor_state.root / "state" / "bootstrap.tfstate"
+    source_digest, source_size, _, _ = _bootstrap_state_identity(source_state)
+    continuation = _seal(
+        Phase5Continuation,
+        schema_version=_SCHEMA,
+        record_type="continuation",
+        successor_manifest_sha256=successor_manifest.record_sha256,
+        successor_approval_sha256=successor_approval.record_sha256,
+        predecessor_state_root=str(predecessor_state.root),
+        predecessor_manifest_sha256=predecessor_manifest.record_sha256,
+        predecessor_approval_sha256=predecessor_approval.record_sha256,
+        carried_successes=carried,
+        terminal_action=terminal,
+        bootstrap_state_sha256=source_digest,
+        bootstrap_state_byte_count=source_size,
+        prepared_at=moment,
+    )
+    destination_state = successor_state.root / "state" / "bootstrap.tfstate"
+    copied = _copy_bootstrap_state(source_state, destination_state)
+    if copied != (source_digest, source_size):
+        raise OperatorError("CONTINUATION_BOOTSTRAP_STATE_COPY_FAILED")
+    successor_state.write_continuation(continuation)
+    return continuation
 
 
 def _validate_approval_binding(
@@ -4914,7 +5480,7 @@ def _run_descriptor_once(
         if (
             descriptor.action is Phase5Action.IMAGE_PUSH
             and index == 2
-            and result.stdout != f"{image_artifact.config_digest}\n".encode()
+            and result.stdout != f"{image_artifact.manifest_digest}\n".encode()
         ):
             return object()
         if (
@@ -5090,6 +5656,20 @@ def _parser() -> argparse.ArgumentParser:
     approval_parser.add_argument("--approved-by", required=True)
     approval_parser.add_argument("--approved-at", type=_parse_timestamp, required=True)
 
+    continuation_parser = subcommands.add_parser("continue-manifest")
+    continuation_parser.add_argument(
+        "--predecessor-state-dir", type=Path, required=True
+    )
+    continuation_parser.add_argument("--predecessor-manifest-sha256", required=True)
+    continuation_parser.add_argument("--predecessor-approval-sha256", required=True)
+    continuation_parser.add_argument("--state-dir", type=Path, required=True)
+    continuation_parser.add_argument("--manifest-sha256", required=True)
+    continuation_parser.add_argument("--approval-sha256", required=True)
+    continuation_parser.add_argument("--repo-root", type=Path, required=True)
+    continuation_parser.add_argument(
+        "--prepared-at", type=_parse_timestamp, required=True
+    )
+
     run_parser = subcommands.add_parser("run")
     run_parser.add_argument("--state-dir", type=Path, required=True)
     run_parser.add_argument("--manifest-sha256", required=True)
@@ -5192,6 +5772,29 @@ def main(argv: Sequence[str] | None = None) -> int:
                 }
             )
             return 0
+        if namespace.command == "continue-manifest":
+            continuation = prepare_phase5_continuation(
+                predecessor_state_root=namespace.predecessor_state_dir,
+                predecessor_manifest_sha256=(namespace.predecessor_manifest_sha256),
+                predecessor_approval_sha256=(namespace.predecessor_approval_sha256),
+                successor_state_root=namespace.state_dir,
+                successor_manifest_sha256=namespace.manifest_sha256,
+                successor_approval_sha256=namespace.approval_sha256,
+                repo_root=namespace.repo_root,
+                prepared_at=namespace.prepared_at,
+            )
+            _emit(
+                {
+                    "schema_version": _SCHEMA,
+                    "status": "CONTINUATION_PREPARED",
+                    "continuation_sha256": continuation.record_sha256,
+                    "manifest_sha256": continuation.successor_manifest_sha256,
+                    "carried_actions": [
+                        item.action.value for item in continuation.carried_successes
+                    ],
+                }
+            )
+            return 0
         if namespace.command == "run":
             state = Phase5StateStore(namespace.state_dir)
             manifest = state.load_manifest(namespace.manifest_sha256)
@@ -5237,6 +5840,7 @@ __all__ = [
     "Phase5Admission",
     "Phase5Approval",
     "Phase5ApprovalManifest",
+    "Phase5Continuation",
     "Phase5Evidence",
     "Phase5ManifestDraft",
     "Phase5Outcome",
@@ -5248,4 +5852,5 @@ __all__ = [
     "execute_action",
     "fixed_command_descriptors",
     "main",
+    "prepare_phase5_continuation",
 ]
