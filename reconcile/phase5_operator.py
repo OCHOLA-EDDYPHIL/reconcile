@@ -5447,6 +5447,130 @@ def _matches_approved_teardown_resource(
     return _matches_approved_before(normalized, expected, unknown)
 
 
+def _plan_changes_by_address(data: bytes) -> dict[str, dict[str, Any]]:
+    def reject_constant(_: str) -> None:
+        raise ValueError("non-finite JSON number")
+
+    try:
+        value = json.loads(
+            data,
+            object_pairs_hook=_reject_duplicate_keys,
+            parse_constant=reject_constant,
+        )
+    except OperatorError:
+        raise
+    except (UnicodeError, ValueError, TypeError) as error:
+        raise OperatorError("TERRAFORM_PLAN_INVALID") from error
+    changes = value.get("resource_changes") if isinstance(value, dict) else None
+    if not isinstance(changes, list):
+        raise OperatorError("TERRAFORM_PLAN_INVALID")
+    result: dict[str, dict[str, Any]] = {}
+    for item in changes:
+        address = item.get("address") if isinstance(item, dict) else None
+        change = item.get("change") if isinstance(item, dict) else None
+        if (
+            not isinstance(address, str)
+            or not isinstance(change, dict)
+            or address in result
+        ):
+            raise OperatorError("TERRAFORM_PLAN_INVALID")
+        result[address] = change
+    return result
+
+
+def _verify_runtime_update_plan(
+    rendered: bytes,
+    expected: TerraformPlanBinding,
+    resources: tuple[PlanResourceBinding, ...],
+    iam_edges: tuple[PlanIamBinding, ...],
+    variables: dict[str, Any],
+) -> None:
+    qualification = _read_bounded_file(
+        Path(expected.qualification_path),
+        maximum=_MAX_PLAN_JSON_BYTES,
+        immutable=True,
+    )
+    if hashlib.sha256(qualification).hexdigest() != expected.qualification_sha256:
+        raise OperatorError("EXECUTION_PLAN_DRIFT")
+    (
+        approved_normalized,
+        approved_resources,
+        approved_iam_edges,
+        _,
+        _,
+    ) = _parse_plan_json(qualification)
+    if (
+        hashlib.sha256(approved_normalized).hexdigest()
+        != expected.normalized_plan_sha256
+        or approved_resources != expected.resources
+        or approved_iam_edges != expected.iam_edges
+        or hashlib.sha256(_canonical_value_bytes(variables)).hexdigest()
+        != expected.variables_sha256
+    ):
+        raise OperatorError("EXECUTION_PLAN_DRIFT")
+
+    approved_by_address = {item.address: item for item in expected.resources}
+    approved_iam_by_address = {item.address: item for item in expected.iam_edges}
+    live_iam_by_address = {item.address: item for item in iam_edges}
+    approved_changes = _plan_changes_by_address(qualification)
+    live_changes = _plan_changes_by_address(rendered)
+    if (
+        set(live_changes) != set(approved_changes)
+        or {item.address for item in resources} != set(approved_by_address)
+        or set(live_iam_by_address) != set(approved_iam_by_address)
+        or any(item.actions != ("create",) for item in expected.resources)
+    ):
+        raise OperatorError("EXECUTION_PLAN_DRIFT")
+
+    service_updates = 0
+    for item in resources:
+        approved = approved_by_address[item.address]
+        approved_change = approved_changes[item.address]
+        live_change = live_changes[item.address]
+        live_after_unknown = live_change.get("after_unknown")
+        if (
+            item.resource_type != approved.resource_type
+            or item.provider_name != approved.provider_name
+            or item.before_projection is None
+            or item.before_unknown is not None
+            or live_after_unknown not in (None, {})
+        ):
+            raise OperatorError("EXECUTION_PLAN_DRIFT")
+        if item.resource_type == "google_cloud_run_v2_service":
+            service_updates += 1
+            if item.actions != ("update",) or not _matches_approved_before(
+                live_change.get("after"),
+                approved_change.get("after"),
+                approved_change.get("after_unknown"),
+            ):
+                raise OperatorError("EXECUTION_PLAN_DRIFT")
+            continue
+        if item.resource_type != "google_cloud_run_v2_service_iam_member":
+            raise OperatorError("EXECUTION_PLAN_DRIFT")
+        approved_iam = approved_iam_by_address.get(item.address)
+        live_iam = live_iam_by_address.get(item.address)
+        if (
+            item.actions != ("no-op",)
+            or _canonical_value_bytes(live_change.get("before"))
+            != _canonical_value_bytes(live_change.get("after"))
+            or approved_iam is None
+            or live_iam is None
+            or live_iam.resource_type != approved_iam.resource_type
+            or live_iam.actions != ("no-op",)
+            or live_iam.role != approved_iam.role
+            or live_iam.member != approved_iam.member
+            or live_iam.authority_unknown is not None
+            or not _matches_approved_before(
+                live_iam.authority_projection,
+                approved_iam.authority_projection,
+                approved_iam.authority_unknown,
+            )
+        ):
+            raise OperatorError("EXECUTION_PLAN_DRIFT")
+    if service_updates < 1:
+        raise OperatorError("EXECUTION_PLAN_DRIFT")
+
+
 def _verify_rendered_plan(
     rendered: bytes,
     expected: TerraformPlanBinding,
@@ -5502,7 +5626,7 @@ def _verify_rendered_plan(
         ):
             raise OperatorError("EXECUTION_PLAN_DRIFT")
         return
-    if (
+    has_drift = (
         hashlib.sha256(normalized).hexdigest() != expected.normalized_plan_sha256
         or resources != expected.resources
         or iam_edges != expected.iam_edges
@@ -5510,8 +5634,19 @@ def _verify_rendered_plan(
         != expected.resource_inventory_sha256
         or _hash_value([item.model_dump(mode="json") for item in iam_edges])
         != expected.iam_inventory_sha256
-    ):
-        raise OperatorError("EXECUTION_PLAN_DRIFT")
+    )
+    if not has_drift:
+        return
+    if expected.action is Phase5Action.RUNTIME_APPLY:
+        _verify_runtime_update_plan(
+            rendered,
+            expected,
+            resources,
+            iam_edges,
+            variables,
+        )
+        return
+    raise OperatorError("EXECUTION_PLAN_DRIFT")
 
 
 def _run_descriptor_once(
