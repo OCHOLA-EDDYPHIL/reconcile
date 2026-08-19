@@ -79,6 +79,9 @@ _PYTHON_SHA256 = "021044895e95be79dc2f110367607e684119afbc8ce75f6f0eec94844e0ace
 _PYTHON_VERSION = "3.12.13"
 _OPERATOR_HOME = "/home/reconcile"
 _OCI_REFERENCE_ANNOTATION = "org.opencontainers.image.ref.name"
+_LEGACY_IMAGE_ID_SOURCE_REVISIONS = frozenset(
+    {"e7ccaab5268d31172b3a5efa5e754b0beb3b1a79"}
+)
 
 _EXECUTION_ROOT_FILES = frozenset(
     {".dockerignore", "Dockerfile", "pyproject.toml", "uv.lock"}
@@ -614,14 +617,28 @@ class Phase5ApprovalManifest(_HasRecordHash):
         actions = tuple(item.action for item in self.commands)
         if len(actions) != len(set(actions)) or set(actions) != set(Phase5Action):
             raise ValueError("command inventory is not closed-world")
-        if self.commands != _fixed_commands(
+        expected_commands = _fixed_commands(
             self.source_revision,
             self.image_digest,
             self.infrastructure_revision,
             self.semantic_config_sha256,
             state_root=state_root,
             image_archive=expected_archive,
-        ):
+        )
+        legacy_commands = (
+            _fixed_commands(
+                self.source_revision,
+                self.image_digest,
+                self.infrastructure_revision,
+                self.semantic_config_sha256,
+                state_root=state_root,
+                image_archive=expected_archive,
+                image_identity_format="--format={{.Id}}",
+            )
+            if self.source_revision in _LEGACY_IMAGE_ID_SOURCE_REVISIONS
+            else None
+        )
+        if self.commands != expected_commands and self.commands != legacy_commands:
             raise ValueError("command inventory differs from fixed descriptors")
         return self
 
@@ -986,6 +1003,10 @@ def _fixed_commands(
     *,
     state_root: Path,
     image_archive: Path,
+    image_identity_format: Literal[
+        "--format={{.Descriptor.digest}}",
+        "--format={{.Id}}",
+    ] = "--format={{.Descriptor.digest}}",
 ) -> tuple[CommandDescriptor, ...]:
     root = _canonical_absolute_path(state_root, require_exists=False)
     plan_root = root / "plans"
@@ -1094,7 +1115,7 @@ def _fixed_commands(
                     _DOCKER,
                     "image",
                     "inspect",
-                    "--format={{.Descriptor.digest}}",
+                    image_identity_format,
                     image_tag,
                 ),
                 (_DOCKER, "image", "push", image_tag),
@@ -4891,6 +4912,8 @@ def authorize_action(
     """Perform the sole admission guard and persist admission before execution."""
 
     moment = _utc(now)
+    if manifest.source_revision in _LEGACY_IMAGE_ID_SOURCE_REVISIONS:
+        raise OperatorError("LEGACY_MANIFEST_READ_ONLY")
     _validate_approval_binding(manifest, approval)
     if moment < approval.approved_at:
         raise OperatorError("APPROVAL_NOT_YET_ACTIVE")
