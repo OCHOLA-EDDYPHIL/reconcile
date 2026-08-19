@@ -82,11 +82,7 @@ _OCI_REFERENCE_ANNOTATION = "org.opencontainers.image.ref.name"
 _LEGACY_IMAGE_ID_SOURCE_REVISIONS = frozenset(
     {"e7ccaab5268d31172b3a5efa5e754b0beb3b1a79"}
 )
-_OPERATOR_DEPENDENCY_PATH = "reconcile/phase5_operator.py"
-_OPERATOR_DEPENDENCY_RECORD_PATH = "reconcile-0.1.0.dist-info/RECORD"
-_OPERATOR_DEPENDENCY_CHANGE_PATHS = frozenset(
-    {_OPERATOR_DEPENDENCY_PATH, _OPERATOR_DEPENDENCY_RECORD_PATH}
-)
+_PROJECT_DEPENDENCY_RECORD_PATH = "reconcile-0.1.0.dist-info/RECORD"
 
 _EXECUTION_ROOT_FILES = frozenset(
     {".dockerignore", "Dockerfile", "pyproject.toml", "uv.lock"}
@@ -4440,9 +4436,10 @@ def _source_changes(
     }
 
 
-def _validate_operator_dependency_drift(
+def _validate_project_dependency_drift(
     predecessor: Phase5ApprovalManifest,
     successor: Phase5ApprovalManifest,
+    source_changes: set[str],
 ) -> None:
     observed: list[tuple[dict[str, Any], ...]] = []
     for manifest in (predecessor, successor):
@@ -4466,7 +4463,8 @@ def _validate_operator_dependency_drift(
         for path in predecessor_entries
         if predecessor_entries[path] != successor_entries[path]
     }
-    if changed != _OPERATOR_DEPENDENCY_CHANGE_PATHS:
+    expected_changes = source_changes | {_PROJECT_DEPENDENCY_RECORD_PATH}
+    if changed != expected_changes:
         raise OperatorError("CONTINUATION_DEPENDENCY_DRIFT")
 
     for manifest, entries in zip(
@@ -4474,22 +4472,17 @@ def _validate_operator_dependency_drift(
         (predecessor_entries, successor_entries),
         strict=True,
     ):
-        source = next(
-            (
-                item
-                for item in manifest.execution_source.files
-                if item.path == _OPERATOR_DEPENDENCY_PATH
-            ),
-            None,
-        )
-        dependency = entries[_OPERATOR_DEPENDENCY_PATH]
-        if source is None or dependency != {
-            "path": _OPERATOR_DEPENDENCY_PATH,
-            "kind": "file",
-            "byte_count": source.byte_count,
-            "sha256": source.sha256,
-        }:
-            raise OperatorError("CONTINUATION_DEPENDENCY_DRIFT")
+        sources = {item.path: item for item in manifest.execution_source.files}
+        for path in source_changes:
+            source = sources.get(path)
+            dependency = entries.get(path)
+            if source is None or dependency != {
+                "path": path,
+                "kind": "file",
+                "byte_count": source.byte_count,
+                "sha256": source.sha256,
+            }:
+                raise OperatorError("CONTINUATION_DEPENDENCY_DRIFT")
 
 
 def _validate_continuation_bounds(
@@ -4546,10 +4539,20 @@ def _validate_continuation_bounds(
         predecessor.semantic_sources,
         successor.semantic_sources,
     )
-    allowed_changes = {"reconcile/phase5_operator.py"}
-    if execution_changes != allowed_changes or semantic_changes != allowed_changes:
+    if (
+        not execution_changes
+        or execution_changes != semantic_changes
+        or any(
+            not path.startswith("reconcile/") or not path.endswith(".py")
+            for path in execution_changes
+        )
+    ):
         raise OperatorError("CONTINUATION_SOURCE_SCOPE_DRIFT")
-    _validate_operator_dependency_drift(predecessor, successor)
+    _validate_project_dependency_drift(
+        predecessor,
+        successor,
+        execution_changes,
+    )
     for action in (
         Phase5Action.BOOTSTRAP_APPLY,
         Phase5Action.FOUNDATION_APPLY,
