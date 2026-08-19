@@ -553,8 +553,12 @@ class _Runner:
             return subprocess.CompletedProcess(
                 list(argv), 0, b'{"terraform_version":"1.15.8"}', b""
             )
-        if argv[:3] == (operator._TERRAFORM, "show", "-json"):
-            execution = Path(argv[3])
+        if (
+            argv[0] == operator._TERRAFORM
+            and argv[1].startswith("-chdir=")
+            and argv[2:4] == ("show", "-json")
+        ):
+            execution = Path(argv[4])
             qualification = (
                 execution.parent.parent / "plans" / f"{execution.stem}.tfplan.json"
             )
@@ -625,7 +629,14 @@ def _mutating_calls(runner: _Runner) -> list[tuple[str, ...]]:
         and not (
             call[0] == operator._TERRAFORM
             and len(call) > 1
-            and call[1] in {"show", "version"}
+            and (
+                call[1] == "version"
+                or (
+                    len(call) > 2
+                    and call[1].startswith("-chdir=")
+                    and call[2] == "show"
+                )
+            )
         )
         and call != ("/usr/bin/gcloud", "version", "--format=json")
         and call[:4] != (operator._PYTHON, "-P", "-S", "-c")
@@ -735,8 +746,33 @@ def test_manifest_freezes_exact_identity_limits_estimates_and_commands(
     )
     assert "init" in bootstrap.commands[1]
     assert "plan" in bootstrap.commands[2]
-    assert bootstrap.commands[3][:3] == (operator._TERRAFORM, "show", "-json")
+    assert bootstrap.commands[3][:4] == (
+        operator._TERRAFORM,
+        "-chdir=infra/bootstrap",
+        "show",
+        "-json",
+    )
     assert "apply" in bootstrap.commands[4]
+    terraform_stacks = {
+        operator.Phase5Action.BOOTSTRAP_APPLY: "infra/bootstrap",
+        operator.Phase5Action.FOUNDATION_APPLY: "infra/environments/dev/foundation",
+        operator.Phase5Action.RUNTIME_APPLY: "infra/environments/dev/runtime",
+        operator.Phase5Action.RUNTIME_TEARDOWN: "infra/environments/dev/runtime",
+        operator.Phase5Action.FOUNDATION_TEARDOWN: (
+            "infra/environments/dev/foundation"
+        ),
+        operator.Phase5Action.STATE_PROTECTION_CHANGE: "infra/bootstrap",
+        operator.Phase5Action.BOOTSTRAP_TEARDOWN: "infra/bootstrap",
+    }
+    for action, directory in terraform_stacks.items():
+        descriptor = manifest.command_for(action)
+        show = next(command for command in descriptor.commands if "show" in command)
+        assert show[:4] == (
+            operator._TERRAFORM,
+            f"-chdir={directory}",
+            "show",
+            "-json",
+        )
     image = manifest.command_for(operator.Phase5Action.IMAGE_PUSH)
     assert {item.name: item.value for item in image.environment} == {
         "CLOUDSDK_AUTH_IMPERSONATE_SERVICE_ACCOUNT": (
@@ -2517,7 +2553,8 @@ def test_action_time_plan_drift_prevents_apply(tmp_path: Path, runner: _Runner) 
     assert evidence.status is operator.OutcomeStatus.UNKNOWN
     assert any("plan" in call for call in runner.calls)
     assert any(
-        call[:3] == (operator._TERRAFORM, "show", "-json") for call in runner.calls
+        call[0] == operator._TERRAFORM and call[2:4] == ("show", "-json")
+        for call in runner.calls
     )
     assert (
         sum(
