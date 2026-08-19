@@ -328,7 +328,12 @@ def _prepare_artifacts(
     runtime_values = _runtime_values(repo_root, image_digest)
     for _, stem in operator._PLAN_FILES.values():
         qualification = plans / f"{stem}.tfplan.json"
-        qualification.write_bytes(_plan_json(stem, runtime_values))
+        qualification.write_bytes(
+            _plan_json(
+                stem,
+                runtime_values if stem.startswith("runtime-") else set(),
+            )
+        )
         qualification.chmod(0o400)
         plan_value = json.loads(qualification.read_bytes())
         variables = {
@@ -579,7 +584,7 @@ class _Runner:
             operator._DOCKER,
             "image",
             "inspect",
-            "--format={{.Id}}",
+            "--format={{.Descriptor.digest}}",
         ):
             output = f"{self.image_id}\n".encode() if self.image_id else b"ok"
             return subprocess.CompletedProcess(list(argv), 0, output, b"")
@@ -667,6 +672,109 @@ def _admit_bootstrap(
     return state, manifest, approval, admission
 
 
+def _record_action(
+    state: operator.Phase5StateStore,
+    manifest: operator.Phase5ApprovalManifest,
+    approval: operator.Phase5Approval,
+    action: operator.Phase5Action,
+    *,
+    at: datetime,
+    result: object,
+) -> operator.Phase5ActionEvidenceBinding:
+    admission = state.admit(
+        manifest=manifest,
+        approval=approval,
+        action=action,
+        admitted_at=at,
+    )
+    outcome = operator._build_outcome(
+        admission,
+        result,
+        finished_at=at + timedelta(seconds=1),
+    )
+    evidence = operator._seal(
+        operator.Phase5Evidence,
+        schema_version="reconcile/phase5-operator/v1",
+        record_type="evidence",
+        manifest_sha256=manifest.record_sha256,
+        approval_sha256=approval.record_sha256,
+        admission_sha256=admission.record_sha256,
+        outcome_sha256=outcome.record_sha256,
+        action=action,
+        status=outcome.status,
+        observed_at=outcome.finished_at,
+    )
+    state.complete(admission=admission, outcome=outcome, evidence=evidence)
+    return operator.Phase5ActionEvidenceBinding(
+        action=action,
+        admission_sha256=admission.record_sha256,
+        outcome_sha256=outcome.record_sha256,
+        evidence_sha256=evidence.record_sha256,
+        status=outcome.status,
+    )
+
+
+def _terminal_image_predecessor(
+    tmp_path: Path,
+) -> tuple[
+    operator.Phase5StateStore,
+    operator.Phase5ApprovalManifest,
+    operator.Phase5Approval,
+]:
+    tmp_path.mkdir()
+    state, manifest, approval, _ = _records(tmp_path)
+    success = subprocess.CompletedProcess(["fixed"], 0, b"", b"")
+    _record_action(
+        state,
+        manifest,
+        approval,
+        operator.Phase5Action.BOOTSTRAP_APPLY,
+        at=_NOW + timedelta(minutes=2),
+        result=success,
+    )
+    _record_action(
+        state,
+        manifest,
+        approval,
+        operator.Phase5Action.FOUNDATION_APPLY,
+        at=_NOW + timedelta(minutes=3),
+        result=success,
+    )
+    _record_action(
+        state,
+        manifest,
+        approval,
+        operator.Phase5Action.IMAGE_PUSH,
+        at=_NOW + timedelta(minutes=4),
+        result=object(),
+    )
+    bootstrap_state = state.root / "state" / "bootstrap.tfstate"
+    bootstrap_state.write_bytes(b'{"lineage":"phase5","serial":1}')
+    bootstrap_state.chmod(0o600)
+    return state, manifest, approval
+
+
+def _continuation_successor(
+    tmp_path: Path,
+) -> tuple[
+    Path,
+    operator.Phase5StateStore,
+    operator.Phase5ApprovalManifest,
+    operator.Phase5Approval,
+    _Runner,
+]:
+    repo_root = _copy_repo_inputs(tmp_path / "successor-repo")
+    operator_source = repo_root / "reconcile" / "phase5_operator.py"
+    operator_source.write_bytes(operator_source.read_bytes() + b"\n")
+    successor_root = tmp_path / "successor"
+    successor_root.mkdir()
+    state, manifest, approval, runner = _records(
+        successor_root,
+        repo_root=repo_root,
+    )
+    return repo_root, state, manifest, approval, runner
+
+
 def test_manifest_freezes_exact_identity_limits_estimates_and_commands(
     tmp_path: Path,
 ) -> None:
@@ -734,6 +842,8 @@ def test_manifest_freezes_exact_identity_limits_estimates_and_commands(
         "reconcile-dev-260813-14fa6d.iam.gserviceaccount.com",
     )
     assert manifest.gcloud_version == "580.0.0"
+    image_push = manifest.command_for(operator.Phase5Action.IMAGE_PUSH)
+    assert image_push.commands[2][3] == "--format={{.Descriptor.digest}}"
     bootstrap = manifest.command_for(operator.Phase5Action.BOOTSTRAP_APPLY)
     assert bootstrap.commands[0] == (
         "/usr/bin/gcloud",
@@ -995,6 +1105,190 @@ def test_state_rejects_nonprivate_directory(tmp_path: Path) -> None:
 
     with pytest.raises(operator.OperatorError, match="STATE_DIRECTORY_NOT_PRIVATE"):
         operator.Phase5StateStore(root)
+
+
+def test_continuation_carries_only_verified_successes_without_replaying_them(
+    tmp_path: Path,
+) -> None:
+    predecessor, predecessor_manifest, predecessor_approval = (
+        _terminal_image_predecessor(tmp_path / "predecessor")
+    )
+    repo_root, successor, manifest, approval, runner = _continuation_successor(tmp_path)
+    predecessor_snapshot = {
+        path.relative_to(predecessor.root).as_posix(): (
+            path.read_bytes(),
+            stat.S_IMODE(path.stat().st_mode),
+            path.stat().st_ino,
+        )
+        for path in predecessor.root.rglob("*")
+        if path.is_file()
+    }
+
+    continuation = operator.prepare_phase5_continuation(
+        predecessor_state_root=predecessor.root,
+        predecessor_manifest_sha256=predecessor_manifest.record_sha256,
+        predecessor_approval_sha256=predecessor_approval.record_sha256,
+        successor_state_root=successor.root,
+        successor_manifest_sha256=manifest.record_sha256,
+        successor_approval_sha256=approval.record_sha256,
+        repo_root=repo_root,
+        prepared_at=_NOW + timedelta(minutes=2),
+        runner=runner,
+    )
+
+    assert tuple(item.action for item in continuation.carried_successes) == (
+        operator.Phase5Action.BOOTSTRAP_APPLY,
+        operator.Phase5Action.FOUNDATION_APPLY,
+    )
+    assert continuation.terminal_action.action is operator.Phase5Action.IMAGE_PUSH
+    assert continuation.terminal_action.status is operator.OutcomeStatus.UNKNOWN
+    source_state = predecessor.root / "state" / "bootstrap.tfstate"
+    copied_state = successor.root / "state" / "bootstrap.tfstate"
+    assert source_state.read_bytes() == copied_state.read_bytes()
+    assert source_state.stat().st_ino != copied_state.stat().st_ino
+    assert stat.S_IMODE(copied_state.stat().st_mode) == 0o600
+    assert predecessor_snapshot == {
+        path.relative_to(predecessor.root).as_posix(): (
+            path.read_bytes(),
+            stat.S_IMODE(path.stat().st_mode),
+            path.stat().st_ino,
+        )
+        for path in predecessor.root.rglob("*")
+        if path.is_file()
+    }
+
+    with pytest.raises(operator.OperatorError, match="ACTION_ALREADY_ATTEMPTED"):
+        successor.admit(
+            manifest=manifest,
+            approval=approval,
+            action=operator.Phase5Action.BOOTSTRAP_APPLY,
+            admitted_at=_NOW + timedelta(minutes=3),
+        )
+    image_admission = successor.admit(
+        manifest=manifest,
+        approval=approval,
+        action=operator.Phase5Action.IMAGE_PUSH,
+        admitted_at=_NOW + timedelta(minutes=4),
+    )
+    assert image_admission.action is operator.Phase5Action.IMAGE_PUSH
+
+
+def test_continuation_rejects_unsuccessful_predecessor_action(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "predecessor").mkdir()
+    predecessor, predecessor_manifest, predecessor_approval, _ = _records(
+        tmp_path / "predecessor"
+    )
+    success = subprocess.CompletedProcess(["fixed"], 0, b"", b"")
+    failure = subprocess.CompletedProcess(["fixed"], 1, b"", b"")
+    _record_action(
+        predecessor,
+        predecessor_manifest,
+        predecessor_approval,
+        operator.Phase5Action.BOOTSTRAP_APPLY,
+        at=_NOW + timedelta(minutes=2),
+        result=success,
+    )
+    _record_action(
+        predecessor,
+        predecessor_manifest,
+        predecessor_approval,
+        operator.Phase5Action.FOUNDATION_APPLY,
+        at=_NOW + timedelta(minutes=3),
+        result=failure,
+    )
+    bootstrap_state = predecessor.root / "state" / "bootstrap.tfstate"
+    bootstrap_state.write_bytes(b'{"serial":1}')
+    bootstrap_state.chmod(0o600)
+    repo_root, successor, manifest, approval, runner = _continuation_successor(tmp_path)
+
+    with pytest.raises(
+        operator.OperatorError,
+        match="CONTINUATION_PREDECESSOR_HISTORY_INVALID",
+    ):
+        operator.prepare_phase5_continuation(
+            predecessor_state_root=predecessor.root,
+            predecessor_manifest_sha256=predecessor_manifest.record_sha256,
+            predecessor_approval_sha256=predecessor_approval.record_sha256,
+            successor_state_root=successor.root,
+            successor_manifest_sha256=manifest.record_sha256,
+            successor_approval_sha256=approval.record_sha256,
+            repo_root=repo_root,
+            prepared_at=_NOW + timedelta(minutes=2),
+            runner=runner,
+        )
+    assert not (successor.root / "state" / "bootstrap.tfstate").exists()
+
+
+def test_continuation_rejects_bound_drift(tmp_path: Path) -> None:
+    (tmp_path / "predecessor").mkdir()
+    _, predecessor, _, _ = _records(tmp_path / "predecessor")
+    _, _, successor, _, _ = _continuation_successor(tmp_path)
+    drifted = successor.model_copy(update={"infrastructure_revision": "f" * 64})
+
+    with pytest.raises(operator.OperatorError, match="CONTINUATION_BOUND_DRIFT"):
+        operator._validate_continuation_bounds(predecessor, drifted)
+
+
+def test_continuation_state_tamper_blocks_next_admission(tmp_path: Path) -> None:
+    predecessor, predecessor_manifest, predecessor_approval = (
+        _terminal_image_predecessor(tmp_path / "predecessor")
+    )
+    repo_root, successor, manifest, approval, runner = _continuation_successor(tmp_path)
+    operator.prepare_phase5_continuation(
+        predecessor_state_root=predecessor.root,
+        predecessor_manifest_sha256=predecessor_manifest.record_sha256,
+        predecessor_approval_sha256=predecessor_approval.record_sha256,
+        successor_state_root=successor.root,
+        successor_manifest_sha256=manifest.record_sha256,
+        successor_approval_sha256=approval.record_sha256,
+        repo_root=repo_root,
+        prepared_at=_NOW + timedelta(minutes=2),
+        runner=runner,
+    )
+    predecessor_state = predecessor.root / "state" / "bootstrap.tfstate"
+    predecessor_state.write_bytes(predecessor_state.read_bytes() + b"tamper")
+    predecessor_state.chmod(0o600)
+
+    with pytest.raises(
+        operator.OperatorError,
+        match="CONTINUATION_BOOTSTRAP_STATE_DRIFT",
+    ):
+        successor.admit(
+            manifest=manifest,
+            approval=approval,
+            action=operator.Phase5Action.IMAGE_PUSH,
+            admitted_at=_NOW + timedelta(minutes=3),
+        )
+
+
+def test_continuation_rejects_bootstrap_state_destination_collision(
+    tmp_path: Path,
+) -> None:
+    predecessor, predecessor_manifest, predecessor_approval = (
+        _terminal_image_predecessor(tmp_path / "predecessor")
+    )
+    repo_root, successor, manifest, approval, runner = _continuation_successor(tmp_path)
+    collision = successor.root / "state" / "bootstrap.tfstate"
+    collision.write_bytes(b"preexisting")
+    collision.chmod(0o600)
+
+    with pytest.raises(
+        operator.OperatorError,
+        match="CONTINUATION_BOOTSTRAP_STATE_EXISTS",
+    ):
+        operator.prepare_phase5_continuation(
+            predecessor_state_root=predecessor.root,
+            predecessor_manifest_sha256=predecessor_manifest.record_sha256,
+            predecessor_approval_sha256=predecessor_approval.record_sha256,
+            successor_state_root=successor.root,
+            successor_manifest_sha256=manifest.record_sha256,
+            successor_approval_sha256=approval.record_sha256,
+            repo_root=repo_root,
+            prepared_at=_NOW + timedelta(minutes=2),
+            runner=runner,
+        )
 
 
 def test_default_cli_is_read_only_inspection(
@@ -2616,10 +2910,10 @@ def test_cloud_resource_manager_enable_failure_prevents_terraform_apply(
     assert not any(call[0] == operator._TERRAFORM for call in observed)
 
 
-def test_loaded_image_id_mismatch_prevents_push(tmp_path: Path) -> None:
+def test_loaded_image_descriptor_mismatch_prevents_push(tmp_path: Path) -> None:
     _, manifest, _, _ = _records(tmp_path)
     assert manifest.image_artifact.config_digest != manifest.image_digest
-    runner = _Runner(image_id=manifest.image_digest)
+    runner = _Runner(image_id=manifest.image_artifact.config_digest)
 
     result = operator._run_descriptor_once(
         manifest.command_for(operator.Phase5Action.IMAGE_PUSH),
@@ -2669,7 +2963,7 @@ def test_image_push_proves_source_tag_resolves_to_remote_manifest_digest(
 ) -> None:
     _, manifest, _, _ = _records(tmp_path)
     runner = _Runner(
-        image_id=manifest.image_artifact.config_digest,
+        image_id=manifest.image_artifact.manifest_digest,
         remote_digest=manifest.image_digest,
     )
 
@@ -2708,7 +3002,7 @@ def test_image_push_proves_source_tag_resolves_to_remote_manifest_digest(
 def test_remote_manifest_mismatch_fails_post_push_proof(tmp_path: Path) -> None:
     _, manifest, _, _ = _records(tmp_path)
     runner = _Runner(
-        image_id=manifest.image_artifact.config_digest,
+        image_id=manifest.image_artifact.manifest_digest,
         remote_digest=manifest.image_artifact.config_digest,
     )
 
