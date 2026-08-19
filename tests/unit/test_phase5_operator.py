@@ -11,7 +11,7 @@ import stat
 import subprocess
 import tarfile
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 import pytest
@@ -23,6 +23,7 @@ pytestmark = pytest.mark.unit
 _NOW = datetime(2026, 8, 18, 6, 0, tzinfo=UTC)
 _SOURCE = "a" * 40
 _REPO_ROOT = Path(__file__).parents[2].resolve()
+_PROJECT_DEPENDENCY_PATHS = ("reconcile/phase5_operator.py",)
 
 
 def _draft(image_digest: str = f"sha256:{'c' * 64}") -> operator.Phase5ManifestDraft:
@@ -36,17 +37,30 @@ def _draft(image_digest: str = f"sha256:{'c' * 64}") -> operator.Phase5ManifestD
     )
 
 
+def _project_dependency_entries(
+    repo_root: Path,
+    paths: tuple[str, ...] = _PROJECT_DEPENDENCY_PATHS,
+) -> tuple[tuple[tuple[str, bytes], ...], bytes]:
+    entries: list[tuple[str, bytes]] = []
+    record: list[bytes] = []
+    for relative in sorted(paths):
+        payload = (repo_root / relative).read_bytes()
+        encoded_digest = base64.urlsafe_b64encode(
+            hashlib.sha256(payload).digest()
+        ).rstrip(b"=")
+        entries.append((relative, payload))
+        record.append(
+            relative.encode()
+            + b",sha256="
+            + encoded_digest
+            + f",{len(payload)}\n".encode()
+        )
+    return tuple(entries), b"".join(record)
+
+
 def _project_dependency_payloads(repo_root: Path) -> tuple[bytes, bytes]:
-    payload = (repo_root / "reconcile" / "phase5_operator.py").read_bytes()
-    encoded_digest = base64.urlsafe_b64encode(hashlib.sha256(payload).digest()).rstrip(
-        b"="
-    )
-    record = (
-        b"reconcile/phase5_operator.py,sha256="
-        + encoded_digest
-        + f",{len(payload)}\n".encode()
-    )
-    return payload, record
+    entries, record = _project_dependency_entries(repo_root)
+    return entries[0][1], record
 
 
 def _write_oci_archive(
@@ -59,6 +73,7 @@ def _write_oci_archive(
     truncate_gzip: bool = False,
     invalid_deflate: bool = False,
     layer_repeat: int = 1,
+    project_dependency_paths: tuple[str, ...] = _PROJECT_DEPENDENCY_PATHS,
 ) -> str:
     config = b'{"architecture":"amd64","os":"linux"}'
     config_hexadecimal = hashlib.sha256(config).hexdigest()
@@ -87,16 +102,30 @@ def _write_oci_archive(
         ),
     )
     if project_root is not None:
-        operator_payload, record_payload = _project_dependency_payloads(project_root)
+        project_entries, record_payload = _project_dependency_entries(
+            project_root,
+            project_dependency_paths,
+        )
         site_packages = "opt/reconcile/lib/python3.12/site-packages"
+        project_directories = sorted(
+            {
+                parent.as_posix()
+                for relative, _ in project_entries
+                for parent in PurePosixPath(relative).parents
+                if parent != PurePosixPath(".")
+            },
+            key=lambda value: (len(PurePosixPath(value).parts), value),
+        )
         default_entries = (
             *default_entries,
-            (f"{site_packages}/reconcile", "directory", None),
+            *(
+                (f"{site_packages}/{relative}", "directory", None)
+                for relative in project_directories
+            ),
             (f"{site_packages}/reconcile-0.1.0.dist-info", "directory", None),
-            (
-                f"{site_packages}/reconcile/phase5_operator.py",
-                "file",
-                operator_payload,
+            *(
+                (f"{site_packages}/{relative}", "file", payload)
+                for relative, payload in project_entries
             ),
             (
                 f"{site_packages}/reconcile-0.1.0.dist-info/RECORD",
@@ -317,20 +346,37 @@ def _write_dependency_tree(root: Path) -> None:
     root.chmod(0o500)
 
 
-def _write_project_dependency_files(root: Path, repo_root: Path) -> None:
-    payload, record_payload = _project_dependency_payloads(repo_root)
+def _write_project_dependency_files(
+    root: Path,
+    repo_root: Path,
+    project_dependency_paths: tuple[str, ...] = _PROJECT_DEPENDENCY_PATHS,
+) -> None:
+    project_entries, record_payload = _project_dependency_entries(
+        repo_root,
+        project_dependency_paths,
+    )
     root.chmod(0o700)
-    package = root / "reconcile"
     metadata = root / "reconcile-0.1.0.dist-info"
-    package.mkdir(mode=0o700)
     metadata.mkdir(mode=0o700)
-    operator_file = package / "phase5_operator.py"
-    operator_file.write_bytes(payload)
-    operator_file.chmod(0o400)
+    project_directories: set[Path] = set()
+    for relative, payload in project_entries:
+        target = root / relative
+        target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        target.write_bytes(payload)
+        target.chmod(0o400)
+        parent = target.parent
+        while parent != root:
+            project_directories.add(parent)
+            parent = parent.parent
     record = metadata / "RECORD"
     record.write_bytes(record_payload)
     record.chmod(0o400)
-    package.chmod(0o500)
+    for directory in sorted(
+        project_directories,
+        key=lambda path: len(path.parts),
+        reverse=True,
+    ):
+        directory.chmod(0o500)
     metadata.chmod(0o500)
     root.chmod(0o500)
 
@@ -368,6 +414,7 @@ def _prepare_artifacts(
     state: operator.Phase5StateStore,
     *,
     repo_root: Path,
+    project_dependency_paths: tuple[str, ...] = _PROJECT_DEPENDENCY_PATHS,
 ) -> operator.Phase5ManifestDraft:
     plans = state.root / "plans"
     images = state.root / "images"
@@ -376,10 +423,15 @@ def _prepare_artifacts(
     terraform_config.chmod(0o400)
     dependency_root = state.root / "python-dependencies"
     _write_dependency_tree(dependency_root)
-    _write_project_dependency_files(dependency_root, repo_root)
+    _write_project_dependency_files(
+        dependency_root,
+        repo_root,
+        project_dependency_paths,
+    )
     image_digest = _write_oci_archive(
         images / "reconcile.oci.tar",
         project_root=repo_root,
+        project_dependency_paths=project_dependency_paths,
     )
     runtime_values = _runtime_values(repo_root, image_digest)
     for _, stem in operator._PLAN_FILES.values():
@@ -503,6 +555,7 @@ def _records(
     tmp_path: Path,
     *,
     repo_root: Path = _REPO_ROOT,
+    project_dependency_paths: tuple[str, ...] = _PROJECT_DEPENDENCY_PATHS,
 ) -> tuple[
     operator.Phase5StateStore,
     operator.Phase5ApprovalManifest,
@@ -511,7 +564,11 @@ def _records(
 ]:
     state = operator.Phase5StateStore(tmp_path / "state")
     source_root = _install_execution_source(state, repo_root)
-    draft = _prepare_artifacts(state, repo_root=source_root)
+    draft = _prepare_artifacts(
+        state,
+        repo_root=source_root,
+        project_dependency_paths=project_dependency_paths,
+    )
     runner = _Runner(source_root=source_root)
     manifest = operator.build_manifest(
         draft,
@@ -792,13 +849,18 @@ def _record_action(
 
 def _terminal_image_predecessor(
     tmp_path: Path,
+    *,
+    project_dependency_paths: tuple[str, ...] = _PROJECT_DEPENDENCY_PATHS,
 ) -> tuple[
     operator.Phase5StateStore,
     operator.Phase5ApprovalManifest,
     operator.Phase5Approval,
 ]:
     tmp_path.mkdir()
-    state, manifest, approval, _ = _records(tmp_path)
+    state, manifest, approval, _ = _records(
+        tmp_path,
+        project_dependency_paths=project_dependency_paths,
+    )
     success = subprocess.CompletedProcess(["fixed"], 0, b"", b"")
     _record_action(
         state,
@@ -832,6 +894,9 @@ def _terminal_image_predecessor(
 
 def _continuation_successor(
     tmp_path: Path,
+    *,
+    changed_paths: tuple[str, ...] = _PROJECT_DEPENDENCY_PATHS,
+    project_dependency_paths: tuple[str, ...] = _PROJECT_DEPENDENCY_PATHS,
 ) -> tuple[
     Path,
     operator.Phase5StateStore,
@@ -840,13 +905,15 @@ def _continuation_successor(
     _Runner,
 ]:
     repo_root = _copy_repo_inputs(tmp_path / "successor-repo")
-    operator_source = repo_root / "reconcile" / "phase5_operator.py"
-    operator_source.write_bytes(operator_source.read_bytes() + b"\n")
+    for relative in changed_paths:
+        source = repo_root / relative
+        source.write_bytes(source.read_bytes() + b"\n")
     successor_root = tmp_path / "successor"
     successor_root.mkdir()
     state, manifest, approval, runner = _records(
         successor_root,
         repo_root=repo_root,
+        project_dependency_paths=project_dependency_paths,
     )
     return repo_root, state, manifest, approval, runner
 
@@ -1237,6 +1304,87 @@ def test_state_rejects_nonprivate_directory(tmp_path: Path) -> None:
 
     with pytest.raises(operator.OperatorError, match="STATE_DIRECTORY_NOT_PRIVATE"):
         operator.Phase5StateStore(root)
+
+
+def test_continuation_accepts_exact_bound_python_repairs(tmp_path: Path) -> None:
+    changed_paths = (
+        "reconcile/durable_application.py",
+        "reconcile/phase5_operator.py",
+    )
+    predecessor_root = tmp_path / "predecessor"
+    predecessor_root.mkdir()
+    _, predecessor, _, _ = _records(
+        predecessor_root,
+        project_dependency_paths=changed_paths,
+    )
+    _, _, successor, _, _ = _continuation_successor(
+        tmp_path,
+        changed_paths=changed_paths,
+        project_dependency_paths=changed_paths,
+    )
+
+    operator._validate_continuation_bounds(predecessor, successor)
+
+
+def test_continuation_rejects_mismatched_semantic_repairs(tmp_path: Path) -> None:
+    changed_paths = (
+        "reconcile/durable_application.py",
+        "reconcile/phase5_operator.py",
+    )
+    predecessor_root = tmp_path / "predecessor"
+    predecessor_root.mkdir()
+    _, predecessor, _, _ = _records(
+        predecessor_root,
+        project_dependency_paths=changed_paths,
+    )
+    _, _, successor, _, _ = _continuation_successor(
+        tmp_path,
+        changed_paths=changed_paths,
+        project_dependency_paths=changed_paths,
+    )
+    predecessor_semantic = {
+        item.path: item for item in predecessor.semantic_sources.files
+    }
+    mismatched_files = tuple(
+        predecessor_semantic[item.path]
+        if item.path == "reconcile/durable_application.py"
+        else item
+        for item in successor.semantic_sources.files
+    )
+    mismatched_semantic = operator.SourceGroupBinding(
+        name=successor.semantic_sources.name,
+        files=mismatched_files,
+        sha256=operator._hash_value(
+            [item.model_dump(mode="json") for item in mismatched_files]
+        ),
+    )
+    mismatched = successor.model_copy(update={"semantic_sources": mismatched_semantic})
+
+    with pytest.raises(
+        operator.OperatorError,
+        match="CONTINUATION_SOURCE_SCOPE_DRIFT",
+    ):
+        operator._validate_continuation_bounds(predecessor, mismatched)
+
+
+def test_continuation_rejects_unbound_python_repair(tmp_path: Path) -> None:
+    predecessor_root = tmp_path / "predecessor"
+    predecessor_root.mkdir()
+    _, predecessor, _, _ = _records(predecessor_root)
+    changed_paths = (
+        "reconcile/durable_application.py",
+        "reconcile/phase5_operator.py",
+    )
+    _, _, successor, _, _ = _continuation_successor(
+        tmp_path,
+        changed_paths=changed_paths,
+    )
+
+    with pytest.raises(
+        operator.OperatorError,
+        match="CONTINUATION_DEPENDENCY_DRIFT",
+    ):
+        operator._validate_continuation_bounds(predecessor, successor)
 
 
 def test_continuation_carries_only_verified_successes_without_replaying_them(
