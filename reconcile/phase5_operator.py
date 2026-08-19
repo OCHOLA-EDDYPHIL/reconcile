@@ -1003,6 +1003,7 @@ def _fixed_commands(
             tuple(plan),
             (
                 _TERRAFORM,
+                f"-chdir={directory}",
                 "show",
                 "-json",
                 str(execution_plan),
