@@ -707,16 +707,18 @@ class HostedHybridExecutor:
                 provider_cleanup_failed=cleanup_failed,
             )
 
+        durable_planner = DurableAdvisoryPlanner(
+            planner,
+            runtime,
+            estimated_cost_microunits=_PLANNER_ESTIMATED_COST_MICROUNITS,
+            minimum_remaining_ms=int(_HOSTED_PROVIDER_TIMEOUT_SECONDS * 1_000),
+        )
         close_failed = False
         try:
             result = await execute_sandbox_order_conditional(
                 envelope,
                 sandbox_reader,
-                DurableAdvisoryPlanner(
-                    planner,
-                    runtime,
-                    estimated_cost_microunits=_PLANNER_ESTIMATED_COST_MICROUNITS,
-                ),
+                durable_planner,
                 revision=revision,
                 cancellation_event=cancellation_event,
                 durability_observer=runtime,
@@ -740,10 +742,18 @@ class HostedHybridExecutor:
             result,
             max_elapsed_ms=maximum_elapsed,
         ):
-            report = mark_bounded_hybrid_explicit_unknown(
-                result.report,
-                provider_cleanup_failed=close_failed,
-            )
+            if (
+                durable_planner.predispatch_refused
+                or result.model_invocation_count == 0
+            ):
+                report = mark_bounded_hybrid_preplanner_unknown(result.report)
+                if close_failed:
+                    report = mark_bounded_hybrid_provider_cleanup_failure(report)
+            else:
+                report = mark_bounded_hybrid_explicit_unknown(
+                    result.report,
+                    provider_cleanup_failed=close_failed,
+                )
         elif result.model_invocation_count == 0:
             report = mark_bounded_hybrid_preplanner_unknown(result.report)
             if close_failed:

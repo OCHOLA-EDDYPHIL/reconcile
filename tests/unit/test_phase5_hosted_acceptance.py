@@ -991,6 +991,33 @@ def test_provider_explicit_unknown_binds_failed_advisory_after_bootstrap() -> No
     _validate_provider_scenario(scenario)
 
 
+def test_provider_explicit_unknown_accepts_predispatch_budget_stop() -> None:
+    request = ScenarioLaunchRequest(
+        schema_version=SCENARIO_LAUNCH_REQUEST_VERSION,
+        launch_id="provider-predispatch-unknown",
+        scenario=ScenarioLaunchName.SANDBOX_ORDER,
+        mode=ScenarioRunMode.ADAPTIVE,
+    )
+    route = ScenarioRouteProvenance(
+        policy_version=BOUNDED_HYBRID_ROUTE_POLICY_VERSION,
+        route=ScenarioHybridRoute.PLANNER_HETEROGENEOUS,
+        outcome=ScenarioHybridOutcome.EXPLICIT_UNKNOWN,
+        planner_invoked=False,
+        fixed_connector_invoked=False,
+        provider_failure=False,
+        provider_cleanup_failure=False,
+    )
+    scenario = _observation(
+        request,
+        "provider-sandbox-adaptive",
+        Classification.UNKNOWN,
+        route,
+        capabilities=(SANDBOX_ORDER_INGRESS_CAPABILITY_NAME,),
+    )
+
+    _validate_provider_scenario(scenario)
+
+
 def test_firestore_proof_requires_exact_effect_commit_scopes() -> None:
     request = ScenarioLaunchRequest(
         schema_version=SCENARIO_LAUNCH_REQUEST_VERSION,

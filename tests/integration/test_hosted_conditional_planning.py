@@ -106,6 +106,22 @@ class _StepClock:
         return self._monotonic
 
 
+class _MutableClock:
+    def __init__(self, current: datetime) -> None:
+        self._current = current
+        self._monotonic = 100.0
+
+    def now(self) -> datetime:
+        return self._current
+
+    def monotonic(self) -> float:
+        return self._monotonic
+
+    def advance(self, seconds: float) -> None:
+        self._current += timedelta(seconds=seconds)
+        self._monotonic += seconds
+
+
 def _metadata() -> AdvisoryPlannerMetadata:
     return AdvisoryPlannerMetadata(
         provider_name="scripted-hosted",
@@ -866,6 +882,89 @@ def test_durable_hosted_provider_timeout_completes_unknown_without_replay(
         assert route is not None
         assert route.provider_failure
         assert route.planner_invoked
+        assert not route.fixed_connector_invoked
+
+    asyncio.run(exercise())
+
+
+def test_durable_hosted_late_provider_window_completes_predispatch_unknown(
+    tmp_path: Path,
+) -> None:
+    local_envelope, _, _ = _prepared_sandbox(
+        tmp_path,
+        "durable-late-provider-window",
+    )
+    hosted_envelope = _hosted_envelope(local_envelope)
+    planner = _Planner(SANDBOX_ORDER_FIXED_PROBE_PLAN.steps[1].request)
+    observations: list[str] = []
+    clock = _MutableClock(datetime.now(UTC))
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        internal = decode_contract(request.content, InternalOperationRequest)
+        observation = internal.payload["observation"]
+        assert observation == "ingress"
+        observations.append(observation)
+        clock.advance(4.2)
+        response = InternalOperationResponse(
+            schema_version=INTERNAL_OPERATION_RESPONSE_VERSION,
+            request_id=internal.request_id,
+            operation=InternalOperation.READ_EVIDENCE,
+            accepted=True,
+            payload={
+                "ingress": {
+                    "event_kind": "REQUEST_SEEN",
+                    "observed_at": clock.now().isoformat(),
+                }
+            },
+        )
+        return httpx.Response(200, content=canonical_internal_json_bytes(response))
+
+    async def exercise() -> None:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            transport = HostedHttpTransport(
+                lambda _audience: "header.payload.signature",
+                client,
+            )
+            fixed = HostedFixedExecutor(
+                storage_reader=object(),  # type: ignore[arg-type]
+                firestore_reader=object(),  # type: ignore[arg-type]
+                sandbox_url="https://sandbox.example.test",
+                sandbox_audience="https://sandbox.example.test",
+                transport=transport,
+            )
+            store = SqliteDurableRuntimeStore(tmp_path / "late-window-runtime.sqlite3")
+            service = DurableInvestigationApplicationService(
+                store,
+                HostedHybridExecutor(
+                    fixed=fixed,
+                    planner_factory=lambda: planner,
+                ),
+                strategy=DurableExecutionStrategy.ADAPTIVE,
+                owner_id="hosted-late-window-regression",
+                semantic_config_sha256="e" * 64,
+                max_provider_calls=1,
+                max_estimated_cost_microunits=1,
+                clock=clock.now,
+                monotonic_clock=clock.monotonic,
+            )
+            result = await service.create_and_wait_result(hosted_envelope)
+            run = await store.get_run(hosted_envelope.investigation_id)
+            receipts = await store.provider_call_receipts(
+                hosted_envelope.investigation_id
+            )
+            await service.aclose()
+
+        assert result.report.classification is Classification.UNKNOWN
+        assert run.state is DurableRunState.TERMINAL
+        assert receipts == ()
+        assert observations == ["ingress"]
+        assert planner.inputs == []
+        assert is_bounded_hybrid_explicit_unknown(result.report)
+        assert not is_bounded_hybrid_fixed_fallback(result.report)
+        route = bounded_hybrid_route_provenance(result.report)
+        assert route is not None
+        assert not route.provider_failure
+        assert not route.planner_invoked
         assert not route.fixed_connector_invoked
 
     asyncio.run(exercise())
