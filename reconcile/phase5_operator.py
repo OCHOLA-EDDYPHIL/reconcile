@@ -985,16 +985,7 @@ def _fixed_commands(
             Phase5Action.BOOTSTRAP_TEARDOWN,
         }:
             plan.append("-destroy")
-        commands: tuple[tuple[str, ...], ...] = (
-            tuple(init),
-            tuple(plan),
-            (
-                _TERRAFORM,
-                "show",
-                "-json",
-                str(execution_plan),
-            ),
-        )
+        commands: tuple[tuple[str, ...], ...] = ()
         if action is Phase5Action.BOOTSTRAP_APPLY:
             commands += (
                 (
@@ -1007,6 +998,16 @@ def _fixed_commands(
                     "--quiet",
                 ),
             )
+        commands += (
+            tuple(init),
+            tuple(plan),
+            (
+                _TERRAFORM,
+                "show",
+                "-json",
+                str(execution_plan),
+            ),
+        )
         if action is not Phase5Action.STATE_PROTECTION_CHANGE:
             commands += (
                 (
@@ -4815,9 +4816,12 @@ def _run_descriptor_once(
     final_code = 0
     environment = _minimal_subprocess_environment(descriptor.environment)
     execution_identity: ExecutionPlanIdentity | None = None
-    terraform_apply_index = (
-        4 if descriptor.action is Phase5Action.BOOTSTRAP_APPLY else 3
+    terraform_index_offset = (
+        1 if descriptor.action is Phase5Action.BOOTSTRAP_APPLY else 0
     )
+    terraform_plan_index = terraform_index_offset + 1
+    terraform_show_index = terraform_index_offset + 2
+    terraform_apply_index = terraform_index_offset + 3
     for index, command in enumerate(descriptor.commands):
         remaining_seconds = int((_utc(deadline) - _utc(clock())).total_seconds())
         if remaining_seconds < 1:
@@ -4869,25 +4873,25 @@ def _run_descriptor_once(
             or len(result.stdout)
             > (
                 _MAX_PLAN_JSON_BYTES
-                if terraform_plan is not None and index == 2
+                if terraform_plan is not None and index == terraform_show_index
                 else _MAX_OUTPUT_BYTES
             )
             or len(result.stderr) > _MAX_OUTPUT_BYTES
         ):
             return object()
         recorded_stdout = result.stdout
-        if terraform_plan is not None and index == 2:
+        if terraform_plan is not None and index == terraform_show_index:
             recorded_stdout = hashlib.sha256(result.stdout).hexdigest().encode("ascii")
         stdout_parts.append(len(recorded_stdout).to_bytes(8, "big") + recorded_stdout)
         stderr_parts.append(len(result.stderr).to_bytes(8, "big") + result.stderr)
         final_code = result.returncode
         if final_code != 0:
             break
-        if terraform_plan is not None and index == 1:
+        if terraform_plan is not None and index == terraform_plan_index:
             execution_identity = _seal_execution_plan(
                 Path(terraform_plan.execution_plan_path)
             )
-        if terraform_plan is not None and index == 2:
+        if terraform_plan is not None and index == terraform_show_index:
             if execution_identity is None:
                 return object()
             _verify_execution_plan(

@@ -724,7 +724,7 @@ def test_manifest_freezes_exact_identity_limits_estimates_and_commands(
     )
     assert manifest.gcloud_version == "580.0.0"
     bootstrap = manifest.command_for(operator.Phase5Action.BOOTSTRAP_APPLY)
-    assert bootstrap.commands[3] == (
+    assert bootstrap.commands[0] == (
         "/usr/bin/gcloud",
         "services",
         "enable",
@@ -733,6 +733,9 @@ def test_manifest_freezes_exact_identity_limits_estimates_and_commands(
         "--account=eddyphilochola13@gmail.com",
         "--quiet",
     )
+    assert "init" in bootstrap.commands[1]
+    assert "plan" in bootstrap.commands[2]
+    assert bootstrap.commands[3][:3] == (operator._TERRAFORM, "show", "-json")
     assert "apply" in bootstrap.commands[4]
     image = manifest.command_for(operator.Phase5Action.IMAGE_PUSH)
     assert {item.name: item.value for item in image.environment} == {
@@ -2516,15 +2519,18 @@ def test_action_time_plan_drift_prevents_apply(tmp_path: Path, runner: _Runner) 
     assert any(
         call[:3] == (operator._TERRAFORM, "show", "-json") for call in runner.calls
     )
-    assert not any(
-        call[:4]
-        == (
-            "/usr/bin/gcloud",
-            "services",
-            "enable",
-            "cloudresourcemanager.googleapis.com",
+    assert (
+        sum(
+            call[:4]
+            == (
+                "/usr/bin/gcloud",
+                "services",
+                "enable",
+                "cloudresourcemanager.googleapis.com",
+            )
+            for call in runner.calls
         )
-        for call in runner.calls
+        == 1
     )
     assert not any("apply" in call for call in runner.calls)
 
@@ -2533,7 +2539,7 @@ def test_cloud_resource_manager_enable_failure_prevents_terraform_apply(
     tmp_path: Path,
 ) -> None:
     _, manifest, _, base_runner = _records(tmp_path)
-    enable = manifest.command_for(operator.Phase5Action.BOOTSTRAP_APPLY).commands[3]
+    enable = manifest.command_for(operator.Phase5Action.BOOTSTRAP_APPLY).commands[0]
     observed: list[tuple[str, ...]] = []
 
     def runner(
@@ -2570,7 +2576,7 @@ def test_cloud_resource_manager_enable_failure_prevents_terraform_apply(
     assert isinstance(result, subprocess.CompletedProcess)
     assert result.returncode == 1
     assert enable in observed
-    assert not any("apply" in call for call in observed)
+    assert not any(call[0] == operator._TERRAFORM for call in observed)
 
 
 def test_loaded_image_id_mismatch_prevents_push(tmp_path: Path) -> None:
