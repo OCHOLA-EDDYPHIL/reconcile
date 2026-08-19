@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import gzip
 import hashlib
 import io
@@ -35,10 +36,24 @@ def _draft(image_digest: str = f"sha256:{'c' * 64}") -> operator.Phase5ManifestD
     )
 
 
+def _project_dependency_payloads(repo_root: Path) -> tuple[bytes, bytes]:
+    payload = (repo_root / "reconcile" / "phase5_operator.py").read_bytes()
+    encoded_digest = base64.urlsafe_b64encode(hashlib.sha256(payload).digest()).rstrip(
+        b"="
+    )
+    record = (
+        b"reconcile/phase5_operator.py,sha256="
+        + encoded_digest
+        + f",{len(payload)}\n".encode()
+    )
+    return payload, record
+
+
 def _write_oci_archive(
     path: Path,
     *,
     layer_entries: tuple[tuple[str, str, bytes | str | None], ...] | None = None,
+    project_root: Path | None = None,
     include_layer: bool = True,
     gzip_layer: bool = False,
     truncate_gzip: bool = False,
@@ -71,6 +86,24 @@ def _write_oci_archive(
             for package in ("grpc", "pydantic_core", "textual")
         ),
     )
+    if project_root is not None:
+        operator_payload, record_payload = _project_dependency_payloads(project_root)
+        site_packages = "opt/reconcile/lib/python3.12/site-packages"
+        default_entries = (
+            *default_entries,
+            (f"{site_packages}/reconcile", "directory", None),
+            (f"{site_packages}/reconcile-0.1.0.dist-info", "directory", None),
+            (
+                f"{site_packages}/reconcile/phase5_operator.py",
+                "file",
+                operator_payload,
+            ),
+            (
+                f"{site_packages}/reconcile-0.1.0.dist-info/RECORD",
+                "file",
+                record_payload,
+            ),
+        )
     selected_entries = default_entries if layer_entries is None else layer_entries
     layer_buffer = io.BytesIO()
     with tarfile.open(fileobj=layer_buffer, mode="w") as layer:
@@ -284,6 +317,24 @@ def _write_dependency_tree(root: Path) -> None:
     root.chmod(0o500)
 
 
+def _write_project_dependency_files(root: Path, repo_root: Path) -> None:
+    payload, record_payload = _project_dependency_payloads(repo_root)
+    root.chmod(0o700)
+    package = root / "reconcile"
+    metadata = root / "reconcile-0.1.0.dist-info"
+    package.mkdir(mode=0o700)
+    metadata.mkdir(mode=0o700)
+    operator_file = package / "phase5_operator.py"
+    operator_file.write_bytes(payload)
+    operator_file.chmod(0o400)
+    record = metadata / "RECORD"
+    record.write_bytes(record_payload)
+    record.chmod(0o400)
+    package.chmod(0o500)
+    metadata.chmod(0o500)
+    root.chmod(0o500)
+
+
 def _dependency_artifact(
     tmp_path: Path,
     *,
@@ -323,8 +374,13 @@ def _prepare_artifacts(
     terraform_config = state.root / "terraform.rc"
     terraform_config.write_bytes(b"")
     terraform_config.chmod(0o400)
-    _write_dependency_tree(state.root / "python-dependencies")
-    image_digest = _write_oci_archive(images / "reconcile.oci.tar")
+    dependency_root = state.root / "python-dependencies"
+    _write_dependency_tree(dependency_root)
+    _write_project_dependency_files(dependency_root, repo_root)
+    image_digest = _write_oci_archive(
+        images / "reconcile.oci.tar",
+        project_root=repo_root,
+    )
     runtime_values = _runtime_values(repo_root, image_digest)
     for _, stem in operator._PLAN_FILES.values():
         qualification = plans / f"{stem}.tfplan.json"
@@ -1304,6 +1360,28 @@ def test_continuation_rejects_bound_drift(tmp_path: Path) -> None:
     drifted = successor.model_copy(update={"infrastructure_revision": "f" * 64})
 
     with pytest.raises(operator.OperatorError, match="CONTINUATION_BOUND_DRIFT"):
+        operator._validate_continuation_bounds(predecessor, drifted)
+
+
+def test_continuation_rejects_additional_dependency_drift(tmp_path: Path) -> None:
+    (tmp_path / "predecessor").mkdir()
+    _, predecessor, _, _ = _records(tmp_path / "predecessor")
+    _, successor_state, successor, _, _ = _continuation_successor(tmp_path)
+    dependency = Path(successor.python_dependencies.root) / "grpc" / "__init__.py"
+    dependency.chmod(0o600)
+    dependency.write_bytes(b'PACKAGE = "changed"\n')
+    dependency.chmod(0o400)
+    recaptured = operator._capture_python_dependencies(
+        state_root=successor_state.root,
+        image_artifact=successor.image_artifact,
+        python_lock_sha256=successor.python_lock_sha256,
+    )
+    drifted = successor.model_copy(update={"python_dependencies": recaptured})
+
+    with pytest.raises(
+        operator.OperatorError,
+        match="CONTINUATION_DEPENDENCY_DRIFT",
+    ):
         operator._validate_continuation_bounds(predecessor, drifted)
 
 

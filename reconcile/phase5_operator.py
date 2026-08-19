@@ -82,6 +82,11 @@ _OCI_REFERENCE_ANNOTATION = "org.opencontainers.image.ref.name"
 _LEGACY_IMAGE_ID_SOURCE_REVISIONS = frozenset(
     {"e7ccaab5268d31172b3a5efa5e754b0beb3b1a79"}
 )
+_OPERATOR_DEPENDENCY_PATH = "reconcile/phase5_operator.py"
+_OPERATOR_DEPENDENCY_RECORD_PATH = "reconcile-0.1.0.dist-info/RECORD"
+_OPERATOR_DEPENDENCY_CHANGE_PATHS = frozenset(
+    {_OPERATOR_DEPENDENCY_PATH, _OPERATOR_DEPENDENCY_RECORD_PATH}
+)
 
 _EXECUTION_ROOT_FILES = frozenset(
     {".dockerignore", "Dockerfile", "pyproject.toml", "uv.lock"}
@@ -2479,7 +2484,9 @@ def _capture_image_artifact(
     )
 
 
-def _dependency_inventory(root: Path) -> tuple[int, int, int, str]:
+def _dependency_inventory_details(
+    root: Path,
+) -> tuple[int, int, int, str, tuple[dict[str, Any], ...]]:
     canonical = _canonical_absolute_path(root, require_exists=True)
     try:
         root_metadata = os.lstat(canonical)
@@ -2601,7 +2608,20 @@ def _dependency_inventory(root: Path) -> tuple[int, int, int, str]:
     inventory.sort(key=lambda item: item["path"])
     if file_count < 1:
         raise OperatorError("PYTHON_DEPENDENCY_CLOSURE_EMPTY")
-    return file_count, entry_count, byte_count, _hash_value(inventory)
+    return (
+        file_count,
+        entry_count,
+        byte_count,
+        _hash_value(inventory),
+        tuple(inventory),
+    )
+
+
+def _dependency_inventory(root: Path) -> tuple[int, int, int, str]:
+    file_count, entry_count, byte_count, aggregate, _ = _dependency_inventory_details(
+        root
+    )
+    return file_count, entry_count, byte_count, aggregate
 
 
 def _capture_python_dependencies(
@@ -4420,6 +4440,58 @@ def _source_changes(
     }
 
 
+def _validate_operator_dependency_drift(
+    predecessor: Phase5ApprovalManifest,
+    successor: Phase5ApprovalManifest,
+) -> None:
+    observed: list[tuple[dict[str, Any], ...]] = []
+    for manifest in (predecessor, successor):
+        binding = manifest.python_dependencies
+        details = _dependency_inventory_details(Path(binding.root))
+        if details[:4] != (
+            binding.file_count,
+            binding.entry_count,
+            binding.byte_count,
+            binding.sha256,
+        ):
+            raise OperatorError("CONTINUATION_DEPENDENCY_DRIFT")
+        observed.append(details[4])
+
+    predecessor_entries = {item["path"]: item for item in observed[0]}
+    successor_entries = {item["path"]: item for item in observed[1]}
+    if set(predecessor_entries) != set(successor_entries):
+        raise OperatorError("CONTINUATION_DEPENDENCY_DRIFT")
+    changed = {
+        path
+        for path in predecessor_entries
+        if predecessor_entries[path] != successor_entries[path]
+    }
+    if changed != _OPERATOR_DEPENDENCY_CHANGE_PATHS:
+        raise OperatorError("CONTINUATION_DEPENDENCY_DRIFT")
+
+    for manifest, entries in zip(
+        (predecessor, successor),
+        (predecessor_entries, successor_entries),
+        strict=True,
+    ):
+        source = next(
+            (
+                item
+                for item in manifest.execution_source.files
+                if item.path == _OPERATOR_DEPENDENCY_PATH
+            ),
+            None,
+        )
+        dependency = entries[_OPERATOR_DEPENDENCY_PATH]
+        if source is None or dependency != {
+            "path": _OPERATOR_DEPENDENCY_PATH,
+            "kind": "file",
+            "byte_count": source.byte_count,
+            "sha256": source.sha256,
+        }:
+            raise OperatorError("CONTINUATION_DEPENDENCY_DRIFT")
+
+
 def _validate_continuation_bounds(
     predecessor: Phase5ApprovalManifest,
     successor: Phase5ApprovalManifest,
@@ -4477,16 +4549,7 @@ def _validate_continuation_bounds(
     allowed_changes = {"reconcile/phase5_operator.py"}
     if execution_changes != allowed_changes or semantic_changes != allowed_changes:
         raise OperatorError("CONTINUATION_SOURCE_SCOPE_DRIFT")
-    predecessor_dependencies = predecessor.python_dependencies.model_dump(
-        mode="json",
-        exclude={"root", "source_image_digest", "source_archive_sha256"},
-    )
-    successor_dependencies = successor.python_dependencies.model_dump(
-        mode="json",
-        exclude={"root", "source_image_digest", "source_archive_sha256"},
-    )
-    if predecessor_dependencies != successor_dependencies:
-        raise OperatorError("CONTINUATION_DEPENDENCY_DRIFT")
+    _validate_operator_dependency_drift(predecessor, successor)
     for action in (
         Phase5Action.BOOTSTRAP_APPLY,
         Phase5Action.FOUNDATION_APPLY,
