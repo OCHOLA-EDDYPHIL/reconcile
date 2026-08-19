@@ -293,22 +293,60 @@ def _plan_json(filename: str, runtime_values: set[str]) -> bytes:
             "before": None,
         }
 
+    if filename == "runtime-create":
+        service_value = {
+            "id": None,
+            "location": "us-central1",
+            "name": "reconcile-p5-api",
+            "project": "reconcile-dev-260813-14fa6d",
+            "template": [{"service_account": "rec-p5-api@example.invalid"}],
+        }
+        runtime_changes = [
+            {
+                "address": "google_cloud_run_v2_service.api",
+                "change": change(service_value, {"id": True}),
+                "provider_name": "registry.terraform.io/hashicorp/google",
+                "type": "google_cloud_run_v2_service",
+            },
+            {
+                "address": (
+                    'google_cloud_run_v2_service_iam_member.api_operator["fixed"]'
+                ),
+                "change": change(
+                    {
+                        "location": "us-central1",
+                        "member": (
+                            "serviceAccount:fixture@reconcile-dev-260813-14fa6d."
+                            "iam.gserviceaccount.com"
+                        ),
+                        "name": None,
+                        "project": "reconcile-dev-260813-14fa6d",
+                        "role": "roles/run.invoker",
+                    },
+                    {"name": True},
+                ),
+                "provider_name": "registry.terraform.io/hashicorp/google",
+                "type": "google_cloud_run_v2_service_iam_member",
+            },
+        ]
+    else:
+        runtime_changes = [
+            {
+                "address": f'google_project_iam_member.fixture["{filename}"]',
+                "change": change(iam_value, {"name": True}),
+                "provider_name": "registry.terraform.io/hashicorp/google",
+                "type": "google_project_iam_member",
+            },
+            {
+                "address": f'google_storage_bucket.fixture["{filename}"]',
+                "change": change(bucket_value, {"id": True}),
+                "provider_name": "registry.terraform.io/hashicorp/google",
+                "type": "google_storage_bucket",
+            },
+        ]
     return json.dumps(
         {
-            "resource_changes": [
-                {
-                    "address": f'google_project_iam_member.fixture["{filename}"]',
-                    "change": change(iam_value, {"name": True}),
-                    "provider_name": "registry.terraform.io/hashicorp/google",
-                    "type": "google_project_iam_member",
-                },
-                {
-                    "address": f'google_storage_bucket.fixture["{filename}"]',
-                    "change": change(bucket_value, {"id": True}),
-                    "provider_name": "registry.terraform.io/hashicorp/google",
-                    "type": "google_storage_bucket",
-                },
-            ],
+            "resource_changes": runtime_changes,
             "terraform_version": "1.15.8",
             "variables": {
                 f"identity_{index}": {"value": value}
@@ -331,6 +369,41 @@ def _live_teardown_plan(qualification: dict[str, Any]) -> dict[str, Any]:
             for key, mask in unknown.items():
                 if mask is True:
                     before[key] = f"provider-computed-{key}"
+    return rendered
+
+
+def _materialize_unknowns(value: Any, mask: Any) -> Any:
+    if mask is True:
+        return "provider-computed"
+    if isinstance(value, dict) and isinstance(mask, dict):
+        rendered = json.loads(json.dumps(value))
+        for key, child in mask.items():
+            rendered[key] = _materialize_unknowns(rendered.get(key), child)
+        return rendered
+    if isinstance(value, list) and isinstance(mask, list):
+        return [
+            _materialize_unknowns(item, child)
+            for item, child in zip(value, mask, strict=True)
+        ]
+    return json.loads(json.dumps(value))
+
+
+def _live_runtime_update_plan(qualification: dict[str, Any]) -> dict[str, Any]:
+    rendered = json.loads(json.dumps(qualification))
+    for resource in rendered["resource_changes"]:
+        change = resource["change"]
+        after = _materialize_unknowns(
+            change["after"],
+            change.get("after_unknown"),
+        )
+        change["after"] = after
+        change["after_unknown"] = {}
+        change["before"] = json.loads(json.dumps(after))
+        if resource["type"] == "google_cloud_run_v2_service":
+            change["actions"] = ["update"]
+            change["before"]["observed_generation"] = "1"
+        else:
+            change["actions"] = ["no-op"]
     return rendered
 
 
@@ -2528,6 +2601,78 @@ def test_normalized_plan_and_iam_graph_drift_blocks_before_mutation(
     assert _mutating_calls(runner) == []
 
 
+def test_runtime_update_verifier_accepts_exact_service_updates_and_iam_noops(
+    tmp_path: Path,
+) -> None:
+    _, manifest, _, _ = _records(tmp_path)
+    binding = manifest.terraform_plan_for(operator.Phase5Action.RUNTIME_APPLY)
+    assert binding is not None
+    qualification = json.loads(Path(binding.qualification_path).read_bytes())
+    rendered = _live_runtime_update_plan(qualification)
+
+    operator._verify_rendered_plan(
+        Path(binding.qualification_path).read_bytes(),
+        binding,
+    )
+    operator._verify_rendered_plan(
+        json.dumps(rendered, separators=(",", ":"), sort_keys=True).encode(),
+        binding,
+    )
+
+
+@pytest.mark.parametrize(
+    "drift",
+    (
+        "missing",
+        "extra",
+        "service-action",
+        "service-after",
+        "service-unknown",
+        "iam-action",
+        "iam-authority",
+        "iam-change",
+    ),
+)
+def test_runtime_update_verifier_rejects_scope_or_authority_drift(
+    tmp_path: Path,
+    drift: str,
+) -> None:
+    _, manifest, _, _ = _records(tmp_path)
+    binding = manifest.terraform_plan_for(operator.Phase5Action.RUNTIME_APPLY)
+    assert binding is not None
+    rendered = _live_runtime_update_plan(
+        json.loads(Path(binding.qualification_path).read_bytes())
+    )
+    service = rendered["resource_changes"][0]
+    iam = rendered["resource_changes"][1]
+    if drift == "missing":
+        rendered["resource_changes"].pop()
+    elif drift == "extra":
+        extra = json.loads(json.dumps(service))
+        extra["address"] = "google_cloud_run_v2_service.unapproved"
+        rendered["resource_changes"].append(extra)
+    elif drift == "service-action":
+        service["change"]["actions"] = ["delete", "create"]
+    elif drift == "service-after":
+        service["change"]["after"]["project"] = "different-project"
+    elif drift == "service-unknown":
+        service["change"]["after"]["id"] = None
+        service["change"]["after_unknown"] = {"id": True}
+    elif drift == "iam-action":
+        iam["change"]["actions"] = ["update"]
+    elif drift == "iam-authority":
+        iam["change"]["before"]["role"] = "roles/owner"
+        iam["change"]["after"]["role"] = "roles/owner"
+    else:
+        iam["change"]["before"]["member"] = "serviceAccount:other@example.invalid"
+
+    with pytest.raises(operator.OperatorError, match="EXECUTION_PLAN_DRIFT"):
+        operator._verify_rendered_plan(
+            json.dumps(rendered, separators=(",", ":"), sort_keys=True).encode(),
+            binding,
+        )
+
+
 @pytest.mark.parametrize(
     "action",
     (
@@ -2730,6 +2875,17 @@ def test_create_verifier_remains_exact_and_state_protection_cannot_apply(
     assert create is not None
     rendered = json.loads(Path(create.qualification_path).read_bytes())
     rendered["resource_changes"] = rendered["resource_changes"][:1]
+    with pytest.raises(operator.OperatorError, match="EXECUTION_PLAN_DRIFT"):
+        operator._verify_rendered_plan(
+            json.dumps(rendered, separators=(",", ":"), sort_keys=True).encode(),
+            create,
+        )
+
+    rendered = json.loads(Path(create.qualification_path).read_bytes())
+    first_change = rendered["resource_changes"][0]["change"]
+    first_change["actions"] = ["update"]
+    first_change["before"] = json.loads(json.dumps(first_change["after"]))
+    first_change["after_unknown"] = {}
     with pytest.raises(operator.OperatorError, match="EXECUTION_PLAN_DRIFT"):
         operator._verify_rendered_plan(
             json.dumps(rendered, separators=(",", ":"), sort_keys=True).encode(),
