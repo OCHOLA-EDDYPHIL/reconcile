@@ -5329,7 +5329,36 @@ def _matches_approved_before(
     if unknown is True:
         return True
     if unknown is None or unknown is False:
-        return _canonical_value_bytes(actual) == _canonical_value_bytes(expected)
+        if _canonical_value_bytes(actual) == _canonical_value_bytes(expected):
+            return True
+        if expected is None:
+            return (
+                actual is False
+                or (isinstance(actual, str) and not actual)
+                or (isinstance(actual, list) and not actual)
+                or (isinstance(actual, dict) and not actual)
+            )
+        if isinstance(actual, dict) and isinstance(expected, dict):
+            return set(actual) == set(expected) and all(
+                _matches_approved_before(
+                    actual[key],
+                    expected_value,
+                    None,
+                    depth=depth + 1,
+                )
+                for key, expected_value in expected.items()
+            )
+        if isinstance(actual, list) and isinstance(expected, list):
+            return len(actual) == len(expected) and all(
+                _matches_approved_before(
+                    actual_value,
+                    expected_value,
+                    None,
+                    depth=depth + 1,
+                )
+                for actual_value, expected_value in zip(actual, expected, strict=True)
+            )
+        return False
     if isinstance(unknown, dict):
         if not isinstance(actual, dict) or not isinstance(expected, dict):
             return False
@@ -5381,6 +5410,40 @@ def _matches_approved_before(
     return False
 
 
+def _matches_approved_teardown_resource(
+    actual: JsonValue,
+    expected: JsonValue,
+    unknown: JsonValue | None,
+    *,
+    resource_type: str,
+) -> bool:
+    if _matches_approved_before(actual, expected, unknown):
+        return True
+    if (
+        resource_type != "google_cloud_run_v2_service_iam_member"
+        or not isinstance(actual, dict)
+        or not isinstance(expected, dict)
+    ):
+        return False
+    expected_project = expected.get("project")
+    expected_location = expected.get("location")
+    expected_name = expected.get("name")
+    if not all(
+        isinstance(item, str) and item and "/" not in item
+        for item in (expected_project, expected_location, expected_name)
+    ):
+        return False
+    canonical_name = (
+        f"projects/{expected_project}/locations/{expected_location}/services/"
+        f"{expected_name}"
+    )
+    if actual.get("name") != canonical_name:
+        return False
+    normalized = dict(actual)
+    normalized["name"] = expected_name
+    return _matches_approved_before(normalized, expected, unknown)
+
+
 def _verify_rendered_plan(
     rendered: bytes,
     expected: TerraformPlanBinding,
@@ -5403,10 +5466,11 @@ def _verify_rendered_plan(
                 and item.actions == ("delete",)
                 and item.after_sha256 == approved.after_sha256
                 and item.before_unknown is None
-                and _matches_approved_before(
+                and _matches_approved_teardown_resource(
                     item.before_projection,
                     approved.before_projection,
                     approved.before_unknown,
+                    resource_type=item.resource_type,
                 )
             )
             for item in resources
