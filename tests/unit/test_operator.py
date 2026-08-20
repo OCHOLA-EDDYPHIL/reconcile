@@ -534,7 +534,59 @@ def test_request_scoped_cancellation_signals_joins_and_clears_notifier() -> None
     asyncio.run(check())
 
 
-def test_request_scoped_wait_is_bounded_after_the_envelope_is_known() -> None:
+def test_request_scoped_wait_includes_bounded_terminalization_grace(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def check() -> None:
+        async def terminalizing_runner(
+            scenario: ScenarioName,
+            mode: ScenarioMode,
+            *,
+            vertex_config: VertexAdcPlannerConfig | None,
+            run_id: str,
+            progress_callback: ProgressCallback | None,
+            cancellation_event: asyncio.Event | None,
+        ) -> ScenarioWorkflowResult:
+            del mode, vertex_config, cancellation_event
+            investigation_id = scenario_investigation_id(scenario, run_id)
+            summary_values = _summary(investigation_id).model_dump(mode="python")
+            summary_values["evidence_budget"]["max_elapsed_ms"] = 25  # type: ignore[index]
+            summary = ExecutionEnvelopeSummary.model_validate(summary_values)
+            assert progress_callback is not None
+            await progress_callback(
+                EnvelopeProgress(
+                    occurred_at=NOW,
+                    investigation_id=investigation_id,
+                    summary=summary,
+                )
+            )
+            await asyncio.sleep(0.05)
+            return _report(investigation_id)
+
+        monkeypatch.setattr(
+            "reconcile.operator._REQUEST_TERMINALIZATION_GRACE",
+            timedelta(milliseconds=100),
+        )
+        service = OperatorApplicationService(
+            runner=terminalizing_runner,
+            clock=_TickClock(),
+        )
+        request = _launch(launch_id="request-terminalization-grace")
+
+        terminal = await asyncio.wait_for(
+            service.launch_and_wait(request),
+            timeout=2,
+        )
+
+        assert terminal.lifecycle is ScenarioRunLifecycle.COMPLETED
+        await service.aclose()
+
+    asyncio.run(check())
+
+
+def test_request_scoped_wait_is_bounded_after_terminalization_grace(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     async def check() -> None:
         cancellation_observed = False
 
@@ -568,6 +620,10 @@ def test_request_scoped_wait_is_bounded_after_the_envelope_is_known() -> None:
                     cancellation_event is not None and cancellation_event.is_set()
                 )
 
+        monkeypatch.setattr(
+            "reconcile.operator._REQUEST_TERMINALIZATION_GRACE",
+            timedelta(milliseconds=25),
+        )
         service = OperatorApplicationService(
             runner=deadline_runner,
             clock=_TickClock(),
