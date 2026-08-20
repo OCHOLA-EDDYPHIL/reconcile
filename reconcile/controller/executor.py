@@ -110,6 +110,10 @@ class ControllerClock(Protocol):
         """Return an aware wall-clock timestamp for audit records."""
 
 
+class ProbeDispatchBudgetExhausted(RuntimeError):
+    """Durable admission reached the elapsed limit before read dispatch."""
+
+
 class _SystemClock:
     def monotonic(self) -> float:
         return time.monotonic()
@@ -891,15 +895,26 @@ class ProbeController:
             observer = self._durability_observer
             durably_started = False
             if observer is not None:
-                restored = await observer.before_dispatch(
-                    request,
-                    sequence=sequence,
-                    controller_cost_units=registration.capability.cost_units,
-                    evidence_byte_reservation=(
-                        registration.capability.result_byte_ceiling
-                    ),
-                    started_at=started_at,
-                )
+                try:
+                    restored = await observer.before_dispatch(
+                        request,
+                        sequence=sequence,
+                        controller_cost_units=registration.capability.cost_units,
+                        evidence_byte_reservation=(
+                            registration.capability.result_byte_ceiling
+                        ),
+                        started_at=started_at,
+                    )
+                except ProbeDispatchBudgetExhausted:
+                    return await self._finish_observed(
+                        sequence=sequence,
+                        started_at=started_at,
+                        outcome=ProbeOutcome.BUDGET_EXHAUSTED,
+                        reason=ProbeStopReason.ELAPSED_BUDGET_EXHAUSTED,
+                        capability_name=capability_name,
+                        capability_version=capability_version,
+                        request_sha256=request_sha256,
+                    )
                 if restored is not None:
                     return await self._restore_observed(
                         restored,
@@ -1260,6 +1275,7 @@ __all__ = [
     "ControllerAuditRecord",
     "ControllerClock",
     "ProbeController",
+    "ProbeDispatchBudgetExhausted",
     "ProbeDurabilityObserver",
     "ProbeExecution",
     "ProbeStopReason",

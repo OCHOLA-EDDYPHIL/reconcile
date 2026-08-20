@@ -911,6 +911,23 @@ class _AdvanceClockAfterProbeStartStore:
         return checkpoint
 
 
+class _AdvanceClockBeforeProbeReservationStore:
+    def __init__(self, store: SqliteDurableRuntimeStore, clock: _MutableClock) -> None:
+        self._store = store
+        self.clock = clock
+        self._audit_reads = 0
+
+    def __getattr__(self, name: str):
+        return getattr(self._store, name)
+
+    async def controller_audits(self, investigation_id: str):
+        audits = await self._store.controller_audits(investigation_id)
+        self._audit_reads += 1
+        if self._audit_reads == 2:
+            self.clock.advance(2)
+        return audits
+
+
 class _AdvanceClockAfterLeaseValidationStore:
     def __init__(
         self,
@@ -1135,9 +1152,11 @@ def test_durable_service_establishes_report_events_telemetry_and_cleanup_separat
         assert replay.created is False
 
         async def cleanup_finished() -> bool:
-            return (
-                await store.get_run(envelope.investigation_id)
-            ).cleanup_status is CleanupStatus.FAILED
+            run = await store.get_run(envelope.investigation_id)
+            telemetry = await store.telemetry_records(envelope.investigation_id)
+            return run.cleanup_status is CleanupStatus.FAILED and any(
+                item.kind is RuntimeTelemetryKind.CLEANUP for item in telemetry
+            )
 
         await _wait_for(cleanup_finished)
         run = await store.get_run(envelope.investigation_id)
@@ -1425,6 +1444,47 @@ def test_deadline_crossing_before_safe_read_dispatch_records_budget_exhaustion(
         assert len(audits) == 1
         assert audits[0].outcome is ProbeOutcome.BUDGET_EXHAUSTED
         assert audits[0].stop_reason is ProbeStopReason.ELAPSED_BUDGET_EXHAUSTED
+        await service.aclose()
+
+    asyncio.run(scenario())
+
+
+def test_deadline_crossing_before_safe_read_reservation_records_budget_exhaustion(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        durable = SqliteDurableRuntimeStore(
+            tmp_path / "read-reservation-deadline.sqlite3"
+        )
+        envelope = _envelope(max_elapsed_ms=1_000)
+        clock = _MutableClock(envelope.ambiguity.observed_at)
+        store = _AdvanceClockBeforeProbeReservationStore(durable, clock)
+        handler = _ReadHandler(clock=clock)
+        service = _service(
+            store,
+            _FixedExecutor(handler, clock=clock),
+            owner_id="worker-read-reservation-deadline",
+            clock=clock.now,
+            monotonic_clock=clock.monotonic,
+        )
+        await service.create(envelope)
+
+        async def terminal() -> bool:
+            return (
+                await durable.get_run(envelope.investigation_id)
+            ).state is DurableRunState.TERMINAL
+
+        await _wait_for(terminal)
+        run = await durable.get_run(envelope.investigation_id)
+        audits = await durable.controller_audits(envelope.investigation_id)
+        checkpoints = await durable.probe_checkpoints(envelope.investigation_id)
+        assert handler.calls == []
+        assert run.established_report is not None
+        assert run.established_report.classification is Classification.UNKNOWN
+        assert len(audits) == 1
+        assert audits[0].outcome is ProbeOutcome.BUDGET_EXHAUSTED
+        assert audits[0].stop_reason is ProbeStopReason.ELAPSED_BUDGET_EXHAUSTED
+        assert checkpoints == ()
         await service.aclose()
 
     asyncio.run(scenario())

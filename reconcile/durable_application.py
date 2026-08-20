@@ -42,6 +42,7 @@ from reconcile.controller import (
     ControllerAuditRecord,
     ControllerClock,
     ProbeController,
+    ProbeDispatchBudgetExhausted,
     ProbeDurabilityObserver,
     ProbeExecution,
     ProbeObservation,
@@ -455,24 +456,29 @@ class DurableExecutionContext(ProbeDurabilityObserver):
             evidence_bytes=evidence_byte_reservation,
             controller_cost_units=controller_cost_units,
         )
-        async with self._authority.hold(occurred_at) as lease:
-            occurred_at = max(occurred_at, lease.renewed_at)
-            await self._store.charge(
-                lease,
-                entry_id=f"reserve-{checkpoint_id}-{uuid4().hex}",
-                category="safe-read-reservation",
-                occurred_at=occurred_at,
-                delta=delta,
-            )
-            checkpoint = await self._store.start_probe(
-                lease,
-                checkpoint_id=checkpoint_id,
-                step_sequence=sequence,
-                request=request,
-                replay_safety=ProbeReplaySafety.SAFE_READ,
-                started_at=started_at,
-                now=occurred_at,
-            )
+        try:
+            async with self._authority.hold(occurred_at) as lease:
+                occurred_at = max(occurred_at, lease.renewed_at)
+                await self._store.charge(
+                    lease,
+                    entry_id=f"reserve-{checkpoint_id}-{uuid4().hex}",
+                    category="safe-read-reservation",
+                    occurred_at=occurred_at,
+                    delta=delta,
+                )
+                checkpoint = await self._store.start_probe(
+                    lease,
+                    checkpoint_id=checkpoint_id,
+                    step_sequence=sequence,
+                    request=request,
+                    replay_safety=ProbeReplaySafety.SAFE_READ,
+                    started_at=started_at,
+                    now=occurred_at,
+                )
+        except BudgetExceeded as error:
+            if error.dimension == "deadline":
+                raise ProbeDispatchBudgetExhausted from None
+            raise
         if checkpoint.state is ProbeCheckpointState.RECORDED:
             raise DurableDependencyDrift(self._run.investigation_id)
         return None
