@@ -51,6 +51,7 @@ from reconcile.contracts import (
     canonical_json_bytes,
     decode_contract,
 )
+from reconcile.controller import probe_request_sha256
 from reconcile.durable_application import (
     DurableExecutionContext,
     DurableInvestigationApplicationService,
@@ -922,7 +923,18 @@ def test_sandbox_adaptive_provider_failure_uses_separate_fixed_fallback_lane(
             if isinstance(event.payload, ProbeRequestEventPayload)
             and event.payload.strategy is ComparisonStrategyKind.FIXED
         )
-        assert len(fixed_requests) == len(SANDBOX_ORDER_FIXED_PROBE_PLAN.steps)
+        fixed_request_sha256s = tuple(
+            event.payload.request.request_sha256 for event in fixed_requests
+        )
+        expected_request_sha256s = tuple(
+            probe_request_sha256(step.request)
+            for step in SANDBOX_ORDER_FIXED_PROBE_PLAN.steps
+        )
+        assert fixed_request_sha256s
+        assert (
+            fixed_request_sha256s
+            == expected_request_sha256s[: len(fixed_request_sha256s)]
+        )
         advisory_failures = tuple(
             event
             for event in journal.events
