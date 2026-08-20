@@ -1135,9 +1135,11 @@ def test_durable_service_establishes_report_events_telemetry_and_cleanup_separat
         assert replay.created is False
 
         async def cleanup_finished() -> bool:
-            return (
-                await store.get_run(envelope.investigation_id)
-            ).cleanup_status is CleanupStatus.FAILED
+            run = await store.get_run(envelope.investigation_id)
+            telemetry = await store.telemetry_records(envelope.investigation_id)
+            return run.cleanup_status is CleanupStatus.FAILED and any(
+                item.kind is RuntimeTelemetryKind.CLEANUP for item in telemetry
+            )
 
         await _wait_for(cleanup_finished)
         run = await store.get_run(envelope.investigation_id)
