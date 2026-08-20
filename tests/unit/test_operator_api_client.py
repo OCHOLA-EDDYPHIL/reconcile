@@ -667,6 +667,7 @@ def test_launch_sends_one_canonical_request_and_binds_response(
         assert request.headers["accept"] == "application/json"
         assert request.headers["content-type"] == "application/json"
         assert request.content == canonical_json_bytes(_launch())
+        assert request.extensions["timeout"]["read"] == 20.0
         return _json_response(_snapshot(), status_code=status_code)
 
     async def scenario() -> None:
@@ -1245,6 +1246,7 @@ def test_client_disables_environment_proxy_redirects_and_bounds_timeouts(
     assert client._client.follow_redirects is False
     assert client._client.timeout.connect == 5.0
     assert client._client.timeout.read == 10.0
+    assert client._launch_timeout.read == 20.0
     assert client._event_timeout.read is None
     asyncio.run(client.aclose())
 
