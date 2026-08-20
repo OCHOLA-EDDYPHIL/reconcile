@@ -42,6 +42,11 @@ _ORIGIN_URL = "git@github.com:OCHOLA-EDDYPHIL/reconcile.git"
 _OWNER = "user:eddyphilochola13@gmail.com"
 _OWNER_ACCOUNT = "eddyphilochola13@gmail.com"
 _STATE_BUCKET = f"{_PROJECT_ID}-p5-state"
+_EMPTY_STATE_BUCKET_CLEANUP_STDERR = (
+    "Removing objects:\n"
+    "ERROR: (gcloud.storage.rm) The following URLs matched no objects or files:\n"
+    f"gs://{_STATE_BUCKET}/**\n"
+).encode("ascii")
 _OPERATOR_SERVICE_ACCOUNT = (
     "rec-p5-apply@reconcile-dev-260813-14fa6d.iam.gserviceaccount.com"
 )
@@ -1149,18 +1154,7 @@ def _fixed_commands(
                 ),
             )
         if action is Phase5Action.BOOTSTRAP_TEARDOWN and include_state_bucket_cleanup:
-            commands += (
-                (
-                    "/usr/bin/gcloud",
-                    "storage",
-                    "rm",
-                    "--all-versions",
-                    f"gs://{_STATE_BUCKET}/**",
-                    f"--project={_PROJECT_ID}",
-                    f"--account={_OWNER_ACCOUNT}",
-                    "--quiet",
-                ),
-            )
+            commands += (_state_bucket_cleanup_command(),)
         commands += (tuple(init),)
         if (
             action is Phase5Action.BOOTSTRAP_TEARDOWN
@@ -1346,6 +1340,19 @@ def _fixed_commands(
         terraform_action(Phase5Action.FOUNDATION_TEARDOWN),
         terraform_action(Phase5Action.STATE_PROTECTION_CHANGE),
         terraform_action(Phase5Action.BOOTSTRAP_TEARDOWN),
+    )
+
+
+def _state_bucket_cleanup_command() -> tuple[str, ...]:
+    return (
+        "/usr/bin/gcloud",
+        "storage",
+        "rm",
+        "--all-versions",
+        f"gs://{_STATE_BUCKET}/**",
+        f"--project={_PROJECT_ID}",
+        f"--account={_OWNER_ACCOUNT}",
+        "--quiet",
     )
 
 
@@ -4835,10 +4842,10 @@ def _verify_continuation_record(
     )
     if predecessor_identity[:2] != expected:
         raise OperatorError("CONTINUATION_BOOTSTRAP_STATE_DRIFT")
-    if allow_evolved_successor_bootstrap_state:
-        if successor_identity[:2] == expected:
-            raise OperatorError("CONTINUATION_BOOTSTRAP_STATE_NOT_EVOLVED")
-    elif successor_identity[:2] != expected:
+    if (
+        not allow_evolved_successor_bootstrap_state
+        and successor_identity[:2] != expected
+    ):
         raise OperatorError("CONTINUATION_BOOTSTRAP_STATE_DRIFT")
     if predecessor_identity[2:] == successor_identity[2:]:
         raise OperatorError("CONTINUATION_BOOTSTRAP_STATE_NOT_INDEPENDENT")
@@ -6187,7 +6194,15 @@ def _run_descriptor_once(
             recorded_stdout = hashlib.sha256(result.stdout).hexdigest().encode("ascii")
         stdout_parts.append(len(recorded_stdout).to_bytes(8, "big") + recorded_stdout)
         stderr_parts.append(len(result.stderr).to_bytes(8, "big") + result.stderr)
-        final_code = result.returncode
+        cleanup_already_empty = (
+            descriptor.action is Phase5Action.BOOTSTRAP_TEARDOWN
+            and index == 0
+            and command == _state_bucket_cleanup_command()
+            and result.returncode == 1
+            and result.stdout == b""
+            and result.stderr == _EMPTY_STATE_BUCKET_CLEANUP_STDERR
+        )
+        final_code = 0 if cleanup_already_empty else result.returncode
         if final_code != 0:
             break
         if (plan_stage := plan_by_index.get(index)) is not None:
