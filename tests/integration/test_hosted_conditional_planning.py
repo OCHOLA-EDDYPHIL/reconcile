@@ -889,12 +889,31 @@ def test_durable_hosted_provider_timeout_completes_unknown_without_replay(
 
 def test_durable_hosted_late_provider_window_completes_predispatch_unknown(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     local_envelope, _, _ = _prepared_sandbox(
         tmp_path,
         "durable-late-provider-window",
     )
     hosted_envelope = _hosted_envelope(local_envelope)
+    hosted_envelope = decode_contract(
+        canonical_json_bytes(
+            hosted_envelope.model_copy(
+                update={
+                    "context": hosted_envelope.context.model_copy(
+                        update={
+                            "evidence_budget": (
+                                hosted_envelope.context.evidence_budget.model_copy(
+                                    update={"max_elapsed_ms": 500}
+                                )
+                            )
+                        }
+                    )
+                }
+            )
+        ),
+        ExecutionEnvelope,
+    )
     planner = _Planner(SANDBOX_ORDER_FIXED_PROBE_PLAN.steps[1].request)
     observations: list[str] = []
     clock = _MutableClock(datetime.now(UTC))
@@ -933,6 +952,13 @@ def test_durable_hosted_late_provider_window_completes_predispatch_unknown(
                 transport=transport,
             )
             store = SqliteDurableRuntimeStore(tmp_path / "late-window-runtime.sqlite3")
+            establish_report = store.establish_report
+
+            async def delayed_establish_report(*args, **kwargs):
+                await asyncio.sleep(0.75)
+                return await establish_report(*args, **kwargs)
+
+            monkeypatch.setattr(store, "establish_report", delayed_establish_report)
             service = DurableInvestigationApplicationService(
                 store,
                 HostedHybridExecutor(
