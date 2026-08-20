@@ -820,6 +820,7 @@ class OperatorApplicationService:
         state: _RunState,
         task: asyncio.Task[None],
     ) -> None:
+        deadline_at: datetime | None = None
         while not task.done():
             async with state.condition:
                 snapshot = decode_contract(
@@ -827,19 +828,32 @@ class OperatorApplicationService:
                     ScenarioRunSnapshot,
                 )
                 generation = state.generation
-            timeout: float | None = None
-            if snapshot.envelope_summary is not None:
-                lane_ceiling = 1 if snapshot.mode is ScenarioRunMode.FIXED else 2
-                deadline_at = (
-                    snapshot.accepted_at
-                    + timedelta(
-                        milliseconds=(
-                            snapshot.envelope_summary.evidence_budget.max_elapsed_ms
-                            * lane_ceiling
+                if snapshot.envelope_summary is not None and deadline_at is None:
+                    envelope_event: ScenarioRunEvent | None = None
+                    for payload in state.events:
+                        event = decode_contract(payload, ScenarioRunEvent)
+                        if event.type is ScenarioRunEventType.ENVELOPE_SUMMARY:
+                            if envelope_event is not None:
+                                raise RuntimeError("duplicate envelope summary event")
+                            envelope_event = event
+                    if envelope_event is None or not isinstance(
+                        envelope_event.payload,
+                        EnvelopeSummaryEventPayload,
+                    ):
+                        raise RuntimeError("envelope summary event is unavailable")
+                    lane_ceiling = 1 if snapshot.mode is ScenarioRunMode.FIXED else 2
+                    deadline_at = (
+                        envelope_event.occurred_at
+                        + timedelta(
+                            milliseconds=(
+                                snapshot.envelope_summary.evidence_budget.max_elapsed_ms
+                                * lane_ceiling
+                            )
                         )
+                        + _REQUEST_TERMINALIZATION_GRACE
                     )
-                    + _REQUEST_TERMINALIZATION_GRACE
-                )
+            timeout: float | None = None
+            if deadline_at is not None:
                 timeout = (deadline_at - self._now()).total_seconds()
                 if timeout <= 0:
                     raise TimeoutError

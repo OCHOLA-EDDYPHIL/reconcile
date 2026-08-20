@@ -534,7 +534,7 @@ def test_request_scoped_cancellation_signals_joins_and_clears_notifier() -> None
     asyncio.run(check())
 
 
-def test_request_scoped_wait_includes_bounded_terminalization_grace(
+def test_request_scoped_wait_anchors_budget_and_grace_to_envelope_event(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     async def check() -> None:
@@ -555,12 +555,12 @@ def test_request_scoped_wait_includes_bounded_terminalization_grace(
             assert progress_callback is not None
             await progress_callback(
                 EnvelopeProgress(
-                    occurred_at=NOW,
+                    occurred_at=NOW + timedelta(hours=1, milliseconds=200),
                     investigation_id=investigation_id,
                     summary=summary,
                 )
             )
-            await asyncio.sleep(0.05)
+            await asyncio.sleep(0.15)
             return _report(investigation_id)
 
         monkeypatch.setattr(
