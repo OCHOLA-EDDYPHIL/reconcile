@@ -1070,6 +1070,55 @@ def _terminal_state_protection_predecessor(
     return state, manifest, approval
 
 
+def _terminal_bootstrap_teardown_predecessor(
+    tmp_path: Path,
+) -> tuple[
+    operator.Phase5StateStore,
+    operator.Phase5ApprovalManifest,
+    operator.Phase5Approval,
+]:
+    tmp_path.mkdir()
+    predecessor, predecessor_manifest, predecessor_approval = (
+        _terminal_state_protection_predecessor(tmp_path / "protection-repair")
+    )
+    (tmp_path / "teardown-repair").mkdir()
+    repo_root, state, manifest, approval, runner = _continuation_successor(
+        tmp_path / "teardown-repair",
+        change_suffix=b"\n\n",
+    )
+    operator.prepare_phase5_continuation(
+        predecessor_state_root=predecessor.root,
+        predecessor_manifest_sha256=predecessor_manifest.record_sha256,
+        predecessor_approval_sha256=predecessor_approval.record_sha256,
+        successor_state_root=state.root,
+        successor_manifest_sha256=manifest.record_sha256,
+        successor_approval_sha256=approval.record_sha256,
+        repo_root=repo_root,
+        prepared_at=_NOW + timedelta(minutes=10),
+        runner=runner,
+    )
+    _record_action(
+        state,
+        manifest,
+        approval,
+        operator.Phase5Action.STATE_PROTECTION_CHANGE,
+        at=_NOW + timedelta(minutes=11),
+        result=subprocess.CompletedProcess(["fixed"], 0, b"", b""),
+    )
+    _record_action(
+        state,
+        manifest,
+        approval,
+        operator.Phase5Action.BOOTSTRAP_TEARDOWN,
+        at=_NOW + timedelta(minutes=12),
+        result=subprocess.CompletedProcess(["fixed"], 1, b"", b"failed"),
+    )
+    bootstrap_state = state.root / "state" / "bootstrap.tfstate"
+    bootstrap_state.write_bytes(b'{"lineage":"phase5","serial":2}')
+    bootstrap_state.chmod(0o600)
+    return state, manifest, approval
+
+
 def test_manifest_freezes_exact_identity_limits_estimates_and_commands(
     tmp_path: Path,
 ) -> None:
@@ -1158,6 +1207,26 @@ def test_manifest_freezes_exact_identity_limits_estimates_and_commands(
         "-json",
     )
     assert "apply" in bootstrap.commands[4]
+    teardown = manifest.command_for(operator.Phase5Action.BOOTSTRAP_TEARDOWN)
+    assert teardown.commands[0] == (
+        "/usr/bin/gcloud",
+        "storage",
+        "rm",
+        "--all-versions",
+        "gs://reconcile-dev-260813-14fa6d-p5-state/**",
+        "--project=reconcile-dev-260813-14fa6d",
+        "--account=eddyphilochola13@gmail.com",
+        "--quiet",
+    )
+    assert "init" in teardown.commands[1]
+    assert "plan" in teardown.commands[2]
+    assert teardown.commands[3][:4] == (
+        operator._TERRAFORM,
+        "-chdir=infra/bootstrap",
+        "show",
+        "-json",
+    )
+    assert "apply" in teardown.commands[4]
     terraform_stacks = {
         operator.Phase5Action.BOOTSTRAP_APPLY: "infra/bootstrap",
         operator.Phase5Action.FOUNDATION_APPLY: "infra/environments/dev/foundation",
@@ -1662,6 +1731,65 @@ def test_continuation_carries_verified_teardown_chain_after_protection_unknown(
         admitted_at=_NOW + timedelta(minutes=11),
     )
     assert protection.action is operator.Phase5Action.STATE_PROTECTION_CHANGE
+
+
+def test_continuation_carries_only_final_bootstrap_teardown_after_failure(
+    tmp_path: Path,
+) -> None:
+    predecessor, predecessor_manifest, predecessor_approval = (
+        _terminal_bootstrap_teardown_predecessor(tmp_path / "predecessor")
+    )
+    (tmp_path / "final-repair").mkdir()
+    repo_root, successor, manifest, approval, runner = _continuation_successor(
+        tmp_path / "final-repair",
+        change_suffix=b"\n\n\n",
+    )
+
+    continuation = operator.prepare_phase5_continuation(
+        predecessor_state_root=predecessor.root,
+        predecessor_manifest_sha256=predecessor_manifest.record_sha256,
+        predecessor_approval_sha256=predecessor_approval.record_sha256,
+        successor_state_root=successor.root,
+        successor_manifest_sha256=manifest.record_sha256,
+        successor_approval_sha256=approval.record_sha256,
+        repo_root=repo_root,
+        prepared_at=_NOW + timedelta(minutes=13),
+        runner=runner,
+    )
+
+    assert tuple(item.action for item in continuation.carried_successes) == (
+        operator.Phase5Action.BOOTSTRAP_APPLY,
+        operator.Phase5Action.FOUNDATION_APPLY,
+        operator.Phase5Action.IMAGE_PUSH,
+        operator.Phase5Action.RUNTIME_APPLY,
+        operator.Phase5Action.PROVIDER_ACCEPTANCE,
+        operator.Phase5Action.HOSTED_ACCEPTANCE,
+        operator.Phase5Action.RUNTIME_TEARDOWN,
+        operator.Phase5Action.FOUNDATION_TEARDOWN,
+        operator.Phase5Action.STATE_PROTECTION_CHANGE,
+    )
+    assert (
+        continuation.terminal_action.action is operator.Phase5Action.BOOTSTRAP_TEARDOWN
+    )
+    assert continuation.terminal_action.status is operator.OutcomeStatus.FAILED
+    assert (predecessor.root / "state" / "bootstrap.tfstate").read_bytes() == (
+        successor.root / "state" / "bootstrap.tfstate"
+    ).read_bytes()
+
+    with pytest.raises(operator.OperatorError, match="ACTION_ALREADY_ATTEMPTED"):
+        successor.admit(
+            manifest=manifest,
+            approval=approval,
+            action=operator.Phase5Action.STATE_PROTECTION_CHANGE,
+            admitted_at=_NOW + timedelta(minutes=14),
+        )
+    teardown = successor.admit(
+        manifest=manifest,
+        approval=approval,
+        action=operator.Phase5Action.BOOTSTRAP_TEARDOWN,
+        admitted_at=_NOW + timedelta(minutes=14),
+    )
+    assert teardown.action is operator.Phase5Action.BOOTSTRAP_TEARDOWN
 
 
 def test_continuation_rejects_unsuccessful_predecessor_action(
@@ -3231,6 +3359,115 @@ def test_create_verifier_remains_exact_and_state_protection_cannot_apply(
     assert len(protection.commands) == 3
     assert "-destroy" in protection.commands[1]
     assert all("apply" not in command for command in protection.commands)
+
+
+def test_bootstrap_teardown_cleans_only_state_objects_before_verified_destroy(
+    tmp_path: Path,
+) -> None:
+    _, manifest, _, _ = _records(tmp_path)
+    descriptor = manifest.command_for(operator.Phase5Action.BOOTSTRAP_TEARDOWN)
+    base_runner = _Runner().bind_source(Path(manifest.execution_source.root))
+
+    def runner(
+        argv: tuple[str, ...],
+        *,
+        cwd: Path,
+        environment: dict[str, str] | Any,
+        timeout_seconds: int,
+    ) -> object:
+        result = base_runner(
+            argv,
+            cwd=cwd,
+            environment=environment,
+            timeout_seconds=timeout_seconds,
+        )
+        if argv == descriptor.commands[3]:
+            assert isinstance(result, subprocess.CompletedProcess)
+            rendered = _live_teardown_plan(json.loads(result.stdout))
+            return subprocess.CompletedProcess(
+                list(argv),
+                0,
+                json.dumps(
+                    rendered,
+                    separators=(",", ":"),
+                    sort_keys=True,
+                ).encode(),
+                b"",
+            )
+        return result
+
+    result = operator._run_descriptor_once(
+        descriptor,
+        repo_root=Path(manifest.execution_source.root),
+        execution_source=manifest.execution_source,
+        runner=runner,
+        image_artifact=manifest.image_artifact,
+        terraform_plan=manifest.terraform_plan_for(
+            operator.Phase5Action.BOOTSTRAP_TEARDOWN
+        ),
+        python_dependencies=manifest.python_dependencies,
+        deadline=manifest.work_deadline,
+        clock=lambda: _NOW + timedelta(minutes=3),
+    )
+
+    assert isinstance(result, subprocess.CompletedProcess)
+    assert result.returncode == 0
+    assert (
+        tuple(call for call in base_runner.calls if call in descriptor.commands)
+        == descriptor.commands
+    )
+
+
+def test_bootstrap_teardown_cleanup_failure_prevents_terraform(
+    tmp_path: Path,
+) -> None:
+    _, manifest, _, _ = _records(tmp_path)
+    descriptor = manifest.command_for(operator.Phase5Action.BOOTSTRAP_TEARDOWN)
+    cleanup = descriptor.commands[0]
+    observed: list[tuple[str, ...]] = []
+
+    def runner(
+        argv: tuple[str, ...],
+        *,
+        cwd: Path,
+        environment: dict[str, str] | Any,
+        timeout_seconds: int,
+    ) -> object:
+        del cwd, environment, timeout_seconds
+        observed.append(argv)
+        return subprocess.CompletedProcess(list(argv), 1, b"", b"unavailable")
+
+    result = operator._run_descriptor_once(
+        descriptor,
+        repo_root=Path(manifest.execution_source.root),
+        execution_source=manifest.execution_source,
+        runner=runner,
+        image_artifact=manifest.image_artifact,
+        terraform_plan=manifest.terraform_plan_for(
+            operator.Phase5Action.BOOTSTRAP_TEARDOWN
+        ),
+        python_dependencies=manifest.python_dependencies,
+        deadline=manifest.work_deadline,
+        clock=lambda: _NOW + timedelta(minutes=3),
+    )
+
+    assert isinstance(result, subprocess.CompletedProcess)
+    assert result.returncode == 1
+    assert observed == [cleanup]
+
+
+def test_bootstrap_teardown_verifies_gcloud_before_admission(tmp_path: Path) -> None:
+    state, manifest, _, runner = _records(tmp_path)
+
+    operator._verify_approved_artifacts(
+        manifest,
+        action=operator.Phase5Action.BOOTSTRAP_TEARDOWN,
+        state=state,
+        repo_root=_REPO_ROOT,
+        runner=runner,
+    )
+
+    assert ("/usr/bin/gcloud", "version", "--format=json") in runner.calls
 
 
 def test_oci_archive_drift_blocks_before_mutation(tmp_path: Path) -> None:
