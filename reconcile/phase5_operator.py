@@ -41,6 +41,7 @@ _REGION = "us-central1"
 _ORIGIN_URL = "git@github.com:OCHOLA-EDDYPHIL/reconcile.git"
 _OWNER = "user:eddyphilochola13@gmail.com"
 _OWNER_ACCOUNT = "eddyphilochola13@gmail.com"
+_STATE_BUCKET = f"{_PROJECT_ID}-p5-state"
 _OPERATOR_SERVICE_ACCOUNT = (
     "rec-p5-apply@reconcile-dev-260813-14fa6d.iam.gserviceaccount.com"
 )
@@ -81,6 +82,13 @@ _OPERATOR_HOME = "/home/reconcile"
 _OCI_REFERENCE_ANNOTATION = "org.opencontainers.image.ref.name"
 _LEGACY_IMAGE_ID_SOURCE_REVISIONS = frozenset(
     {"e7ccaab5268d31172b3a5efa5e754b0beb3b1a79"}
+)
+_LEGACY_STATE_BUCKET_CLEANUP_SOURCE_REVISIONS = frozenset(
+    {
+        "e7ccaab5268d31172b3a5efa5e754b0beb3b1a79",
+        "bab63ed6ec64e068fb0734a436cce3626c5f18c3",
+        "dd8713fcb892049a4c07824e7dcec46c3708c480",
+    }
 )
 _PROJECT_DEPENDENCY_RECORD_PATH = "reconcile-0.1.0.dist-info/RECORD"
 
@@ -216,6 +224,10 @@ _TEARDOWN_CONTINUATION_ACTIONS = (
     Phase5Action.HOSTED_ACCEPTANCE,
     Phase5Action.RUNTIME_TEARDOWN,
     Phase5Action.FOUNDATION_TEARDOWN,
+)
+_BOOTSTRAP_CONTINUATION_ACTIONS = (
+    *_TEARDOWN_CONTINUATION_ACTIONS,
+    Phase5Action.STATE_PROTECTION_CHANGE,
 )
 
 
@@ -642,20 +654,45 @@ class Phase5ApprovalManifest(_HasRecordHash):
             state_root=state_root,
             image_archive=expected_archive,
         )
-        legacy_commands = (
-            _fixed_commands(
-                self.source_revision,
-                self.image_digest,
-                self.infrastructure_revision,
-                self.semantic_config_sha256,
-                state_root=state_root,
-                image_archive=expected_archive,
-                image_identity_format="--format={{.Id}}",
+        accepted_commands = [expected_commands]
+        if self.source_revision in _LEGACY_STATE_BUCKET_CLEANUP_SOURCE_REVISIONS:
+            accepted_commands.append(
+                _fixed_commands(
+                    self.source_revision,
+                    self.image_digest,
+                    self.infrastructure_revision,
+                    self.semantic_config_sha256,
+                    state_root=state_root,
+                    image_archive=expected_archive,
+                    include_state_bucket_cleanup=False,
+                )
             )
-            if self.source_revision in _LEGACY_IMAGE_ID_SOURCE_REVISIONS
-            else None
-        )
-        if self.commands != expected_commands and self.commands != legacy_commands:
+        if self.source_revision in _LEGACY_IMAGE_ID_SOURCE_REVISIONS:
+            accepted_commands.append(
+                _fixed_commands(
+                    self.source_revision,
+                    self.image_digest,
+                    self.infrastructure_revision,
+                    self.semantic_config_sha256,
+                    state_root=state_root,
+                    image_archive=expected_archive,
+                    image_identity_format="--format={{.Id}}",
+                )
+            )
+            if self.source_revision in _LEGACY_STATE_BUCKET_CLEANUP_SOURCE_REVISIONS:
+                accepted_commands.append(
+                    _fixed_commands(
+                        self.source_revision,
+                        self.image_digest,
+                        self.infrastructure_revision,
+                        self.semantic_config_sha256,
+                        state_root=state_root,
+                        image_archive=expected_archive,
+                        image_identity_format="--format={{.Id}}",
+                        include_state_bucket_cleanup=False,
+                    )
+                )
+        if self.commands not in accepted_commands:
             raise ValueError("command inventory differs from fixed descriptors")
         return self
 
@@ -804,7 +841,7 @@ class Phase5Continuation(_HasRecordHash):
     predecessor_approval_sha256: Sha256Digest
     carried_successes: tuple[Phase5ActionEvidenceBinding, ...] = Field(
         min_length=2,
-        max_length=8,
+        max_length=9,
     )
     terminal_action: Phase5ActionEvidenceBinding
     bootstrap_state_sha256: Sha256Digest
@@ -815,19 +852,27 @@ class Phase5Continuation(_HasRecordHash):
     def _validate_continuation_shape(self) -> Phase5Continuation:
         carried_actions = tuple(item.action for item in self.carried_successes)
         valid_shape = (
-            carried_actions == _INITIAL_CONTINUATION_ACTIONS
-            and self.terminal_action.action is Phase5Action.IMAGE_PUSH
-        ) or (
-            carried_actions == _TEARDOWN_CONTINUATION_ACTIONS
-            and self.terminal_action.action is Phase5Action.STATE_PROTECTION_CHANGE
+            (
+                carried_actions == _INITIAL_CONTINUATION_ACTIONS
+                and self.terminal_action.action is Phase5Action.IMAGE_PUSH
+                and self.terminal_action.status is OutcomeStatus.UNKNOWN
+            )
+            or (
+                carried_actions == _TEARDOWN_CONTINUATION_ACTIONS
+                and self.terminal_action.action is Phase5Action.STATE_PROTECTION_CHANGE
+                and self.terminal_action.status is OutcomeStatus.UNKNOWN
+            )
+            or (
+                carried_actions == _BOOTSTRAP_CONTINUATION_ACTIONS
+                and self.terminal_action.action is Phase5Action.BOOTSTRAP_TEARDOWN
+                and self.terminal_action.status is OutcomeStatus.FAILED
+            )
         )
         if not valid_shape or any(
             item.status is not OutcomeStatus.SUCCEEDED
             for item in self.carried_successes
         ):
             raise ValueError("continuation may carry only successful prerequisites")
-        if self.terminal_action.status is not OutcomeStatus.UNKNOWN:
-            raise ValueError("continuation requires a supported terminal outcome")
         return self
 
 
@@ -1026,6 +1071,7 @@ def _fixed_commands(
         "--format={{.Descriptor.digest}}",
         "--format={{.Id}}",
     ] = "--format={{.Descriptor.digest}}",
+    include_state_bucket_cleanup: bool = True,
 ) -> tuple[CommandDescriptor, ...]:
     root = _canonical_absolute_path(state_root, require_exists=False)
     plan_root = root / "plans"
@@ -1076,6 +1122,19 @@ def _fixed_commands(
                     "services",
                     "enable",
                     "cloudresourcemanager.googleapis.com",
+                    f"--project={_PROJECT_ID}",
+                    f"--account={_OWNER_ACCOUNT}",
+                    "--quiet",
+                ),
+            )
+        if action is Phase5Action.BOOTSTRAP_TEARDOWN and include_state_bucket_cleanup:
+            commands += (
+                (
+                    "/usr/bin/gcloud",
+                    "storage",
+                    "rm",
+                    "--all-versions",
+                    f"gs://{_STATE_BUCKET}/**",
                     f"--project={_PROJECT_ID}",
                     f"--account={_OWNER_ACCOUNT}",
                     "--quiet",
@@ -4198,30 +4257,52 @@ class Phase5StateStore:
                 )
             else:
                 prior = continuations[0]
-                _verify_continuation_record(
-                    prior,
-                    successor_manifest=manifest,
-                    successor_approval=approval,
-                    successor_state_root=self.root,
-                )
+                prior_actions = tuple(item.action for item in prior.carried_successes)
                 if (
-                    tuple(item.action for item in prior.carried_successes)
-                    != _INITIAL_CONTINUATION_ACTIONS
-                    or prior.terminal_action.action is not Phase5Action.IMAGE_PUSH
-                    or prior.terminal_action.status is not OutcomeStatus.UNKNOWN
+                    prior_actions == _INITIAL_CONTINUATION_ACTIONS
+                    and prior.terminal_action.action is Phase5Action.IMAGE_PUSH
+                    and prior.terminal_action.status is OutcomeStatus.UNKNOWN
                 ):
+                    direct_carried_actions = _TEARDOWN_CONTINUATION_ACTIONS[
+                        len(_INITIAL_CONTINUATION_ACTIONS) :
+                    ]
+                    terminal_action = Phase5Action.STATE_PROTECTION_CHANGE
+                elif (
+                    prior_actions == _TEARDOWN_CONTINUATION_ACTIONS
+                    and prior.terminal_action.action
+                    is Phase5Action.STATE_PROTECTION_CHANGE
+                    and prior.terminal_action.status is OutcomeStatus.UNKNOWN
+                ):
+                    direct_carried_actions = (Phase5Action.STATE_PROTECTION_CHANGE,)
+                    terminal_action = Phase5Action.BOOTSTRAP_TEARDOWN
+                else:
                     raise OperatorError("CONTINUATION_PREDECESSOR_HISTORY_INVALID")
-                direct_carried_actions = _TEARDOWN_CONTINUATION_ACTIONS[
-                    len(_INITIAL_CONTINUATION_ACTIONS) :
-                ]
                 expected_attempted = {
                     *direct_carried_actions,
-                    Phase5Action.STATE_PROTECTION_CHANGE,
+                    terminal_action,
                 }
                 if direct_attempted != expected_attempted or direct_successful != set(
                     direct_carried_actions
                 ):
                     raise OperatorError("CONTINUATION_PREDECESSOR_HISTORY_INVALID")
+                terminal = self._action_binding(
+                    directory,
+                    manifest.record_sha256,
+                    terminal_action,
+                )
+                allow_evolved_bootstrap_state = (
+                    terminal_action is Phase5Action.BOOTSTRAP_TEARDOWN
+                    and terminal.status is OutcomeStatus.FAILED
+                )
+                _verify_continuation_record(
+                    prior,
+                    successor_manifest=manifest,
+                    successor_approval=approval,
+                    successor_state_root=self.root,
+                    allow_evolved_successor_bootstrap_state=(
+                        allow_evolved_bootstrap_state
+                    ),
+                )
                 carried = (
                     *prior.carried_successes,
                     *(
@@ -4233,14 +4314,16 @@ class Phase5StateStore:
                         for action in direct_carried_actions
                     ),
                 )
-                terminal = self._action_binding(
-                    directory,
-                    manifest.record_sha256,
-                    Phase5Action.STATE_PROTECTION_CHANGE,
-                )
             if (
                 any(item.status is not OutcomeStatus.SUCCEEDED for item in carried)
-                or terminal.status is not OutcomeStatus.UNKNOWN
+                or (
+                    terminal.action is Phase5Action.BOOTSTRAP_TEARDOWN
+                    and terminal.status is not OutcomeStatus.FAILED
+                )
+                or (
+                    terminal.action is not Phase5Action.BOOTSTRAP_TEARDOWN
+                    and terminal.status is not OutcomeStatus.UNKNOWN
+                )
             ):
                 raise OperatorError("CONTINUATION_PREDECESSOR_HISTORY_INVALID")
             return manifest, approval, carried, terminal
@@ -4641,6 +4724,7 @@ def _verify_continuation_record(
     successor_manifest: Phase5ApprovalManifest,
     successor_approval: Phase5Approval,
     successor_state_root: Path,
+    allow_evolved_successor_bootstrap_state: bool = False,
 ) -> None:
     _validate_approval_binding(successor_manifest, successor_approval)
     successor_root = _canonical_absolute_path(
@@ -4689,7 +4773,12 @@ def _verify_continuation_record(
         continuation.bootstrap_state_sha256,
         continuation.bootstrap_state_byte_count,
     )
-    if predecessor_identity[:2] != expected or successor_identity[:2] != expected:
+    if predecessor_identity[:2] != expected:
+        raise OperatorError("CONTINUATION_BOOTSTRAP_STATE_DRIFT")
+    if allow_evolved_successor_bootstrap_state:
+        if successor_identity[:2] == expected:
+            raise OperatorError("CONTINUATION_BOOTSTRAP_STATE_NOT_EVOLVED")
+    elif successor_identity[:2] != expected:
         raise OperatorError("CONTINUATION_BOOTSTRAP_STATE_DRIFT")
     if predecessor_identity[2:] == successor_identity[2:]:
         raise OperatorError("CONTINUATION_BOOTSTRAP_STATE_NOT_INDEPENDENT")
@@ -4998,6 +5087,7 @@ def _verify_approved_artifacts(
             raise OperatorError("EXECUTION_PLAN_ALREADY_EXISTS")
     if action in {
         Phase5Action.BOOTSTRAP_APPLY,
+        Phase5Action.BOOTSTRAP_TEARDOWN,
         Phase5Action.IMAGE_PUSH,
     }:
         _verify_gcloud_binary(repo_root, runner)
@@ -5859,7 +5949,13 @@ def _run_descriptor_once(
     environment = _minimal_subprocess_environment(descriptor.environment)
     execution_identity: ExecutionPlanIdentity | None = None
     terraform_index_offset = (
-        1 if descriptor.action is Phase5Action.BOOTSTRAP_APPLY else 0
+        1
+        if descriptor.action
+        in {
+            Phase5Action.BOOTSTRAP_APPLY,
+            Phase5Action.BOOTSTRAP_TEARDOWN,
+        }
+        else 0
     )
     terraform_plan_index = terraform_index_offset + 1
     terraform_show_index = terraform_index_offset + 2
