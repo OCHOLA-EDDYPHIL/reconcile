@@ -423,6 +423,59 @@ def test_cleanup_guards_present_absent_and_manifest_revisions_atomically() -> No
     assert len(client.commits) == commit_count + 1
 
 
+def test_server_timestamps_may_precede_provider_update_times() -> None:
+    client = _Client()
+    targets = _targets(client)
+    asyncio.run(
+        targets.mutation.commit_business_operation(
+            namespace_id=_NAMESPACE,
+            operation_id=_OPERATION,
+            manifest_collection=_MANIFEST_COLLECTION,
+            manifest_document_id=_MANIFEST_DOCUMENT,
+            documents=_documents(),
+            selected_effect_ids=("primary-request", "audit-record"),
+            correlation=_CORRELATION,
+        )
+    )
+    for path, (payload, update_time) in tuple(client.documents.items()):
+        client.documents[path] = (payload, update_time + timedelta(milliseconds=1))
+
+    readback = asyncio.run(targets.read.read_business_operation(**_arguments()))
+    deletion = asyncio.run(targets.cleanup.delete_owned(**_arguments()))
+
+    assert readback.manifest is not None
+    assert readback.manifest.status is BusinessOperationStatus.TERMINAL_COMMITTED
+    assert deletion.removed_count == 3
+    assert client.documents == {}
+
+
+@pytest.mark.parametrize("document_index", [0, 1])
+def test_server_timestamp_after_provider_update_time_is_rejected(
+    document_index: int,
+) -> None:
+    client = _Client()
+    targets = _targets(client)
+    asyncio.run(
+        targets.mutation.commit_business_operation(
+            namespace_id=_NAMESPACE,
+            operation_id=_OPERATION,
+            manifest_collection=_MANIFEST_COLLECTION,
+            manifest_document_id=_MANIFEST_DOCUMENT,
+            documents=_documents(),
+            selected_effect_ids=("primary-request",),
+            correlation=_CORRELATION,
+        )
+    )
+    path = tuple(client.documents)[document_index]
+    payload, update_time = client.documents[path]
+    payload["observed_at"] = update_time + timedelta(microseconds=1)
+
+    with pytest.raises(FirestoreCloudError) as raised:
+        asyncio.run(targets.read.read_business_operation(**_arguments()))
+
+    assert raised.value.code is FirestoreCloudFailure.MALFORMED_RESPONSE
+
+
 def test_unknown_post_commit_failure_is_sanitized_and_never_replayed() -> None:
     client = _Client()
     client.after_apply_failure[2] = RuntimeError(
