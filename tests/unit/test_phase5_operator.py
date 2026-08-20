@@ -293,7 +293,47 @@ def _plan_json(filename: str, runtime_values: set[str]) -> bytes:
             "before": None,
         }
 
-    if filename == "runtime-create":
+    if filename == "bootstrap-destroy":
+        services = (
+            "aiplatform.googleapis.com",
+            "artifactregistry.googleapis.com",
+            "cloudbuild.googleapis.com",
+            "firestore.googleapis.com",
+            "run.googleapis.com",
+            "storage.googleapis.com",
+        )
+        runtime_changes = [
+            {
+                "address": f'google_project_service.bootstrap_required["{service}"]',
+                "change": change(
+                    {
+                        "id": None,
+                        "project": "reconcile-dev-260813-14fa6d",
+                        "service": service,
+                    },
+                    {"id": True},
+                ),
+                "provider_name": "registry.terraform.io/hashicorp/google",
+                "type": "google_project_service",
+            }
+            for service in services
+        ]
+        runtime_changes.append(
+            {
+                "address": "google_storage_bucket.terraform_state",
+                "change": change(
+                    {
+                        **bucket_value,
+                        "deletion_policy": "DELETE",
+                        "force_destroy": True,
+                    },
+                    {"id": True},
+                ),
+                "provider_name": "registry.terraform.io/hashicorp/google",
+                "type": "google_storage_bucket",
+            }
+        )
+    elif filename == "runtime-create":
         service_value = {
             "id": None,
             "location": "us-central1",
@@ -386,6 +426,43 @@ def _materialize_unknowns(value: Any, mask: Any) -> Any:
             for item, child in zip(value, mask, strict=True)
         ]
     return json.loads(json.dumps(value))
+
+
+def _live_bootstrap_protection_update_plan(
+    qualification: dict[str, Any],
+) -> dict[str, Any]:
+    rendered = json.loads(json.dumps(qualification))
+    selected: list[dict[str, Any]] = []
+    for resource in rendered["resource_changes"]:
+        if resource["type"] not in {
+            "google_project_service",
+            "google_storage_bucket",
+        }:
+            continue
+        change = resource["change"]
+        unknown = change.pop("reconcile_before_unknown", None)
+        change.pop("reconcile_before_sensitive", None)
+        approved = _materialize_unknowns(change["before"], unknown)
+        before = json.loads(json.dumps(approved))
+        after = json.loads(json.dumps(approved))
+        if resource["type"] == "google_storage_bucket":
+            before["force_destroy"] = False
+            before["deletion_policy"] = "PREVENT"
+            actions = ["update"]
+        else:
+            actions = ["no-op"]
+        change.clear()
+        change.update(
+            {
+                "actions": actions,
+                "after": after,
+                "after_unknown": {},
+                "before": before,
+            }
+        )
+        selected.append(resource)
+    rendered["resource_changes"] = selected
+    return rendered
 
 
 def _live_runtime_update_plan(qualification: dict[str, Any]) -> dict[str, Any]:
@@ -770,10 +847,18 @@ class _Runner:
             and argv[2:4] == ("show", "-json")
         ):
             execution = Path(argv[4])
-            qualification = (
-                execution.parent.parent / "plans" / f"{execution.stem}.tfplan.json"
-            )
-            payload = json.loads(qualification.read_bytes())
+            if execution.stem == "bootstrap-final-protection-update":
+                qualification = (
+                    execution.parent.parent / "plans" / "bootstrap-destroy.tfplan.json"
+                )
+                payload = _live_bootstrap_protection_update_plan(
+                    json.loads(qualification.read_bytes())
+                )
+            else:
+                qualification = (
+                    execution.parent.parent / "plans" / f"{execution.stem}.tfplan.json"
+                )
+                payload = json.loads(qualification.read_bytes())
             if self.rendered_plan_drift:
                 payload["resource_changes"][0]["change"]["actions"] = ["update"]
             output = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode()
@@ -1220,13 +1305,26 @@ def test_manifest_freezes_exact_identity_limits_estimates_and_commands(
     )
     assert "init" in teardown.commands[1]
     assert "plan" in teardown.commands[2]
+    assert "-target=google_storage_bucket.terraform_state" in teardown.commands[2]
+    assert "bootstrap-final-protection-update.tfplan" in teardown.commands[2][6]
     assert teardown.commands[3][:4] == (
         operator._TERRAFORM,
         "-chdir=infra/bootstrap",
         "show",
         "-json",
     )
+    assert "bootstrap-final-protection-update.tfplan" in teardown.commands[3][4]
     assert "apply" in teardown.commands[4]
+    assert "bootstrap-final-protection-update.tfplan" in teardown.commands[4][5]
+    assert "plan" in teardown.commands[5]
+    assert "-destroy" in teardown.commands[5]
+    assert teardown.commands[6][:4] == (
+        operator._TERRAFORM,
+        "-chdir=infra/bootstrap",
+        "show",
+        "-json",
+    )
+    assert "apply" in teardown.commands[7]
     terraform_stacks = {
         operator.Phase5Action.BOOTSTRAP_APPLY: "infra/bootstrap",
         operator.Phase5Action.FOUNDATION_APPLY: "infra/environments/dev/foundation",
@@ -1790,6 +1888,80 @@ def test_continuation_carries_only_final_bootstrap_teardown_after_failure(
         admitted_at=_NOW + timedelta(minutes=14),
     )
     assert teardown.action is operator.Phase5Action.BOOTSTRAP_TEARDOWN
+
+
+def test_continuation_retries_only_bootstrap_teardown_after_repeated_failure(
+    tmp_path: Path,
+) -> None:
+    predecessor, predecessor_manifest, predecessor_approval = (
+        _terminal_bootstrap_teardown_predecessor(tmp_path / "predecessor")
+    )
+    (tmp_path / "first-final-repair").mkdir()
+    repo_root, state, manifest, approval, runner = _continuation_successor(
+        tmp_path / "first-final-repair",
+        change_suffix=b"\n\n\n",
+    )
+    operator.prepare_phase5_continuation(
+        predecessor_state_root=predecessor.root,
+        predecessor_manifest_sha256=predecessor_manifest.record_sha256,
+        predecessor_approval_sha256=predecessor_approval.record_sha256,
+        successor_state_root=state.root,
+        successor_manifest_sha256=manifest.record_sha256,
+        successor_approval_sha256=approval.record_sha256,
+        repo_root=repo_root,
+        prepared_at=_NOW + timedelta(minutes=13),
+        runner=runner,
+    )
+    _record_action(
+        state,
+        manifest,
+        approval,
+        operator.Phase5Action.BOOTSTRAP_TEARDOWN,
+        at=_NOW + timedelta(minutes=14),
+        result=subprocess.CompletedProcess(["fixed"], 1, b"", b"failed"),
+    )
+    bootstrap_state = state.root / "state" / "bootstrap.tfstate"
+    bootstrap_state.write_bytes(b'{"lineage":"phase5","serial":3}')
+    bootstrap_state.chmod(0o600)
+
+    (tmp_path / "second-final-repair").mkdir()
+    next_repo, successor, next_manifest, next_approval, next_runner = (
+        _continuation_successor(
+            tmp_path / "second-final-repair",
+            change_suffix=b"\n\n\n\n",
+        )
+    )
+    continuation = operator.prepare_phase5_continuation(
+        predecessor_state_root=state.root,
+        predecessor_manifest_sha256=manifest.record_sha256,
+        predecessor_approval_sha256=approval.record_sha256,
+        successor_state_root=successor.root,
+        successor_manifest_sha256=next_manifest.record_sha256,
+        successor_approval_sha256=next_approval.record_sha256,
+        repo_root=next_repo,
+        prepared_at=_NOW + timedelta(minutes=15),
+        runner=next_runner,
+    )
+
+    assert tuple(item.action for item in continuation.carried_successes) == (
+        operator.Phase5Action.BOOTSTRAP_APPLY,
+        operator.Phase5Action.FOUNDATION_APPLY,
+        operator.Phase5Action.IMAGE_PUSH,
+        operator.Phase5Action.RUNTIME_APPLY,
+        operator.Phase5Action.PROVIDER_ACCEPTANCE,
+        operator.Phase5Action.HOSTED_ACCEPTANCE,
+        operator.Phase5Action.RUNTIME_TEARDOWN,
+        operator.Phase5Action.FOUNDATION_TEARDOWN,
+        operator.Phase5Action.STATE_PROTECTION_CHANGE,
+    )
+    assert (
+        continuation.terminal_action.action is operator.Phase5Action.BOOTSTRAP_TEARDOWN
+    )
+    assert continuation.terminal_action.status is operator.OutcomeStatus.FAILED
+    assert (
+        bootstrap_state.read_bytes()
+        == (successor.root / "state" / "bootstrap.tfstate").read_bytes()
+    )
 
 
 def test_continuation_rejects_unsuccessful_predecessor_action(
@@ -3381,7 +3553,7 @@ def test_bootstrap_teardown_cleans_only_state_objects_before_verified_destroy(
             environment=environment,
             timeout_seconds=timeout_seconds,
         )
-        if argv == descriptor.commands[3]:
+        if argv == descriptor.commands[6]:
             assert isinstance(result, subprocess.CompletedProcess)
             rendered = _live_teardown_plan(json.loads(result.stdout))
             return subprocess.CompletedProcess(
@@ -3454,6 +3626,66 @@ def test_bootstrap_teardown_cleanup_failure_prevents_terraform(
     assert isinstance(result, subprocess.CompletedProcess)
     assert result.returncode == 1
     assert observed == [cleanup]
+
+
+def test_bootstrap_teardown_rejects_unapplied_protection_before_destroy(
+    tmp_path: Path,
+) -> None:
+    _, manifest, _, _ = _records(tmp_path)
+    descriptor = manifest.command_for(operator.Phase5Action.BOOTSTRAP_TEARDOWN)
+    base_runner = _Runner().bind_source(Path(manifest.execution_source.root))
+
+    def runner(
+        argv: tuple[str, ...],
+        *,
+        cwd: Path,
+        environment: dict[str, str] | Any,
+        timeout_seconds: int,
+    ) -> object:
+        result = base_runner(
+            argv,
+            cwd=cwd,
+            environment=environment,
+            timeout_seconds=timeout_seconds,
+        )
+        if argv == descriptor.commands[3]:
+            assert isinstance(result, subprocess.CompletedProcess)
+            rendered = json.loads(result.stdout)
+            bucket = next(
+                item
+                for item in rendered["resource_changes"]
+                if item["type"] == "google_storage_bucket"
+            )
+            bucket["change"]["after"]["force_destroy"] = False
+            bucket["change"]["after"]["deletion_policy"] = "PREVENT"
+            return subprocess.CompletedProcess(
+                list(argv),
+                0,
+                json.dumps(
+                    rendered,
+                    separators=(",", ":"),
+                    sort_keys=True,
+                ).encode(),
+                b"",
+            )
+        return result
+
+    with pytest.raises(operator.OperatorError, match="EXECUTION_PLAN_DRIFT"):
+        operator._run_descriptor_once(
+            descriptor,
+            repo_root=Path(manifest.execution_source.root),
+            execution_source=manifest.execution_source,
+            runner=runner,
+            image_artifact=manifest.image_artifact,
+            terraform_plan=manifest.terraform_plan_for(
+                operator.Phase5Action.BOOTSTRAP_TEARDOWN
+            ),
+            python_dependencies=manifest.python_dependencies,
+            deadline=manifest.work_deadline,
+            clock=lambda: _NOW + timedelta(minutes=3),
+        )
+
+    assert all(command not in base_runner.calls for command in descriptor.commands[4:])
 
 
 def test_bootstrap_teardown_verifies_gcloud_before_admission(tmp_path: Path) -> None:
