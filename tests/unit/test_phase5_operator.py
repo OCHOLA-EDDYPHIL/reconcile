@@ -2831,6 +2831,104 @@ def test_teardown_verifier_accepts_observed_provider_normalization_only() -> Non
 
 
 @pytest.mark.parametrize(
+    ("resource_type", "approved", "observed"),
+    (
+        (
+            "google_artifact_registry_repository",
+            {"cleanup_policies": [{"condition": [{"older_than": "1d"}]}]},
+            {"cleanup_policies": [{"condition": [{"older_than": "86400s"}]}]},
+        ),
+        (
+            "google_billing_budget",
+            {
+                "amount": [
+                    {
+                        "last_period_amount": None,
+                        "specified_amount": [{"nanos": None, "units": "5"}],
+                    }
+                ],
+                "budget_filter": [{"calendar_period": None}],
+            },
+            {
+                "amount": [
+                    {
+                        "last_period_amount": False,
+                        "specified_amount": [{"nanos": 0, "units": "5"}],
+                    }
+                ],
+                "budget_filter": [{"calendar_period": "MONTH"}],
+            },
+        ),
+        (
+            "google_storage_bucket",
+            {"hierarchical_namespace": [], "name": "approved-bucket"},
+            {
+                "hierarchical_namespace": [{"enabled": False}],
+                "name": "approved-bucket",
+            },
+        ),
+        (
+            "google_storage_bucket_iam_member",
+            {"bucket": "approved-bucket", "role": "roles/storage.objectViewer"},
+            {
+                "bucket": "b/approved-bucket",
+                "role": "roles/storage.objectViewer",
+            },
+        ),
+    ),
+)
+def test_teardown_verifier_accepts_exact_foundation_provider_normalizations(
+    resource_type: str,
+    approved: dict[str, Any],
+    observed: dict[str, Any],
+) -> None:
+    assert operator._matches_approved_teardown_resource(
+        observed,
+        approved,
+        None,
+        resource_type=resource_type,
+    )
+
+
+@pytest.mark.parametrize(
+    ("resource_type", "approved", "observed"),
+    (
+        (
+            "google_artifact_registry_repository",
+            {"cleanup_policies": [{"condition": [{"older_than": "1d"}]}]},
+            {"cleanup_policies": [{"condition": [{"older_than": "86401s"}]}]},
+        ),
+        (
+            "google_billing_budget",
+            {"budget_filter": [{"calendar_period": None}]},
+            {"budget_filter": [{"calendar_period": "YEAR"}]},
+        ),
+        (
+            "google_storage_bucket",
+            {"hierarchical_namespace": []},
+            {"hierarchical_namespace": [{"enabled": True}]},
+        ),
+        (
+            "google_storage_bucket_iam_member",
+            {"bucket": "approved-bucket"},
+            {"bucket": "b/different-bucket"},
+        ),
+    ),
+)
+def test_teardown_verifier_rejects_nearby_foundation_drift(
+    resource_type: str,
+    approved: dict[str, Any],
+    observed: dict[str, Any],
+) -> None:
+    assert not operator._matches_approved_teardown_resource(
+        observed,
+        approved,
+        None,
+        resource_type=resource_type,
+    )
+
+
+@pytest.mark.parametrize(
     ("mutation", "reason"),
     (
         ("malformed-sensitive", "TERRAFORM_PLAN_INVALID"),

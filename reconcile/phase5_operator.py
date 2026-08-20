@@ -5420,11 +5420,16 @@ def _matches_approved_teardown_resource(
     *,
     resource_type: str,
 ) -> bool:
-    if _matches_approved_before(actual, expected, unknown):
+    normalized = _normalize_observed_teardown_resource(
+        actual,
+        expected,
+        resource_type=resource_type,
+    )
+    if _matches_approved_before(normalized, expected, unknown):
         return True
     if (
         resource_type != "google_cloud_run_v2_service_iam_member"
-        or not isinstance(actual, dict)
+        or not isinstance(normalized, dict)
         or not isinstance(expected, dict)
     ):
         return False
@@ -5440,11 +5445,104 @@ def _matches_approved_teardown_resource(
         f"projects/{expected_project}/locations/{expected_location}/services/"
         f"{expected_name}"
     )
-    if actual.get("name") != canonical_name:
+    if normalized.get("name") != canonical_name:
         return False
-    normalized = dict(actual)
-    normalized["name"] = expected_name
-    return _matches_approved_before(normalized, expected, unknown)
+    canonicalized = dict(normalized)
+    canonicalized["name"] = expected_name
+    return _matches_approved_before(canonicalized, expected, unknown)
+
+
+def _normalize_observed_teardown_resource(
+    actual: JsonValue,
+    expected: JsonValue,
+    *,
+    resource_type: str,
+) -> JsonValue:
+    if not isinstance(actual, dict) or not isinstance(expected, dict):
+        return actual
+    normalized = json.loads(_canonical_value_bytes(actual))
+    if not isinstance(normalized, dict):  # pragma: no cover - canonical object above
+        return actual
+
+    if resource_type == "google_artifact_registry_repository":
+        policies = normalized.get("cleanup_policies")
+        expected_policies = expected.get("cleanup_policies")
+        if isinstance(policies, list) and isinstance(expected_policies, list):
+            for policy, expected_policy in zip(
+                policies, expected_policies, strict=True
+            ):
+                if not isinstance(policy, dict) or not isinstance(
+                    expected_policy, dict
+                ):
+                    continue
+                conditions = policy.get("condition")
+                expected_conditions = expected_policy.get("condition")
+                if (
+                    isinstance(conditions, list)
+                    and isinstance(expected_conditions, list)
+                    and len(conditions) == len(expected_conditions) == 1
+                    and isinstance(conditions[0], dict)
+                    and isinstance(expected_conditions[0], dict)
+                    and conditions[0].get("older_than") == "86400s"
+                    and expected_conditions[0].get("older_than") == "1d"
+                ):
+                    conditions[0]["older_than"] = "1d"
+
+    if resource_type == "google_billing_budget":
+        amounts = normalized.get("amount")
+        expected_amounts = expected.get("amount")
+        if (
+            isinstance(amounts, list)
+            and isinstance(expected_amounts, list)
+            and len(amounts) == len(expected_amounts) == 1
+            and isinstance(amounts[0], dict)
+            and isinstance(expected_amounts[0], dict)
+        ):
+            if (
+                amounts[0].get("last_period_amount") is False
+                and expected_amounts[0].get("last_period_amount") is None
+            ):
+                amounts[0]["last_period_amount"] = None
+            specified = amounts[0].get("specified_amount")
+            expected_specified = expected_amounts[0].get("specified_amount")
+            if (
+                isinstance(specified, list)
+                and isinstance(expected_specified, list)
+                and len(specified) == len(expected_specified) == 1
+                and isinstance(specified[0], dict)
+                and isinstance(expected_specified[0], dict)
+                and type(specified[0].get("nanos")) is int
+                and specified[0].get("nanos") == 0
+                and expected_specified[0].get("nanos") is None
+            ):
+                specified[0]["nanos"] = None
+        filters = normalized.get("budget_filter")
+        expected_filters = expected.get("budget_filter")
+        if (
+            isinstance(filters, list)
+            and isinstance(expected_filters, list)
+            and len(filters) == len(expected_filters) == 1
+            and isinstance(filters[0], dict)
+            and isinstance(expected_filters[0], dict)
+            and filters[0].get("calendar_period") == "MONTH"
+            and expected_filters[0].get("calendar_period") is None
+        ):
+            filters[0]["calendar_period"] = None
+
+    if (
+        resource_type == "google_storage_bucket"
+        and normalized.get("hierarchical_namespace") == [{"enabled": False}]
+        and expected.get("hierarchical_namespace") == []
+    ):
+        normalized["hierarchical_namespace"] = []
+
+    if resource_type == "google_storage_bucket_iam_member":
+        bucket = normalized.get("bucket")
+        expected_bucket = expected.get("bucket")
+        if isinstance(expected_bucket, str) and bucket == f"b/{expected_bucket}":
+            normalized["bucket"] = expected_bucket
+
+    return normalized  # type: ignore[return-value]
 
 
 def _plan_changes_by_address(data: bytes) -> dict[str, dict[str, Any]]:
@@ -5616,10 +5714,11 @@ def _verify_rendered_plan(
                 or item.role != approved.role
                 or item.member != approved.member
                 or item.authority_unknown is not None
-                or not _matches_approved_before(
+                or not _matches_approved_teardown_resource(
                     item.authority_projection,
                     approved.authority_projection,
                     approved.authority_unknown,
+                    resource_type=item.resource_type,
                 )
                 for item in iam_edges
             )
