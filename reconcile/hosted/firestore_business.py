@@ -563,8 +563,8 @@ class _CloudFirestoreBusinessTarget:
         if not isinstance(payload, dict) or snapshot.update_time is None:
             raise ValueError("manifest snapshot is malformed")
         stored = _StoredManifest.model_validate(payload)
-        if _aware_utc(snapshot.update_time) != stored.observed_at:
-            raise ValueError("manifest timestamp is not bound to its revision")
+        if stored.observed_at > _aware_utc(snapshot.update_time):
+            raise ValueError("manifest timestamp is later than its revision")
         try:
             status = BusinessOperationStatus(stored.status)
         except ValueError as error:
@@ -619,8 +619,8 @@ class _CloudFirestoreBusinessTarget:
         if not isinstance(payload, dict) or snapshot.update_time is None:
             raise ValueError("effect snapshot is malformed")
         stored = _StoredEffect.model_validate(payload)
-        if _aware_utc(snapshot.update_time) != stored.observed_at:
-            raise ValueError("effect timestamp is not bound to its revision")
+        if stored.observed_at > _aware_utc(snapshot.update_time):
+            raise ValueError("effect timestamp is later than its revision")
         return BusinessDocument(
             effect_id=stored.effect_id,
             collection_name=stored.collection_name,
