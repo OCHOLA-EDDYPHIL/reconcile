@@ -203,6 +203,22 @@ class OutcomeStatus(StrEnum):
     UNKNOWN = "UNKNOWN"
 
 
+_INITIAL_CONTINUATION_ACTIONS = (
+    Phase5Action.BOOTSTRAP_APPLY,
+    Phase5Action.FOUNDATION_APPLY,
+)
+_TEARDOWN_CONTINUATION_ACTIONS = (
+    Phase5Action.BOOTSTRAP_APPLY,
+    Phase5Action.FOUNDATION_APPLY,
+    Phase5Action.IMAGE_PUSH,
+    Phase5Action.RUNTIME_APPLY,
+    Phase5Action.PROVIDER_ACCEPTANCE,
+    Phase5Action.HOSTED_ACCEPTANCE,
+    Phase5Action.RUNTIME_TEARDOWN,
+    Phase5Action.FOUNDATION_TEARDOWN,
+)
+
+
 class OutcomeReason(StrEnum):
     COMMAND_SUCCEEDED = "COMMAND_SUCCEEDED"
     COMMAND_FAILED = "COMMAND_FAILED"
@@ -788,7 +804,7 @@ class Phase5Continuation(_HasRecordHash):
     predecessor_approval_sha256: Sha256Digest
     carried_successes: tuple[Phase5ActionEvidenceBinding, ...] = Field(
         min_length=2,
-        max_length=2,
+        max_length=8,
     )
     terminal_action: Phase5ActionEvidenceBinding
     bootstrap_state_sha256: Sha256Digest
@@ -797,19 +813,21 @@ class Phase5Continuation(_HasRecordHash):
 
     @model_validator(mode="after")
     def _validate_continuation_shape(self) -> Phase5Continuation:
-        if tuple(item.action for item in self.carried_successes) != (
-            Phase5Action.BOOTSTRAP_APPLY,
-            Phase5Action.FOUNDATION_APPLY,
-        ) or any(
+        carried_actions = tuple(item.action for item in self.carried_successes)
+        valid_shape = (
+            carried_actions == _INITIAL_CONTINUATION_ACTIONS
+            and self.terminal_action.action is Phase5Action.IMAGE_PUSH
+        ) or (
+            carried_actions == _TEARDOWN_CONTINUATION_ACTIONS
+            and self.terminal_action.action is Phase5Action.STATE_PROTECTION_CHANGE
+        )
+        if not valid_shape or any(
             item.status is not OutcomeStatus.SUCCEEDED
             for item in self.carried_successes
         ):
             raise ValueError("continuation may carry only successful prerequisites")
-        if (
-            self.terminal_action.action is not Phase5Action.IMAGE_PUSH
-            or self.terminal_action.status is not OutcomeStatus.UNKNOWN
-        ):
-            raise ValueError("continuation requires the terminal image-push outcome")
+        if self.terminal_action.status is not OutcomeStatus.UNKNOWN:
+            raise ValueError("continuation requires a supported terminal outcome")
         return self
 
 
@@ -4145,35 +4163,81 @@ class Phase5StateStore:
             _validate_approval_binding(manifest, approval)
             if self._unfinished(directory) is not None:
                 raise OperatorError("CONTINUATION_PREDECESSOR_UNFINISHED")
-            if self._names(directory, "continuation-"):
-                raise OperatorError("CONTINUATION_PREDECESSOR_NOT_DIRECT")
-            attempted, successful = self._direct_action_history(
+            continuation_names = self._names(directory, "continuation-")
+            if len(continuation_names) > 1:
+                raise OperatorError("CONTINUATION_RECORD_SET_INVALID")
+            continuations = tuple(
+                self._read(directory, name, Phase5Continuation)
+                for name in continuation_names
+            )
+            if continuations and (
+                continuations[0].successor_manifest_sha256 != manifest.record_sha256
+            ):
+                raise OperatorError("CONTINUATION_RECORD_SET_INVALID")
+            direct_attempted, direct_successful = self._direct_action_history(
                 directory,
                 manifest.record_sha256,
             )
-            expected_attempted = {
-                Phase5Action.BOOTSTRAP_APPLY,
-                Phase5Action.FOUNDATION_APPLY,
-                Phase5Action.IMAGE_PUSH,
-            }
-            expected_successful = {
-                Phase5Action.BOOTSTRAP_APPLY,
-                Phase5Action.FOUNDATION_APPLY,
-            }
-            if attempted != expected_attempted or successful != expected_successful:
-                raise OperatorError("CONTINUATION_PREDECESSOR_HISTORY_INVALID")
-            carried = tuple(
-                self._action_binding(directory, manifest.record_sha256, action)
-                for action in (
-                    Phase5Action.BOOTSTRAP_APPLY,
-                    Phase5Action.FOUNDATION_APPLY,
+            if not continuations:
+                expected_attempted = {
+                    *_INITIAL_CONTINUATION_ACTIONS,
+                    Phase5Action.IMAGE_PUSH,
+                }
+                if direct_attempted != expected_attempted or direct_successful != set(
+                    _INITIAL_CONTINUATION_ACTIONS
+                ):
+                    raise OperatorError("CONTINUATION_PREDECESSOR_HISTORY_INVALID")
+                carried = tuple(
+                    self._action_binding(directory, manifest.record_sha256, action)
+                    for action in _INITIAL_CONTINUATION_ACTIONS
                 )
-            )
-            terminal = self._action_binding(
-                directory,
-                manifest.record_sha256,
-                Phase5Action.IMAGE_PUSH,
-            )
+                terminal = self._action_binding(
+                    directory,
+                    manifest.record_sha256,
+                    Phase5Action.IMAGE_PUSH,
+                )
+            else:
+                prior = continuations[0]
+                _verify_continuation_record(
+                    prior,
+                    successor_manifest=manifest,
+                    successor_approval=approval,
+                    successor_state_root=self.root,
+                )
+                if (
+                    tuple(item.action for item in prior.carried_successes)
+                    != _INITIAL_CONTINUATION_ACTIONS
+                    or prior.terminal_action.action is not Phase5Action.IMAGE_PUSH
+                    or prior.terminal_action.status is not OutcomeStatus.UNKNOWN
+                ):
+                    raise OperatorError("CONTINUATION_PREDECESSOR_HISTORY_INVALID")
+                direct_carried_actions = _TEARDOWN_CONTINUATION_ACTIONS[
+                    len(_INITIAL_CONTINUATION_ACTIONS) :
+                ]
+                expected_attempted = {
+                    *direct_carried_actions,
+                    Phase5Action.STATE_PROTECTION_CHANGE,
+                }
+                if direct_attempted != expected_attempted or direct_successful != set(
+                    direct_carried_actions
+                ):
+                    raise OperatorError("CONTINUATION_PREDECESSOR_HISTORY_INVALID")
+                carried = (
+                    *prior.carried_successes,
+                    *(
+                        self._action_binding(
+                            directory,
+                            manifest.record_sha256,
+                            action,
+                        )
+                        for action in direct_carried_actions
+                    ),
+                )
+                terminal = self._action_binding(
+                    directory,
+                    manifest.record_sha256,
+                    Phase5Action.STATE_PROTECTION_CHANGE,
+                )
             if (
                 any(item.status is not OutcomeStatus.SUCCEEDED for item in carried)
                 or terminal.status is not OutcomeStatus.UNKNOWN
@@ -5419,11 +5483,13 @@ def _matches_approved_teardown_resource(
     unknown: JsonValue | None,
     *,
     resource_type: str,
+    action: Phase5Action | None = None,
 ) -> bool:
     normalized = _normalize_observed_teardown_resource(
         actual,
         expected,
         resource_type=resource_type,
+        action=action,
     )
     if _matches_approved_before(normalized, expected, unknown):
         return True
@@ -5457,6 +5523,7 @@ def _normalize_observed_teardown_resource(
     expected: JsonValue,
     *,
     resource_type: str,
+    action: Phase5Action | None = None,
 ) -> JsonValue:
     if not isinstance(actual, dict) or not isinstance(expected, dict):
         return actual
@@ -5529,12 +5596,31 @@ def _normalize_observed_teardown_resource(
         ):
             filters[0]["calendar_period"] = None
 
-    if (
-        resource_type == "google_storage_bucket"
-        and normalized.get("hierarchical_namespace") == [{"enabled": False}]
-        and expected.get("hierarchical_namespace") == []
-    ):
-        normalized["hierarchical_namespace"] = []
+    if resource_type == "google_storage_bucket":
+        if (
+            normalized.get("hierarchical_namespace") == [{"enabled": False}]
+            and expected.get("hierarchical_namespace") == []
+        ):
+            normalized["hierarchical_namespace"] = []
+        if action in {
+            Phase5Action.STATE_PROTECTION_CHANGE,
+            Phase5Action.BOOTSTRAP_TEARDOWN,
+        }:
+            for field in (
+                "default_event_based_hold",
+                "enable_object_retention",
+                "requester_pays",
+            ):
+                if normalized.get(field) is False and expected.get(field) is None:
+                    normalized[field] = None
+            if (
+                normalized.get("force_destroy") is False
+                and normalized.get("deletion_policy") == "PREVENT"
+                and expected.get("force_destroy") is True
+                and expected.get("deletion_policy") == "DELETE"
+            ):
+                normalized["force_destroy"] = True
+                normalized["deletion_policy"] = "DELETE"
 
     if resource_type == "google_storage_bucket_iam_member":
         bucket = normalized.get("bucket")
@@ -5696,6 +5782,7 @@ def _verify_rendered_plan(
                     approved.before_projection,
                     approved.before_unknown,
                     resource_type=item.resource_type,
+                    action=expected.action,
                 )
             )
             for item in resources
@@ -5719,6 +5806,7 @@ def _verify_rendered_plan(
                     approved.authority_projection,
                     approved.authority_unknown,
                     resource_type=item.resource_type,
+                    action=expected.action,
                 )
                 for item in iam_edges
             )

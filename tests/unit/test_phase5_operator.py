@@ -898,6 +898,26 @@ def _record_action(
         result,
         finished_at=at + timedelta(seconds=1),
     )
+    acceptance: dict[str, object] = {}
+    if (
+        action
+        in {
+            operator.Phase5Action.PROVIDER_ACCEPTANCE,
+            operator.Phase5Action.HOSTED_ACCEPTANCE,
+        }
+        and outcome.status is operator.OutcomeStatus.SUCCEEDED
+    ):
+        acceptance = {
+            "acceptance_mode": (
+                "provider"
+                if action is operator.Phase5Action.PROVIDER_ACCEPTANCE
+                else "hosted"
+            ),
+            "acceptance_artifact_path": f"/tmp/{action.value}.json",
+            "acceptance_record_sha256": "d" * 64,
+            "acceptance_file_sha256": "e" * 64,
+            "acceptance_byte_count": 1,
+        }
     evidence = operator._seal(
         operator.Phase5Evidence,
         schema_version="reconcile/phase5-operator/v1",
@@ -909,6 +929,7 @@ def _record_action(
         action=action,
         status=outcome.status,
         observed_at=outcome.finished_at,
+        **acceptance,
     )
     state.complete(admission=admission, outcome=outcome, evidence=evidence)
     return operator.Phase5ActionEvidenceBinding(
@@ -970,6 +991,7 @@ def _continuation_successor(
     *,
     changed_paths: tuple[str, ...] = _PROJECT_DEPENDENCY_PATHS,
     project_dependency_paths: tuple[str, ...] = _PROJECT_DEPENDENCY_PATHS,
+    change_suffix: bytes = b"\n",
 ) -> tuple[
     Path,
     operator.Phase5StateStore,
@@ -980,7 +1002,7 @@ def _continuation_successor(
     repo_root = _copy_repo_inputs(tmp_path / "successor-repo")
     for relative in changed_paths:
         source = repo_root / relative
-        source.write_bytes(source.read_bytes() + b"\n")
+        source.write_bytes(source.read_bytes() + change_suffix)
     successor_root = tmp_path / "successor"
     successor_root.mkdir()
     state, manifest, approval, runner = _records(
@@ -989,6 +1011,63 @@ def _continuation_successor(
         project_dependency_paths=project_dependency_paths,
     )
     return repo_root, state, manifest, approval, runner
+
+
+def _terminal_state_protection_predecessor(
+    tmp_path: Path,
+) -> tuple[
+    operator.Phase5StateStore,
+    operator.Phase5ApprovalManifest,
+    operator.Phase5Approval,
+]:
+    tmp_path.mkdir()
+    initial, initial_manifest, initial_approval = _terminal_image_predecessor(
+        tmp_path / "initial"
+    )
+    (tmp_path / "first-repair").mkdir()
+    repo_root, state, manifest, approval, runner = _continuation_successor(
+        tmp_path / "first-repair"
+    )
+    operator.prepare_phase5_continuation(
+        predecessor_state_root=initial.root,
+        predecessor_manifest_sha256=initial_manifest.record_sha256,
+        predecessor_approval_sha256=initial_approval.record_sha256,
+        successor_state_root=state.root,
+        successor_manifest_sha256=manifest.record_sha256,
+        successor_approval_sha256=approval.record_sha256,
+        repo_root=repo_root,
+        prepared_at=_NOW + timedelta(minutes=2),
+        runner=runner,
+    )
+    success = subprocess.CompletedProcess(["fixed"], 0, b"", b"")
+    for minute, action in enumerate(
+        (
+            operator.Phase5Action.IMAGE_PUSH,
+            operator.Phase5Action.RUNTIME_APPLY,
+            operator.Phase5Action.PROVIDER_ACCEPTANCE,
+            operator.Phase5Action.HOSTED_ACCEPTANCE,
+            operator.Phase5Action.RUNTIME_TEARDOWN,
+            operator.Phase5Action.FOUNDATION_TEARDOWN,
+        ),
+        start=3,
+    ):
+        _record_action(
+            state,
+            manifest,
+            approval,
+            action,
+            at=_NOW + timedelta(minutes=minute),
+            result=success,
+        )
+    _record_action(
+        state,
+        manifest,
+        approval,
+        operator.Phase5Action.STATE_PROTECTION_CHANGE,
+        at=_NOW + timedelta(minutes=9),
+        result=object(),
+    )
+    return state, manifest, approval
 
 
 def test_manifest_freezes_exact_identity_limits_estimates_and_commands(
@@ -1524,6 +1603,65 @@ def test_continuation_carries_only_verified_successes_without_replaying_them(
         admitted_at=_NOW + timedelta(minutes=4),
     )
     assert image_admission.action is operator.Phase5Action.IMAGE_PUSH
+
+
+def test_continuation_carries_verified_teardown_chain_after_protection_unknown(
+    tmp_path: Path,
+) -> None:
+    predecessor, predecessor_manifest, predecessor_approval = (
+        _terminal_state_protection_predecessor(tmp_path / "predecessor")
+    )
+    (tmp_path / "second-repair").mkdir()
+    repo_root, successor, manifest, approval, runner = _continuation_successor(
+        tmp_path / "second-repair",
+        change_suffix=b"\n\n",
+    )
+
+    continuation = operator.prepare_phase5_continuation(
+        predecessor_state_root=predecessor.root,
+        predecessor_manifest_sha256=predecessor_manifest.record_sha256,
+        predecessor_approval_sha256=predecessor_approval.record_sha256,
+        successor_state_root=successor.root,
+        successor_manifest_sha256=manifest.record_sha256,
+        successor_approval_sha256=approval.record_sha256,
+        repo_root=repo_root,
+        prepared_at=_NOW + timedelta(minutes=10),
+        runner=runner,
+    )
+
+    assert tuple(item.action for item in continuation.carried_successes) == (
+        operator.Phase5Action.BOOTSTRAP_APPLY,
+        operator.Phase5Action.FOUNDATION_APPLY,
+        operator.Phase5Action.IMAGE_PUSH,
+        operator.Phase5Action.RUNTIME_APPLY,
+        operator.Phase5Action.PROVIDER_ACCEPTANCE,
+        operator.Phase5Action.HOSTED_ACCEPTANCE,
+        operator.Phase5Action.RUNTIME_TEARDOWN,
+        operator.Phase5Action.FOUNDATION_TEARDOWN,
+    )
+    assert (
+        continuation.terminal_action.action
+        is operator.Phase5Action.STATE_PROTECTION_CHANGE
+    )
+    assert continuation.terminal_action.status is operator.OutcomeStatus.UNKNOWN
+    assert (predecessor.root / "state" / "bootstrap.tfstate").read_bytes() == (
+        successor.root / "state" / "bootstrap.tfstate"
+    ).read_bytes()
+
+    with pytest.raises(operator.OperatorError, match="ACTION_ALREADY_ATTEMPTED"):
+        successor.admit(
+            manifest=manifest,
+            approval=approval,
+            action=operator.Phase5Action.FOUNDATION_TEARDOWN,
+            admitted_at=_NOW + timedelta(minutes=11),
+        )
+    protection = successor.admit(
+        manifest=manifest,
+        approval=approval,
+        action=operator.Phase5Action.STATE_PROTECTION_CHANGE,
+        admitted_at=_NOW + timedelta(minutes=11),
+    )
+    assert protection.action is operator.Phase5Action.STATE_PROTECTION_CHANGE
 
 
 def test_continuation_rejects_unsuccessful_predecessor_action(
@@ -2887,6 +3025,96 @@ def test_teardown_verifier_accepts_exact_foundation_provider_normalizations(
         approved,
         None,
         resource_type=resource_type,
+    )
+
+
+@pytest.mark.parametrize(
+    "action",
+    (
+        operator.Phase5Action.STATE_PROTECTION_CHANGE,
+        operator.Phase5Action.BOOTSTRAP_TEARDOWN,
+    ),
+)
+def test_bootstrap_teardown_accepts_exact_state_bucket_transition(
+    action: operator.Phase5Action,
+) -> None:
+    approved = {
+        "default_event_based_hold": None,
+        "deletion_policy": "DELETE",
+        "enable_object_retention": None,
+        "force_destroy": True,
+        "hierarchical_namespace": [],
+        "name": "approved-state-bucket",
+        "requester_pays": None,
+    }
+    observed = {
+        "default_event_based_hold": False,
+        "deletion_policy": "PREVENT",
+        "enable_object_retention": False,
+        "force_destroy": False,
+        "hierarchical_namespace": [{"enabled": False}],
+        "name": "approved-state-bucket",
+        "requester_pays": False,
+    }
+
+    assert operator._matches_approved_teardown_resource(
+        observed,
+        approved,
+        None,
+        resource_type="google_storage_bucket",
+        action=action,
+    )
+
+
+@pytest.mark.parametrize(
+    ("action", "field", "value"),
+    (
+        (operator.Phase5Action.FOUNDATION_TEARDOWN, None, None),
+        (operator.Phase5Action.STATE_PROTECTION_CHANGE, "force_destroy", True),
+        (
+            operator.Phase5Action.STATE_PROTECTION_CHANGE,
+            "deletion_policy",
+            "DELETE",
+        ),
+        (
+            operator.Phase5Action.STATE_PROTECTION_CHANGE,
+            "requester_pays",
+            True,
+        ),
+    ),
+)
+def test_bootstrap_teardown_rejects_unscoped_or_nearby_bucket_state(
+    action: operator.Phase5Action,
+    field: str | None,
+    value: object,
+) -> None:
+    approved = {
+        "default_event_based_hold": None,
+        "deletion_policy": "DELETE",
+        "enable_object_retention": None,
+        "force_destroy": True,
+        "hierarchical_namespace": [],
+        "name": "approved-state-bucket",
+        "requester_pays": None,
+    }
+    observed = {
+        "default_event_based_hold": False,
+        "deletion_policy": "PREVENT",
+        "enable_object_retention": False,
+        "force_destroy": False,
+        "hierarchical_namespace": [{"enabled": False}],
+        "name": "approved-state-bucket",
+        "requester_pays": False,
+    }
+    if field is not None:
+        observed[field] = value
+
+    assert not operator._matches_approved_teardown_resource(
+        observed,
+        approved,
+        None,
+        resource_type="google_storage_bucket",
+        action=action,
     )
 
 
