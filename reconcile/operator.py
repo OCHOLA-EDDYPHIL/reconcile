@@ -96,6 +96,7 @@ from reconcile.scenarios.service import (
 
 MAX_ACTIVE_SCENARIO_RUNS = 4
 MAX_RETAINED_SCENARIO_RUNS = 64
+_REQUEST_TERMINALIZATION_GRACE = timedelta(seconds=4)
 
 
 class OperatorServiceError(Exception):
@@ -829,11 +830,15 @@ class OperatorApplicationService:
             timeout: float | None = None
             if snapshot.envelope_summary is not None:
                 lane_ceiling = 1 if snapshot.mode is ScenarioRunMode.FIXED else 2
-                deadline_at = snapshot.accepted_at + timedelta(
-                    milliseconds=(
-                        snapshot.envelope_summary.evidence_budget.max_elapsed_ms
-                        * lane_ceiling
+                deadline_at = (
+                    snapshot.accepted_at
+                    + timedelta(
+                        milliseconds=(
+                            snapshot.envelope_summary.evidence_budget.max_elapsed_ms
+                            * lane_ceiling
+                        )
                     )
+                    + _REQUEST_TERMINALIZATION_GRACE
                 )
                 timeout = (deadline_at - self._now()).total_seconds()
                 if timeout <= 0:
