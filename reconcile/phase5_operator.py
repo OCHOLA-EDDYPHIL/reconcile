@@ -90,6 +90,9 @@ _LEGACY_STATE_BUCKET_CLEANUP_SOURCE_REVISIONS = frozenset(
         "dd8713fcb892049a4c07824e7dcec46c3708c480",
     }
 )
+_LEGACY_BOOTSTRAP_PROTECTION_UPDATE_SOURCE_REVISIONS = frozenset(
+    {"33954ba1f117ad49b01b0c7de7d2a8da025f2144"}
+)
 _PROJECT_DEPENDENCY_RECORD_PATH = "reconcile-0.1.0.dist-info/RECORD"
 
 _EXECUTION_ROOT_FILES = frozenset(
@@ -665,6 +668,19 @@ class Phase5ApprovalManifest(_HasRecordHash):
                     state_root=state_root,
                     image_archive=expected_archive,
                     include_state_bucket_cleanup=False,
+                    include_bootstrap_protection_update=False,
+                )
+            )
+        if self.source_revision in _LEGACY_BOOTSTRAP_PROTECTION_UPDATE_SOURCE_REVISIONS:
+            accepted_commands.append(
+                _fixed_commands(
+                    self.source_revision,
+                    self.image_digest,
+                    self.infrastructure_revision,
+                    self.semantic_config_sha256,
+                    state_root=state_root,
+                    image_archive=expected_archive,
+                    include_bootstrap_protection_update=False,
                 )
             )
         if self.source_revision in _LEGACY_IMAGE_ID_SOURCE_REVISIONS:
@@ -690,6 +706,7 @@ class Phase5ApprovalManifest(_HasRecordHash):
                         image_archive=expected_archive,
                         image_identity_format="--format={{.Id}}",
                         include_state_bucket_cleanup=False,
+                        include_bootstrap_protection_update=False,
                     )
                 )
         if self.commands not in accepted_commands:
@@ -1072,6 +1089,7 @@ def _fixed_commands(
         "--format={{.Id}}",
     ] = "--format={{.Descriptor.digest}}",
     include_state_bucket_cleanup: bool = True,
+    include_bootstrap_protection_update: bool = True,
 ) -> tuple[CommandDescriptor, ...]:
     root = _canonical_absolute_path(state_root, require_exists=False)
     plan_root = root / "plans"
@@ -1087,6 +1105,9 @@ def _fixed_commands(
         directory = _STACK_ROOTS[stack]
         variables = plan_root / f"{stem}.tfvars.json"
         execution_plan = execution_root / f"{stem}.tfplan"
+        protection_execution_plan = (
+            execution_root / "bootstrap-final-protection-update.tfplan"
+        )
         init = [
             _TERRAFORM,
             f"-chdir={directory}",
@@ -1140,8 +1161,40 @@ def _fixed_commands(
                     "--quiet",
                 ),
             )
+        commands += (tuple(init),)
+        if (
+            action is Phase5Action.BOOTSTRAP_TEARDOWN
+            and include_bootstrap_protection_update
+        ):
+            commands += (
+                (
+                    _TERRAFORM,
+                    f"-chdir={directory}",
+                    "plan",
+                    "-input=false",
+                    "-lock=true",
+                    "-no-color",
+                    f"-out={protection_execution_plan}",
+                    f"-var-file={variables}",
+                    "-target=google_storage_bucket.terraform_state",
+                ),
+                (
+                    _TERRAFORM,
+                    f"-chdir={directory}",
+                    "show",
+                    "-json",
+                    str(protection_execution_plan),
+                ),
+                (
+                    _TERRAFORM,
+                    f"-chdir={directory}",
+                    "apply",
+                    "-input=false",
+                    "-no-color",
+                    str(protection_execution_plan),
+                ),
+            )
         commands += (
-            tuple(init),
             tuple(plan),
             (
                 _TERRAFORM,
@@ -4275,6 +4328,13 @@ class Phase5StateStore:
                 ):
                     direct_carried_actions = (Phase5Action.STATE_PROTECTION_CHANGE,)
                     terminal_action = Phase5Action.BOOTSTRAP_TEARDOWN
+                elif (
+                    prior_actions == _BOOTSTRAP_CONTINUATION_ACTIONS
+                    and prior.terminal_action.action is Phase5Action.BOOTSTRAP_TEARDOWN
+                    and prior.terminal_action.status is OutcomeStatus.FAILED
+                ):
+                    direct_carried_actions = ()
+                    terminal_action = Phase5Action.BOOTSTRAP_TEARDOWN
                 else:
                     raise OperatorError("CONTINUATION_PREDECESSOR_HISTORY_INVALID")
                 expected_attempted = {
@@ -5076,15 +5136,22 @@ def _verify_approved_artifacts(
         raise OperatorError("APPROVED_ARTIFACT_DRIFT")
     plan = manifest.terraform_plan_for(action)
     if plan is not None:
-        execution_path = Path(plan.execution_plan_path)
-        try:
-            os.lstat(execution_path)
-        except FileNotFoundError:
-            pass
-        except OSError as error:
-            raise OperatorError("EXECUTION_PLAN_PATH_INVALID") from error
-        else:
-            raise OperatorError("EXECUTION_PLAN_ALREADY_EXISTS")
+        execution_paths = [Path(plan.execution_plan_path)]
+        if action is Phase5Action.BOOTSTRAP_TEARDOWN:
+            execution_paths.append(
+                Path(plan.execution_plan_path).with_name(
+                    "bootstrap-final-protection-update.tfplan"
+                )
+            )
+        for execution_path in execution_paths:
+            try:
+                os.lstat(execution_path)
+            except FileNotFoundError:
+                pass
+            except OSError as error:
+                raise OperatorError("EXECUTION_PLAN_PATH_INVALID") from error
+            else:
+                raise OperatorError("EXECUTION_PLAN_ALREADY_EXISTS")
     if action in {
         Phase5Action.BOOTSTRAP_APPLY,
         Phase5Action.BOOTSTRAP_TEARDOWN,
@@ -5845,6 +5912,94 @@ def _verify_runtime_update_plan(
         raise OperatorError("EXECUTION_PLAN_DRIFT")
 
 
+def _verify_bootstrap_protection_update_plan(
+    rendered: bytes,
+    expected: TerraformPlanBinding,
+) -> None:
+    _, resources, iam_edges, _, variables = _parse_plan_json(rendered)
+    approved_by_address = {item.address: item for item in expected.resources}
+    bucket_address = "google_storage_bucket.terraform_state"
+    service_addresses = {
+        item.address
+        for item in expected.resources
+        if item.resource_type == "google_project_service"
+        and item.address.startswith('google_project_service.bootstrap_required["')
+    }
+    expected_addresses = service_addresses | {bucket_address}
+    live_by_address = {item.address: item for item in resources}
+    live_changes = _plan_changes_by_address(rendered)
+    if (
+        expected.action is not Phase5Action.BOOTSTRAP_TEARDOWN
+        or len(service_addresses) != 6
+        or set(live_by_address) != expected_addresses
+        or set(live_changes) != expected_addresses
+        or iam_edges
+        or hashlib.sha256(_canonical_value_bytes(variables)).hexdigest()
+        != expected.variables_sha256
+    ):
+        raise OperatorError("EXECUTION_PLAN_DRIFT")
+
+    for address in sorted(service_addresses):
+        item = live_by_address[address]
+        approved = approved_by_address[address]
+        change = live_changes[address]
+        before = change.get("before")
+        after = change.get("after")
+        if (
+            approved.actions != ("delete",)
+            or item.resource_type != approved.resource_type
+            or item.provider_name != approved.provider_name
+            or item.actions != ("no-op",)
+            or item.before_unknown is not None
+            or change.get("after_unknown") not in (None, {})
+            or _canonical_value_bytes(before) != _canonical_value_bytes(after)
+            or not _matches_approved_teardown_resource(
+                before,
+                approved.before_projection,
+                approved.before_unknown,
+                resource_type=item.resource_type,
+                action=Phase5Action.BOOTSTRAP_TEARDOWN,
+            )
+        ):
+            raise OperatorError("EXECUTION_PLAN_DRIFT")
+
+    bucket = live_by_address[bucket_address]
+    approved_bucket = approved_by_address[bucket_address]
+    bucket_change = live_changes[bucket_address]
+    before = bucket_change.get("before")
+    after = bucket_change.get("after")
+    if (
+        approved_bucket.actions != ("delete",)
+        or bucket.resource_type != "google_storage_bucket"
+        or bucket.resource_type != approved_bucket.resource_type
+        or bucket.provider_name != approved_bucket.provider_name
+        or bucket.actions != ("update",)
+        or bucket.before_unknown is not None
+        or bucket_change.get("after_unknown") not in (None, {})
+        or not isinstance(before, dict)
+        or not isinstance(after, dict)
+        or before.get("force_destroy") is not False
+        or before.get("deletion_policy") != "PREVENT"
+        or after.get("force_destroy") is not True
+        or after.get("deletion_policy") != "DELETE"
+        or not _matches_approved_teardown_resource(
+            before,
+            approved_bucket.before_projection,
+            approved_bucket.before_unknown,
+            resource_type=bucket.resource_type,
+            action=Phase5Action.STATE_PROTECTION_CHANGE,
+        )
+        or not _matches_approved_teardown_resource(
+            after,
+            approved_bucket.before_projection,
+            approved_bucket.before_unknown,
+            resource_type=bucket.resource_type,
+            action=Phase5Action.BOOTSTRAP_TEARDOWN,
+        )
+    ):
+        raise OperatorError("EXECUTION_PLAN_DRIFT")
+
+
 def _verify_rendered_plan(
     rendered: bytes,
     expected: TerraformPlanBinding,
@@ -5947,29 +6102,43 @@ def _run_descriptor_once(
     stderr_parts: list[bytes] = []
     final_code = 0
     environment = _minimal_subprocess_environment(descriptor.environment)
-    execution_identity: ExecutionPlanIdentity | None = None
-    terraform_index_offset = (
-        1
-        if descriptor.action
-        in {
-            Phase5Action.BOOTSTRAP_APPLY,
-            Phase5Action.BOOTSTRAP_TEARDOWN,
-        }
-        else 0
-    )
-    terraform_plan_index = terraform_index_offset + 1
-    terraform_show_index = terraform_index_offset + 2
-    terraform_apply_index = terraform_index_offset + 3
+    execution_identities: dict[Path, ExecutionPlanIdentity] = {}
+    plan_stages: tuple[tuple[int, int, int, Path, bool], ...] = ()
+    if terraform_plan is not None:
+        if descriptor.action is Phase5Action.BOOTSTRAP_TEARDOWN:
+            protection_path = Path(terraform_plan.execution_plan_path).with_name(
+                "bootstrap-final-protection-update.tfplan"
+            )
+            plan_stages = (
+                (2, 3, 4, protection_path, True),
+                (5, 6, 7, Path(terraform_plan.execution_plan_path), False),
+            )
+        else:
+            terraform_index_offset = (
+                1 if descriptor.action is Phase5Action.BOOTSTRAP_APPLY else 0
+            )
+            plan_stages = (
+                (
+                    terraform_index_offset + 1,
+                    terraform_index_offset + 2,
+                    terraform_index_offset + 3,
+                    Path(terraform_plan.execution_plan_path),
+                    False,
+                ),
+            )
+    plan_by_index = {stage[0]: stage for stage in plan_stages}
+    show_by_index = {stage[1]: stage for stage in plan_stages}
+    apply_by_index = {stage[2]: stage for stage in plan_stages}
     for index, command in enumerate(descriptor.commands):
         remaining_seconds = int((_utc(deadline) - _utc(clock())).total_seconds())
         if remaining_seconds < 1:
             return object()
-        if terraform_plan is not None and index == terraform_apply_index:
+        if (apply_stage := apply_by_index.get(index)) is not None:
+            execution_path = apply_stage[3]
+            execution_identity = execution_identities.get(execution_path)
             if execution_identity is None:
                 return object()
-            _verify_execution_plan(
-                Path(terraform_plan.execution_plan_path), execution_identity
-            )
+            _verify_execution_plan(execution_path, execution_identity)
         _verify_execution_source_binding(execution_source)
         if command[0] == _TERRAFORM:
             cli_config = environment.get("TF_CLI_CONFIG_FILE")
@@ -6009,33 +6178,36 @@ def _run_descriptor_once(
             or type(result.stdout) is not bytes
             or type(result.stderr) is not bytes
             or len(result.stdout)
-            > (
-                _MAX_PLAN_JSON_BYTES
-                if terraform_plan is not None and index == terraform_show_index
-                else _MAX_OUTPUT_BYTES
-            )
+            > (_MAX_PLAN_JSON_BYTES if index in show_by_index else _MAX_OUTPUT_BYTES)
             or len(result.stderr) > _MAX_OUTPUT_BYTES
         ):
             return object()
         recorded_stdout = result.stdout
-        if terraform_plan is not None and index == terraform_show_index:
+        if index in show_by_index:
             recorded_stdout = hashlib.sha256(result.stdout).hexdigest().encode("ascii")
         stdout_parts.append(len(recorded_stdout).to_bytes(8, "big") + recorded_stdout)
         stderr_parts.append(len(result.stderr).to_bytes(8, "big") + result.stderr)
         final_code = result.returncode
         if final_code != 0:
             break
-        if terraform_plan is not None and index == terraform_plan_index:
-            execution_identity = _seal_execution_plan(
-                Path(terraform_plan.execution_plan_path)
-            )
-        if terraform_plan is not None and index == terraform_show_index:
+        if (plan_stage := plan_by_index.get(index)) is not None:
+            execution_path = plan_stage[3]
+            execution_identities[execution_path] = _seal_execution_plan(execution_path)
+        if (show_stage := show_by_index.get(index)) is not None:
+            execution_path = show_stage[3]
+            execution_identity = execution_identities.get(execution_path)
             if execution_identity is None:
                 return object()
-            _verify_execution_plan(
-                Path(terraform_plan.execution_plan_path), execution_identity
-            )
-            _verify_rendered_plan(result.stdout, terraform_plan)
+            _verify_execution_plan(execution_path, execution_identity)
+            if terraform_plan is None:  # pragma: no cover - stages require a plan
+                return object()
+            if show_stage[4]:
+                _verify_bootstrap_protection_update_plan(
+                    result.stdout,
+                    terraform_plan,
+                )
+            else:
+                _verify_rendered_plan(result.stdout, terraform_plan)
         if descriptor.action is Phase5Action.IMAGE_PUSH and index == 0:
             docker_config = next(
                 (
