@@ -1105,7 +1105,7 @@ def test_request_scoped_cancellation_signals_joins_and_clears_owned_state(
     asyncio.run(scenario())
 
 
-def test_request_scoped_wait_is_bounded_by_the_durable_deadline(
+def test_request_scoped_wait_is_bounded_by_the_terminalization_deadline(
     tmp_path: Path,
 ) -> None:
     async def scenario() -> None:
@@ -1121,7 +1121,7 @@ def test_request_scoped_wait_is_bounded_by_the_durable_deadline(
         with pytest.raises(DurableServiceUnavailable):
             await asyncio.wait_for(
                 service.create_and_wait(envelope),
-                timeout=2,
+                timeout=6,
             )
         assert service._tasks == {}
         assert service._cancellation_events == {}

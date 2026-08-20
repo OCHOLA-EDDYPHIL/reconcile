@@ -8,7 +8,7 @@ import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from itertools import pairwise
 from typing import Protocol
@@ -70,6 +70,8 @@ from reconcile.persistence.durable import (
 )
 from reconcile.persistence.events import EventJournalSnapshot
 from reconcile.runtime_provenance import build_runtime_provenance
+
+_TERMINALIZATION_GRACE = timedelta(seconds=4)
 
 
 class DurableExecutionStrategy(StrEnum):
@@ -956,7 +958,13 @@ class DurableInvestigationApplicationService:
                     raise RuntimeError("durable request lost its owned task")
             else:
                 try:
-                    await self._await_owned_task(task, current.limits.deadline_at)
+                    # Evidence and provider dispatch remain bound to deadline_at.
+                    # Allow only the already-owned task to durably persist its
+                    # terminal result and projections after that boundary.
+                    await self._await_owned_task(
+                        task,
+                        current.limits.deadline_at + _TERMINALIZATION_GRACE,
+                    )
                 except TimeoutError:
                     if not terminal_before_wait:
                         raise
