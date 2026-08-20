@@ -1921,8 +1921,6 @@ def test_continuation_retries_only_bootstrap_teardown_after_repeated_failure(
         result=subprocess.CompletedProcess(["fixed"], 1, b"", b"failed"),
     )
     bootstrap_state = state.root / "state" / "bootstrap.tfstate"
-    bootstrap_state.write_bytes(b'{"lineage":"phase5","serial":3}')
-    bootstrap_state.chmod(0o600)
 
     (tmp_path / "second-final-repair").mkdir()
     next_repo, successor, next_manifest, next_approval, next_runner = (
@@ -3626,6 +3624,73 @@ def test_bootstrap_teardown_cleanup_failure_prevents_terraform(
     assert isinstance(result, subprocess.CompletedProcess)
     assert result.returncode == 1
     assert observed == [cleanup]
+
+
+def test_bootstrap_teardown_accepts_exact_already_empty_cleanup_result(
+    tmp_path: Path,
+) -> None:
+    _, manifest, _, _ = _records(tmp_path)
+    descriptor = manifest.command_for(operator.Phase5Action.BOOTSTRAP_TEARDOWN)
+    base_runner = _Runner().bind_source(Path(manifest.execution_source.root))
+
+    def runner(
+        argv: tuple[str, ...],
+        *,
+        cwd: Path,
+        environment: dict[str, str] | Any,
+        timeout_seconds: int,
+    ) -> object:
+        if argv == descriptor.commands[0]:
+            base_runner.calls.append(argv)
+            base_runner.cwds.append(cwd)
+            base_runner.environments.append(dict(environment))
+            return subprocess.CompletedProcess(
+                list(argv),
+                1,
+                b"",
+                operator._EMPTY_STATE_BUCKET_CLEANUP_STDERR,
+            )
+        result = base_runner(
+            argv,
+            cwd=cwd,
+            environment=environment,
+            timeout_seconds=timeout_seconds,
+        )
+        if argv == descriptor.commands[6]:
+            assert isinstance(result, subprocess.CompletedProcess)
+            rendered = _live_teardown_plan(json.loads(result.stdout))
+            return subprocess.CompletedProcess(
+                list(argv),
+                0,
+                json.dumps(
+                    rendered,
+                    separators=(",", ":"),
+                    sort_keys=True,
+                ).encode(),
+                b"",
+            )
+        return result
+
+    result = operator._run_descriptor_once(
+        descriptor,
+        repo_root=Path(manifest.execution_source.root),
+        execution_source=manifest.execution_source,
+        runner=runner,
+        image_artifact=manifest.image_artifact,
+        terraform_plan=manifest.terraform_plan_for(
+            operator.Phase5Action.BOOTSTRAP_TEARDOWN
+        ),
+        python_dependencies=manifest.python_dependencies,
+        deadline=manifest.work_deadline,
+        clock=lambda: _NOW + timedelta(minutes=3),
+    )
+
+    assert isinstance(result, subprocess.CompletedProcess)
+    assert result.returncode == 0
+    assert (
+        tuple(call for call in base_runner.calls if call in descriptor.commands)
+        == descriptor.commands
+    )
 
 
 def test_bootstrap_teardown_rejects_unapplied_protection_before_destroy(
