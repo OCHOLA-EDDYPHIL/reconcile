@@ -1013,6 +1013,7 @@ def test_provider_explicit_unknown_accepts_predispatch_budget_stop() -> None:
         Classification.UNKNOWN,
         route,
         capabilities=(SANDBOX_ORDER_INGRESS_CAPABILITY_NAME,),
+        provider_event_shape="none",
     )
 
     _validate_provider_scenario(scenario)

@@ -955,6 +955,13 @@ def _validate_provider_event_provenance(
     )
     audit = report.probe_audit
 
+    if outcome is ScenarioHybridOutcome.EXPLICIT_UNKNOWN:
+        route = report.route_provenance
+        if route is not None and not route.planner_invoked:
+            if advisory_turns or adaptive_requests or fixed_requests or len(audit) != 1:
+                raise ValueError("predispatch UNKNOWN event provenance changed")
+            return
+
     if outcome is ScenarioHybridOutcome.FIXED_FALLBACK:
         if advisory_turns or adaptive_requests or len(fixed_requests) != 2:
             raise ValueError("fixed fallback event provenance changed")
