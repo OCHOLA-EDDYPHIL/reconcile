@@ -9,7 +9,6 @@ permissions:
   contents: read
 
 env:
-  UV_PYTHON: /usr/local/libexec/reconcile/python-3.12.13/bin/python3.12
   UV_PYTHON_DOWNLOADS: never
 
 jobs:

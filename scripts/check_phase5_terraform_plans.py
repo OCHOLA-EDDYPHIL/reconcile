@@ -1377,7 +1377,12 @@ def _run(
         timeout=120,
     )
     if result.returncode not in expected:
-        raise RuntimeError(f"subprocess failed with exit code {result.returncode}")
+        stdout = result.stdout.strip()[-4_096:] or "<empty>"
+        stderr = result.stderr.strip()[-4_096:] or "<empty>"
+        raise RuntimeError(
+            f"subprocess failed with exit code {result.returncode}; "
+            f"stdout={stdout!r}; stderr={stderr!r}"
+        )
     return result
 
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import shutil
 import stat
+import subprocess
 from copy import deepcopy
 from pathlib import Path
 from typing import Any
@@ -12,6 +13,24 @@ import pytest
 from scripts import check_phase5_terraform_plans as plans
 
 pytestmark = pytest.mark.unit
+
+
+def test_subprocess_failure_includes_bounded_diagnostics(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    failure = subprocess.CompletedProcess(
+        args=["terraform", "validate"],
+        returncode=1,
+        stdout="provider output",
+        stderr="sandbox denial",
+    )
+    monkeypatch.setattr(plans.subprocess, "run", lambda *args, **kwargs: failure)
+
+    with pytest.raises(
+        RuntimeError,
+        match="stdout='provider output'; stderr='sandbox denial'",
+    ):
+        plans._run(["terraform", "validate"], environment={})
 
 
 def _resource(address: str, after: dict[str, Any] | None = None) -> dict[str, Any]:
