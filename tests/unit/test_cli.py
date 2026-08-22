@@ -32,6 +32,11 @@ from reconcile.contracts import (
     InvestigationEvent,
     InvestigationEventType,
     InvestigationReport,
+    RecoveryRunEvent,
+    RecoveryRunFailureCategory,
+    RecoveryRunLifecycle,
+    RecoveryRunRequest,
+    RecoveryRunSnapshot,
     ScenarioLaunchName,
     ScenarioLaunchRequest,
     ScenarioLifecycleEventPayload,
@@ -57,7 +62,10 @@ from reconcile.interfaces.api_client import (
     ServiceUnavailableError,
     TransportError,
 )
-from reconcile.interfaces.operator_api_client import ScenarioLaunchResult
+from reconcile.interfaces.operator_api_client import (
+    RecoveryLaunchResult,
+    ScenarioLaunchResult,
+)
 from reconcile.operator import sanitize_report
 from reconcile.scenarios.service import (
     ScenarioMode,
@@ -68,6 +76,7 @@ from tests.contract._factories import (
     NOW,
     make_envelope,
     make_investigation_event,
+    make_recovery_run_examples,
     make_report,
 )
 
@@ -1240,3 +1249,75 @@ def test_scenario_requires_explicit_local_acknowledgement(
     assert result.exit_code == 2
     assert result.stdout_bytes == b""
     assert result.stderr_bytes == b"The input is invalid.\n"
+
+
+def test_recovery_run_uses_remote_api_without_local_acknowledgement(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request_example, _event, _launch, base, _scope = make_recovery_run_examples()
+    snapshot = RecoveryRunSnapshot.model_validate(
+        base.model_copy(
+            update={
+                "lifecycle": RecoveryRunLifecycle.FAILED,
+                "failure_category": RecoveryRunFailureCategory.INTERNAL_FAILURE,
+                "updated_at": NOW + timedelta(seconds=1),
+            }
+        )
+    )
+    requests: list[RecoveryRunRequest] = []
+    urls: list[str] = []
+
+    class FakeRecoveryClient:
+        def __init__(self, base_url: str) -> None:
+            urls.append(base_url)
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_exc_info: object) -> None:
+            return None
+
+        async def launch_recovery(
+            self,
+            request: RecoveryRunRequest,
+        ) -> RecoveryLaunchResult:
+            requests.append(request)
+            return RecoveryLaunchResult(created=True, snapshot=snapshot)
+
+        async def recovery_events(
+            self,
+            _run_id: str,
+        ) -> AsyncIterator[RecoveryRunEvent]:
+            if False:  # pragma: no cover - declares an empty async iterator.
+                yield make_recovery_run_examples()[1]
+
+        async def get_recovery_snapshot(self, _run_id: str) -> RecoveryRunSnapshot:
+            return snapshot
+
+    monkeypatch.setattr(cli_module, "_operator_client", FakeRecoveryClient)
+
+    result = _RUNNER.invoke(
+        app,
+        [
+            "recovery",
+            "run",
+            "cloud-run-rollout",
+            "--policy",
+            "adaptive",
+            "--fault",
+            "drop-after-accept",
+            "--run-id",
+            request_example.run_id,
+            "--api-url",
+            "http://127.0.0.1:9000",
+        ],
+    )
+
+    assert result.exit_code == 5
+    assert urls == ["http://127.0.0.1:9000"]
+    assert len(requests) == 1
+    assert requests[0].run_id == request_example.run_id
+    assert requests[0].policy.value == "adaptive"
+    assert requests[0].fault.value == "drop-after-accept"
+    assert "Recovery run: recovery-run-7" in result.stdout
+    assert "Lifecycle: FAILED" in result.stdout

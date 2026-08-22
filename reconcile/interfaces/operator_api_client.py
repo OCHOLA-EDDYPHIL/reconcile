@@ -16,12 +16,18 @@ from urllib.parse import urlsplit
 import httpx
 
 from reconcile.contracts import (
+    MAX_RECOVERY_RUN_EVENTS,
     MAX_SCENARIO_RUN_EVENTS,
     ApiError,
     ApiErrorCode,
     Classification,
     ContractError,
     ExecutionEnvelopeSummary,
+    RecoveryRunEvent,
+    RecoveryRunEventType,
+    RecoveryRunLifecycle,
+    RecoveryRunRequest,
+    RecoveryRunSnapshot,
     ScenarioLaunchRequest,
     ScenarioLifecycleEventPayload,
     ScenarioOperationalStatus,
@@ -119,6 +125,14 @@ class ScenarioLaunchResult:
     snapshot: ScenarioRunSnapshot
 
 
+@dataclass(frozen=True, slots=True)
+class RecoveryLaunchResult:
+    """Transport result for a newly accepted or exactly replayed recovery run."""
+
+    created: bool
+    snapshot: RecoveryRunSnapshot
+
+
 def _invalid_request() -> InvalidRequestError:
     return InvalidRequestError()
 
@@ -191,6 +205,16 @@ def _validated_cursor(value: int) -> int:
         isinstance(value, bool)
         or not isinstance(value, int)
         or not 0 <= value <= MAX_SCENARIO_RUN_EVENTS
+    ):
+        raise _invalid_request() from None
+    return value
+
+
+def _validated_recovery_cursor(value: int) -> int:
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, int)
+        or not 0 <= value <= MAX_RECOVERY_RUN_EVENTS
     ):
         raise _invalid_request() from None
     return value
@@ -358,6 +382,29 @@ def _decode_sse_event(
     return event
 
 
+def _decode_recovery_sse_event(
+    fields: dict[bytes, bytes],
+    *,
+    run_id: str,
+    expected_cursor: int,
+) -> RecoveryRunEvent:
+    try:
+        cursor_text = fields[b"id"].decode("ascii")
+        event_type = fields[b"event"].decode("ascii")
+    except (KeyError, UnicodeDecodeError):
+        raise _protocol_error() from None
+    if cursor_text != str(expected_cursor):
+        raise _protocol_error() from None
+    event = _decode_canonical(fields[b"data"], RecoveryRunEvent)
+    if (
+        event.cursor != expected_cursor
+        or event.run_id != run_id
+        or event.type.value != event_type
+    ):
+        raise _protocol_error() from None
+    return event
+
+
 def _is_accepted(event: ScenarioRunEvent) -> bool:
     return (
         event.type is ScenarioRunEventType.LIFECYCLE
@@ -371,6 +418,15 @@ def _is_terminal(event: ScenarioRunEvent) -> bool:
         event.type is ScenarioRunEventType.TERMINAL
         and type(event.payload) is TerminalStateEventPayload
     )
+
+
+def _is_recovery_terminal(event: RecoveryRunEvent) -> bool:
+    return event.type is RecoveryRunEventType.LIFECYCLE and event.payload.lifecycle in {
+        RecoveryRunLifecycle.COMPLETED,
+        RecoveryRunLifecycle.ESCALATED,
+        RecoveryRunLifecycle.FAILED,
+        RecoveryRunLifecycle.CANCELLED,
+    }
 
 
 def _validate_terminal_snapshot(
@@ -588,6 +644,50 @@ class OperatorApiClient:
             snapshot=snapshot,
         )
 
+    async def launch_recovery(
+        self,
+        request: RecoveryRunRequest,
+    ) -> RecoveryLaunchResult:
+        """Launch or replay one recovery run without retrying the POST."""
+
+        self._ensure_open()
+        try:
+            if type(request) is not RecoveryRunRequest:
+                raise TypeError
+            sealed_request = decode_contract(
+                canonical_json_bytes(request),
+                RecoveryRunRequest,
+            )
+            payload = canonical_json_bytes(sealed_request)
+        except Exception:
+            raise _invalid_request() from None
+
+        try:
+            headers = await self._request_headers("application/json")
+            headers["Content-Type"] = "application/json"
+            async with self._client.stream(
+                "POST",
+                "/api/v1/recovery-runs",
+                content=payload,
+                headers=headers,
+                timeout=self._launch_timeout,
+            ) as response:
+                if response.status_code not in {HTTPStatus.OK, HTTPStatus.ACCEPTED}:
+                    await _raise_api_error(response)
+                snapshot = await _decode_json_response(
+                    response,
+                    RecoveryRunSnapshot,
+                )
+                created = response.status_code == HTTPStatus.ACCEPTED
+        except InvestigationApiClientError:
+            raise
+        except Exception:
+            raise LaunchOutcomeUnknownError() from None
+
+        if snapshot.request != sealed_request:
+            raise _protocol_error() from None
+        return RecoveryLaunchResult(created=created, snapshot=snapshot)
+
     async def get_snapshot(self, investigation_id: str) -> ScenarioRunSnapshot:
         """Retrieve one path-bound canonical operator snapshot."""
 
@@ -607,6 +707,31 @@ class OperatorApiClient:
         except Exception:
             raise TransportError() from None
         if snapshot.investigation_id != validated_id:
+            raise _protocol_error() from None
+        return snapshot
+
+    async def get_recovery_snapshot(self, run_id: str) -> RecoveryRunSnapshot:
+        """Retrieve one path-bound canonical recovery-run snapshot."""
+
+        self._ensure_open()
+        validated_id = _validated_investigation_id(run_id)
+        try:
+            async with self._client.stream(
+                "GET",
+                f"/api/v1/recovery-runs/{validated_id}",
+                headers=await self._request_headers("application/json"),
+            ) as response:
+                if response.status_code != HTTPStatus.OK:
+                    await _raise_api_error(response)
+                snapshot = await _decode_json_response(
+                    response,
+                    RecoveryRunSnapshot,
+                )
+        except InvestigationApiClientError:
+            raise
+        except Exception:
+            raise TransportError() from None
+        if snapshot.request.run_id != validated_id:
             raise _protocol_error() from None
         return snapshot
 
@@ -684,6 +809,95 @@ class OperatorApiClient:
             cursor=cursor,
             reconnect_limit=reconnect_limit,
         )
+
+    def recovery_events(
+        self,
+        run_id: str,
+        *,
+        after: int = 0,
+        max_reconnects: int = _DEFAULT_RECONNECTS,
+    ) -> AsyncIterator[RecoveryRunEvent]:
+        """Iterate a recovery timeline through confirmed terminal state."""
+
+        self._ensure_open()
+        validated_id = _validated_investigation_id(run_id)
+        cursor = _validated_recovery_cursor(after)
+        reconnect_limit = _validated_reconnects(max_reconnects)
+        return self._recovery_event_iterator(
+            validated_id,
+            cursor=cursor,
+            reconnect_limit=reconnect_limit,
+        )
+
+    async def _recovery_event_iterator(
+        self,
+        run_id: str,
+        *,
+        cursor: int,
+        reconnect_limit: int,
+    ) -> AsyncIterator[RecoveryRunEvent]:
+        reconnects = 0
+        while True:
+            terminal_seen = False
+            try:
+                headers = await self._request_headers("text/event-stream")
+                if cursor:
+                    headers["Last-Event-ID"] = str(cursor)
+                async with self._client.stream(
+                    "GET",
+                    f"/api/v1/recovery-runs/{run_id}/events",
+                    headers=headers,
+                    timeout=self._event_timeout,
+                ) as response:
+                    if response.status_code != HTTPStatus.OK:
+                        await _raise_api_error(response)
+                    _require_content_type(response, "text/event-stream")
+                    _require_identity_encoding(response)
+
+                    async for fields in _sse_records(response):
+                        event = _decode_recovery_sse_event(
+                            fields,
+                            run_id=run_id,
+                            expected_cursor=cursor + 1,
+                        )
+                        cursor = event.cursor
+                        terminal_seen = _is_recovery_terminal(event)
+                        yield event
+                        if terminal_seen:
+                            break
+                        if cursor >= MAX_RECOVERY_RUN_EVENTS:
+                            raise _protocol_error() from None
+
+                snapshot = await self.get_recovery_snapshot(run_id)
+                if snapshot.event_cursor < cursor:
+                    raise _protocol_error() from None
+                terminal_snapshot = snapshot.lifecycle in {
+                    RecoveryRunLifecycle.COMPLETED,
+                    RecoveryRunLifecycle.ESCALATED,
+                    RecoveryRunLifecycle.FAILED,
+                    RecoveryRunLifecycle.CANCELLED,
+                }
+                if terminal_seen or (
+                    terminal_snapshot and snapshot.event_cursor == cursor
+                ):
+                    if snapshot.event_cursor != cursor or not terminal_snapshot:
+                        raise _protocol_error() from None
+                    return
+                raise StreamInterruptedError(cursor)
+            except _IdentityUnavailableError:
+                raise
+            except InvestigationApiClientError as error:
+                if not isinstance(error, TransportError):
+                    raise
+            except Exception:
+                pass
+
+            if reconnects >= reconnect_limit:
+                raise StreamInterruptedError(cursor) from None
+            reconnects += 1
+            delay = min(0.01 * (2 ** (reconnects - 1) - 1), 0.25)
+            if delay:
+                await asyncio.sleep(delay)
 
     async def _event_iterator(
         self,
@@ -770,6 +984,7 @@ __all__ = [
     "DEFAULT_OPERATOR_API_BASE_URL",
     "LaunchOutcomeUnknownError",
     "OperatorApiClient",
+    "RecoveryLaunchResult",
     "ScenarioLaunchResult",
     "StreamInterruptedError",
 ]
