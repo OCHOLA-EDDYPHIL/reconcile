@@ -22,6 +22,7 @@ from reconcile.contracts import (
     RecoveryAuthorityKind,
     RecoveryDispatchOutcome,
     RecoveryLaunchPermitState,
+    RecoveryNodeState,
     RecoveryPreparedAction,
     RecoveryRunEventType,
     RecoveryRunFailureCategory,
@@ -533,16 +534,122 @@ def test_claimed_action_permit_is_reconciled_after_restart_without_redispatch(
         clock=lambda: NOW + timedelta(seconds=7),
         claim_id_factory=lambda: "claim-record",
     )
-    completed = asyncio.run(resumed_worker.run(request.run_id))
+    original_node_state = resumed_worker._node_state
+
+    async def crash_after_claimed_state(run_id, node_id, state, *, attempt):
+        result = await original_node_state(
+            run_id,
+            node_id,
+            state,
+            attempt=attempt,
+        )
+        if node_id == "stage" and state is RecoveryNodeState.DISPATCH_CLAIMED:
+            raise _ProcessCrash
+        return result
+
+    resumed_worker._node_state = crash_after_claimed_state
+    with pytest.raises(_ProcessCrash):
+        asyncio.run(resumed_worker.run(request.run_id))
+    claimed_projection = asyncio.run(store.get(request.run_id))
+    assert claimed_projection.nodes[0].state is RecoveryNodeState.DISPATCH_CLAIMED
+
+    final_gateway = _Gateway(store, authority, definition)
+    final_worker = ProofToPermitWorkflow(
+        store=store,
+        definition_factory=lambda _request: definition,
+        evidence_source=_Evidence(states),
+        action_preparer=_Preparer(),
+        recovery_agent=RecoveryAgent(_DynamicPlanner()),
+        rollout_agent=RolloutAgent(final_gateway),
+        permit_authority=authority,
+        clock=lambda: NOW + timedelta(seconds=7),
+        claim_id_factory=lambda: "claim-record",
+    )
+    completed = asyncio.run(final_worker.run(request.run_id))
     assert completed.lifecycle is RecoveryRunLifecycle.COMPLETED
     assert len(crashing_gateway.scopes) == 2
-    assert len(resumed_gateway.scopes) == 1
-    assert resumed_gateway.scopes[0].target_node_id == "record"
+    assert resumed_gateway.scopes == []
+    assert len(final_gateway.scopes) == 1
+    assert final_gateway.scopes[0].target_node_id == "record"
     assert completed.action_permits[0].state is ActionPermitState.CLAIMED
     # A terminal replay is also a pure read.
-    replayed = asyncio.run(resumed_worker.run(request.run_id))
+    replayed = asyncio.run(final_worker.run(request.run_id))
     assert replayed == completed
-    assert len(resumed_gateway.scopes) == 1
+    assert len(final_gateway.scopes) == 1
+
+
+def test_completed_continue_dispatch_resumes_after_successor_activation(
+    tmp_path,
+) -> None:
+    definition, states = _definition_and_states()
+    request = RecoveryRunRequest(
+        schema_version=RECOVERY_RUN_REQUEST_VERSION,
+        run_id="recovery-successor-restart-7",
+        scenario="cloud-run-rollout",
+        policy=RecoveryRunPolicy.ADAPTIVE,
+        fault=RecoveryRunFault.DROP_AFTER_ACCEPT,
+    )
+    store = InMemoryRecoveryRunStore()
+    authority = PermitAuthority(
+        SqliteDurableRuntimeStore(tmp_path / "successor-restart.sqlite3"),
+        clock=lambda: NOW + timedelta(seconds=7),
+    )
+    first_gateway = _Gateway(store, authority, definition)
+    first_worker = ProofToPermitWorkflow(
+        store=store,
+        definition_factory=lambda _request: definition,
+        evidence_source=_Evidence(states),
+        action_preparer=_Preparer(),
+        recovery_agent=RecoveryAgent(_DynamicPlanner()),
+        rollout_agent=RolloutAgent(first_gateway),
+        permit_authority=authority,
+        clock=lambda: NOW + timedelta(seconds=7),
+        claim_id_factory=iter(("claim-launch", "claim-promote")).__next__,
+    )
+    original_node_state = first_worker._node_state
+
+    async def crash_after_successor_state(run_id, node_id, state, *, attempt):
+        result = await original_node_state(
+            run_id,
+            node_id,
+            state,
+            attempt=attempt,
+        )
+        if node_id == "promote" and state is RecoveryNodeState.RECONCILING:
+            raise _ProcessCrash
+        return result
+
+    first_worker._node_state = crash_after_successor_state
+
+    async def crash():
+        await store.create(request, definition.chain, created_at=NOW)
+        await first_worker.run(request.run_id)
+
+    with pytest.raises(_ProcessCrash):
+        asyncio.run(crash())
+    interrupted = asyncio.run(store.get(request.run_id))
+    assert interrupted.nodes[0].state is RecoveryNodeState.PERMITTED
+    assert interrupted.nodes[1].state is RecoveryNodeState.RECONCILING
+    assert interrupted.action_permits[0].state is ActionPermitState.COMPLETED
+
+    final_gateway = _Gateway(store, authority, definition)
+    final_worker = ProofToPermitWorkflow(
+        store=store,
+        definition_factory=lambda _request: definition,
+        evidence_source=_Evidence(states),
+        action_preparer=_Preparer(),
+        recovery_agent=RecoveryAgent(_DynamicPlanner()),
+        rollout_agent=RolloutAgent(final_gateway),
+        permit_authority=authority,
+        clock=lambda: NOW + timedelta(seconds=7),
+        claim_id_factory=lambda: "claim-record",
+    )
+    completed = asyncio.run(final_worker.run(request.run_id))
+
+    assert completed.lifecycle is RecoveryRunLifecycle.COMPLETED
+    assert len(first_gateway.scopes) == 2
+    assert len(final_gateway.scopes) == 1
+    assert final_gateway.scopes[0].target_node_id == "record"
 
 
 def test_stale_pre_stage_etag_cannot_enter_a_certificate_scoped_dispatch(

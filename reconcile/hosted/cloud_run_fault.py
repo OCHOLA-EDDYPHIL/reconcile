@@ -43,8 +43,12 @@ from reconcile.contracts.recovery import (
 from reconcile.contracts.recovery_run import (
     RecoveryActionScope,
     RecoveryAuthorityKind,
+    RecoveryDecision,
     RecoveryDispatchOutcome,
     RecoveryLaunchPermit,
+    RecoveryNodeState,
+    RecoveryRunFault,
+    RecoveryRunLifecycle,
     RecoveryRunSnapshot,
 )
 from reconcile.controller.permits import PermitAuthority, action_permit_from_certificate
@@ -277,9 +281,20 @@ class RecoveryCloudRunCanaryActionAuthorizer:
         if cloud_run_action_request_sha256(request) != scope.action_request_sha256:
             raise PermissionError("canary request does not match recovery authority")
         snapshot = await self._store.get(scope.run_id)
+        if snapshot.lifecycle is not RecoveryRunLifecycle.RUNNING:
+            raise PermissionError("canary recovery run is not active")
         node = self._node(snapshot, scope.target_node_id)
         if node.semantic_action.semantic_action_sha256 != scope.semantic_action_sha256:
             raise PermissionError("canary semantic action changed")
+        progress = {item.node_id: item for item in snapshot.nodes}
+        expected_fault_mode = (
+            CloudRunFaultMode.DROP_AFTER_ACCEPT
+            if request.action is CloudRunCanaryAction.STAGE
+            and snapshot.request.fault is RecoveryRunFault.DROP_AFTER_ACCEPT
+            else CloudRunFaultMode.PASS_THROUGH
+        )
+        if request.fault_mode is not expected_fault_mode:
+            raise PermissionError("canary recovery fault mode changed")
 
         if scope.authority_kind is RecoveryAuthorityKind.LAUNCH_PERMIT:
             launch = snapshot.launch_permit
@@ -291,6 +306,9 @@ class RecoveryCloudRunCanaryActionAuthorizer:
                 or canonical_sha256(launch) != scope.authority_sha256
                 or request.operation_id != node.envelope.operation_id
                 or node.depends_on
+                or snapshot.active_node_id != node.node_id
+                or progress[node.node_id].state
+                is not RecoveryNodeState.DISPATCH_PENDING
             ):
                 raise PermissionError("canary launch authority changed")
             arguments = node.semantic_action.semantic_arguments
@@ -326,14 +344,31 @@ class RecoveryCloudRunCanaryActionAuthorizer:
             raise PermissionError("canary certificate authority is unavailable")
         certificate = certificate_matches[0]
         expected = action_permit_from_certificate(certificate)
+        source_progress = (
+            None if expected is None else progress.get(expected.source_node_id)
+        )
         if (
             expected is None
             or expected.permit_id != scope.authority_id
             or canonical_sha256(expected) != scope.authority_sha256
             or expected.action is not scope.permit_action
+            or expected.source_node_id != scope.source_node_id
             or expected.target_node_id != node.node_id
+            or expected.semantic_action_sha256 != scope.semantic_action_sha256
+            or snapshot.active_node_id != expected.source_node_id
+            or source_progress is None
+            or source_progress.state is not RecoveryNodeState.PERMITTED
+            or progress[node.node_id].state is not RecoveryNodeState.WAITING
+            or snapshot.decision is not RecoveryDecision.CONTINUE
         ):
             raise PermissionError("canary action permit changed")
+        projected_permits = tuple(
+            item
+            for item in snapshot.action_permits
+            if item.permit_id == expected.permit_id
+        )
+        if projected_permits != (expected,):
+            raise PermissionError("canary action permit is not dispatchable")
         arguments = node.semantic_action.semantic_arguments
         if (
             arguments.get("release_id") != request.release_id

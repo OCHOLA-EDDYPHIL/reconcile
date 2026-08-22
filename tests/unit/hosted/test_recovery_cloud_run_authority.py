@@ -11,6 +11,7 @@ from reconcile.contracts import (
     RECOVERY_ACTION_SCOPE_VERSION,
     RECOVERY_LAUNCH_PERMIT_VERSION,
     RECOVERY_RUN_REQUEST_VERSION,
+    ActionPermitState,
     RecoveryActionScope,
     RecoveryAuthorityKind,
     RecoveryDecision,
@@ -21,6 +22,7 @@ from reconcile.contracts import (
     RecoveryNodeState,
     RecoveryRunEventPayload,
     RecoveryRunEventType,
+    RecoveryRunFailureCategory,
     RecoveryRunFault,
     RecoveryRunLifecycle,
     RecoveryRunPolicy,
@@ -86,6 +88,125 @@ def _provisional_scope(
         permit_action=permit_action,
         certificate_id=certificate_id,
         certificate_sha256=certificate_sha256,
+    )
+
+
+async def _record_dispatchable_promotion(
+    store: InMemoryRecoveryRunStore,
+    request: RecoveryRunRequest,
+    chain,
+    report,
+    certificate,
+    permit,
+) -> None:
+    snapshot, _created = await store.create(request, chain, created_at=NOW)
+    for event_type, payload, occurred_at in (
+        (
+            RecoveryRunEventType.LIFECYCLE,
+            RecoveryRunEventPayload(lifecycle=RecoveryRunLifecycle.RUNNING),
+            NOW,
+        ),
+        (
+            RecoveryRunEventType.NODE,
+            RecoveryRunEventPayload(
+                node=RecoveryNodeProgress(
+                    node_id=certificate.node_id,
+                    state=RecoveryNodeState.RECONCILING,
+                    attempt=1,
+                )
+            ),
+            NOW,
+        ),
+        (
+            RecoveryRunEventType.EVIDENCE,
+            RecoveryRunEventPayload(report=report),
+            NOW + timedelta(seconds=5),
+        ),
+        (
+            RecoveryRunEventType.DECISION,
+            RecoveryRunEventPayload(
+                decision=RecoveryDecision.CONTINUE,
+                certificate=certificate,
+            ),
+            NOW + timedelta(seconds=6),
+        ),
+        (
+            RecoveryRunEventType.NODE,
+            RecoveryRunEventPayload(
+                node=RecoveryNodeProgress(
+                    node_id=certificate.node_id,
+                    state=RecoveryNodeState.VERIFIED,
+                    attempt=1,
+                )
+            ),
+            NOW + timedelta(seconds=6),
+        ),
+        (
+            RecoveryRunEventType.ACTION_PERMIT,
+            RecoveryRunEventPayload(action_permit=permit),
+            NOW + timedelta(seconds=6),
+        ),
+        (
+            RecoveryRunEventType.NODE,
+            RecoveryRunEventPayload(
+                node=RecoveryNodeProgress(
+                    node_id=certificate.node_id,
+                    state=RecoveryNodeState.PERMITTED,
+                    attempt=1,
+                )
+            ),
+            NOW + timedelta(seconds=6),
+        ),
+    ):
+        snapshot = await store.append(
+            request.run_id,
+            expected_revision=snapshot.revision,
+            event_type=event_type,
+            payload=payload,
+            occurred_at=occurred_at,
+        )
+
+
+def _promotion_action(
+    request: RecoveryRunRequest,
+    chain,
+    certificate,
+    permit,
+    *,
+    source_node_id: str | None = None,
+    fault_mode: CloudRunFaultMode = CloudRunFaultMode.PASS_THROUGH,
+) -> CloudRunCanaryActionRequest:
+    target = chain.nodes[1]
+    provisional = _provisional_scope(
+        run_id=request.run_id,
+        source_node_id=source_node_id or certificate.node_id,
+        target_node_id=target.node_id,
+        semantic_action_sha256=target.semantic_action.semantic_action_sha256,
+        authority_kind=RecoveryAuthorityKind.ACTION_PERMIT,
+        authority_id=permit.permit_id,
+        permit_action=permit.action,
+        certificate_id=certificate.certificate_id,
+        certificate_sha256=canonical_sha256(certificate),
+    )
+    action = CloudRunCanaryActionRequest(
+        schema_version=CLOUD_RUN_CANARY_ACTION_REQUEST_VERSION,
+        request_id="request-promote-7",
+        action=CloudRunCanaryAction.PROMOTE,
+        fault_mode=fault_mode,
+        release_id=RELEASE_ID,
+        revision=REVISION,
+        service_etag="etag-release-7",
+        scope=provisional,
+    )
+    return action.model_copy(
+        update={
+            "scope": provisional.model_copy(
+                update={
+                    "action_request_sha256": cloud_run_action_request_sha256(action),
+                    "authority_sha256": canonical_sha256(permit),
+                }
+            )
+        }
     )
 
 
@@ -209,35 +330,7 @@ def test_certificate_bound_promotion_rejects_tampering_before_claim(tmp_path) ->
     )
     permit = asyncio.run(permit_authority.issue_permit(certificate))
     assert permit is not None
-    target = chain.nodes[1]
-    provisional = _provisional_scope(
-        run_id=request.run_id,
-        source_node_id=certificate.node_id,
-        target_node_id=target.node_id,
-        semantic_action_sha256=target.semantic_action.semantic_action_sha256,
-        authority_kind=RecoveryAuthorityKind.ACTION_PERMIT,
-        authority_id=permit.permit_id,
-        permit_action=permit.action,
-        certificate_id=certificate.certificate_id,
-        certificate_sha256=canonical_sha256(certificate),
-    )
-    action = CloudRunCanaryActionRequest(
-        schema_version=CLOUD_RUN_CANARY_ACTION_REQUEST_VERSION,
-        request_id="request-promote-7",
-        action=CloudRunCanaryAction.PROMOTE,
-        fault_mode=CloudRunFaultMode.PASS_THROUGH,
-        release_id=RELEASE_ID,
-        revision=REVISION,
-        service_etag="etag-release-7",
-        scope=provisional,
-    )
-    scope = provisional.model_copy(
-        update={
-            "action_request_sha256": cloud_run_action_request_sha256(action),
-            "authority_sha256": canonical_sha256(permit),
-        }
-    )
-    action = action.model_copy(update={"scope": scope})
+    action = _promotion_action(request, chain, certificate, permit)
     authorizer = RecoveryCloudRunCanaryActionAuthorizer(
         recovery_store=store,
         permit_authority=permit_authority,
@@ -245,30 +338,13 @@ def test_certificate_bound_promotion_rejects_tampering_before_claim(tmp_path) ->
     )
 
     async def exercise():
-        snapshot, _created = await store.create(request, chain, created_at=NOW)
-        snapshot = await store.append(
-            request.run_id,
-            expected_revision=snapshot.revision,
-            event_type=RecoveryRunEventType.LIFECYCLE,
-            payload=RecoveryRunEventPayload(lifecycle=RecoveryRunLifecycle.RUNNING),
-            occurred_at=NOW,
-        )
-        snapshot = await store.append(
-            request.run_id,
-            expected_revision=snapshot.revision,
-            event_type=RecoveryRunEventType.EVIDENCE,
-            payload=RecoveryRunEventPayload(report=report),
-            occurred_at=NOW + timedelta(seconds=5),
-        )
-        await store.append(
-            request.run_id,
-            expected_revision=snapshot.revision,
-            event_type=RecoveryRunEventType.DECISION,
-            payload=RecoveryRunEventPayload(
-                decision=RecoveryDecision.CONTINUE,
-                certificate=certificate,
-            ),
-            occurred_at=NOW + timedelta(seconds=6),
+        await _record_dispatchable_promotion(
+            store,
+            request,
+            chain,
+            report,
+            certificate,
+            permit,
         )
         tampered = action.model_copy(update={"revision": "other-revision"})
         with pytest.raises(PermissionError, match="request"):
@@ -282,3 +358,124 @@ def test_certificate_bound_promotion_rejects_tampering_before_claim(tmp_path) ->
     completed = asyncio.run(exercise())
     assert completed.state.value == "COMPLETED"
     assert completed.claim_id == "claim-7"
+
+
+@pytest.mark.parametrize(
+    ("source_node_id", "fault_mode", "message"),
+    (
+        ("record", CloudRunFaultMode.PASS_THROUGH, "action permit"),
+        ("stage", CloudRunFaultMode.DROP_AFTER_ACCEPT, "fault mode"),
+    ),
+)
+def test_certificate_bound_promotion_rejects_self_consistent_scope_tampering(
+    tmp_path,
+    source_node_id: str,
+    fault_mode: CloudRunFaultMode,
+    message: str,
+) -> None:
+    certificate, _evaluation, report, chain, _envelope = _verify(
+        node_id="stage",
+        kind="committed",
+    )
+    request = _run_request(f"recovery-scope-{source_node_id}-{fault_mode.value}")
+    store = InMemoryRecoveryRunStore()
+    permit_authority = PermitAuthority(
+        SqliteDurableRuntimeStore(tmp_path / "tampered-scope.sqlite3"),
+        clock=lambda: NOW + timedelta(seconds=7),
+    )
+    permit = asyncio.run(permit_authority.issue_permit(certificate))
+    assert permit is not None
+    action = _promotion_action(
+        request,
+        chain,
+        certificate,
+        permit,
+        source_node_id=source_node_id,
+        fault_mode=fault_mode,
+    )
+    authorizer = RecoveryCloudRunCanaryActionAuthorizer(
+        recovery_store=store,
+        permit_authority=permit_authority,
+        clock=lambda: NOW + timedelta(seconds=7),
+    )
+
+    async def exercise():
+        await _record_dispatchable_promotion(
+            store,
+            request,
+            chain,
+            report,
+            certificate,
+            permit,
+        )
+        with pytest.raises(PermissionError, match=message):
+            await authorizer.claim(action)
+        return await permit_authority.get_permit(permit.permit_id)
+
+    retained = asyncio.run(exercise())
+    assert retained.state is ActionPermitState.ISSUED
+
+
+@pytest.mark.parametrize(
+    ("lifecycle", "category"),
+    (
+        (
+            RecoveryRunLifecycle.FAILED,
+            RecoveryRunFailureCategory.INTERNAL_FAILURE,
+        ),
+        (
+            RecoveryRunLifecycle.CANCELLED,
+            RecoveryRunFailureCategory.CANCELLED,
+        ),
+    ),
+)
+def test_terminal_recovery_run_cannot_claim_an_unspent_action_permit(
+    tmp_path,
+    lifecycle: RecoveryRunLifecycle,
+    category: RecoveryRunFailureCategory,
+) -> None:
+    certificate, _evaluation, report, chain, _envelope = _verify(
+        node_id="stage",
+        kind="committed",
+    )
+    request = _run_request(f"recovery-terminal-{lifecycle.value.lower()}")
+    store = InMemoryRecoveryRunStore()
+    permit_authority = PermitAuthority(
+        SqliteDurableRuntimeStore(tmp_path / "terminal-scope.sqlite3"),
+        clock=lambda: NOW + timedelta(seconds=7),
+    )
+    permit = asyncio.run(permit_authority.issue_permit(certificate))
+    assert permit is not None
+    action = _promotion_action(request, chain, certificate, permit)
+    authorizer = RecoveryCloudRunCanaryActionAuthorizer(
+        recovery_store=store,
+        permit_authority=permit_authority,
+        clock=lambda: NOW + timedelta(seconds=7),
+    )
+
+    async def exercise():
+        await _record_dispatchable_promotion(
+            store,
+            request,
+            chain,
+            report,
+            certificate,
+            permit,
+        )
+        snapshot = await store.get(request.run_id)
+        await store.append(
+            request.run_id,
+            expected_revision=snapshot.revision,
+            event_type=RecoveryRunEventType.LIFECYCLE,
+            payload=RecoveryRunEventPayload(
+                lifecycle=lifecycle,
+                failure_category=category,
+            ),
+            occurred_at=NOW + timedelta(seconds=7),
+        )
+        with pytest.raises(PermissionError, match="not active"):
+            await authorizer.claim(action)
+        return await permit_authority.get_permit(permit.permit_id)
+
+    retained = asyncio.run(exercise())
+    assert retained.state is ActionPermitState.ISSUED

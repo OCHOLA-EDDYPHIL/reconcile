@@ -64,6 +64,7 @@ from reconcile.persistence.recovery_runs import (
     RecoveryRunConflict,
     RecoveryRunEventSnapshot,
     RecoveryRunStore,
+    is_terminal_recovery_run,
 )
 from reconcile.recovery_agents import (
     RecoveryAgent,
@@ -383,16 +384,25 @@ class ProofToPermitWorkflow:
         *,
         attempt: int,
     ) -> RecoveryRunSnapshot:
-        return await self._append(
+        snapshot = await self._store.get(run_id)
+        desired = RecoveryNodeProgress(
+            node_id=node_id,
+            state=state,
+            attempt=attempt,
+        )
+        current = tuple(item for item in snapshot.nodes if item.node_id == node_id)
+        if len(current) != 1:
+            raise RecoveryDefinitionError("recovery node progress is not unique")
+        if is_terminal_recovery_run(snapshot.lifecycle):
+            raise RecoveryRunConflict(run_id)
+        if current[0] == desired:
+            return snapshot
+        return await self._store.append(
             run_id,
-            RecoveryRunEventType.NODE,
-            RecoveryRunEventPayload(
-                node=RecoveryNodeProgress(
-                    node_id=node_id,
-                    state=state,
-                    attempt=attempt,
-                )
-            ),
+            expected_revision=snapshot.revision,
+            event_type=RecoveryRunEventType.NODE,
+            payload=RecoveryRunEventPayload(node=desired),
+            occurred_at=self._now(snapshot),
         )
 
     async def _prepare_action(
