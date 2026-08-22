@@ -30,6 +30,7 @@ from reconcile.contracts import (
     RecoveryRunLifecycle,
     RecoveryRunPolicy,
     RecoveryRunRequest,
+    VerifiedCertificate,
     canonical_sha256,
 )
 from reconcile.contracts.base import canonical_json_value_bytes
@@ -67,10 +68,12 @@ pytestmark = pytest.mark.unit
 class _Evidence:
     def __init__(self, states: dict[str, RecoveryEvidenceState]) -> None:
         self.states = states
+        self.current_calls: list[str] = []
         self.fixed_calls: list[str] = []
         self.probe_calls: list[str] = []
 
     async def current(self, _run_id, node, _envelope):
+        self.current_calls.append(node.node_id)
         return self.states[node.node_id]
 
     async def fixed(self, _run_id, node, _envelope):
@@ -268,6 +271,7 @@ class _Gateway:
         self.definition = definition
         self.scopes = []
         self.prepared = []
+        self.provider_calls = 0
         self.crash_after_claim = crash_after_claim
 
     async def dispatch(self, prepared, scope):
@@ -275,6 +279,11 @@ class _Gateway:
         self.prepared.append(prepared)
         self.scopes.append(scope)
         if scope.authority_kind is RecoveryAuthorityKind.LAUNCH_PERMIT:
+            snapshot = await self.store.get(scope.run_id)
+            progress = next(
+                item for item in snapshot.nodes if item.node_id == scope.target_node_id
+            )
+            assert progress.state is RecoveryNodeState.DISPATCH_PENDING
             claimed = await self.store.claim_launch(
                 scope.run_id,
                 launch_permit_id=scope.authority_id,
@@ -320,6 +329,7 @@ class _Gateway:
         if self.crash_after_claim:
             self.crash_after_claim = False
             raise _ProcessCrash
+        self.provider_calls += 1
         completed = await self.authority.complete_dispatch(
             claimed,
             PermitCompletionOutcome.SUCCEEDED,
@@ -330,8 +340,119 @@ class _Gateway:
         )
 
 
+class _BlockingClaimGateway(_Gateway):
+    def __init__(self, store, authority, definition) -> None:
+        super().__init__(store, authority, definition)
+        self.claimed = asyncio.Event()
+
+    async def dispatch(self, prepared, scope):
+        if scope.authority_kind is RecoveryAuthorityKind.LAUNCH_PERMIT:
+            return await super().dispatch(prepared, scope)
+        self.prepared.append(prepared)
+        self.scopes.append(scope)
+        snapshot = await self.store.get(scope.run_id)
+        certificate = next(
+            item
+            for item in snapshot.certificates
+            if item.certificate_id == scope.certificate_id
+        )
+        target = next(
+            item
+            for item in self.definition.chain.nodes
+            if item.node_id == scope.target_node_id
+        )
+        await self.authority.claim_for_dispatch(
+            permit_id=scope.authority_id,
+            certificate=certificate,
+            semantic_action=target.semantic_action,
+            tool_name=target.semantic_action.tool_name,
+            tool_version=target.semantic_action.tool_version,
+            arguments=prepared.arguments,
+            target=prepared.target,
+            precondition=prepared.precondition,
+            claim_id=scope.claim_id,
+        )
+        self.claimed.set()
+        await asyncio.Event().wait()
+        raise AssertionError("blocked dispatch unexpectedly resumed")
+
+
 class _ProcessCrash(BaseException):
     """Simulate abrupt worker loss, bypassing in-process error recovery."""
+
+
+def test_issued_launch_permit_resumes_through_dispatch_pending_after_restart(
+    tmp_path,
+) -> None:
+    definition, states = _definition_and_states()
+    request = RecoveryRunRequest(
+        schema_version=RECOVERY_RUN_REQUEST_VERSION,
+        run_id="recovery-launch-restart-7",
+        scenario="cloud-run-rollout",
+        policy=RecoveryRunPolicy.ADAPTIVE,
+        fault=RecoveryRunFault.DROP_AFTER_ACCEPT,
+    )
+    store = InMemoryRecoveryRunStore()
+    authority = PermitAuthority(
+        SqliteDurableRuntimeStore(tmp_path / "launch-restart.sqlite3"),
+        clock=lambda: NOW + timedelta(seconds=7),
+    )
+    first_gateway = _Gateway(store, authority, definition)
+    first_worker = ProofToPermitWorkflow(
+        store=store,
+        definition_factory=lambda _request: definition,
+        evidence_source=_Evidence(states),
+        action_preparer=_Preparer(),
+        recovery_agent=RecoveryAgent(_DynamicPlanner()),
+        rollout_agent=RolloutAgent(first_gateway),
+        permit_authority=authority,
+        clock=lambda: NOW + timedelta(seconds=7),
+        claim_id_factory=lambda: "claim-launch-before-crash",
+    )
+
+    async def crash_before_pending(run_id, node_id, state, *, attempt):
+        assert run_id == request.run_id
+        assert node_id == "stage"
+        assert state is RecoveryNodeState.DISPATCH_PENDING
+        assert attempt == 1
+        raise _ProcessCrash
+
+    first_worker._node_state = crash_before_pending
+
+    async def crash():
+        await store.create(request, definition.chain, created_at=NOW)
+        await first_worker.run(request.run_id)
+
+    with pytest.raises(_ProcessCrash):
+        asyncio.run(crash())
+    interrupted = asyncio.run(store.get(request.run_id))
+    assert interrupted.launch_permit is not None
+    assert interrupted.launch_permit.state is RecoveryLaunchPermitState.ISSUED
+    assert interrupted.nodes[0].state is RecoveryNodeState.WAITING
+    assert first_gateway.scopes == []
+
+    resumed_gateway = _Gateway(store, authority, definition)
+    resumed_worker = ProofToPermitWorkflow(
+        store=store,
+        definition_factory=lambda _request: definition,
+        evidence_source=_Evidence(states),
+        action_preparer=_Preparer(),
+        recovery_agent=RecoveryAgent(_DynamicPlanner()),
+        rollout_agent=RolloutAgent(resumed_gateway),
+        permit_authority=authority,
+        clock=lambda: NOW + timedelta(seconds=7),
+        claim_id_factory=iter(
+            ("claim-launch-after-restart", "claim-promote", "claim-record")
+        ).__next__,
+    )
+    completed = asyncio.run(resumed_worker.run(request.run_id))
+
+    assert completed.lifecycle is RecoveryRunLifecycle.COMPLETED
+    assert (
+        resumed_gateway.scopes[0].authority_kind is RecoveryAuthorityKind.LAUNCH_PERMIT
+    )
+    assert completed.launch_permit is not None
+    assert completed.launch_permit.state is RecoveryLaunchPermitState.COMPLETED
 
 
 def test_model_action_and_repeated_probe_are_never_selected_for_execution() -> None:
@@ -652,6 +773,200 @@ def test_completed_continue_dispatch_resumes_after_successor_activation(
     assert final_gateway.scopes[0].target_node_id == "record"
 
 
+def test_recorded_decision_resumes_without_duplicate_certificate_or_probe(
+    tmp_path,
+) -> None:
+    definition, states = _definition_and_states()
+    request = RecoveryRunRequest(
+        schema_version=RECOVERY_RUN_REQUEST_VERSION,
+        run_id="recovery-decision-restart-7",
+        scenario="cloud-run-rollout",
+        policy=RecoveryRunPolicy.ADAPTIVE,
+        fault=RecoveryRunFault.DROP_AFTER_ACCEPT,
+    )
+    store = InMemoryRecoveryRunStore()
+    authority = PermitAuthority(
+        SqliteDurableRuntimeStore(tmp_path / "decision-restart.sqlite3"),
+        clock=lambda: NOW + timedelta(seconds=7),
+    )
+    first_evidence = _Evidence(states)
+    first_worker = ProofToPermitWorkflow(
+        store=store,
+        definition_factory=lambda _request: definition,
+        evidence_source=first_evidence,
+        action_preparer=_Preparer(),
+        recovery_agent=RecoveryAgent(_DynamicPlanner()),
+        rollout_agent=RolloutAgent(_Gateway(store, authority, definition)),
+        permit_authority=authority,
+        clock=lambda: NOW + timedelta(seconds=7),
+        claim_id_factory=lambda: "claim-launch",
+    )
+    original_record_decision = first_worker._record_decision
+
+    async def crash_after_decision(run_id, artifact, decision):
+        await original_record_decision(run_id, artifact, decision)
+        raise _ProcessCrash
+
+    first_worker._record_decision = crash_after_decision
+
+    async def crash():
+        await store.create(request, definition.chain, created_at=NOW)
+        await first_worker.run(request.run_id)
+
+    with pytest.raises(_ProcessCrash):
+        asyncio.run(crash())
+    interrupted = asyncio.run(store.get(request.run_id))
+    assert interrupted.nodes[0].state is RecoveryNodeState.RECONCILING
+    assert len(interrupted.certificates) == 1
+
+    resumed_evidence = _Evidence(states)
+    resumed_gateway = _Gateway(store, authority, definition)
+    resumed_worker = ProofToPermitWorkflow(
+        store=store,
+        definition_factory=lambda _request: definition,
+        evidence_source=resumed_evidence,
+        action_preparer=_Preparer(),
+        recovery_agent=RecoveryAgent(_DynamicPlanner()),
+        rollout_agent=RolloutAgent(resumed_gateway),
+        permit_authority=authority,
+        clock=lambda: NOW + timedelta(seconds=7),
+        claim_id_factory=iter(("claim-promote", "claim-record")).__next__,
+    )
+    completed = asyncio.run(resumed_worker.run(request.run_id))
+
+    assert completed.lifecycle is RecoveryRunLifecycle.COMPLETED
+    assert len(completed.certificates) == 3
+    assert resumed_evidence.current_calls == ["promote", "record"]
+    assert tuple(scope.target_node_id for scope in resumed_gateway.scopes) == (
+        "promote",
+        "record",
+    )
+
+
+def test_expiry_during_claim_never_advances_or_contacts_provider(tmp_path) -> None:
+    definition, states = _definition_and_states()
+    certificate, *_rest = _verify(node_id="stage", kind="committed")
+    assert isinstance(certificate, VerifiedCertificate)
+    request = RecoveryRunRequest(
+        schema_version=RECOVERY_RUN_REQUEST_VERSION,
+        run_id="recovery-expiry-at-claim-7",
+        scenario="cloud-run-rollout",
+        policy=RecoveryRunPolicy.ADAPTIVE,
+        fault=RecoveryRunFault.DROP_AFTER_ACCEPT,
+    )
+    authority_times = iter(
+        (
+            certificate.expires_at - timedelta(microseconds=1),
+            certificate.expires_at,
+        )
+    )
+    store = InMemoryRecoveryRunStore()
+    authority = PermitAuthority(
+        SqliteDurableRuntimeStore(tmp_path / "expiry-at-claim.sqlite3"),
+        clock=authority_times.__next__,
+    )
+    gateway = _Gateway(store, authority, definition)
+    workflow = ProofToPermitWorkflow(
+        store=store,
+        definition_factory=lambda _request: definition,
+        evidence_source=_Evidence(states),
+        action_preparer=_Preparer(),
+        recovery_agent=RecoveryAgent(_DynamicPlanner()),
+        rollout_agent=RolloutAgent(gateway),
+        permit_authority=authority,
+        clock=lambda: NOW + timedelta(seconds=7),
+        claim_id_factory=iter(("claim-launch", "claim-promote")).__next__,
+    )
+
+    async def exercise():
+        await store.create(request, definition.chain, created_at=NOW)
+        await workflow.run(request.run_id)
+
+    with pytest.raises(RecoveryWorkflowError, match="expired before dispatch"):
+        asyncio.run(exercise())
+    snapshot = asyncio.run(store.get(request.run_id))
+    assert gateway.provider_calls == 0
+    assert snapshot.action_permits[0].state is ActionPermitState.EXPIRED
+    assert snapshot.nodes[0].state is RecoveryNodeState.PERMITTED
+    assert snapshot.nodes[1].state is RecoveryNodeState.WAITING
+
+
+def test_retry_bound_survives_crash_after_second_attempt_decision(tmp_path) -> None:
+    definition, states = _definition_and_states()
+    _artifact, evaluation, report, chain, envelope = _verify(
+        node_id="record",
+        kind="not-committed",
+    )
+    assert chain == definition.chain
+    states["record"] = RecoveryEvidenceState(envelope, report, evaluation)
+    request = RecoveryRunRequest(
+        schema_version=RECOVERY_RUN_REQUEST_VERSION,
+        run_id="recovery-retry-bound-restart-7",
+        scenario="cloud-run-rollout",
+        policy=RecoveryRunPolicy.ADAPTIVE,
+        fault=RecoveryRunFault.SUPPRESS_BEFORE_DISPATCH,
+    )
+    store = InMemoryRecoveryRunStore()
+    authority = PermitAuthority(
+        SqliteDurableRuntimeStore(tmp_path / "retry-bound.sqlite3"),
+        clock=lambda: NOW + timedelta(seconds=7),
+    )
+    gateway = _Gateway(store, authority, definition)
+    first_worker = ProofToPermitWorkflow(
+        store=store,
+        definition_factory=lambda _request: definition,
+        evidence_source=_Evidence(states),
+        action_preparer=_Preparer(),
+        recovery_agent=RecoveryAgent(_DynamicPlanner()),
+        rollout_agent=RolloutAgent(gateway),
+        permit_authority=authority,
+        clock=lambda: NOW + timedelta(seconds=7),
+        claim_id_factory=iter(
+            ("claim-launch", "claim-promote", "claim-record", "claim-retry")
+        ).__next__,
+    )
+    original_node_state = first_worker._node_state
+
+    async def crash_after_second_decision(run_id, node_id, state, *, attempt):
+        result = await original_node_state(
+            run_id,
+            node_id,
+            state,
+            attempt=attempt,
+        )
+        if node_id == "record" and state is RecoveryNodeState.VERIFIED and attempt == 2:
+            raise _ProcessCrash
+        return result
+
+    first_worker._node_state = crash_after_second_decision
+
+    async def crash():
+        await store.create(request, definition.chain, created_at=NOW)
+        await first_worker.run(request.run_id)
+
+    with pytest.raises(_ProcessCrash):
+        asyncio.run(crash())
+    interrupted = asyncio.run(store.get(request.run_id))
+    assert interrupted.nodes[2].state is RecoveryNodeState.VERIFIED
+    assert interrupted.nodes[2].attempt == 2
+    scope_count = len(gateway.scopes)
+
+    resumed = ProofToPermitWorkflow(
+        store=store,
+        definition_factory=lambda _request: definition,
+        evidence_source=_Evidence(states),
+        action_preparer=_Preparer(),
+        recovery_agent=RecoveryAgent(_DynamicPlanner()),
+        rollout_agent=RolloutAgent(gateway),
+        permit_authority=authority,
+        clock=lambda: NOW + timedelta(seconds=7),
+        claim_id_factory=lambda: "claim-third-attempt",
+    )
+    with pytest.raises(RecoveryWorkflowError, match="bounded recovery retry"):
+        asyncio.run(resumed.run(request.run_id))
+    assert len(gateway.scopes) == scope_count
+
+
 def test_stale_pre_stage_etag_cannot_enter_a_certificate_scoped_dispatch(
     tmp_path,
 ) -> None:
@@ -862,7 +1177,70 @@ def test_explicit_cancellation_is_terminal_but_shutdown_remains_restartable(
     cancelled = asyncio.run(exercise())
     assert cancelled.lifecycle is RecoveryRunLifecycle.CANCELLED
     assert cancelled.failure_category is RecoveryRunFailureCategory.CANCELLED
+    assert cancelled.nodes[0].state is RecoveryNodeState.RECONCILING
     assert len(gateway.scopes) == 1
+
+
+def test_cancellation_after_action_claim_mirrors_authority_and_never_redispatches(
+    tmp_path,
+) -> None:
+    definition, states = _definition_and_states()
+    request = RecoveryRunRequest(
+        schema_version=RECOVERY_RUN_REQUEST_VERSION,
+        run_id="recovery-cancel-after-claim-7",
+        scenario="cloud-run-rollout",
+        policy=RecoveryRunPolicy.ADAPTIVE,
+        fault=RecoveryRunFault.DROP_AFTER_ACCEPT,
+    )
+    store = InMemoryRecoveryRunStore()
+    authority = PermitAuthority(
+        SqliteDurableRuntimeStore(tmp_path / "cancel-after-claim.sqlite3"),
+        clock=lambda: NOW + timedelta(seconds=7),
+    )
+    blocking_gateway = _BlockingClaimGateway(store, authority, definition)
+    service = RecoveryRunApplicationService(
+        ProofToPermitWorkflow(
+            store=store,
+            definition_factory=lambda _request: definition,
+            evidence_source=_Evidence(states),
+            action_preparer=_Preparer(),
+            recovery_agent=RecoveryAgent(_DynamicPlanner()),
+            rollout_agent=RolloutAgent(blocking_gateway),
+            permit_authority=authority,
+            clock=lambda: NOW + timedelta(seconds=7),
+            claim_id_factory=iter(("claim-launch", "claim-promote")).__next__,
+        ),
+        store,
+        clock=lambda: NOW,
+    )
+
+    async def cancel_after_claim():
+        await service.launch(request)
+        await asyncio.wait_for(blocking_gateway.claimed.wait(), timeout=10)
+        snapshot = await service.cancel(request.run_id)
+        await service.aclose()
+        return snapshot
+
+    cancelled = asyncio.run(cancel_after_claim())
+    assert cancelled.lifecycle is RecoveryRunLifecycle.CANCELLED
+    assert cancelled.failure_category is RecoveryRunFailureCategory.CANCELLED
+    assert cancelled.nodes[0].state is RecoveryNodeState.DISPATCH_CLAIMED
+    assert cancelled.action_permits[0].state is ActionPermitState.CLAIMED
+
+    replay_gateway = _Gateway(store, authority, definition)
+    replay = ProofToPermitWorkflow(
+        store=store,
+        definition_factory=lambda _request: definition,
+        evidence_source=_Evidence(states),
+        action_preparer=_Preparer(),
+        recovery_agent=RecoveryAgent(_DynamicPlanner()),
+        rollout_agent=RolloutAgent(replay_gateway),
+        permit_authority=authority,
+        clock=lambda: NOW + timedelta(seconds=7),
+        claim_id_factory=lambda: "never-dispatched",
+    )
+    assert asyncio.run(replay.run(request.run_id)) == cancelled
+    assert replay_gateway.scopes == []
 
 
 @pytest.mark.parametrize(

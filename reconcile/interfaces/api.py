@@ -1030,7 +1030,18 @@ def _validated_recovery_event_snapshot(
         ):
             raise _InternalApiFailure
     if value.terminal:
-        if value.events and terminal_positions != (len(value.events) - 1,):
+        if len(terminal_positions) > 1 or (after == 0 and len(terminal_positions) != 1):
+            raise _InternalApiFailure
+        if terminal_positions:
+            if any(
+                event.type is not RecoveryRunEventType.ACTION_PERMIT
+                for event in value.events[terminal_positions[0] + 1 :]
+            ):
+                raise _InternalApiFailure
+        elif any(
+            event.type is not RecoveryRunEventType.ACTION_PERMIT
+            for event in value.events
+        ):
             raise _InternalApiFailure
     elif terminal_positions:
         raise _InternalApiFailure
@@ -1291,6 +1302,9 @@ def create_app(
                     for event in current.events:
                         yield _recovery_sse_event(event)
                     cursor = current.cursor
+                    # A terminal lifecycle closes this response. If an authority
+                    # claim races with cancellation, its permitted audit-only
+                    # event is available through the same resumable cursor.
                     if current.terminal or await request.is_disconnected():
                         return
                     current = _validated_recovery_event_snapshot(

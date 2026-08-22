@@ -30,9 +30,12 @@ PERMIT_AUDIT_EVENT_VERSION = "reconcile/permit-audit-event/v1"
 PERMIT_CLAIM_REQUEST_VERSION = "reconcile/permit-claim-request/v1"
 PERMIT_COMPLETION_REQUEST_VERSION = "reconcile/permit-completion-request/v1"
 
-_PERMIT_PRESENTATION_AND_LIFECYCLE_FIELDS = {
+_PERMIT_PRESENTATION_FIELDS = {
     "certificate_sha256",
     "issued_at",
+}
+
+_PERMIT_LIFECYCLE_FIELDS = {
     "state",
     "revision",
     "claim_id",
@@ -105,13 +108,28 @@ def same_action_permit_authority(
     return canonical_json_value_bytes(
         left.model_dump(
             mode="json",
-            exclude=_PERMIT_PRESENTATION_AND_LIFECYCLE_FIELDS,
+            exclude=_PERMIT_PRESENTATION_FIELDS | _PERMIT_LIFECYCLE_FIELDS,
         )
     ) == canonical_json_value_bytes(
         right.model_dump(
             mode="json",
-            exclude=_PERMIT_PRESENTATION_AND_LIFECYCLE_FIELDS,
+            exclude=_PERMIT_PRESENTATION_FIELDS | _PERMIT_LIFECYCLE_FIELDS,
         )
+    )
+
+
+def same_action_permit_state(
+    left: ActionPermit,
+    right: ActionPermit,
+) -> bool:
+    """Compare logical authority and lifecycle while ignoring presentation fields."""
+
+    validate_action_permit_identity(left)
+    validate_action_permit_identity(right)
+    return canonical_json_value_bytes(
+        left.model_dump(mode="json", exclude=_PERMIT_PRESENTATION_FIELDS)
+    ) == canonical_json_value_bytes(
+        right.model_dump(mode="json", exclude=_PERMIT_PRESENTATION_FIELDS)
     )
 
 
@@ -636,6 +654,7 @@ __all__ = [
     "evaluate_permit_completion",
     "issued_audit_event",
     "same_action_permit_authority",
+    "same_action_permit_state",
     "validate_action_permit_identity",
     "validate_permit_audit_history",
 ]

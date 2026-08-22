@@ -38,6 +38,7 @@ from reconcile.contracts import (
     decode_contract,
 )
 from reconcile.contracts.base import Identifier, StrictModel
+from reconcile.persistence.permits import same_action_permit_authority
 
 RECOVERY_RUN_AGGREGATE_VERSION = "reconcile/recovery-run-aggregate/v1"
 RECOVERY_RUN_EVENT_SNAPSHOT_VERSION = "reconcile/recovery-event-snapshot/v1"
@@ -283,28 +284,6 @@ def _upsert_permit(
         raise RecoveryRunConflict(run_id)
     if matching:
         current = matching[0]
-        issued_current = current.model_copy(
-            update={
-                "state": ActionPermitState.ISSUED,
-                "revision": 0,
-                "claim_id": None,
-                "claimed_at": None,
-                "completed_at": None,
-                "completion_outcome": None,
-                "expired_at": None,
-            }
-        )
-        issued_replacement = replacement.model_copy(
-            update={
-                "state": ActionPermitState.ISSUED,
-                "revision": 0,
-                "claim_id": None,
-                "claimed_at": None,
-                "completed_at": None,
-                "completion_outcome": None,
-                "expired_at": None,
-            }
-        )
         valid_transition = replacement.revision == current.revision + 1 and (
             (
                 current.state is ActionPermitState.ISSUED
@@ -316,7 +295,11 @@ def _upsert_permit(
                 and replacement.state is ActionPermitState.COMPLETED
             )
         )
-        if issued_current != issued_replacement or not valid_transition:
+        try:
+            same_authority = same_action_permit_authority(current, replacement)
+        except (TypeError, ValueError):
+            same_authority = False
+        if not same_authority or not valid_transition:
             raise RecoveryRunConflict(run_id)
         return tuple(
             replacement if item.permit_id == replacement.permit_id else item
@@ -333,11 +316,20 @@ def apply_recovery_event(
 
     if type(snapshot) is not RecoveryRunSnapshot or type(event) is not RecoveryRunEvent:
         raise TypeError("exact recovery projection inputs are required")
+    terminal_permit_audit = (
+        is_terminal_recovery_run(snapshot.lifecycle)
+        and event.type is RecoveryRunEventType.ACTION_PERMIT
+        and event.payload.action_permit is not None
+        and any(
+            permit.permit_id == event.payload.action_permit.permit_id
+            for permit in snapshot.action_permits
+        )
+    )
     if (
         event.run_id != snapshot.request.run_id
         or event.cursor != snapshot.event_cursor + 1
         or event.occurred_at < snapshot.updated_at
-        or is_terminal_recovery_run(snapshot.lifecycle)
+        or (is_terminal_recovery_run(snapshot.lifecycle) and not terminal_permit_audit)
     ):
         raise RecoveryRunConflict(snapshot.request.run_id)
 

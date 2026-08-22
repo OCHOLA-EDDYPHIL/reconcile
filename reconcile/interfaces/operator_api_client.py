@@ -860,13 +860,17 @@ class OperatorApiClient:
                             run_id=run_id,
                             expected_cursor=cursor + 1,
                         )
-                        cursor = event.cursor
-                        terminal_seen = _is_recovery_terminal(event)
-                        yield event
-                        if terminal_seen:
-                            break
-                        if cursor >= MAX_RECOVERY_RUN_EVENTS:
+                        if (
+                            terminal_seen
+                            and event.type is not RecoveryRunEventType.ACTION_PERMIT
+                        ):
                             raise _protocol_error() from None
+                        cursor = event.cursor
+                        if _is_recovery_terminal(event):
+                            if terminal_seen:
+                                raise _protocol_error() from None
+                            terminal_seen = True
+                        yield event
 
                 snapshot = await self.get_recovery_snapshot(run_id)
                 if snapshot.event_cursor < cursor:

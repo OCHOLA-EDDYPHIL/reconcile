@@ -817,6 +817,10 @@ class CloudRunCanaryFaultProxy:
             raise TypeError("fault proxy requires the sealed canary action adapter")
         self._adapter = action_adapter
 
+    @property
+    def target(self) -> CloudRunCanaryTarget:
+        return self._adapter.target
+
     @staticmethod
     def _after_accept(
         receipt: CloudRunAcceptedOperation,

@@ -10,6 +10,7 @@ from pydantic import ValidationError
 
 from reconcile.contracts import (
     SCENARIO_OPERATIONAL_STATUS_VERSION,
+    RecoveryActionScope,
     ScenarioLaunchName,
     ScenarioOperationalCleanupState,
     ScenarioOperationalInvestigationState,
@@ -74,7 +75,8 @@ def test_operational_status_has_an_exact_canonical_v2_round_trip() -> None:
 def test_v2_schema_is_separate_regenerable_and_validates_the_contract() -> None:
     assert "scenario-operational-status" not in PUBLIC_SCHEMAS
     assert V2_PUBLIC_SCHEMAS == {
-        "scenario-operational-status": ScenarioOperationalStatus
+        "recovery-action-scope": RecoveryActionScope,
+        "scenario-operational-status": ScenarioOperationalStatus,
     }
     path = next(
         item

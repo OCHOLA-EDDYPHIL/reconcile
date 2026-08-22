@@ -10,6 +10,12 @@ import pytest
 from fastapi.testclient import TestClient
 
 from reconcile.contracts import (
+    MAX_RECOVERY_RUN_EVENTS,
+    ActionPermitState,
+    Classification,
+    RecoveryNodeProgress,
+    RecoveryNodeState,
+    RecoveryRunEvent,
     RecoveryRunEventPayload,
     RecoveryRunEventType,
     RecoveryRunFailureCategory,
@@ -19,11 +25,23 @@ from reconcile.contracts import (
     canonical_json_bytes,
     decode_contract,
 )
-from reconcile.interfaces.api import create_app
+from reconcile.interfaces.api import (
+    _InternalApiFailure,
+    _validated_recovery_event_snapshot,
+    create_app,
+)
 from reconcile.interfaces.operator_api_client import OperatorApiClient
-from reconcile.persistence import InMemoryRecoveryRunStore
+from reconcile.persistence import (
+    RECOVERY_RUN_EVENT_SNAPSHOT_VERSION,
+    InMemoryRecoveryRunStore,
+    RecoveryRunEventSnapshot,
+)
 from reconcile.recovery_workflow import RecoveryRunLaunchResult
-from tests.contract._factories import make_recovery_run_examples
+from tests.contract._factories import (
+    make_recovery_examples,
+    make_recovery_run_examples,
+    make_report,
+)
 
 pytestmark = pytest.mark.integration
 
@@ -78,6 +96,43 @@ class _RecoveryService:
 
     async def aclose(self) -> None:
         self.closed = True
+
+
+class _TerminalAuditService:
+    def __init__(
+        self,
+        snapshot: RecoveryRunSnapshot,
+        events: RecoveryRunEventSnapshot,
+    ) -> None:
+        self._snapshot = snapshot
+        self._events = events
+
+    async def get(self, run_id: str) -> RecoveryRunSnapshot:
+        assert run_id == self._snapshot.request.run_id
+        return self._snapshot
+
+    async def snapshot(self, run_id: str, *, after: int = 0):
+        assert run_id == self._snapshot.request.run_id
+        return self._events.model_copy(
+            update={
+                "events": tuple(
+                    event for event in self._events.events if event.cursor > after
+                )
+            }
+        )
+
+    async def wait_for_events(
+        self,
+        run_id: str,
+        *,
+        after: int = 0,
+        cancellation_event: asyncio.Event | None = None,
+    ):
+        del cancellation_event
+        return await self.snapshot(run_id, after=after)
+
+    async def aclose(self) -> None:
+        return None
 
 
 def test_recovery_api_launch_get_and_resumable_sse() -> None:
@@ -150,3 +205,156 @@ def test_operator_client_validates_the_terminal_recovery_timeline() -> None:
         assert terminal_suffix == []
 
     asyncio.run(exercise())
+
+
+def test_terminal_recovery_suffix_accepts_late_permit_audit() -> None:
+    request, accepted, _launch, snapshot, _scope = make_recovery_run_examples()
+    _chain, _hypothesis, certificate, _witness, issued_permit = make_recovery_examples()
+    permit = issued_permit.model_copy(
+        update={
+            "state": ActionPermitState.CLAIMED,
+            "revision": 1,
+            "claim_id": "claim-after-cancel-7",
+            "claimed_at": issued_permit.issued_at + timedelta(microseconds=1),
+        }
+    )
+    terminal = RecoveryRunEvent(
+        schema_version=accepted.schema_version,
+        run_id=request.run_id,
+        cursor=2,
+        type=RecoveryRunEventType.LIFECYCLE,
+        occurred_at=accepted.occurred_at + timedelta(seconds=1),
+        payload=RecoveryRunEventPayload(
+            lifecycle=RecoveryRunLifecycle.CANCELLED,
+            failure_category=RecoveryRunFailureCategory.CANCELLED,
+        ),
+    )
+    audit = RecoveryRunEvent(
+        schema_version=accepted.schema_version,
+        run_id=request.run_id,
+        cursor=3,
+        type=RecoveryRunEventType.ACTION_PERMIT,
+        occurred_at=accepted.occurred_at + timedelta(seconds=2),
+        payload=RecoveryRunEventPayload(action_permit=permit),
+    )
+    full = RecoveryRunEventSnapshot(
+        schema_version=RECOVERY_RUN_EVENT_SNAPSHOT_VERSION,
+        run_id=request.run_id,
+        cursor=3,
+        terminal=True,
+        events=(accepted, terminal, audit),
+    )
+    suffix = full.model_copy(update={"events": (audit,)})
+
+    assert (
+        _validated_recovery_event_snapshot(
+            full,
+            run_id=request.run_id,
+            after=0,
+        )
+        == full
+    )
+    assert (
+        _validated_recovery_event_snapshot(
+            suffix,
+            run_id=request.run_id,
+            after=2,
+        )
+        == suffix
+    )
+
+    invalid = RecoveryRunEvent(
+        schema_version=accepted.schema_version,
+        run_id=request.run_id,
+        cursor=3,
+        type=RecoveryRunEventType.NODE,
+        occurred_at=accepted.occurred_at + timedelta(seconds=2),
+        payload=RecoveryRunEventPayload(
+            node=RecoveryNodeProgress(
+                node_id=snapshot.chain.nodes[0].node_id,
+                state=RecoveryNodeState.RECONCILING,
+                attempt=1,
+            )
+        ),
+    )
+    with pytest.raises(_InternalApiFailure):
+        _validated_recovery_event_snapshot(
+            full.model_copy(update={"events": (accepted, terminal, invalid)}),
+            run_id=request.run_id,
+            after=0,
+        )
+    with pytest.raises(_InternalApiFailure):
+        _validated_recovery_event_snapshot(
+            suffix.model_copy(update={"events": (invalid,)}),
+            run_id=request.run_id,
+            after=2,
+        )
+
+    final_snapshot = RecoveryRunSnapshot.model_validate(
+        snapshot.model_copy(
+            update={
+                "lifecycle": RecoveryRunLifecycle.CANCELLED,
+                "failure_category": RecoveryRunFailureCategory.CANCELLED,
+                "event_cursor": 3,
+                "revision": 2,
+                "reports": (make_report(Classification.COMMITTED),),
+                "certificates": (certificate,),
+                "action_permits": (permit,),
+                "updated_at": audit.occurred_at,
+            }
+        )
+    )
+    application = create_app(
+        recovery_service=_TerminalAuditService(final_snapshot, full),
+        hosted=True,
+    )
+
+    async def consume_without_reconnect() -> tuple[RecoveryRunEvent, ...]:
+        async with OperatorApiClient(
+            transport=httpx.ASGITransport(app=application)
+        ) as client:
+            events = [
+                event
+                async for event in client.recovery_events(
+                    request.run_id,
+                    max_reconnects=0,
+                )
+            ]
+            return tuple(events)
+
+    assert asyncio.run(consume_without_reconnect()) == full.events
+
+    maximum_audit = audit.model_copy(update={"cursor": MAX_RECOVERY_RUN_EVENTS})
+    maximum_events = full.model_copy(
+        update={
+            "cursor": MAX_RECOVERY_RUN_EVENTS,
+            "events": (maximum_audit,),
+        }
+    )
+    maximum_snapshot = final_snapshot.model_copy(
+        update={
+            "event_cursor": MAX_RECOVERY_RUN_EVENTS,
+            "revision": MAX_RECOVERY_RUN_EVENTS - 1,
+        }
+    )
+    maximum_application = create_app(
+        recovery_service=_TerminalAuditService(maximum_snapshot, maximum_events),
+        hosted=True,
+    )
+
+    async def consume_maximum_suffix() -> tuple[RecoveryRunEvent, ...]:
+        async with OperatorApiClient(
+            transport=httpx.ASGITransport(app=maximum_application)
+        ) as client:
+            return tuple(
+                [
+                    event
+                    async for event in client.recovery_events(
+                        request.run_id,
+                        after=MAX_RECOVERY_RUN_EVENTS - 1,
+                        max_reconnects=0,
+                    )
+                ]
+            )
+
+    assert asyncio.run(consume_maximum_suffix()) == (maximum_audit,)

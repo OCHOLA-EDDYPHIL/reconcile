@@ -59,7 +59,11 @@ from reconcile.evidence.recovery_verification import (
     RecoveryVerificationResult,
     verify_recovery,
 )
-from reconcile.persistence.permits import PermitNotFound
+from reconcile.persistence.permits import (
+    PermitNotFound,
+    same_action_permit_authority,
+    same_action_permit_state,
+)
 from reconcile.persistence.recovery_runs import (
     RecoveryRunConflict,
     RecoveryRunEventSnapshot,
@@ -534,13 +538,23 @@ class ProofToPermitWorkflow:
                 RecoveryRunEventType.LAUNCH_PERMIT,
                 RecoveryRunEventPayload(launch_permit=launch),
             )
-            await self._node_state(
-                run_id,
-                node.node_id,
-                RecoveryNodeState.DISPATCH_PENDING,
-                attempt=1,
-            )
         if launch.state is RecoveryLaunchPermitState.ISSUED:
+            progress = next(
+                item
+                for item in (await self._store.get(run_id)).nodes
+                if item.node_id == node.node_id
+            )
+            if progress.state is RecoveryNodeState.WAITING:
+                await self._node_state(
+                    run_id,
+                    node.node_id,
+                    RecoveryNodeState.DISPATCH_PENDING,
+                    attempt=1,
+                )
+            elif progress.state is not RecoveryNodeState.DISPATCH_PENDING:
+                raise RecoveryWorkflowError(
+                    "issued launch permit has invalid recovery node state"
+                )
             if (
                 prepared is None
                 or prepared.action_request_sha256 != launch.action_request_sha256
@@ -562,6 +576,28 @@ class ProofToPermitWorkflow:
             try:
                 receipt = await self._rollout_agent.execute(prepared, scope)
             except asyncio.CancelledError:
+
+                async def preserve_launch_authority() -> None:
+                    current = await self._store.get(run_id)
+                    latest = current.launch_permit
+                    if latest is not None and latest.state in {
+                        RecoveryLaunchPermitState.CLAIMED,
+                        RecoveryLaunchPermitState.COMPLETED,
+                    }:
+                        progress = next(
+                            item
+                            for item in current.nodes
+                            if item.node_id == node.node_id
+                        )
+                        if progress.state is RecoveryNodeState.DISPATCH_PENDING:
+                            await self._node_state(
+                                run_id,
+                                node.node_id,
+                                RecoveryNodeState.DISPATCH_CLAIMED,
+                                attempt=1,
+                            )
+
+                await asyncio.shield(preserve_launch_authority())
                 raise
             except Exception:
                 # The authority store is the fault boundary. If it was claimed,
@@ -778,7 +814,11 @@ class ProofToPermitWorkflow:
             raise RecoveryWorkflowError("action permit projection is ambiguous")
         current_revision = -1 if not projected else projected[0].revision
         if projected and current_revision == permit.revision:
-            if projected[0] != permit:
+            try:
+                same_state = same_action_permit_state(projected[0], permit)
+            except (TypeError, ValueError):
+                same_state = False
+            if not same_state:
                 raise RecoveryWorkflowError("action permit projection changed")
             return
         if current_revision > permit.revision:
@@ -837,6 +877,13 @@ class ProofToPermitWorkflow:
         transition = certificate.transition
         if transition is None:
             return
+        source_progress = next(
+            item
+            for item in (await self._store.get(snapshot.request.run_id)).nodes
+            if item.node_id == transition.source_node_id
+        )
+        if transition.action is PermitAction.RETRY and source_progress.attempt >= 2:
+            raise RecoveryWorkflowError("bounded recovery retry was exhausted")
         target_node = _node(definition.chain, transition.target_node_id)
         expected = action_permit_from_certificate(certificate)
         if expected is None:
@@ -850,18 +897,13 @@ class ProofToPermitWorkflow:
                     "verified transition did not issue a permit"
                 ) from None
             permit = issued
-        issued = permit.model_copy(
-            update={
-                "state": ActionPermitState.ISSUED,
-                "revision": 0,
-                "claim_id": None,
-                "claimed_at": None,
-                "completed_at": None,
-                "completion_outcome": None,
-                "expired_at": None,
-            }
-        )
-        if type(permit) is not type(expected) or issued != expected:
+        try:
+            same_authority = type(permit) is type(
+                expected
+            ) and same_action_permit_authority(permit, expected)
+        except (TypeError, ValueError):
+            same_authority = False
+        if not same_authority:
             raise RecoveryWorkflowError("durable action permit identity changed")
         run_id = snapshot.request.run_id
         await self._mirror_action_permit(run_id, permit)
@@ -884,11 +926,6 @@ class ProofToPermitWorkflow:
             raise RecoveryWorkflowError(
                 "expired action permit cannot authorize dispatch"
             )
-        source_progress = next(
-            item
-            for item in (await self._store.get(run_id)).nodes
-            if item.node_id == transition.source_node_id
-        )
         reports = tuple(
             report
             for report in snapshot.reports
@@ -931,12 +968,51 @@ class ProofToPermitWorkflow:
         try:
             receipt = await self._rollout_agent.execute(prepared, scope)
         except asyncio.CancelledError:
+
+            async def preserve_action_authority() -> None:
+                latest = await self._permit_authority.get_permit(permit.permit_id)
+                if latest.state is ActionPermitState.ISSUED:
+                    return
+                await self._mirror_action_permit(run_id, latest)
+                if latest.state in {
+                    ActionPermitState.CLAIMED,
+                    ActionPermitState.COMPLETED,
+                }:
+                    current = await self._store.get(run_id)
+                    progress = next(
+                        item
+                        for item in current.nodes
+                        if item.node_id == transition.source_node_id
+                    )
+                    if progress.state in {
+                        RecoveryNodeState.VERIFIED,
+                        RecoveryNodeState.PERMITTED,
+                    }:
+                        await self._node_state(
+                            run_id,
+                            transition.source_node_id,
+                            RecoveryNodeState.DISPATCH_CLAIMED,
+                            attempt=max(1, source_progress.attempt),
+                        )
+
+            await asyncio.shield(preserve_action_authority())
             raise
         except Exception:
             latest = await self._permit_authority.get_permit(permit.permit_id)
             if latest.state is ActionPermitState.ISSUED:
                 raise
             await self._mirror_action_permit(run_id, latest)
+            if latest.state is ActionPermitState.EXPIRED:
+                raise RecoveryWorkflowError(
+                    "action permit expired before dispatch authority was claimed"
+                ) from None
+            if latest.state not in {
+                ActionPermitState.CLAIMED,
+                ActionPermitState.COMPLETED,
+            }:
+                raise RecoveryWorkflowError(
+                    "action permit did not establish dispatch authority"
+                ) from None
             await self._node_state(
                 run_id,
                 transition.source_node_id,
@@ -1105,6 +1181,24 @@ class ProofToPermitWorkflow:
                             lifecycle=RecoveryRunLifecycle.ESCALATED
                         ),
                     )
+            tail = await self._store.events(
+                run_id,
+                after=max(0, snapshot.event_cursor - 1),
+            )
+            if (
+                len(tail.events) == 1
+                and tail.events[0].cursor == snapshot.event_cursor
+                and tail.events[0].type is RecoveryRunEventType.DECISION
+                and tail.events[0].payload.certificate is not None
+                and tail.events[0].payload.certificate.node_id == node.node_id
+            ):
+                await self._node_state(
+                    run_id,
+                    node.node_id,
+                    RecoveryNodeState.VERIFIED,
+                    attempt=max(1, progress.attempt),
+                )
+                continue
             _state, artifact = await self._investigate(snapshot, definition, node)
             if isinstance(artifact, VerifiedCertificate):
                 observation_round = 1 + sum(
@@ -1161,11 +1255,6 @@ class ProofToPermitWorkflow:
                 )
                 continue
             if artifact.transition is not None:
-                if (
-                    artifact.transition.action is PermitAction.RETRY
-                    and progress.attempt >= 2
-                ):
-                    raise RecoveryWorkflowError("bounded recovery retry was exhausted")
                 await self._permitted_dispatch(snapshot, definition, artifact)
                 target = artifact.transition.target_node_id
                 if target != node.node_id:

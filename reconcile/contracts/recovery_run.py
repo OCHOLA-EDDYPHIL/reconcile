@@ -540,32 +540,31 @@ class RecoveryRunSnapshot(StrictModel):
                 or artifact.target != node.semantic_action.target
             ):
                 raise ValueError("recovery proof binding changed")
-        certificates = {
-            (certificate.certificate_id, canonical_sha256(certificate)): certificate
-            for certificate in self.certificates
-        }
         for permit in self.action_permits:
-            certificate = certificates.get(
-                (permit.certificate_id, permit.certificate_sha256)
-            )
-            transition = None if certificate is None else certificate.transition
-            if (
-                certificate is None
-                or transition is None
-                or permit.chain_id != certificate.chain_id
-                or permit.source_node_id != transition.source_node_id
-                or permit.target_node_id != transition.target_node_id
-                or permit.semantic_action_sha256 != transition.semantic_action_sha256
-                or permit.action is not transition.action
-                or permit.action_policy_version != certificate.action_policy_version
-                or permit.tool_name != transition.tool_name
-                or permit.tool_version != transition.tool_version
-                or permit.arguments_sha256 != transition.arguments_sha256
-                or permit.target_sha256 != transition.target_sha256
-                or permit.precondition_sha256 != transition.precondition_sha256
-                or permit.issued_at != certificate.issued_at
-                or permit.expires_at != certificate.expires_at
-            ):
+            bound = False
+            for certificate in self.certificates:
+                transition = certificate.transition
+                if (
+                    certificate.certificate_id == permit.certificate_id
+                    and transition is not None
+                    and permit.chain_id == certificate.chain_id
+                    and permit.source_node_id == transition.source_node_id
+                    and permit.target_node_id == transition.target_node_id
+                    and permit.semantic_action_sha256
+                    == transition.semantic_action_sha256
+                    and permit.action is transition.action
+                    and permit.action_policy_version
+                    == certificate.action_policy_version
+                    and permit.tool_name == transition.tool_name
+                    and permit.tool_version == transition.tool_version
+                    and permit.arguments_sha256 == transition.arguments_sha256
+                    and permit.target_sha256 == transition.target_sha256
+                    and permit.precondition_sha256 == transition.precondition_sha256
+                    and permit.expires_at == certificate.expires_at
+                ):
+                    bound = True
+                    break
+            if not bound:
                 raise ValueError("action permit is not bound to its certificate")
         if self.lifecycle is RecoveryRunLifecycle.COMPLETED and any(
             node.state is not RecoveryNodeState.COMPLETED for node in self.nodes

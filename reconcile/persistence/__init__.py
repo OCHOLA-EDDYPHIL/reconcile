@@ -79,6 +79,7 @@ from reconcile.persistence.permits import (
     action_permit_id,
     action_permit_transition,
     same_action_permit_authority,
+    same_action_permit_state,
     validate_action_permit_identity,
 )
 from reconcile.persistence.recovery_runs import (
@@ -236,6 +237,7 @@ __all__ = [
     "new_investigation_record",
     "runtime_limits_for",
     "same_action_permit_authority",
+    "same_action_permit_state",
     "sanitize_runtime_telemetry_attributes",
     "validate_action_permit_identity",
 ]

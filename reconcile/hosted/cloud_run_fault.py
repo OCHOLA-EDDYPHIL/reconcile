@@ -47,11 +47,14 @@ from reconcile.contracts.recovery_run import (
     RecoveryDispatchOutcome,
     RecoveryLaunchPermit,
     RecoveryNodeState,
+    RecoveryRunEventPayload,
+    RecoveryRunEventType,
     RecoveryRunFault,
     RecoveryRunLifecycle,
     RecoveryRunSnapshot,
 )
 from reconcile.controller.permits import PermitAuthority, action_permit_from_certificate
+from reconcile.evidence.recovery_rules import CLOUD_RUN_SERVICE_TARGET_KIND
 from reconcile.hosted.cloud_run_canary import (
     CloudRunAcceptanceAmbiguity,
     CloudRunAcceptedOperation,
@@ -59,11 +62,16 @@ from reconcile.hosted.cloud_run_canary import (
     CloudRunCanaryError,
     CloudRunCanaryErrorCode,
     CloudRunCanaryFaultProxy,
+    CloudRunCanaryTarget,
     CloudRunFaultMode,
 )
 from reconcile.hosted.identity import VerifiedCaller
 from reconcile.hosted.workflow import HostedOperationScope, HostedWorkflowOperation
-from reconcile.persistence.recovery_runs import RecoveryRunStore
+from reconcile.persistence.permits import (
+    same_action_permit_authority,
+    same_action_permit_state,
+)
+from reconcile.persistence.recovery_runs import RecoveryRunConflict, RecoveryRunStore
 
 CLOUD_RUN_CANARY_ACTION_PATH = "/internal/v1/cloud-run-canary/actions"
 CLOUD_RUN_CANARY_ACTION_REQUEST_VERSION = "reconcile/cloud-run-canary-action-request/v1"
@@ -240,15 +248,23 @@ class RecoveryCloudRunCanaryActionAuthorizer:
         *,
         recovery_store: RecoveryRunStore,
         permit_authority: PermitAuthority,
+        target: CloudRunCanaryTarget,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         if not isinstance(recovery_store, RecoveryRunStore):
             raise TypeError("canary recovery authority requires a recovery store")
         if type(permit_authority) is not PermitAuthority:
             raise TypeError("canary recovery authority requires a permit authority")
+        if type(target) is not CloudRunCanaryTarget:
+            raise TypeError("canary recovery authority requires an exact target")
         self._store = recovery_store
         self._permit_authority = permit_authority
+        self._target = target
         self._clock = clock or (lambda: datetime.now(UTC))
+
+    @property
+    def target(self) -> CloudRunCanaryTarget:
+        return self._target
 
     def _now(self) -> datetime:
         value = self._clock()
@@ -259,6 +275,40 @@ class RecoveryCloudRunCanaryActionAuthorizer:
         ):
             raise PermissionError("canary recovery clock is invalid")
         return value.astimezone(UTC)
+
+    async def _mirror_action_permit(
+        self,
+        run_id: str,
+        permit: ActionPermit,
+    ) -> None:
+        for _attempt in range(8):
+            snapshot = await self._store.get(run_id)
+            matches = tuple(
+                item
+                for item in snapshot.action_permits
+                if item.permit_id == permit.permit_id
+            )
+            if len(matches) != 1:
+                raise PermissionError("canary action permit projection is unavailable")
+            try:
+                if same_action_permit_state(matches[0], permit):
+                    return
+            except (TypeError, ValueError):
+                raise PermissionError(
+                    "canary action permit projection changed"
+                ) from None
+            try:
+                await self._store.append(
+                    run_id,
+                    expected_revision=snapshot.revision,
+                    event_type=RecoveryRunEventType.ACTION_PERMIT,
+                    payload=RecoveryRunEventPayload(action_permit=permit),
+                    occurred_at=max(self._now(), snapshot.updated_at),
+                )
+                return
+            except RecoveryRunConflict:
+                continue
+        raise PermissionError("canary action permit projection is contended")
 
     @staticmethod
     def _node(snapshot: RecoveryRunSnapshot, node_id: str):
@@ -284,7 +334,17 @@ class RecoveryCloudRunCanaryActionAuthorizer:
         if snapshot.lifecycle is not RecoveryRunLifecycle.RUNNING:
             raise PermissionError("canary recovery run is not active")
         node = self._node(snapshot, scope.target_node_id)
-        if node.semantic_action.semantic_action_sha256 != scope.semantic_action_sha256:
+        target = node.semantic_action.target
+        if (
+            node.semantic_action.semantic_action_sha256 != scope.semantic_action_sha256
+            or target.target_kind != CLOUD_RUN_SERVICE_TARGET_KIND
+            or target.scope
+            != {
+                "project": self._target.project,
+                "location": self._target.location,
+            }
+            or target.resource != {"service": self._target.service}
+        ):
             raise PermissionError("canary semantic action changed")
         progress = {item.node_id: item for item in snapshot.nodes}
         expected_fault_mode = (
@@ -340,17 +400,55 @@ class RecoveryCloudRunCanaryActionAuthorizer:
             if item.certificate_id == scope.certificate_id
             and canonical_sha256(item) == scope.certificate_sha256
         )
-        if len(certificate_matches) != 1:
+        if not certificate_matches:
             raise PermissionError("canary certificate authority is unavailable")
         certificate = certificate_matches[0]
+        if any(item != certificate for item in certificate_matches[1:]):
+            raise PermissionError("canary certificate authority is ambiguous")
         expected = action_permit_from_certificate(certificate)
         source_progress = (
             None if expected is None else progress.get(expected.source_node_id)
         )
+        projected_permits = (
+            ()
+            if expected is None
+            else tuple(
+                item
+                for item in snapshot.action_permits
+                if item.permit_id == expected.permit_id
+            )
+        )
+        projected = projected_permits[0] if len(projected_permits) == 1 else None
+        try:
+            projected_matches = projected is not None and same_action_permit_authority(
+                projected, expected
+            )
+        except (TypeError, ValueError):
+            projected_matches = False
+        durable = (
+            None
+            if expected is None
+            else await self._permit_authority.get_permit(expected.permit_id)
+        )
+        try:
+            durable_matches = (
+                durable is not None
+                and projected is not None
+                and same_action_permit_authority(durable, expected)
+                and same_action_permit_state(durable, projected)
+            )
+        except (TypeError, ValueError):
+            durable_matches = False
         if (
             expected is None
             or expected.permit_id != scope.authority_id
-            or canonical_sha256(expected) != scope.authority_sha256
+            or projected is None
+            or projected.state is not ActionPermitState.ISSUED
+            or not projected_matches
+            or durable is None
+            or durable.state is not ActionPermitState.ISSUED
+            or canonical_sha256(durable) != scope.authority_sha256
+            or not durable_matches
             or expected.action is not scope.permit_action
             or expected.source_node_id != scope.source_node_id
             or expected.target_node_id != node.node_id
@@ -362,13 +460,6 @@ class RecoveryCloudRunCanaryActionAuthorizer:
             or snapshot.decision is not RecoveryDecision.CONTINUE
         ):
             raise PermissionError("canary action permit changed")
-        projected_permits = tuple(
-            item
-            for item in snapshot.action_permits
-            if item.permit_id == expected.permit_id
-        )
-        if projected_permits != (expected,):
-            raise PermissionError("canary action permit is not dispatchable")
         arguments = node.semantic_action.semantic_arguments
         if (
             arguments.get("release_id") != request.release_id
@@ -388,6 +479,10 @@ class RecoveryCloudRunCanaryActionAuthorizer:
             precondition={"service_etag": request.service_etag},
             claim_id=scope.claim_id,
         )
+        latest = await self._store.get(scope.run_id)
+        if latest.lifecycle is not RecoveryRunLifecycle.RUNNING:
+            await self._mirror_action_permit(scope.run_id, claimed)
+            raise PermissionError("canary recovery run changed during permit claim")
         return CloudRunCanaryDispatchLease(
             request_sha256=canonical_sha256(request),
             authority_id=scope.authority_id,
@@ -542,6 +637,11 @@ def install_cloud_run_canary_fault_route(
     )
     if not modern_authorizer and not callable(action_authorizer):
         raise TypeError("canary fault route requires an action authorizer")
+    if (
+        type(action_authorizer) is RecoveryCloudRunCanaryActionAuthorizer
+        and action_authorizer.target != proxy.target
+    ):
+        raise ValueError("canary fault proxy and recovery authority targets differ")
     if type(expected_caller_email) is not str or not expected_caller_email:
         raise TypeError("canary fault route requires an expected caller")
     if (
@@ -630,8 +730,19 @@ def install_cloud_run_canary_fault_route(
             }.get(error.code, HTTPStatus.SERVICE_UNAVAILABLE)
             return _error(code=error.code.value, status=status)
         except asyncio.CancelledError:
-            # A claimed authority is never released or retried. The run resumes by
-            # reconciling provider state after cancellation.
+            # The provider thread cannot be stopped. Close claimed authority as
+            # outcome-unknown before propagating cancellation so the run can
+            # restart in reconciliation and can never redispatch this request.
+            if lease is not None:
+                try:
+                    await asyncio.shield(
+                        action_authorizer.complete(  # type: ignore[union-attr]
+                            lease,
+                            RecoveryDispatchOutcome.OUTCOME_UNKNOWN,
+                        )
+                    )
+                except Exception:
+                    pass
             raise
         except Exception:
             if lease is not None:
