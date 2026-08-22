@@ -10,12 +10,15 @@ from pydantic import BaseModel
 
 from reconcile.contracts import (
     ActionGateResult,
+    ActionPermit,
     AdaptivePlannerInput,
     AdaptivePlannerOutput,
+    AmbiguityWitness,
     ApiError,
     EvidenceDecision,
     ExecutionEnvelope,
     ExpectedEffect,
+    GeminiHypothesis,
     InvestigationComparisonRecord,
     InvestigationEvent,
     InvestigationReport,
@@ -27,24 +30,29 @@ from reconcile.contracts import (
     QualificationResultSet,
     QualificationSuiteManifest,
     QualificationSummary,
+    RecoveryChain,
     ScenarioCleanupRequest,
     ScenarioCleanupResult,
     ScenarioFaultTrace,
     ScenarioOperationalStatus,
     ScenarioRunRequest,
     ScenarioRunResult,
+    VerifiedCertificate,
 )
 
 SCHEMA_DIRECTORY = Path("schemas/v1")
 V2_SCHEMA_DIRECTORY = Path("schemas/v2")
 PUBLIC_SCHEMAS: dict[str, type[BaseModel]] = {
+    "action-permit": ActionPermit,
     "action-gate-result": ActionGateResult,
     "adaptive-planner-input": AdaptivePlannerInput,
     "adaptive-planner-output": AdaptivePlannerOutput,
+    "ambiguity-witness": AmbiguityWitness,
     "error": ApiError,
     "evidence-decision": EvidenceDecision,
     "execution-envelope": ExecutionEnvelope,
     "expected-effect": ExpectedEffect,
+    "gemini-hypothesis": GeminiHypothesis,
     "investigation-comparison-record": InvestigationComparisonRecord,
     "investigation-event": InvestigationEvent,
     "investigation-report": InvestigationReport,
@@ -56,11 +64,13 @@ PUBLIC_SCHEMAS: dict[str, type[BaseModel]] = {
     "qualification-result-set": QualificationResultSet,
     "qualification-suite-manifest": QualificationSuiteManifest,
     "qualification-summary": QualificationSummary,
+    "recovery-chain": RecoveryChain,
     "scenario-cleanup-request": ScenarioCleanupRequest,
     "scenario-cleanup-result": ScenarioCleanupResult,
     "scenario-fault-trace": ScenarioFaultTrace,
     "scenario-run-request": ScenarioRunRequest,
     "scenario-run-result": ScenarioRunResult,
+    "verified-certificate": VerifiedCertificate,
 }
 V2_PUBLIC_SCHEMAS: dict[str, type[BaseModel]] = {
     "scenario-operational-status": ScenarioOperationalStatus,
