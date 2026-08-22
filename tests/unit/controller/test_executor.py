@@ -945,23 +945,27 @@ def test_timeout_terminalizes_session_while_cancel_suppressing_handler_lives() -
     async def scenario() -> None:
         handler = CancellationSuppressingHandler()
         controller = ProbeController(
-            _envelope(max_elapsed_ms=1_000),
+            _envelope(max_elapsed_ms=5_000),
             _registry(
                 handler,
-                capability=_closed_capability(timeout_ms=50),
+                capability=_closed_capability(timeout_ms=1_000),
             ),
         )
 
-        timed_out = await controller.execute(_request())
-        repeated = await controller.execute(_request())
+        execution = asyncio.create_task(controller.execute(_request()))
+        try:
+            await asyncio.wait_for(handler.started.wait(), timeout=5.0)
+            timed_out = await asyncio.wait_for(execution, timeout=5.0)
+            repeated = await controller.execute(_request())
 
-        assert timed_out.audit.stop_reason is ProbeStopReason.PROBE_TIMEOUT
-        assert repeated is timed_out
-        assert len(controller.audit_trail) == 1
-        assert len(handler.calls) == 1
-        assert handler.max_active == 1
-        handler.release.set()
-        await asyncio.sleep(0)
+            assert timed_out.audit.stop_reason is ProbeStopReason.PROBE_TIMEOUT
+            assert repeated is timed_out
+            assert len(controller.audit_trail) == 1
+            assert len(handler.calls) == 1
+            assert handler.max_active == 1
+        finally:
+            handler.release.set()
+            await asyncio.sleep(0)
 
     asyncio.run(scenario())
 

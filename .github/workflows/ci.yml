@@ -9,11 +9,10 @@ permissions:
   contents: read
 
 env:
-  UV_PYTHON: /usr/local/libexec/reconcile/python-3.12.13/bin/python3.12
   UV_PYTHON_DOWNLOADS: never
 
 jobs:
-  checks:
+  quality:
     runs-on: [self-hosted, Linux, X64, reconcile-ci]
     timeout-minutes: 30
     steps:
@@ -31,8 +30,65 @@ jobs:
       - run: uv sync --locked --all-groups
       - run: uv run --no-sync ruff check .
       - run: uv run --no-sync ruff format --check .
-      - run: uv run --no-sync pytest
       - run: uv build --no-sources
+
+  tests:
+    name: tests (${{ matrix.shard }})
+    runs-on: [self-hosted, Linux, X64, reconcile-ci]
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - shard: contracts
+            paths: tests/contract tests/acceptance
+          - shard: unit-root
+            paths: tests/unit/test_*.py
+          - shard: unit-packages
+            paths: tests/unit/adapters tests/unit/contracts tests/unit/controller tests/unit/evidence tests/unit/hosted tests/unit/persistence tests/unit/scenarios
+          - shard: integration-durable
+            paths: tests/integration/test_durable_scenarios.py
+          - shard: integration-routing
+            paths: >-
+              tests/integration/test_bounded_hybrid_routing.py
+              tests/integration/test_cli_scenarios.py
+              tests/integration/test_fixed_baseline.py
+              tests/integration/test_qualification_protocol.py
+          - shard: integration-remaining
+            paths: >-
+              tests/integration
+              --ignore=tests/integration/test_bounded_hybrid_routing.py
+              --ignore=tests/integration/test_cli_scenarios.py
+              --ignore=tests/integration/test_durable_scenarios.py
+              --ignore=tests/integration/test_fixed_baseline.py
+              --ignore=tests/integration/test_qualification_protocol.py
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: "3.12.13"
+      - uses: astral-sh/setup-uv@ae62891fec2bb8e7d6c99fc78c9fec3a63790f8d
+        with:
+          version: "0.12.3"
+          enable-cache: true
+      - run: uv sync --locked --all-groups
+      - run: uv run --no-sync pytest ${{ matrix.paths }}
+
+  checks:
+    if: ${{ always() }}
+    needs: [quality, tests]
+    runs-on: [self-hosted, Linux, X64, reconcile-ci]
+    timeout-minutes: 5
+    steps:
+      - name: Require every quality and test shard
+        env:
+          QUALITY_RESULT: ${{ needs.quality.result }}
+          TESTS_RESULT: ${{ needs.tests.result }}
+        run: |
+          test "$QUALITY_RESULT" = success
+          test "$TESTS_RESULT" = success
 
   container:
     runs-on: [self-hosted, Linux, X64, reconcile-ci]

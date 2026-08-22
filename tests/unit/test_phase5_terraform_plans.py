@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import shutil
 import stat
+import subprocess
 from copy import deepcopy
 from pathlib import Path
 from typing import Any
@@ -12,6 +13,27 @@ import pytest
 from scripts import check_phase5_terraform_plans as plans
 
 pytestmark = pytest.mark.unit
+
+
+def test_subprocess_failure_includes_bounded_diagnostics(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    omitted = "not-in-diagnostic"
+    failure = subprocess.CompletedProcess(
+        args=["terraform", "validate"],
+        returncode=1,
+        stdout=omitted + ("o" * 4_096),
+        stderr=omitted + ("e" * 4_096),
+    )
+    monkeypatch.setattr(plans.subprocess, "run", lambda *args, **kwargs: failure)
+
+    with pytest.raises(RuntimeError) as raised:
+        plans._run(["terraform", "validate"], environment={})
+
+    diagnostic = str(raised.value)
+    assert omitted not in diagnostic
+    assert "stdout='" + ("o" * 4_096) + "'" in diagnostic
+    assert "stderr='" + ("e" * 4_096) + "'" in diagnostic
 
 
 def _resource(address: str, after: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -645,6 +667,140 @@ def test_sandbox_is_read_only_offline_and_receives_a_minimal_environment(
     assert ["--setenv", "TMPDIR", str(tmp_path.parent / "tmp")] == command[
         command.index("--setenv") : command.index("--setenv") + 3
     ]
+
+
+def test_capable_bubblewrap_is_selected_without_docker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(plans.shutil, "which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(plans, "_bubblewrap_usable", lambda _: True)
+    monkeypatch.setattr(
+        plans,
+        "_run",
+        lambda *args, **kwargs: pytest.fail("Docker must not be inspected"),
+    )
+
+    assert plans._select_offline_backend(tmp_path) == (
+        "bubblewrap",
+        Path("/usr/bin/bwrap"),
+    )
+
+
+def test_unusable_bubblewrap_selects_digest_pinned_docker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    commands: list[list[str]] = []
+
+    def locate(name: str) -> str:
+        return f"/usr/bin/{name}"
+
+    def record(command: list[str], **_: Any) -> subprocess.CompletedProcess[str]:
+        commands.append(command)
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(plans.shutil, "which", locate)
+    monkeypatch.setattr(plans, "_bubblewrap_usable", lambda _: False)
+    monkeypatch.setattr(plans, "_run", record)
+
+    assert plans._select_offline_backend(tmp_path) == (
+        "docker",
+        Path("/usr/bin/docker"),
+    )
+    assert commands == [
+        ["/usr/bin/docker", "image", "inspect", plans._OFFLINE_DOCKER_IMAGE]
+    ]
+    assert (tmp_path / "docker-config").stat().st_mode & 0o777 == 0o700
+
+
+def test_docker_backend_pulls_only_the_missing_digest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    commands: list[list[str]] = []
+
+    def locate(name: str) -> str:
+        return f"/usr/bin/{name}"
+
+    def record(command: list[str], **_: Any) -> subprocess.CompletedProcess[str]:
+        commands.append(command)
+        return subprocess.CompletedProcess(
+            command, 1 if len(commands) == 1 else 0, "", ""
+        )
+
+    monkeypatch.setattr(plans.shutil, "which", locate)
+    monkeypatch.setattr(plans, "_bubblewrap_usable", lambda _: False)
+    monkeypatch.setattr(plans, "_run", record)
+
+    assert plans._select_offline_backend(tmp_path)[0] == "docker"
+    assert commands == [
+        ["/usr/bin/docker", "image", "inspect", plans._OFFLINE_DOCKER_IMAGE],
+        ["/usr/bin/docker", "pull", plans._OFFLINE_DOCKER_IMAGE],
+    ]
+
+
+def test_offline_backend_fails_closed_when_no_isolator_exists(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(plans.shutil, "which", lambda _: None)
+
+    with pytest.raises(RuntimeError, match="usable bwrap or a Docker daemon"):
+        plans._select_offline_backend(tmp_path)
+
+
+def test_docker_sandbox_is_networkless_read_only_and_closed_environment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("DOCKER_HOST", "tcp://127.0.0.1:2375")
+    monkeypatch.setenv("UNRELATED_SECRET", "not-forwarded")
+    root = tmp_path / "plans"
+    working = root / "runtime"
+    working.mkdir(parents=True)
+    terraform = tmp_path / "terraform"
+    mirror = tmp_path / "provider-mirror"
+    environment = plans._minimal_environment(network=False) | {
+        "TF_CLI_CONFIG_FILE": str(root / "terraform.rc"),
+        "TF_DATA_DIR": str(root / "runtime-data"),
+    }
+
+    command = plans._docker_offline_command(
+        [str(terraform), f"-chdir={working}", "validate"],
+        working,
+        docker=Path("/usr/bin/docker"),
+        environment=environment,
+        read_only_paths=(mirror,),
+    )
+
+    assert command[:3] == ["/usr/bin/docker", "run", "--rm"]
+    assert ["--network", "none"] == command[
+        command.index("--network") : command.index("--network") + 2
+    ]
+    assert "--read-only" in command
+    assert ["--cap-drop", "ALL"] == command[
+        command.index("--cap-drop") : command.index("--cap-drop") + 2
+    ]
+    assert ["--security-opt", "no-new-privileges"] == command[
+        command.index("--security-opt") : command.index("--security-opt") + 2
+    ]
+    assert ["--user", f"{plans.os.getuid()}:{plans.os.getgid()}"] == command[
+        command.index("--user") : command.index("--user") + 2
+    ]
+    assert f"{root.resolve()}:{root.resolve()}:rw" in command
+    assert f"{terraform.resolve()}:/reconcile-bin/terraform:ro" in command
+    assert f"{mirror.resolve()}:{mirror.resolve()}:ro" in command
+    assert command[-3:] == [
+        "/reconcile-bin/terraform",
+        f"-chdir={working}",
+        "validate",
+    ]
+    assert plans._OFFLINE_DOCKER_IMAGE in command
+    encoded_environment = [
+        command[index + 1] for index, value in enumerate(command) if value == "--env"
+    ]
+    assert "DOCKER_HOST=tcp://127.0.0.1:2375" not in encoded_environment
+    assert all("UNRELATED_SECRET" not in item for item in encoded_environment)
+
+    outer_environment = plans._docker_environment(root)
+    assert outer_environment["DOCKER_HOST"] == "tcp://127.0.0.1:2375"
+    assert "UNRELATED_SECRET" not in outer_environment
 
 
 def test_provider_mirror_uses_generated_fixed_configuration(

@@ -1842,10 +1842,13 @@ def test_cli_snapshot_imports_only_from_the_bound_snapshot(
         timeout: int,
     ) -> subprocess.CompletedProcess[bytes]:
         calls.append((argv, cwd, dict(environment), timeout))
+        process_environment = dict(environment)
+        if loader_path := os.environ.get("LD_LIBRARY_PATH"):
+            process_environment["LD_LIBRARY_PATH"] = loader_path
         return subprocess.run(
             argv,
             cwd=cwd,
-            env=environment,
+            env=process_environment,
             capture_output=True,
             check=False,
             timeout=timeout,
@@ -1869,6 +1872,7 @@ def test_cli_snapshot_imports_only_from_the_bound_snapshot(
     assert argv[:4] == (acceptance_module.sys.executable, "-P", "-S", "-m")
     assert cwd == source
     assert environment["PYTHONPATH"] == f"{source}:{dependencies}"
+    assert "LD_LIBRARY_PATH" not in environment
     assert str(live.parent) not in environment["PYTHONPATH"]
     assert timeout == 120
 

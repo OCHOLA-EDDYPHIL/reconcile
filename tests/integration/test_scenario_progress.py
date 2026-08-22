@@ -21,7 +21,7 @@ from reconcile.scenarios.service import (
 
 pytestmark = pytest.mark.integration
 
-_EVENT_TIMEOUT_SECONDS = 5.0
+_EVENT_TIMEOUT_SECONDS = 30.0
 _RUN_TIMEOUT_SECONDS = 30.0
 
 
