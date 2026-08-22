@@ -21,6 +21,7 @@ variable "region" {
 variable "service_account_emails" {
   type = object({
     api         = string
+    canary      = string
     controller  = string
     fault_proxy = string
     sandbox     = string
@@ -29,6 +30,7 @@ variable "service_account_emails" {
   validation {
     condition = var.service_account_emails == {
       api         = "rec-p5-api@reconcile-dev-260813-14fa6d.iam.gserviceaccount.com"
+      canary      = "rec-p5-canary@reconcile-dev-260813-14fa6d.iam.gserviceaccount.com"
       controller  = "rec-p5-controller@reconcile-dev-260813-14fa6d.iam.gserviceaccount.com"
       fault_proxy = "rec-p5-fault@reconcile-dev-260813-14fa6d.iam.gserviceaccount.com"
       sandbox     = "rec-p5-sandbox@reconcile-dev-260813-14fa6d.iam.gserviceaccount.com"
@@ -87,12 +89,14 @@ variable "api_invoker_members" {
 variable "request_timeout_seconds" {
   type = object({
     api         = number
+    canary      = number
     controller  = number
     fault_proxy = number
     sandbox     = number
   })
   default = {
     api         = 300
+    canary      = 60
     controller  = 300
     fault_proxy = 60
     sandbox     = 60

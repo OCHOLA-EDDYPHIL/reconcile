@@ -15,7 +15,7 @@ _STACKS = (
     _INFRA / "environments" / "dev" / "foundation",
     _INFRA / "environments" / "dev" / "runtime",
 )
-_CLOUD_RUN_SERVICES = {"api", "controller", "fault_proxy", "sandbox"}
+_CLOUD_RUN_SERVICES = {"api", "canary", "controller", "fault_proxy", "sandbox"}
 _BOOTSTRAP_SERVICES = {
     "cloudbilling.googleapis.com",
     "cloudresourcemanager.googleapis.com",
@@ -34,32 +34,45 @@ _FOUNDATION_SERVICES = {
 }
 _EXPECTED_RESOURCE_BLOCKS = {
     ("google_artifact_registry_repository", "runtime"),
+    (
+        "google_artifact_registry_repository_iam_member",
+        "canary_mutator_image_reader",
+    ),
     ("google_billing_account_iam_member", "phase5_apply"),
     ("google_billing_budget", "phase5"),
     ("google_cloud_run_v2_service", "api"),
+    ("google_cloud_run_v2_service", "canary"),
     ("google_cloud_run_v2_service", "controller"),
     ("google_cloud_run_v2_service", "fault_proxy"),
     ("google_cloud_run_v2_service", "sandbox"),
     ("google_cloud_run_v2_service_iam_member", "api_operator"),
+    ("google_cloud_run_v2_service_iam_member", "canary_mutator"),
+    ("google_cloud_run_v2_service_iam_member", "canary_invoker"),
+    ("google_cloud_run_v2_service_iam_member", "canary_reader"),
     ("google_cloud_run_v2_service_iam_member", "internal"),
     ("google_firestore_database", "phase5"),
     ("google_project_iam_member", "phase5_apply"),
+    ("google_project_iam_member", "canary_operation_reader"),
     ("google_project_iam_member", "runtime_database_user"),
     ("google_project_iam_member", "runtime_database_viewer"),
     ("google_project_iam_member", "sandbox_database_user"),
     ("google_project_iam_member", "target_database_user"),
     ("google_project_iam_member", "target_database_viewer"),
     ("google_project_iam_member", "vertex_user"),
+    ("google_project_iam_custom_role", "canary_operation_reader"),
+    ("google_project_iam_custom_role", "canary_mutator"),
     ("google_project_service", "bootstrap_required"),
     ("google_project_service", "required"),
     ("google_service_account", "phase5_apply"),
     ("google_service_account", "runtime"),
     ("google_service_account_iam_member", "apply_act_as"),
+    ("google_service_account_iam_member", "canary_mutator_act_as"),
     ("google_service_account_iam_member", "owner_impersonation"),
     ("google_storage_bucket", "target"),
     ("google_storage_bucket", "terraform_state"),
     ("google_storage_bucket_iam_member", "target_mutator"),
     ("google_storage_bucket_iam_member", "target_viewer"),
+    ("terraform_data", "canary_baseline"),
 }
 _APPLY_PROJECT_ROLES = {
     "roles/artifactregistry.admin",
@@ -387,9 +400,69 @@ def test_cloud_run_audiences_and_candidate_environment_are_closed_world() -> Non
 def test_runtime_commands_are_owned_by_the_pinned_images() -> None:
     source = (_STACKS[2] / "cloud_run.tf").read_text(encoding="utf-8")
     variables = (_STACKS[2] / "variables.tf").read_text(encoding="utf-8")
+    resources = {
+        resource.name: resource
+        for resource in _resources()
+        if resource.resource_type == "google_cloud_run_v2_service"
+    }
 
     assert "container_args" not in variables
-    assert re.search(r"(?m)^\s*(?:args|command)\s*=", source) is None
+    assert len(re.findall(r"(?m)^\s*(?:args|command)\s*=", source)) == 2
+    assert _attribute(resources["canary"].body, "command") == (
+        '["/opt/reconcile/bin/python"]'
+    )
+    assert _attribute(resources["canary"].body, "args") == (
+        '["-m", "reconcile.hosted.cloud_run_canary"]'
+    )
+    for name in _CLOUD_RUN_SERVICES - {"canary"}:
+        assert re.search(r"(?m)^\s*(?:args|command)\s*=", resources[name].body) is None
+
+
+def test_canary_runtime_drift_and_baseline_rotation_are_explicit() -> None:
+    cloud_run = (_STACKS[2] / "cloud_run.tf").read_text(encoding="utf-8")
+    locals_source = (_STACKS[2] / "locals.tf").read_text(encoding="utf-8")
+    invocation_iam = (_STACKS[2] / "invocation_iam.tf").read_text(encoding="utf-8")
+    resources = {
+        (resource.resource_type, resource.name): resource for resource in _resources()
+    }
+    canary = resources[("google_cloud_run_v2_service", "canary")].body
+    trigger = resources[("terraform_data", "canary_baseline")].body
+
+    for template_input in (
+        "var.image_digest",
+        "var.infrastructure_revision",
+        "var.project_id",
+        "var.region",
+        "var.request_timeout_seconds.canary",
+        "var.semantic_config_sha256",
+        "var.service_account_emails.canary",
+        "var.source_revision",
+    ):
+        assert template_input in locals_source
+    assert (
+        'canary_baseline_revision = "reconcile-p5-canary-b-'
+        '${substr(local.canary_baseline_identity, 0, 16)}"'
+    ) in locals_source
+    assert _attribute(trigger, "triggers_replace") == ("local.canary_baseline_identity")
+    assert (
+        len(
+            re.findall(
+                r"(?m)^\s*revision\s*=\s*local[.]canary_baseline_revision$",
+                canary,
+            )
+        )
+        == 2
+    )
+    assert "ignore_changes       = [template, traffic]" in canary
+    assert "replace_triggered_by = [terraform_data.canary_baseline]" in canary
+    assert (
+        invocation_iam.count("replace_triggered_by = [terraform_data.canary_baseline]")
+        == 3
+    )
+    assert (
+        "RECONCILE_CANARY_BASELINE_REVISION = local.canary_baseline_revision"
+        in cloud_run
+    )
 
 
 def test_artifact_registry_uses_immutable_tags_without_claiming_a_maximum() -> None:
@@ -527,9 +600,20 @@ def test_apply_identity_and_runtime_iam_graph_are_closed_world() -> None:
         for resource in resources
         if resource.resource_type == "google_cloud_run_v2_service_iam_member"
     }
+    artifact_iam = {
+        resource.name: resource
+        for resource in resources
+        if resource.resource_type == "google_artifact_registry_repository_iam_member"
+    }
+    custom_roles = {
+        resource.name: resource
+        for resource in resources
+        if resource.resource_type == "google_project_iam_custom_role"
+    }
 
     assert set(project_iam) == {
         "phase5_apply",
+        "canary_operation_reader",
         "runtime_database_user",
         "runtime_database_viewer",
         "sandbox_database_user",
@@ -586,6 +670,11 @@ def test_apply_identity_and_runtime_iam_graph_are_closed_world() -> None:
             '"serviceAccount:${google_service_account.runtime["controller"].email}"',
             None,
         ),
+        "canary_operation_reader": (
+            '"projects/${var.project_id}/roles/reconcileP5CanaryOperationReader"',
+            '"serviceAccount:${var.service_account_emails.controller}"',
+            None,
+        ),
     }
     for name, (role, member, for_each) in expected_project_bindings.items():
         body = project_iam[name].body
@@ -595,6 +684,33 @@ def test_apply_identity_and_runtime_iam_graph_are_closed_world() -> None:
             assert re.search(r"(?m)^\s*for_each\s*=", body) is None
         else:
             assert _attribute(body, "for_each") == for_each
+
+    operation_reader = project_iam["canary_operation_reader"].body
+    assert re.search(r"(?m)^\s*condition\s*\{", operation_reader) is None
+
+    assert set(custom_roles) == {"canary_mutator", "canary_operation_reader"}
+    operation_role = custom_roles["canary_operation_reader"].body
+    assert _attribute(operation_role, "role_id") == (
+        '"reconcileP5CanaryOperationReader"'
+    )
+    assert _attribute(operation_role, "permissions") == '["run.operations.get"]'
+    assert _attribute(operation_role, "stage") == '"GA"'
+    mutator_role = custom_roles["canary_mutator"].body
+    assert _attribute(mutator_role, "role_id") == '"reconcileP5CanaryMutator"'
+    assert set(re.findall(r'"(run\.[a-z.]+)"', mutator_role)) == {
+        "run.revisions.get",
+        "run.services.get",
+        "run.services.update",
+    }
+    assert _attribute(mutator_role, "stage") == '"GA"'
+
+    assert set(artifact_iam) == {"canary_mutator_image_reader"}
+    image_reader = artifact_iam["canary_mutator_image_reader"].body
+    assert _attribute(image_reader, "repository") == '"reconcile-p5"'
+    assert _attribute(image_reader, "role") == '"roles/artifactregistry.reader"'
+    assert _attribute(image_reader, "member") == (
+        '"serviceAccount:${var.service_account_emails.fault_proxy}"'
+    )
 
     assert set(bucket_iam) == {"target_mutator", "target_viewer"}
     expected_bucket_bindings = {
@@ -613,7 +729,11 @@ def test_apply_identity_and_runtime_iam_graph_are_closed_world() -> None:
         assert _attribute(body, "role") == role
         assert _attribute(body, "member") == member
 
-    assert set(service_account_iam) == {"apply_act_as", "owner_impersonation"}
+    assert set(service_account_iam) == {
+        "apply_act_as",
+        "canary_mutator_act_as",
+        "owner_impersonation",
+    }
     owner = service_account_iam["owner_impersonation"].body
     assert _attribute(owner, "role") == '"roles/iam.serviceAccountTokenCreator"'
     assert _attribute(owner, "member") == "var.owner_principal"
@@ -622,6 +742,14 @@ def test_apply_identity_and_runtime_iam_graph_are_closed_world() -> None:
     assert _attribute(act_as, "role") == '"roles/iam.serviceAccountUser"'
     assert _attribute(act_as, "member") == (
         '"serviceAccount:rec-p5-apply@reconcile-dev-260813-14fa6d.iam.gserviceaccount.com"'
+    )
+    canary_act_as = service_account_iam["canary_mutator_act_as"].body
+    assert _attribute(canary_act_as, "service_account_id") == (
+        '"projects/${var.project_id}/serviceAccounts/${var.service_account_emails.canary}"'
+    )
+    assert _attribute(canary_act_as, "role") == '"roles/iam.serviceAccountUser"'
+    assert _attribute(canary_act_as, "member") == (
+        '"serviceAccount:${var.service_account_emails.fault_proxy}"'
     )
 
     billing_iam = [
@@ -635,7 +763,13 @@ def test_apply_identity_and_runtime_iam_graph_are_closed_world() -> None:
         "google_service_account.phase5_apply.member"
     )
 
-    assert set(run_iam) == {"api_operator", "internal"}
+    assert set(run_iam) == {
+        "api_operator",
+        "canary_invoker",
+        "canary_mutator",
+        "canary_reader",
+        "internal",
+    }
     api_operator = run_iam["api_operator"].body
     assert _attribute(api_operator, "for_each") == "var.api_invoker_members"
     assert _attribute(api_operator, "name") == "google_cloud_run_v2_service.api.name"
@@ -646,6 +780,20 @@ def test_apply_identity_and_runtime_iam_graph_are_closed_world() -> None:
     assert _attribute(internal, "name") == "each.value.service"
     assert _attribute(internal, "role") == '"roles/run.invoker"'
     assert _attribute(internal, "member") == ('"serviceAccount:${each.value.member}"')
+    assert _attribute(run_iam["canary_reader"].body, "role") == '"roles/run.viewer"'
+    assert _attribute(run_iam["canary_reader"].body, "member") == (
+        '"serviceAccount:${var.service_account_emails.controller}"'
+    )
+    assert _attribute(run_iam["canary_mutator"].body, "role") == (
+        '"projects/${var.project_id}/roles/reconcileP5CanaryMutator"'
+    )
+    assert _attribute(run_iam["canary_mutator"].body, "member") == (
+        '"serviceAccount:${var.service_account_emails.fault_proxy}"'
+    )
+    assert _attribute(run_iam["canary_invoker"].body, "role") == ('"roles/run.invoker"')
+    assert _attribute(run_iam["canary_invoker"].body, "member") == (
+        '"serviceAccount:${var.service_account_emails.controller}"'
+    )
 
     invocation_locals = _matching_blocks(
         _STACKS[2] / "invocation_iam.tf", re.compile(r"(?m)^locals\s*\{")
@@ -686,7 +834,7 @@ def test_every_label_capable_resource_has_phase5_labels() -> None:
         if resource.resource_type in label_capable_types
     ]
 
-    assert len(resources) == 7
+    assert len(resources) == 8
     for resource in resources:
         assert re.search(r"(?m)^\s*labels\s*=", resource.body) is not None
 
@@ -717,6 +865,7 @@ def test_outputs_are_closed_world_and_non_sensitive() -> None:
         },
         _STACKS[2] / "outputs.tf": {
             "api_uri": "value = google_cloud_run_v2_service.api.uri",
+            "canary_uri": "value = google_cloud_run_v2_service.canary.uri",
         },
     }
 

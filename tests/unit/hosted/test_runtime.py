@@ -107,6 +107,10 @@ def _config(component: Component) -> HostedConfig:
             "target_bucket": _BUCKET,
             "sandbox_url": "https://sandbox.example.run.app",
             "sandbox_audience": _audience(Component.SANDBOX),
+            "canary_location": "us-central1",
+            "canary_service": "reconcile-p5-canary",
+            "canary_baseline_revision": "reconcile-p5-canary-b-0123456789abcdef",
+            "canary_audience": (f"https://reconcile.invalid/phase5/{_PROJECT}/canary"),
         }
     else:
         values = {
@@ -173,6 +177,26 @@ def test_every_component_assembles_one_identical_candidate_without_io(
         application = create_runtime_component_app(config)
         assert type(application) is FastAPI
         assert application.state.hosted_config is config
+
+
+def test_fault_proxy_canary_route_is_deployed_with_closed_permit_gate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+    sentinel = object()
+
+    def capture(_config: HostedConfig, **kwargs: object) -> object:
+        captured.update(kwargs)
+        return sentinel
+
+    monkeypatch.setattr(hosted_runtime, "create_component_app", capture)
+
+    result = create_runtime_component_app(_config(Component.FAULT_PROXY))
+
+    assert result is sentinel
+    assert type(captured["cloud_run_canary_action_authorizer"]) is (
+        hosted_runtime.ClosedCloudRunCanaryActionAuthorizer
+    )
 
 
 def test_fixed_executor_routes_storage_and_firestore_to_fixed_connectors(
