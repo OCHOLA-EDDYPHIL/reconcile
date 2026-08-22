@@ -1,0 +1,230 @@
+{
+  "$defs": {
+    "ArgumentsObject": {
+      "additionalProperties": {
+        "$ref": "#/$defs/JsonValue"
+      },
+      "maxProperties": 64,
+      "type": "object"
+    },
+    "ExecutionEnvelopeReference": {
+      "additionalProperties": false,
+      "properties": {
+        "envelope_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Envelope Sha256",
+          "type": "string"
+        },
+        "investigation_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Investigation Id",
+          "type": "string"
+        },
+        "operation_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Operation Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "investigation_id",
+        "operation_id",
+        "envelope_sha256"
+      ],
+      "title": "ExecutionEnvelopeReference",
+      "type": "object"
+    },
+    "JsonValue": {},
+    "NonEmptySmallJsonObject": {
+      "additionalProperties": {
+        "$ref": "#/$defs/JsonValue"
+      },
+      "maxProperties": 32,
+      "minProperties": 1,
+      "type": "object"
+    },
+    "RecoveryActionNode": {
+      "additionalProperties": false,
+      "properties": {
+        "chain_profile_version": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Chain Profile Version",
+          "type": "string"
+        },
+        "depends_on": {
+          "items": {
+            "maxLength": 128,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+            "type": "string"
+          },
+          "maxItems": 32,
+          "title": "Depends On",
+          "type": "array"
+        },
+        "envelope": {
+          "$ref": "#/$defs/ExecutionEnvelopeReference"
+        },
+        "node_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Node Id",
+          "type": "string"
+        },
+        "semantic_action": {
+          "$ref": "#/$defs/SemanticActionIdentity"
+        }
+      },
+      "required": [
+        "node_id",
+        "chain_profile_version",
+        "semantic_action",
+        "envelope"
+      ],
+      "title": "RecoveryActionNode",
+      "type": "object"
+    },
+    "SemanticActionIdentity": {
+      "additionalProperties": false,
+      "properties": {
+        "action_profile_version": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Action Profile Version",
+          "type": "string"
+        },
+        "expected_effect_sha256s": {
+          "items": {
+            "pattern": "^[0-9a-f]{64}$",
+            "type": "string"
+          },
+          "maxItems": 64,
+          "minItems": 1,
+          "title": "Expected Effect Sha256S",
+          "type": "array"
+        },
+        "key_version": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Key Version",
+          "type": "string"
+        },
+        "semantic_action_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Semantic Action Sha256",
+          "type": "string"
+        },
+        "semantic_arguments": {
+          "$ref": "#/$defs/ArgumentsObject"
+        },
+        "target": {
+          "$ref": "#/$defs/TargetBinding"
+        },
+        "tool_name": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Tool Name",
+          "type": "string"
+        },
+        "tool_version": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Tool Version",
+          "type": "string"
+        }
+      },
+      "required": [
+        "key_version",
+        "tool_name",
+        "tool_version",
+        "target",
+        "expected_effect_sha256s",
+        "action_profile_version",
+        "semantic_action_sha256"
+      ],
+      "title": "SemanticActionIdentity",
+      "type": "object"
+    },
+    "TargetBinding": {
+      "additionalProperties": false,
+      "properties": {
+        "resource": {
+          "$ref": "#/$defs/NonEmptySmallJsonObject"
+        },
+        "scope": {
+          "$ref": "#/$defs/NonEmptySmallJsonObject"
+        },
+        "target_kind": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Target Kind",
+          "type": "string"
+        }
+      },
+      "required": [
+        "target_kind",
+        "scope",
+        "resource"
+      ],
+      "title": "TargetBinding",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "chain_id": {
+      "maxLength": 128,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+      "title": "Chain Id",
+      "type": "string"
+    },
+    "chain_profile_version": {
+      "maxLength": 128,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+      "title": "Chain Profile Version",
+      "type": "string"
+    },
+    "created_at": {
+      "format": "date-time",
+      "title": "Created At",
+      "type": "string"
+    },
+    "nodes": {
+      "items": {
+        "$ref": "#/$defs/RecoveryActionNode"
+      },
+      "maxItems": 32,
+      "minItems": 1,
+      "title": "Nodes",
+      "type": "array"
+    },
+    "schema_version": {
+      "const": "reconcile/recovery-chain/v1",
+      "title": "Schema Version",
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema_version",
+    "chain_id",
+    "chain_profile_version",
+    "nodes",
+    "created_at"
+  ],
+  "title": "RecoveryChain",
+  "type": "object"
+}

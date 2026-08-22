@@ -1,0 +1,355 @@
+{
+  "$defs": {
+    "CertifiedTransition": {
+      "additionalProperties": false,
+      "properties": {
+        "action": {
+          "$ref": "#/$defs/PermitAction"
+        },
+        "arguments_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Arguments Sha256",
+          "type": "string"
+        },
+        "precondition_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Precondition Sha256",
+          "type": "string"
+        },
+        "semantic_action_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Semantic Action Sha256",
+          "type": "string"
+        },
+        "source_node_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Source Node Id",
+          "type": "string"
+        },
+        "target_node_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Target Node Id",
+          "type": "string"
+        },
+        "target_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Target Sha256",
+          "type": "string"
+        },
+        "tool_name": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Tool Name",
+          "type": "string"
+        },
+        "tool_version": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Tool Version",
+          "type": "string"
+        }
+      },
+      "required": [
+        "action",
+        "source_node_id",
+        "target_node_id",
+        "semantic_action_sha256",
+        "tool_name",
+        "tool_version",
+        "arguments_sha256",
+        "target_sha256",
+        "precondition_sha256"
+      ],
+      "title": "CertifiedTransition",
+      "type": "object"
+    },
+    "Classification": {
+      "enum": [
+        "COMMITTED",
+        "NOT_COMMITTED",
+        "PARTIAL",
+        "PENDING",
+        "UNKNOWN"
+      ],
+      "title": "Classification",
+      "type": "string"
+    },
+    "JsonValue": {},
+    "NonEmptySmallJsonObject": {
+      "additionalProperties": {
+        "$ref": "#/$defs/JsonValue"
+      },
+      "maxProperties": 32,
+      "minProperties": 1,
+      "type": "object"
+    },
+    "PermitAction": {
+      "enum": [
+        "CONTINUE",
+        "RETRY"
+      ],
+      "title": "PermitAction",
+      "type": "string"
+    },
+    "RecoveryEvidenceBinding": {
+      "additionalProperties": false,
+      "properties": {
+        "evidence_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Evidence Id",
+          "type": "string"
+        },
+        "evidence_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Evidence Sha256",
+          "type": "string"
+        },
+        "raw_observation_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Raw Observation Sha256",
+          "type": "string"
+        },
+        "valid_until": {
+          "format": "date-time",
+          "title": "Valid Until",
+          "type": "string"
+        }
+      },
+      "required": [
+        "evidence_id",
+        "evidence_sha256",
+        "raw_observation_sha256",
+        "valid_until"
+      ],
+      "title": "RecoveryEvidenceBinding",
+      "type": "object"
+    },
+    "TargetBinding": {
+      "additionalProperties": false,
+      "properties": {
+        "resource": {
+          "$ref": "#/$defs/NonEmptySmallJsonObject"
+        },
+        "scope": {
+          "$ref": "#/$defs/NonEmptySmallJsonObject"
+        },
+        "target_kind": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Target Kind",
+          "type": "string"
+        }
+      },
+      "required": [
+        "target_kind",
+        "scope",
+        "resource"
+      ],
+      "title": "TargetBinding",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "action_policy_version": {
+      "maxLength": 128,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+      "title": "Action Policy Version",
+      "type": "string"
+    },
+    "action_profile_version": {
+      "maxLength": 128,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+      "title": "Action Profile Version",
+      "type": "string"
+    },
+    "authority_policy_version": {
+      "maxLength": 128,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+      "title": "Authority Policy Version",
+      "type": "string"
+    },
+    "authority_satisfied": {
+      "const": true,
+      "title": "Authority Satisfied",
+      "type": "boolean"
+    },
+    "certificate_id": {
+      "maxLength": 128,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+      "title": "Certificate Id",
+      "type": "string"
+    },
+    "chain_id": {
+      "maxLength": 128,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+      "title": "Chain Id",
+      "type": "string"
+    },
+    "chain_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Chain Sha256",
+      "type": "string"
+    },
+    "classification": {
+      "$ref": "#/$defs/Classification"
+    },
+    "classification_policy_version": {
+      "maxLength": 128,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+      "title": "Classification Policy Version",
+      "type": "string"
+    },
+    "correlation_policy_version": {
+      "maxLength": 128,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+      "title": "Correlation Policy Version",
+      "type": "string"
+    },
+    "correlation_satisfied": {
+      "const": true,
+      "title": "Correlation Satisfied",
+      "type": "boolean"
+    },
+    "envelope_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Envelope Sha256",
+      "type": "string"
+    },
+    "evidence": {
+      "items": {
+        "$ref": "#/$defs/RecoveryEvidenceBinding"
+      },
+      "maxItems": 64,
+      "minItems": 1,
+      "title": "Evidence",
+      "type": "array"
+    },
+    "expires_at": {
+      "format": "date-time",
+      "title": "Expires At",
+      "type": "string"
+    },
+    "freshness_policy_version": {
+      "maxLength": 128,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+      "title": "Freshness Policy Version",
+      "type": "string"
+    },
+    "freshness_satisfied": {
+      "const": true,
+      "title": "Freshness Satisfied",
+      "type": "boolean"
+    },
+    "issued_at": {
+      "format": "date-time",
+      "title": "Issued At",
+      "type": "string"
+    },
+    "node_id": {
+      "maxLength": 128,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+      "title": "Node Id",
+      "type": "string"
+    },
+    "node_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Node Sha256",
+      "type": "string"
+    },
+    "proof_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Proof Sha256",
+      "type": "string"
+    },
+    "report_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Report Sha256",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": "reconcile/verified-certificate/v1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "semantic_action_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Semantic Action Sha256",
+      "type": "string"
+    },
+    "target": {
+      "$ref": "#/$defs/TargetBinding"
+    },
+    "target_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Target Sha256",
+      "type": "string"
+    },
+    "transition": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/CertifiedTransition"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "verifier_version": {
+      "maxLength": 128,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+      "title": "Verifier Version",
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema_version",
+    "certificate_id",
+    "chain_id",
+    "node_id",
+    "semantic_action_sha256",
+    "chain_sha256",
+    "node_sha256",
+    "envelope_sha256",
+    "report_sha256",
+    "proof_sha256",
+    "target",
+    "target_sha256",
+    "evidence",
+    "authority_satisfied",
+    "correlation_satisfied",
+    "freshness_satisfied",
+    "authority_policy_version",
+    "correlation_policy_version",
+    "freshness_policy_version",
+    "classification_policy_version",
+    "action_policy_version",
+    "action_profile_version",
+    "verifier_version",
+    "classification",
+    "transition",
+    "issued_at",
+    "expires_at"
+  ],
+  "title": "VerifiedCertificate",
+  "type": "object"
+}

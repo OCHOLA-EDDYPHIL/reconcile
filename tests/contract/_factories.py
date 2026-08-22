@@ -7,35 +7,44 @@ from datetime import UTC, datetime, timedelta
 
 from reconcile.contracts import (
     ACTION_GATE_RESULT_VERSION,
+    ACTION_PERMIT_VERSION,
     ADAPTIVE_PLANNER_INPUT_VERSION,
     ADAPTIVE_PLANNER_OUTPUT_VERSION,
+    AMBIGUITY_WITNESS_VERSION,
     ERROR_VERSION,
     EVIDENCE_DECISION_VERSION,
     EXECUTION_ENVELOPE_VERSION,
     EXPECTED_EFFECT_VERSION,
+    GEMINI_HYPOTHESIS_VERSION,
     INVESTIGATION_COMPARISON_RECORD_VERSION,
     INVESTIGATION_EVENT_VERSION,
     INVESTIGATION_REPORT_VERSION,
     NORMALIZED_EVIDENCE_VERSION,
     OBSERVATION_CAPABILITY_VERSION,
     PROBE_REQUEST_VERSION,
+    RECOVERY_CHAIN_VERSION,
     SCENARIO_CLEANUP_REQUEST_VERSION,
     SCENARIO_CLEANUP_RESULT_VERSION,
     SCENARIO_FAULT_TRACE_VERSION,
     SCENARIO_RUN_REQUEST_VERSION,
     SCENARIO_RUN_RESULT_VERSION,
+    VERIFIED_CERTIFICATE_VERSION,
     ActionGateEventPayload,
     ActionGateReason,
     ActionGateResult,
+    ActionPermit,
+    ActionPermitState,
     AdaptivePlannerInput,
     AdaptivePlannerOutput,
     AdaptivePlannerPhase,
     AdvisoryExplanation,
     AmbiguityKind,
+    AmbiguityWitness,
     AmbiguousExecution,
     ApiError,
     ApiErrorCode,
     CapabilityRef,
+    CertifiedTransition,
     Classification,
     ClassificationEventPayload,
     ComparisonModelUsage,
@@ -43,6 +52,7 @@ from reconcile.contracts import (
     ComparisonRun,
     ComparisonStrategyKind,
     DeterministicProof,
+    DiscriminatingObservation,
     EffectAssertion,
     EffectAssertionState,
     EffectFinding,
@@ -55,10 +65,13 @@ from reconcile.contracts import (
     EvidenceProvenance,
     EvidenceReason,
     ExecutionEnvelope,
+    ExecutionEnvelopeReference,
     ExpectedEffect,
     ExplanationCompleteness,
     FreshnessPolicy,
     FreshnessWindow,
+    GeminiHypothesis,
+    HypothesizedEffect,
     InvestigationComparisonRecord,
     InvestigationEvent,
     InvestigationEventType,
@@ -70,6 +83,7 @@ from reconcile.contracts import (
     ObservationCapability,
     OperationStatus,
     OriginalInvocation,
+    PermitAction,
     PlannerAcquisitionAdvice,
     PlannerAdmittedEvidence,
     PlannerCapability,
@@ -83,11 +97,13 @@ from reconcile.contracts import (
     PlannerVersionMetadata,
     PlannerWeakEvidence,
     PolicyReferences,
+    PossibleHistory,
     PreregisteredExpectedClassification,
     ProbeAuditRecord,
     ProbeEventPayload,
     ProbeOutcome,
     ProbeRequest,
+    ProposedTransition,
     QualificationCaseResult,
     QualificationDisposition,
     QualificationLaneOrder,
@@ -96,6 +112,9 @@ from reconcile.contracts import (
     QualificationSuiteManifest,
     QualificationSummary,
     RawObservationReference,
+    RecoveryActionNode,
+    RecoveryChain,
+    RecoveryEvidenceBinding,
     RequestedAction,
     ScenarioCallerObservation,
     ScenarioCleanupDisposition,
@@ -112,10 +131,13 @@ from reconcile.contracts import (
     ScenarioTraceEvent,
     ScenarioTransportEvent,
     ScenarioWorkerTermination,
+    SemanticActionIdentity,
     TargetBinding,
     TargetConstraint,
+    VerifiedCertificate,
     canonical_json_bytes,
     canonical_sha256,
+    semantic_action_sha256,
 )
 from reconcile.contracts.base import canonical_json_value_bytes
 from reconcile.qualification import (
@@ -944,6 +966,245 @@ def make_planner_output() -> AdaptivePlannerOutput:
     )
 
 
+def make_recovery_examples() -> tuple[
+    RecoveryChain,
+    GeminiHypothesis,
+    VerifiedCertificate,
+    AmbiguityWitness,
+    ActionPermit,
+]:
+    envelope = make_envelope()
+    second_envelope = envelope.model_copy(
+        update={
+            "investigation_id": "investigation-promote-7",
+            "operation_id": "operation-promote-7",
+        }
+    )
+
+    def action_identity(
+        *,
+        tool_name: str,
+        arguments: dict[str, object],
+        bound_envelope: ExecutionEnvelope,
+    ) -> SemanticActionIdentity:
+        effect_hashes = tuple(
+            canonical_sha256(effect) for effect in bound_envelope.expected_effects
+        )
+        digest = semantic_action_sha256(
+            key_version="semantic-action-v1",
+            tool_name=tool_name,
+            tool_version="1.0.0",
+            semantic_arguments=arguments,  # type: ignore[arg-type]
+            target=bound_envelope.target,
+            expected_effect_sha256s=effect_hashes,
+            action_profile_version=f"{tool_name}-profile-v1",
+        )
+        return SemanticActionIdentity(
+            key_version="semantic-action-v1",
+            tool_name=tool_name,
+            tool_version="1.0.0",
+            semantic_arguments=arguments,  # type: ignore[arg-type]
+            target=bound_envelope.target,
+            expected_effect_sha256s=effect_hashes,
+            action_profile_version=f"{tool_name}-profile-v1",
+            semantic_action_sha256=digest,
+        )
+
+    stage = RecoveryActionNode(
+        node_id="stage-revision",
+        chain_profile_version="cloud-run-release-chain-v1",
+        semantic_action=action_identity(
+            tool_name="stage-cloud-run-revision",
+            arguments={"image_digest": "sha256:" + "a" * 64, "release_id": "r-7"},
+            bound_envelope=envelope,
+        ),
+        envelope=ExecutionEnvelopeReference(
+            investigation_id=envelope.investigation_id,
+            operation_id=envelope.operation_id,
+            envelope_sha256=canonical_sha256(envelope),
+        ),
+    )
+    promote = RecoveryActionNode(
+        node_id="promote-traffic",
+        chain_profile_version="cloud-run-release-chain-v1",
+        semantic_action=action_identity(
+            tool_name="promote-cloud-run-traffic",
+            arguments={"percent": 100, "release_id": "r-7"},
+            bound_envelope=second_envelope,
+        ),
+        depends_on=(stage.node_id,),
+        envelope=ExecutionEnvelopeReference(
+            investigation_id=second_envelope.investigation_id,
+            operation_id=second_envelope.operation_id,
+            envelope_sha256=canonical_sha256(second_envelope),
+        ),
+    )
+    chain = RecoveryChain(
+        schema_version=RECOVERY_CHAIN_VERSION,
+        chain_id="release-chain-7",
+        chain_profile_version="cloud-run-release-chain-v1",
+        nodes=(stage, promote),
+        created_at=NOW,
+    )
+
+    report = make_report(Classification.COMMITTED)
+    evidence = report.evidence[0]
+    established = tuple(
+        HypothesizedEffect(
+            effect_id=finding.effect_id,
+            state=finding.state,
+            cited_evidence_ids=(evidence.evidence_id,),
+        )
+        for finding in report.proof.effect_findings  # type: ignore[union-attr]
+    )
+    committed_history = PossibleHistory(
+        history_id="provider-accepted",
+        classification=Classification.COMMITTED,
+        effect_states=established,
+        compatible_evidence_ids=(evidence.evidence_id,),
+        summary="The provider accepted and completed the staged revision.",
+    )
+    hypothesis = GeminiHypothesis(
+        schema_version=GEMINI_HYPOTHESIS_VERSION,
+        hypothesis_id="hypothesis-7",
+        chain_id=chain.chain_id,
+        node_id=stage.node_id,
+        semantic_action_sha256=stage.semantic_action.semantic_action_sha256,
+        report_sha256=canonical_sha256(report),
+        proposed_classification=Classification.COMMITTED,
+        effect_hypotheses=established,
+        cited_evidence_ids=(evidence.evidence_id,),
+        confidence_basis_points=8_500,
+        alternative_histories=(committed_history,),
+        proposed_transition=ProposedTransition(
+            action=PermitAction.CONTINUE,
+            source_node_id=stage.node_id,
+            target_node_id=promote.node_id,
+            rationale="Continue only after deterministic verification.",
+        ),
+        explanation="Provider evidence suggests that the staged revision committed.",
+        created_at=NOW + timedelta(seconds=5),
+    )
+
+    binding = RecoveryEvidenceBinding(
+        evidence_id=evidence.evidence_id,
+        evidence_sha256=canonical_sha256(evidence),
+        raw_observation_sha256=evidence.raw_observation.sha256,
+        valid_until=evidence.freshness.valid_until,
+    )
+    transition = CertifiedTransition(
+        action=PermitAction.CONTINUE,
+        source_node_id=stage.node_id,
+        target_node_id=promote.node_id,
+        semantic_action_sha256=promote.semantic_action.semantic_action_sha256,
+        tool_name=promote.semantic_action.tool_name,
+        tool_version=promote.semantic_action.tool_version,
+        arguments_sha256=hashlib.sha256(
+            canonical_json_value_bytes(promote.semantic_action.semantic_arguments)
+        ).hexdigest(),
+        target_sha256=canonical_sha256(promote.semantic_action.target),
+        precondition_sha256="b" * 64,
+    )
+    certificate = VerifiedCertificate(
+        schema_version=VERIFIED_CERTIFICATE_VERSION,
+        certificate_id="certificate-7",
+        chain_id=chain.chain_id,
+        node_id=stage.node_id,
+        semantic_action_sha256=stage.semantic_action.semantic_action_sha256,
+        chain_sha256=canonical_sha256(chain),
+        node_sha256=canonical_sha256(stage),
+        envelope_sha256=stage.envelope.envelope_sha256,
+        report_sha256=canonical_sha256(report),
+        proof_sha256=canonical_sha256(report.proof),  # type: ignore[arg-type]
+        target=stage.semantic_action.target,
+        target_sha256=canonical_sha256(stage.semantic_action.target),
+        evidence=(binding,),
+        authority_satisfied=True,
+        correlation_satisfied=True,
+        freshness_satisfied=True,
+        authority_policy_version="authority-v1",
+        correlation_policy_version="correlation-v1",
+        freshness_policy_version="freshness-v1",
+        classification_policy_version="classification-v1",
+        action_policy_version="action-v1",
+        action_profile_version=stage.semantic_action.action_profile_version,
+        verifier_version="recovery-verifier-v1",
+        classification=Classification.COMMITTED,
+        transition=transition,
+        issued_at=NOW + timedelta(seconds=5),
+        expires_at=NOW + timedelta(seconds=20),
+    )
+
+    absent_history = PossibleHistory(
+        history_id="provider-not-dispatched",
+        classification=Classification.NOT_COMMITTED,
+        effect_states=tuple(
+            HypothesizedEffect(
+                effect_id=effect.effect_id,
+                state=EffectAssertionState.NOT_ESTABLISHED,
+            )
+            for effect in envelope.expected_effects
+        ),
+        compatible_evidence_ids=(evidence.evidence_id,),
+        summary="The request never crossed the provider boundary.",
+    )
+    witness = AmbiguityWitness(
+        schema_version=AMBIGUITY_WITNESS_VERSION,
+        witness_id="witness-7",
+        chain_id=chain.chain_id,
+        node_id=stage.node_id,
+        semantic_action_sha256=stage.semantic_action.semantic_action_sha256,
+        chain_sha256=canonical_sha256(chain),
+        node_sha256=canonical_sha256(stage),
+        envelope_sha256=stage.envelope.envelope_sha256,
+        report_sha256=canonical_sha256(report),
+        proof_sha256=canonical_sha256(report.proof),  # type: ignore[arg-type]
+        target=stage.semantic_action.target,
+        target_sha256=canonical_sha256(stage.semantic_action.target),
+        evidence=(binding,),
+        possible_histories=(committed_history, absent_history),
+        discriminating_observations=(
+            DiscriminatingObservation(
+                observation_id="read-exact-revision",
+                description="Read the exact candidate revision from Cloud Run.",
+                capability_name="cloud-run-revision-get",
+                capability_version="1.0.0",
+                relevant_effect_ids=("business-record", "audit-record"),
+                distinguishes_history_ids=(
+                    committed_history.history_id,
+                    absent_history.history_id,
+                ),
+            ),
+        ),
+        verifier_version="recovery-verifier-v1",
+        created_at=NOW + timedelta(seconds=5),
+    )
+    permit = ActionPermit(
+        schema_version=ACTION_PERMIT_VERSION,
+        permit_id="permit-7",
+        certificate_id=certificate.certificate_id,
+        certificate_sha256=canonical_sha256(certificate),
+        chain_id=chain.chain_id,
+        source_node_id=transition.source_node_id,
+        target_node_id=transition.target_node_id,
+        semantic_action_sha256=transition.semantic_action_sha256,
+        action=transition.action,
+        action_profile_version=promote.semantic_action.action_profile_version,
+        action_policy_version=certificate.action_policy_version,
+        tool_name=transition.tool_name,
+        tool_version=transition.tool_version,
+        arguments_sha256=transition.arguments_sha256,
+        target_sha256=transition.target_sha256,
+        precondition_sha256=transition.precondition_sha256,
+        issued_at=certificate.issued_at,
+        expires_at=certificate.expires_at,
+        max_uses=1,
+        state=ActionPermitState.ISSUED,
+        revision=0,
+    )
+    return chain, hypothesis, certificate, witness, permit
+
+
 def make_qualification_examples() -> tuple[
     QualificationSuiteManifest,
     QualificationCaseResult,
@@ -1017,6 +1278,7 @@ def public_examples() -> tuple[object, ...]:
         make_api_error(),
         make_investigation_event(),
         *qualification,
+        *make_recovery_examples(),
     )
 
 

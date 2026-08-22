@@ -1,0 +1,372 @@
+{
+  "$defs": {
+    "ArgumentsObject": {
+      "additionalProperties": {
+        "$ref": "#/$defs/JsonValue"
+      },
+      "maxProperties": 64,
+      "type": "object"
+    },
+    "Classification": {
+      "enum": [
+        "COMMITTED",
+        "NOT_COMMITTED",
+        "PARTIAL",
+        "PENDING",
+        "UNKNOWN"
+      ],
+      "title": "Classification",
+      "type": "string"
+    },
+    "EffectAssertionState": {
+      "enum": [
+        "ESTABLISHED",
+        "NOT_ESTABLISHED",
+        "UNVERIFIED"
+      ],
+      "title": "EffectAssertionState",
+      "type": "string"
+    },
+    "HypothesisMissingEvidence": {
+      "additionalProperties": false,
+      "properties": {
+        "effect_ids": {
+          "items": {
+            "maxLength": 128,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+            "type": "string"
+          },
+          "maxItems": 64,
+          "minItems": 1,
+          "title": "Effect Ids",
+          "type": "array"
+        },
+        "reason": {
+          "maxLength": 4096,
+          "minLength": 1,
+          "title": "Reason",
+          "type": "string"
+        }
+      },
+      "required": [
+        "effect_ids",
+        "reason"
+      ],
+      "title": "HypothesisMissingEvidence",
+      "type": "object"
+    },
+    "HypothesizedEffect": {
+      "additionalProperties": false,
+      "properties": {
+        "cited_evidence_ids": {
+          "items": {
+            "maxLength": 128,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+            "type": "string"
+          },
+          "maxItems": 64,
+          "title": "Cited Evidence Ids",
+          "type": "array"
+        },
+        "effect_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Effect Id",
+          "type": "string"
+        },
+        "state": {
+          "$ref": "#/$defs/EffectAssertionState"
+        }
+      },
+      "required": [
+        "effect_id",
+        "state"
+      ],
+      "title": "HypothesizedEffect",
+      "type": "object"
+    },
+    "JsonValue": {},
+    "PermitAction": {
+      "enum": [
+        "CONTINUE",
+        "RETRY"
+      ],
+      "title": "PermitAction",
+      "type": "string"
+    },
+    "PossibleHistory": {
+      "additionalProperties": false,
+      "properties": {
+        "classification": {
+          "$ref": "#/$defs/Classification"
+        },
+        "compatible_evidence_ids": {
+          "items": {
+            "maxLength": 128,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+            "type": "string"
+          },
+          "maxItems": 64,
+          "title": "Compatible Evidence Ids",
+          "type": "array"
+        },
+        "effect_states": {
+          "items": {
+            "$ref": "#/$defs/HypothesizedEffect"
+          },
+          "maxItems": 64,
+          "minItems": 1,
+          "title": "Effect States",
+          "type": "array"
+        },
+        "history_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "History Id",
+          "type": "string"
+        },
+        "summary": {
+          "maxLength": 4096,
+          "minLength": 1,
+          "title": "Summary",
+          "type": "string"
+        }
+      },
+      "required": [
+        "history_id",
+        "classification",
+        "effect_states",
+        "summary"
+      ],
+      "title": "PossibleHistory",
+      "type": "object"
+    },
+    "ProbeRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "arguments": {
+          "$ref": "#/$defs/ArgumentsObject"
+        },
+        "capability_name": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Capability Name",
+          "type": "string"
+        },
+        "capability_version": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Capability Version",
+          "type": "string"
+        },
+        "rationale": {
+          "maxLength": 4096,
+          "minLength": 1,
+          "title": "Rationale",
+          "type": "string"
+        },
+        "relevant_effect_ids": {
+          "items": {
+            "maxLength": 128,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+            "type": "string"
+          },
+          "maxItems": 64,
+          "minItems": 1,
+          "title": "Relevant Effect Ids",
+          "type": "array"
+        },
+        "schema_version": {
+          "const": "reconcile/probe-request/v1",
+          "title": "Schema Version",
+          "type": "string"
+        }
+      },
+      "required": [
+        "schema_version",
+        "capability_name",
+        "capability_version",
+        "relevant_effect_ids",
+        "rationale"
+      ],
+      "title": "ProbeRequest",
+      "type": "object"
+    },
+    "ProposedTransition": {
+      "additionalProperties": false,
+      "properties": {
+        "action": {
+          "$ref": "#/$defs/PermitAction"
+        },
+        "rationale": {
+          "maxLength": 4096,
+          "minLength": 1,
+          "title": "Rationale",
+          "type": "string"
+        },
+        "source_node_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Source Node Id",
+          "type": "string"
+        },
+        "target_node_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Target Node Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "action",
+        "source_node_id",
+        "target_node_id",
+        "rationale"
+      ],
+      "title": "ProposedTransition",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "alternative_histories": {
+      "items": {
+        "$ref": "#/$defs/PossibleHistory"
+      },
+      "maxItems": 8,
+      "title": "Alternative Histories",
+      "type": "array"
+    },
+    "chain_id": {
+      "maxLength": 128,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+      "title": "Chain Id",
+      "type": "string"
+    },
+    "cited_evidence_ids": {
+      "items": {
+        "maxLength": 128,
+        "minLength": 1,
+        "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+        "type": "string"
+      },
+      "maxItems": 64,
+      "title": "Cited Evidence Ids",
+      "type": "array"
+    },
+    "confidence_basis_points": {
+      "maximum": 10000,
+      "minimum": 0,
+      "title": "Confidence Basis Points",
+      "type": "integer"
+    },
+    "created_at": {
+      "format": "date-time",
+      "title": "Created At",
+      "type": "string"
+    },
+    "effect_hypotheses": {
+      "items": {
+        "$ref": "#/$defs/HypothesizedEffect"
+      },
+      "maxItems": 64,
+      "minItems": 1,
+      "title": "Effect Hypotheses",
+      "type": "array"
+    },
+    "explanation": {
+      "maxLength": 4096,
+      "minLength": 1,
+      "title": "Explanation",
+      "type": "string"
+    },
+    "hypothesis_id": {
+      "maxLength": 128,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+      "title": "Hypothesis Id",
+      "type": "string"
+    },
+    "missing_evidence": {
+      "items": {
+        "$ref": "#/$defs/HypothesisMissingEvidence"
+      },
+      "maxItems": 64,
+      "title": "Missing Evidence",
+      "type": "array"
+    },
+    "node_id": {
+      "maxLength": 128,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+      "title": "Node Id",
+      "type": "string"
+    },
+    "proposed_classification": {
+      "$ref": "#/$defs/Classification"
+    },
+    "proposed_probe": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ProbeRequest"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "proposed_transition": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ProposedTransition"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "report_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Report Sha256",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": "reconcile/gemini-hypothesis/v1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "semantic_action_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Semantic Action Sha256",
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema_version",
+    "hypothesis_id",
+    "chain_id",
+    "node_id",
+    "semantic_action_sha256",
+    "report_sha256",
+    "proposed_classification",
+    "effect_hypotheses",
+    "confidence_basis_points",
+    "explanation",
+    "created_at"
+  ],
+  "title": "GeminiHypothesis",
+  "type": "object"
+}

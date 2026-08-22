@@ -1,0 +1,244 @@
+{
+  "$defs": {
+    "ActionPermitState": {
+      "enum": [
+        "ISSUED",
+        "CLAIMED",
+        "COMPLETED",
+        "EXPIRED"
+      ],
+      "title": "ActionPermitState",
+      "type": "string"
+    },
+    "PermitAction": {
+      "enum": [
+        "CONTINUE",
+        "RETRY"
+      ],
+      "title": "PermitAction",
+      "type": "string"
+    },
+    "PermitCompletionOutcome": {
+      "enum": [
+        "SUCCEEDED",
+        "REJECTED",
+        "OUTCOME_UNKNOWN"
+      ],
+      "title": "PermitCompletionOutcome",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "action": {
+      "$ref": "#/$defs/PermitAction"
+    },
+    "action_policy_version": {
+      "maxLength": 128,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+      "title": "Action Policy Version",
+      "type": "string"
+    },
+    "action_profile_version": {
+      "maxLength": 128,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+      "title": "Action Profile Version",
+      "type": "string"
+    },
+    "arguments_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Arguments Sha256",
+      "type": "string"
+    },
+    "certificate_id": {
+      "maxLength": 128,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+      "title": "Certificate Id",
+      "type": "string"
+    },
+    "certificate_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Certificate Sha256",
+      "type": "string"
+    },
+    "chain_id": {
+      "maxLength": 128,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+      "title": "Chain Id",
+      "type": "string"
+    },
+    "claim_id": {
+      "anyOf": [
+        {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Claim Id"
+    },
+    "claimed_at": {
+      "anyOf": [
+        {
+          "format": "date-time",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Claimed At"
+    },
+    "completed_at": {
+      "anyOf": [
+        {
+          "format": "date-time",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Completed At"
+    },
+    "completion_outcome": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/PermitCompletionOutcome"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "expired_at": {
+      "anyOf": [
+        {
+          "format": "date-time",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Expired At"
+    },
+    "expires_at": {
+      "format": "date-time",
+      "title": "Expires At",
+      "type": "string"
+    },
+    "issued_at": {
+      "format": "date-time",
+      "title": "Issued At",
+      "type": "string"
+    },
+    "max_uses": {
+      "const": 1,
+      "title": "Max Uses",
+      "type": "integer"
+    },
+    "permit_id": {
+      "maxLength": 128,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+      "title": "Permit Id",
+      "type": "string"
+    },
+    "precondition_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Precondition Sha256",
+      "type": "string"
+    },
+    "revision": {
+      "maximum": 9223372036854775807,
+      "minimum": 0,
+      "title": "Revision",
+      "type": "integer"
+    },
+    "schema_version": {
+      "const": "reconcile/action-permit/v1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "semantic_action_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Semantic Action Sha256",
+      "type": "string"
+    },
+    "source_node_id": {
+      "maxLength": 128,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+      "title": "Source Node Id",
+      "type": "string"
+    },
+    "state": {
+      "$ref": "#/$defs/ActionPermitState"
+    },
+    "target_node_id": {
+      "maxLength": 128,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+      "title": "Target Node Id",
+      "type": "string"
+    },
+    "target_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Target Sha256",
+      "type": "string"
+    },
+    "tool_name": {
+      "maxLength": 128,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+      "title": "Tool Name",
+      "type": "string"
+    },
+    "tool_version": {
+      "maxLength": 128,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+      "title": "Tool Version",
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema_version",
+    "permit_id",
+    "certificate_id",
+    "certificate_sha256",
+    "chain_id",
+    "source_node_id",
+    "target_node_id",
+    "semantic_action_sha256",
+    "action",
+    "action_profile_version",
+    "action_policy_version",
+    "tool_name",
+    "tool_version",
+    "arguments_sha256",
+    "target_sha256",
+    "precondition_sha256",
+    "issued_at",
+    "expires_at",
+    "max_uses",
+    "state",
+    "revision"
+  ],
+  "title": "ActionPermit",
+  "type": "object"
+}
