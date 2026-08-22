@@ -434,6 +434,7 @@ def _envelope(
     *,
     node_id: str,
     capability_names: tuple[str, ...] | None = None,
+    freshness_seconds: int = 60,
 ) -> ExecutionEnvelope:
     tool_name, arguments = _tool_and_arguments(profile_version)
     capabilities = capability_names or (
@@ -522,7 +523,10 @@ def _envelope(
                 max_total_result_bytes=1_000_000,
                 max_cost_units=8,
             ),
-            freshness=FreshnessPolicy(max_age_seconds=60, clock_skew_seconds=2),
+            freshness=FreshnessPolicy(
+                max_age_seconds=freshness_seconds,
+                clock_skew_seconds=2,
+            ),
             policies=PolicyReferences(
                 authority="recovery-authority-v1",
                 classification="recovery-classification-v1",
@@ -558,7 +562,9 @@ def _action(
     )
 
 
-def _chain() -> tuple[RecoveryChain, dict[str, ExecutionEnvelope]]:
+def _chain(
+    *, stage_freshness_seconds: int = 60
+) -> tuple[RecoveryChain, dict[str, ExecutionEnvelope]]:
     specifications = (
         (
             "stage",
@@ -579,7 +585,11 @@ def _chain() -> tuple[RecoveryChain, dict[str, ExecutionEnvelope]]:
     envelopes: dict[str, ExecutionEnvelope] = {}
     nodes: list[RecoveryActionNode] = []
     for node_id, profile_version, dependencies in specifications:
-        envelope = _envelope(profile_version, node_id=node_id)
+        envelope = _envelope(
+            profile_version,
+            node_id=node_id,
+            freshness_seconds=(stage_freshness_seconds if node_id == "stage" else 60),
+        )
         envelopes[node_id] = envelope
         nodes.append(
             RecoveryActionNode(
@@ -887,9 +897,80 @@ def test_running_then_succeeded_operation_remains_certifiable() -> None:
 
     assert isinstance(artifact, VerifiedCertificate)
     assert artifact.classification is Classification.COMMITTED
-    assert {binding.evidence_id for binding in artifact.evidence} == {
-        evidence.evidence_id for evidence in evaluation.evidence
+    active_ids = {
+        evidence.evidence_id
+        for evidence in evaluation.evidence
+        if evidence.operation_status is OperationStatus.ACTIVE
     }
+    assert active_ids
+    assert active_ids.isdisjoint(binding.evidence_id for binding in artifact.evidence)
+    assert artifact.report_sha256 == canonical_sha256(report)
+
+
+def test_expired_superseded_poll_does_not_expire_fresh_terminal_proof() -> None:
+    chain, envelopes = _chain(stage_freshness_seconds=2)
+    envelope = envelopes["stage"]
+    run = _run_pipeline(
+        envelope,
+        (
+            (
+                "cloud-run-operation-get",
+                "pending",
+                NOW + timedelta(seconds=2),
+                None,
+            ),
+            (
+                "cloud-run-service-get",
+                "committed",
+                NOW + timedelta(seconds=4),
+                "etag-stage-7",
+            ),
+            (
+                "cloud-run-revision-get",
+                "committed",
+                NOW + timedelta(seconds=4),
+                None,
+            ),
+            (
+                "cloud-run-operation-get",
+                "operation-succeeded",
+                NOW + timedelta(seconds=4),
+                None,
+            ),
+            (
+                "cloud-run-revision-health",
+                "committed",
+                NOW + timedelta(seconds=4),
+                None,
+            ),
+        ),
+    )
+    evaluation, report = run.evaluation_and_report()
+    active_id = next(
+        evidence.evidence_id
+        for evidence in evaluation.evidence
+        if evidence.operation_status is OperationStatus.ACTIVE
+    )
+
+    artifact = verify_recovery(
+        chain=chain,
+        node_id="stage",
+        envelope=envelope,
+        report=report,
+        evaluation=evaluation,
+        verified_at=NOW + timedelta(seconds=5),
+        successor_envelope=envelopes["promote"],
+    )
+
+    assert isinstance(artifact, VerifiedCertificate)
+    assert active_id not in {binding.evidence_id for binding in artifact.evidence}
+    assert active_id in {evidence.evidence_id for evidence in report.evidence}
+    assert active_id in evaluation.proof.admitted_evidence_ids
+    assert artifact.report_sha256 == canonical_sha256(report)
+    assert artifact.proof_sha256 == canonical_sha256(evaluation.proof)
+    assert artifact.expires_at == min(
+        binding.valid_until for binding in artifact.evidence
+    )
 
 
 def test_committed_promotion_certifies_firestore_record_creation() -> None:

@@ -961,6 +961,9 @@ def verify_recovery(
     )
     admitted = _admitted_evidence(envelope, evaluation)
     supporting = _supporting_evidence(evaluation, admitted)
+    # Validate the complete admitted history. The certificate's report/proof
+    # digests bind that history, while direct evidence bindings remain the
+    # decisive support whose freshness bounds the authorization.
     relevant = admitted
 
     try:
@@ -1030,7 +1033,7 @@ def verify_recovery(
         proof_sha256=canonical_sha256(evaluation.proof),
         target=node.semantic_action.target,
         target_sha256=canonical_sha256(node.semantic_action.target),
-        evidence=_bindings(admitted),
+        evidence=_bindings(supporting),
         authority_satisfied=True,
         correlation_satisfied=True,
         freshness_satisfied=True,
