@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import timedelta
+from datetime import datetime, timedelta
 
 import pytest
 from google.adk.tools import ToolContext
 
 from reconcile.contracts import (
+    ActionPermit,
     ActionPermitState,
     PermitCompletionOutcome,
     TargetBinding,
@@ -22,8 +23,7 @@ from reconcile.scenarios.adk_mutation import (
     run_adk_mutation,
     run_permitted_adk_mutation,
 )
-from tests._permit_support import make_permit_certificate
-from tests.contract._factories import NOW
+from tests._permit_support import NOW, make_permit_certificate
 
 pytestmark = pytest.mark.unit
 
@@ -209,7 +209,7 @@ def _named_promotion_tool(callback):
 def test_permit_is_claimed_in_before_tool_callback_and_completed_afterward(
     tmp_path,
 ) -> None:
-    certificate, arguments, precondition = make_permit_certificate()
+    certificate, semantic_action, arguments, precondition = make_permit_certificate()
     store = SqliteDurableRuntimeStore(tmp_path / "runtime.sqlite3")
     permit = asyncio.run(
         PermitAuthority(
@@ -218,15 +218,15 @@ def test_permit_is_claimed_in_before_tool_callback_and_completed_afterward(
         ).issue_permit(certificate)
     )
     assert permit is not None
-    calls: list[tuple[str, int]] = []
+    calls: list[tuple[str, str, int]] = []
 
     @_named_promotion_tool
-    def promote(release_id: str, percent: int) -> None:
-        calls.append((release_id, percent))
+    def promote(release_id: str, revision: str, percent: int) -> None:
+        calls.append((release_id, revision, percent))
 
     authority = PermitAuthority(
         store,
-        clock=_SequenceClock(7, 8),
+        clock=_SequenceClock(7, 7, 8),
         claim_id_factory=lambda: "claim-adk-success",
     )
     response = run_permitted_adk_mutation(
@@ -238,13 +238,14 @@ def test_permit_is_claimed_in_before_tool_callback_and_completed_afterward(
         authority=authority,
         permit_id=permit.permit_id,
         certificate=certificate,
+        semantic_action=semantic_action,
         tool_version=permit.tool_version,
         target=certificate.target,
         precondition=precondition,
     )
 
     assert response == {"accepted": True}
-    assert calls == [("r-7", 100)]
+    assert calls == [("release-7", "reconcile-canary-release-7", 100)]
     stored = asyncio.run(store.get_permit(permit.permit_id))
     assert stored.state is ActionPermitState.COMPLETED
     assert stored.completion_outcome is PermitCompletionOutcome.SUCCEEDED
@@ -260,7 +261,7 @@ def test_permit_is_claimed_in_before_tool_callback_and_completed_afterward(
 def test_wrong_target_replay_missing_and_model_forgery_make_no_outbound_call(
     tmp_path,
 ) -> None:
-    certificate, arguments, precondition = make_permit_certificate()
+    certificate, semantic_action, arguments, precondition = make_permit_certificate()
     store = SqliteDurableRuntimeStore(tmp_path / "runtime.sqlite3")
     permit = asyncio.run(
         PermitAuthority(
@@ -272,14 +273,12 @@ def test_wrong_target_replay_missing_and_model_forgery_make_no_outbound_call(
     calls = 0
 
     @_named_promotion_tool
-    def promote(release_id: str, percent: int) -> None:
+    def promote(release_id: str, revision: str, percent: int) -> None:
         nonlocal calls
         calls += 1
 
     wrong_target = TargetBinding.model_validate(
-        certificate.target.model_copy(
-            update={"resource": {"object_name": "wrong-target"}}
-        )
+        certificate.target.model_copy(update={"resource": {"service": "wrong-target"}})
     )
     wrong_authority = PermitAuthority(
         store,
@@ -296,6 +295,7 @@ def test_wrong_target_replay_missing_and_model_forgery_make_no_outbound_call(
             authority=wrong_authority,
             permit_id=permit.permit_id,
             certificate=certificate,
+            semantic_action=semantic_action,
             tool_version=permit.tool_version,
             target=wrong_target,
             precondition=precondition,
@@ -320,6 +320,7 @@ def test_wrong_target_replay_missing_and_model_forgery_make_no_outbound_call(
             authority=missing_authority,
             permit_id="permit-missing",
             certificate=certificate,
+            semantic_action=semantic_action,
             tool_version=permit.tool_version,
             target=certificate.target,
             precondition=precondition,
@@ -328,7 +329,7 @@ def test_wrong_target_replay_missing_and_model_forgery_make_no_outbound_call(
 
     with pytest.raises(ValueError, match="controller-owned"):
         run_permitted_adk_mutation(
-            lambda release_id, percent, permit_id: None,
+            lambda release_id, revision, percent, permit_id: None,
             arguments={**arguments, "permit_id": "model-forged"},
             public_response={"accepted": True},
             function_call_id="function-call-forged",
@@ -336,6 +337,7 @@ def test_wrong_target_replay_missing_and_model_forgery_make_no_outbound_call(
             authority=missing_authority,
             permit_id=permit.permit_id,
             certificate=certificate,
+            semantic_action=semantic_action,
             tool_version=permit.tool_version,
             target=certificate.target,
             precondition=precondition,
@@ -344,7 +346,7 @@ def test_wrong_target_replay_missing_and_model_forgery_make_no_outbound_call(
 
     success_authority = PermitAuthority(
         store,
-        clock=_SequenceClock(8, 9),
+        clock=_SequenceClock(8, 8, 9),
         claim_id_factory=lambda: "claim-success",
     )
     run_permitted_adk_mutation(
@@ -356,6 +358,7 @@ def test_wrong_target_replay_missing_and_model_forgery_make_no_outbound_call(
         authority=success_authority,
         permit_id=permit.permit_id,
         certificate=certificate,
+        semantic_action=semantic_action,
         tool_version=permit.tool_version,
         target=certificate.target,
         precondition=precondition,
@@ -377,11 +380,109 @@ def test_wrong_target_replay_missing_and_model_forgery_make_no_outbound_call(
             authority=replay_authority,
             permit_id=permit.permit_id,
             certificate=certificate,
+            semantic_action=semantic_action,
             tool_version=permit.tool_version,
             target=certificate.target,
             precondition=precondition,
         )
     assert calls == 1
+
+
+@pytest.mark.parametrize(
+    "case",
+    (
+        "missing-revision",
+        "wrong-argument-type",
+        "wrong-argument-value",
+        "wrong-version",
+        "missing-precondition",
+        "extra-precondition",
+        "wrong-precondition-type",
+        "expired",
+        "modified-permit",
+    ),
+)
+def test_dispatch_guard_blocks_adversarial_inputs_before_provider_contact(
+    tmp_path,
+    case: str,
+) -> None:
+    certificate, semantic_action, arguments, precondition = make_permit_certificate()
+    store = SqliteDurableRuntimeStore(tmp_path / f"{case}.sqlite3")
+    expected = asyncio.run(
+        PermitAuthority(
+            store,
+            clock=lambda: NOW + timedelta(seconds=6),
+        ).issue_permit(certificate)
+    )
+    assert expected is not None
+    if case == "modified-permit":
+        modified_store = SqliteDurableRuntimeStore(
+            tmp_path / "modified-permit-durable.sqlite3"
+        )
+        modified = ActionPermit.model_validate(
+            expected.model_copy(update={"action_policy_version": "modified-policy-v1"})
+        )
+        asyncio.run(modified_store.issue_permit(modified))
+        store = modified_store
+
+    dispatched_arguments = dict(arguments)
+    dispatched_precondition = dict(precondition)
+    dispatched_version = expected.tool_version
+    if case == "missing-revision":
+        dispatched_arguments.pop("revision")
+    elif case == "wrong-argument-type":
+        dispatched_arguments["percent"] = True
+    elif case == "wrong-argument-value":
+        dispatched_arguments["percent"] = 99
+    elif case == "wrong-version":
+        dispatched_version = "2.0.0"
+    elif case == "missing-precondition":
+        dispatched_precondition = {}
+    elif case == "extra-precondition":
+        dispatched_precondition["unexpected"] = True
+    elif case == "wrong-precondition-type":
+        dispatched_precondition["service_etag"] = 7
+
+    calls = 0
+
+    @_named_promotion_tool
+    def promote(
+        release_id: str,
+        revision: str = "missing-revision",
+        percent: int = 100,
+    ) -> None:
+        nonlocal calls
+        calls += 1
+
+    claim_at = (
+        certificate.expires_at if case == "expired" else NOW + timedelta(seconds=7)
+    )
+    authority = PermitAuthority(
+        store,
+        clock=lambda: claim_at,
+        claim_id_factory=lambda: f"claim-{case}",
+    )
+    with pytest.raises(AdkMutationError):
+        run_permitted_adk_mutation(
+            promote,
+            arguments=dispatched_arguments,
+            public_response={"accepted": True},
+            function_call_id=f"function-call-{case}",
+            invocation_id=f"invocation-{case}",
+            authority=authority,
+            permit_id=expected.permit_id,
+            certificate=certificate,
+            semantic_action=semantic_action,
+            tool_version=dispatched_version,
+            target=certificate.target,
+            precondition=dispatched_precondition,
+        )
+
+    assert calls == 0
+    stored = asyncio.run(store.get_permit(expected.permit_id))
+    assert stored.state is (
+        ActionPermitState.EXPIRED if case == "expired" else ActionPermitState.ISSUED
+    )
 
 
 @pytest.mark.parametrize(
@@ -405,7 +506,7 @@ def test_provider_failure_after_claim_is_terminal_and_never_replayed(
     expected_outcome: PermitCompletionOutcome,
     expected_audit: PermitAuditKind,
 ) -> None:
-    certificate, arguments, precondition = make_permit_certificate()
+    certificate, semantic_action, arguments, precondition = make_permit_certificate()
     store = SqliteDurableRuntimeStore(tmp_path / f"{expected_outcome.value}.sqlite3")
     permit = asyncio.run(
         PermitAuthority(
@@ -417,14 +518,14 @@ def test_provider_failure_after_claim_is_terminal_and_never_replayed(
     calls = 0
 
     @_named_promotion_tool
-    def promote(release_id: str, percent: int) -> None:
+    def promote(release_id: str, revision: str, percent: int) -> None:
         nonlocal calls
         calls += 1
         raise exception
 
     authority = PermitAuthority(
         store,
-        clock=_SequenceClock(7, 8),
+        clock=_SequenceClock(7, 7, 8),
         claim_id_factory=lambda: "claim-provider-failure",
     )
     with pytest.raises(AdkMutationError):
@@ -437,6 +538,7 @@ def test_provider_failure_after_claim_is_terminal_and_never_replayed(
             authority=authority,
             permit_id=permit.permit_id,
             certificate=certificate,
+            semantic_action=semantic_action,
             tool_version=permit.tool_version,
             target=certificate.target,
             precondition=precondition,
@@ -471,8 +573,72 @@ class _CrashAfterClaimStore:
         return await self._delegate.permit_audit_events(permit_id)
 
 
+class _MutableClock:
+    def __init__(self, now: datetime) -> None:
+        self.now = now
+
+    def __call__(self) -> datetime:
+        return self.now
+
+
+class _ExpireAfterClaimStore:
+    def __init__(
+        self,
+        delegate: ActionPermitStore,
+        clock: _MutableClock,
+    ) -> None:
+        self._delegate = delegate
+        self._clock = clock
+
+    async def issue_permit(self, permit):
+        return await self._delegate.issue_permit(permit)
+
+    async def get_permit(self, permit_id):
+        return await self._delegate.get_permit(permit_id)
+
+    async def claim_permit(self, request):
+        claimed = await self._delegate.claim_permit(request)
+        self._clock.now = claimed.expires_at
+        return claimed
+
+    async def complete_permit(self, request):
+        return await self._delegate.complete_permit(request)
+
+    async def permit_audit_events(self, permit_id):
+        return await self._delegate.permit_audit_events(permit_id)
+
+
+class _TamperedReturnStore:
+    def __init__(self, delegate: ActionPermitStore, phase: str) -> None:
+        self._delegate = delegate
+        self._phase = phase
+
+    @staticmethod
+    def _tamper(permit: ActionPermit) -> ActionPermit:
+        return ActionPermit.model_validate(
+            permit.model_copy(update={"action_policy_version": "tampered-policy-v1"})
+        )
+
+    async def issue_permit(self, permit):
+        return await self._delegate.issue_permit(permit)
+
+    async def get_permit(self, permit_id):
+        return await self._delegate.get_permit(permit_id)
+
+    async def claim_permit(self, request):
+        claimed = await self._delegate.claim_permit(request)
+        return self._tamper(claimed) if self._phase == "claim" else claimed
+
+    async def complete_permit(self, request):
+        completed = await self._delegate.complete_permit(request)
+        return self._tamper(completed) if self._phase == "completion" else completed
+
+    async def permit_audit_events(self, permit_id):
+        return await self._delegate.permit_audit_events(permit_id)
+
+
 def test_crash_after_claim_leaves_no_automatic_redispatch_path(tmp_path) -> None:
-    certificate, arguments, precondition = make_permit_certificate()
+    certificate, semantic_action, arguments, precondition = make_permit_certificate()
     store = SqliteDurableRuntimeStore(tmp_path / "runtime.sqlite3")
     permit = asyncio.run(
         PermitAuthority(
@@ -484,7 +650,7 @@ def test_crash_after_claim_leaves_no_automatic_redispatch_path(tmp_path) -> None
     calls = 0
 
     @_named_promotion_tool
-    def promote(release_id: str, percent: int) -> None:
+    def promote(release_id: str, revision: str, percent: int) -> None:
         nonlocal calls
         calls += 1
 
@@ -503,6 +669,7 @@ def test_crash_after_claim_leaves_no_automatic_redispatch_path(tmp_path) -> None
             authority=crashing_authority,
             permit_id=permit.permit_id,
             certificate=certificate,
+            semantic_action=semantic_action,
             tool_version=permit.tool_version,
             target=certificate.target,
             precondition=precondition,
@@ -527,8 +694,110 @@ def test_crash_after_claim_leaves_no_automatic_redispatch_path(tmp_path) -> None
             authority=restarted_authority,
             permit_id=permit.permit_id,
             certificate=certificate,
+            semantic_action=semantic_action,
             tool_version=permit.tool_version,
             target=certificate.target,
             precondition=precondition,
         )
     assert calls == 0
+
+
+def test_permit_expiring_while_durable_claim_returns_blocks_outbound_call(
+    tmp_path,
+) -> None:
+    certificate, semantic_action, arguments, precondition = make_permit_certificate()
+    store = SqliteDurableRuntimeStore(tmp_path / "claim-delay.sqlite3")
+    permit = asyncio.run(
+        PermitAuthority(
+            store,
+            clock=lambda: NOW + timedelta(seconds=6),
+        ).issue_permit(certificate)
+    )
+    assert permit is not None
+    calls = 0
+
+    @_named_promotion_tool
+    def promote(release_id: str, revision: str, percent: int) -> None:
+        nonlocal calls
+        calls += 1
+
+    clock = _MutableClock(NOW + timedelta(seconds=7))
+    authority = PermitAuthority(
+        _ExpireAfterClaimStore(store, clock),
+        clock=clock,
+        claim_id_factory=lambda: "claim-expired-after-write",
+    )
+    with pytest.raises(AdkMutationError):
+        run_permitted_adk_mutation(
+            promote,
+            arguments=arguments,
+            public_response={"accepted": True},
+            function_call_id="function-call-expired-after-write",
+            invocation_id="invocation-expired-after-write",
+            authority=authority,
+            permit_id=permit.permit_id,
+            certificate=certificate,
+            semantic_action=semantic_action,
+            tool_version=permit.tool_version,
+            target=certificate.target,
+            precondition=precondition,
+        )
+
+    assert calls == 0
+    assert asyncio.run(store.get_permit(permit.permit_id)).state is (
+        ActionPermitState.CLAIMED
+    )
+
+
+@pytest.mark.parametrize(
+    ("phase", "expected_calls", "expected_state"),
+    (
+        ("claim", 0, ActionPermitState.CLAIMED),
+        ("completion", 1, ActionPermitState.COMPLETED),
+    ),
+)
+def test_authority_rejects_tampered_store_return_bindings(
+    tmp_path,
+    phase: str,
+    expected_calls: int,
+    expected_state: ActionPermitState,
+) -> None:
+    certificate, semantic_action, arguments, precondition = make_permit_certificate()
+    store = SqliteDurableRuntimeStore(tmp_path / f"tampered-{phase}.sqlite3")
+    permit = asyncio.run(
+        PermitAuthority(
+            store,
+            clock=lambda: NOW + timedelta(seconds=6),
+        ).issue_permit(certificate)
+    )
+    assert permit is not None
+    calls = 0
+
+    @_named_promotion_tool
+    def promote(release_id: str, revision: str, percent: int) -> None:
+        nonlocal calls
+        calls += 1
+
+    authority = PermitAuthority(
+        _TamperedReturnStore(store, phase),
+        clock=lambda: NOW + timedelta(seconds=7),
+        claim_id_factory=lambda: f"claim-tampered-{phase}",
+    )
+    with pytest.raises(AdkMutationError):
+        run_permitted_adk_mutation(
+            promote,
+            arguments=arguments,
+            public_response={"accepted": True},
+            function_call_id=f"function-call-tampered-{phase}",
+            invocation_id=f"invocation-tampered-{phase}",
+            authority=authority,
+            permit_id=permit.permit_id,
+            certificate=certificate,
+            semantic_action=semantic_action,
+            tool_version=permit.tool_version,
+            target=certificate.target,
+            precondition=precondition,
+        )
+
+    assert calls == expected_calls
+    assert asyncio.run(store.get_permit(permit.permit_id)).state is expected_state

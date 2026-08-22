@@ -28,8 +28,11 @@ from reconcile.persistence.permits import (
     PermitDenialReason,
     PermitStoreOutcomeUnknown,
 )
-from tests._permit_support import make_permit_certificate
-from tests.contract._factories import NOW
+from reconcile.scenarios.adk_mutation import (
+    run_permitted_adk_mutation,
+    run_permitted_adk_mutation_async,
+)
+from tests._permit_support import NOW, make_permit_certificate
 
 pytestmark = pytest.mark.unit
 
@@ -92,7 +95,9 @@ class _MemoryCas:
 
 def test_firestore_thirty_two_concurrent_claims_have_exactly_one_winner() -> None:
     async def scenario() -> None:
-        certificate, arguments, precondition = make_permit_certificate()
+        certificate, semantic_action, arguments, precondition = (
+            make_permit_certificate()
+        )
         store = FirestoreActionPermitStore(_MemoryCas())
         permit = await PermitAuthority(
             store,
@@ -109,6 +114,7 @@ def test_firestore_thirty_two_concurrent_claims_have_exactly_one_winner() -> Non
             return await authority.claim_for_dispatch(
                 permit_id=permit.permit_id,
                 certificate=certificate,
+                semantic_action=semantic_action,
                 tool_name=permit.tool_name,
                 tool_version=permit.tool_version,
                 arguments=arguments,
@@ -145,7 +151,9 @@ def test_firestore_thirty_two_concurrent_claims_have_exactly_one_winner() -> Non
 
 def test_firestore_claim_outcome_unknown_never_returns_dispatch_authority() -> None:
     async def scenario() -> None:
-        certificate, arguments, precondition = make_permit_certificate()
+        certificate, semantic_action, arguments, precondition = (
+            make_permit_certificate()
+        )
         cas = _MemoryCas()
         store = FirestoreActionPermitStore(cas)
         permit = await PermitAuthority(
@@ -163,6 +171,7 @@ def test_firestore_claim_outcome_unknown_never_returns_dispatch_authority() -> N
             await authority.claim_for_dispatch(
                 permit_id=permit.permit_id,
                 certificate=certificate,
+                semantic_action=semantic_action,
                 tool_name=permit.tool_name,
                 tool_version=permit.tool_version,
                 arguments=arguments,
@@ -175,5 +184,80 @@ def test_firestore_claim_outcome_unknown_never_returns_dispatch_authority() -> N
         assert [
             event.kind for event in await store.permit_audit_events(permit.permit_id)
         ] == [PermitAuditKind.ISSUED]
+
+    asyncio.run(scenario())
+
+
+def test_firestore_permitted_dispatch_runs_on_callers_event_loop() -> None:
+    async def scenario() -> None:
+        certificate, semantic_action, arguments, precondition = (
+            make_permit_certificate()
+        )
+        store = FirestoreActionPermitStore(_MemoryCas())
+        permit = await PermitAuthority(
+            store,
+            clock=lambda: NOW + timedelta(seconds=6),
+        ).issue_permit(certificate)
+        assert permit is not None
+        calls: list[tuple[str, str, int]] = []
+
+        def promote(release_id: str, revision: str, percent: int) -> None:
+            calls.append((release_id, revision, percent))
+
+        promote.__name__ = "promote-cloud-run-traffic"
+        with pytest.raises(RuntimeError, match="active event loop"):
+            run_permitted_adk_mutation(
+                promote,
+                arguments=arguments,
+                public_response={"accepted": True},
+                function_call_id="function-call-hosted-sync",
+                invocation_id="invocation-hosted-sync",
+                authority=PermitAuthority(
+                    store,
+                    clock=lambda: NOW + timedelta(seconds=7),
+                    claim_id_factory=lambda: "claim-hosted-sync",
+                ),
+                permit_id=permit.permit_id,
+                certificate=certificate,
+                semantic_action=semantic_action,
+                tool_version=permit.tool_version,
+                target=certificate.target,
+                precondition=precondition,
+            )
+        assert (await store.get_permit(permit.permit_id)).state is (
+            ActionPermitState.ISSUED
+        )
+
+        times = iter(
+            (
+                NOW + timedelta(seconds=7),
+                NOW + timedelta(seconds=7),
+                NOW + timedelta(seconds=8),
+            )
+        )
+        response = await run_permitted_adk_mutation_async(
+            promote,
+            arguments=arguments,
+            public_response={"accepted": True},
+            function_call_id="function-call-hosted-async",
+            invocation_id="invocation-hosted-async",
+            authority=PermitAuthority(
+                store,
+                clock=lambda: next(times),
+                claim_id_factory=lambda: "claim-hosted-async",
+            ),
+            permit_id=permit.permit_id,
+            certificate=certificate,
+            semantic_action=semantic_action,
+            tool_version=permit.tool_version,
+            target=certificate.target,
+            precondition=precondition,
+        )
+
+        assert response == {"accepted": True}
+        assert calls == [("release-7", "reconcile-canary-release-7", 100)]
+        assert (await store.get_permit(permit.permit_id)).state is (
+            ActionPermitState.COMPLETED
+        )
 
     asyncio.run(scenario())

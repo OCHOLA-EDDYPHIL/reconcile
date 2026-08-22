@@ -2190,6 +2190,7 @@ class SqliteDurableRuntimeStore:
                     current,
                     request,
                     audit_sequence=len(audits) + 1,
+                    audit_not_before=audits[-1].occurred_at,
                 )
                 if mutation.permit != current:
                     self._replace_permit_locked(
@@ -2223,6 +2224,7 @@ class SqliteDurableRuntimeStore:
                     current,
                     request,
                     audit_sequence=len(audits) + 1,
+                    audit_not_before=audits[-1].occurred_at,
                 )
                 if mutation.permit != current:
                     self._replace_permit_locked(

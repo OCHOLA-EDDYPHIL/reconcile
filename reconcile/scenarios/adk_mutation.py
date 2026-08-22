@@ -34,6 +34,7 @@ from reconcile.contracts.common import TargetBinding
 from reconcile.contracts.recovery import (
     ActionPermit,
     PermitCompletionOutcome,
+    SemanticActionIdentity,
     VerifiedCertificate,
 )
 from reconcile.controller.permits import PermitAuthority
@@ -77,6 +78,7 @@ class PermitDispatchBinding:
     authority: PermitAuthority
     permit_id: str
     certificate: VerifiedCertificate
+    semantic_action: SemanticActionIdentity
     tool_version: str
     target: TargetBinding
     precondition: PublicObject
@@ -290,6 +292,7 @@ async def _run_adk_mutation(
         permit_state.claimed = await permit_dispatch.authority.claim_for_dispatch(
             permit_id=permit_dispatch.permit_id,
             certificate=permit_dispatch.certificate,
+            semantic_action=permit_dispatch.semantic_action,
             tool_name=tool.name,
             tool_version=permit_dispatch.tool_version,
             arguments=cast(dict[str, JsonValue], args),
@@ -479,7 +482,7 @@ def run_adk_mutation(
     )
 
 
-def run_permitted_adk_mutation(
+async def run_permitted_adk_mutation_async(
     tool: MutationTool,
     *,
     arguments: Mapping[str, JsonValue],
@@ -489,20 +492,13 @@ def run_permitted_adk_mutation(
     authority: PermitAuthority,
     permit_id: str,
     certificate: VerifiedCertificate,
+    semantic_action: SemanticActionIdentity,
     tool_version: str,
     target: TargetBinding,
     precondition: Mapping[str, JsonValue],
 ) -> PublicObject:
-    """Dispatch one mutation only after the ADK callback claims an exact permit."""
+    """Await one permitted ADK mutation on the caller's current event loop."""
 
-    try:
-        asyncio.get_running_loop()
-    except RuntimeError:
-        pass
-    else:
-        raise RuntimeError(
-            "run_permitted_adk_mutation cannot run inside an active event loop"
-        )
     validated_arguments = _validate_object(
         arguments,
         adapter=_ARGUMENTS_ADAPTER,
@@ -539,26 +535,70 @@ def run_permitted_adk_mutation(
         raise TypeError("permit authority must be exact")
     if type(certificate) is not VerifiedCertificate:
         raise TypeError("verified certificate must be exact")
+    if type(semantic_action) is not SemanticActionIdentity:
+        raise TypeError("semantic action must be exact")
     if type(target) is not TargetBinding:
         raise TypeError("dispatch target must be exact")
     tool_name = _validate_tool_signature(tool, validated_arguments)
 
+    return await _run_adk_mutation(
+        tool=tool,
+        tool_name=tool_name,
+        arguments=validated_arguments,
+        public_response=validated_response,
+        function_call_id=validated_call_id,
+        invocation_id=validated_invocation_id,
+        permit_dispatch=PermitDispatchBinding(
+            authority=authority,
+            permit_id=validated_permit_id,
+            certificate=certificate,
+            semantic_action=semantic_action,
+            tool_version=validated_tool_version,
+            target=target,
+            precondition=validated_precondition,
+        ),
+    )
+
+
+def run_permitted_adk_mutation(
+    tool: MutationTool,
+    *,
+    arguments: Mapping[str, JsonValue],
+    public_response: Mapping[str, JsonValue],
+    function_call_id: str,
+    invocation_id: str,
+    authority: PermitAuthority,
+    permit_id: str,
+    certificate: VerifiedCertificate,
+    semantic_action: SemanticActionIdentity,
+    tool_version: str,
+    target: TargetBinding,
+    precondition: Mapping[str, JsonValue],
+) -> PublicObject:
+    """Run the permitted mutation synchronously for local SQLite callers."""
+
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        pass
+    else:
+        raise RuntimeError(
+            "run_permitted_adk_mutation cannot run inside an active event loop"
+        )
     return asyncio.run(
-        _run_adk_mutation(
-            tool=tool,
-            tool_name=tool_name,
-            arguments=validated_arguments,
-            public_response=validated_response,
-            function_call_id=validated_call_id,
-            invocation_id=validated_invocation_id,
-            permit_dispatch=PermitDispatchBinding(
-                authority=authority,
-                permit_id=validated_permit_id,
-                certificate=certificate,
-                tool_version=validated_tool_version,
-                target=target,
-                precondition=validated_precondition,
-            ),
+        run_permitted_adk_mutation_async(
+            tool,
+            arguments=arguments,
+            public_response=public_response,
+            function_call_id=function_call_id,
+            invocation_id=invocation_id,
+            authority=authority,
+            permit_id=permit_id,
+            certificate=certificate,
+            semantic_action=semantic_action,
+            tool_version=tool_version,
+            target=target,
+            precondition=precondition,
         )
     )
 
@@ -570,4 +610,5 @@ __all__ = [
     "ScriptedModel",
     "run_adk_mutation",
     "run_permitted_adk_mutation",
+    "run_permitted_adk_mutation_async",
 ]

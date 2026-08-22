@@ -15,6 +15,7 @@ from reconcile.contracts import (
     ActionPermitState,
     PermitAction,
     PermitCompletionOutcome,
+    SemanticActionIdentity,
     TargetBinding,
     VerifiedCertificate,
     canonical_json_bytes,
@@ -27,6 +28,7 @@ from reconcile.evidence.recovery_rules import (
     PROMOTE_CLOUD_RUN_TRAFFIC_PROFILE_VERSION,
     RECOVERY_ACTION_PROFILES,
     STAGE_CLOUD_RUN_REVISION_PROFILE_VERSION,
+    validate_recovery_dispatch,
 )
 from reconcile.persistence.permits import (
     PERMIT_CLAIM_REQUEST_VERSION,
@@ -66,6 +68,15 @@ def _certificate(value: VerifiedCertificate) -> VerifiedCertificate:
         return decode_contract(canonical_json_bytes(value), VerifiedCertificate)
     except Exception as error:
         raise PermitAuthorityError("verified certificate is invalid") from error
+
+
+def _semantic_action(value: SemanticActionIdentity) -> SemanticActionIdentity:
+    if type(value) is not SemanticActionIdentity:
+        raise TypeError("dispatch semantic action must be exact")
+    try:
+        return SemanticActionIdentity.model_validate_json(canonical_json_bytes(value))
+    except Exception as error:
+        raise PermitAuthorityError("dispatch semantic action is invalid") from error
 
 
 def _target_profile_version(certificate: VerifiedCertificate) -> str:
@@ -187,6 +198,7 @@ class PermitAuthority:
         *,
         permit_id: str,
         certificate: VerifiedCertificate,
+        semantic_action: SemanticActionIdentity,
         tool_name: str,
         tool_version: str,
         arguments: Mapping[str, JsonValue],
@@ -197,9 +209,36 @@ class PermitAuthority:
         expected = action_permit_from_certificate(trusted)
         if expected is None:
             raise PermitAuthorityError("certificate does not authorize dispatch")
-        if type(target) is not TargetBinding:
-            raise TypeError("dispatch target must be exact")
+        trusted_action = _semantic_action(semantic_action)
+        try:
+            isolated_arguments = dict(arguments)
+            isolated_precondition = dict(precondition)
+            profile = validate_recovery_dispatch(
+                trusted_action,
+                tool_name=tool_name,
+                tool_version=tool_version,
+                arguments=isolated_arguments,
+                target=target,
+                precondition=isolated_precondition,
+            )
+        except (TypeError, ValueError) as error:
+            raise PermitAuthorityError(
+                "dispatch does not match a sealed recovery action"
+            ) from error
+        arguments_sha256 = dispatch_arguments_sha256(isolated_arguments)
+        precondition_sha256 = dispatch_precondition_sha256(isolated_precondition)
+        if (
+            profile.profile_version != expected.action_profile_version
+            or trusted_action.semantic_action_sha256 != expected.semantic_action_sha256
+            or arguments_sha256 != expected.arguments_sha256
+            or canonical_sha256(target) != expected.target_sha256
+            or precondition_sha256 != expected.precondition_sha256
+        ):
+            raise PermitAuthorityError(
+                "dispatch does not match the certified transition"
+            )
         claim_id = self._claim_id_factory()
+        requested_at = self._now()
         request = PermitClaimRequest(
             schema_version=PERMIT_CLAIM_REQUEST_VERSION,
             permit_id=permit_id,
@@ -215,18 +254,29 @@ class PermitAuthority:
             action_policy_version=trusted.action_policy_version,
             tool_name=tool_name,
             tool_version=tool_version,
-            arguments_sha256=dispatch_arguments_sha256(arguments),
+            arguments_sha256=arguments_sha256,
             target_sha256=canonical_sha256(target),
-            precondition_sha256=dispatch_precondition_sha256(precondition),
-            requested_at=self._now(),
+            precondition_sha256=precondition_sha256,
+            requested_at=requested_at,
         )
         claimed = await self._store.claim_permit(request)
-        if (
-            type(claimed) is not ActionPermit
-            or claimed.state is not ActionPermitState.CLAIMED
-            or claimed.claim_id != claim_id
-        ):
+        expected_claimed = ActionPermit.model_validate(
+            expected.model_copy(
+                update={
+                    "state": ActionPermitState.CLAIMED,
+                    "revision": 1,
+                    "claim_id": claim_id,
+                    "claimed_at": requested_at,
+                }
+            )
+        )
+        if type(claimed) is not ActionPermit or claimed != expected_claimed:
             raise PermitAuthorityError("permit store returned an invalid claim")
+        checked_at = self._now()
+        if checked_at < requested_at or checked_at >= claimed.expires_at:
+            raise PermitAuthorityError(
+                "durably claimed permit requires outcome reconciliation"
+            )
         return claimed
 
     async def complete_dispatch(
@@ -242,20 +292,27 @@ class PermitAuthority:
             raise PermitAuthorityError("an exact claimed permit is required")
         if type(outcome) is not PermitCompletionOutcome:
             raise TypeError("permit completion outcome must be exact")
+        completed_at = self._now()
         request = PermitCompletionRequest(
             schema_version=PERMIT_COMPLETION_REQUEST_VERSION,
             permit_id=claimed.permit_id,
             claim_id=claimed.claim_id,
             claimed_permit_sha256=canonical_sha256(claimed),
             outcome=outcome,
-            completed_at=self._now(),
+            completed_at=completed_at,
         )
         completed = await self._store.complete_permit(request)
-        if (
-            type(completed) is not ActionPermit
-            or completed.state is not ActionPermitState.COMPLETED
-            or completed.completion_outcome is not outcome
-        ):
+        expected_completed = ActionPermit.model_validate(
+            claimed.model_copy(
+                update={
+                    "state": ActionPermitState.COMPLETED,
+                    "revision": 2,
+                    "completed_at": completed_at,
+                    "completion_outcome": outcome,
+                }
+            )
+        )
+        if type(completed) is not ActionPermit or completed != expected_completed:
             raise PermitAuthorityError("permit store returned an invalid completion")
         return completed
 

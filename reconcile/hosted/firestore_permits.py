@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable
+from datetime import datetime
 from typing import Literal, Protocol
 
 from pydantic import model_validator
@@ -191,7 +192,7 @@ class FirestoreActionPermitStore:
         self,
         permit_id: str,
         mutation_factory: Callable[
-            [ActionPermit, int],
+            [ActionPermit, int, datetime],
             PermitMutation,
         ],
     ) -> PermitMutation:
@@ -200,6 +201,7 @@ class FirestoreActionPermitStore:
             mutation = mutation_factory(
                 aggregate.permit,
                 len(aggregate.audit_events) + 1,
+                aggregate.audit_events[-1].occurred_at,
             )
             replacement = FirestoreActionPermitAggregate(
                 schema_version=FIRESTORE_ACTION_PERMIT_AGGREGATE_VERSION,
@@ -233,10 +235,11 @@ class FirestoreActionPermitStore:
             raise TypeError("permit claim request must be exact")
         mutation = await self._mutate(
             request.permit_id,
-            lambda permit, sequence: evaluate_permit_claim(
+            lambda permit, sequence, audit_not_before: evaluate_permit_claim(
                 permit,
                 request,
                 audit_sequence=sequence,
+                audit_not_before=audit_not_before,
             ),
         )
         if mutation.denial_reason is not None:
@@ -251,10 +254,11 @@ class FirestoreActionPermitStore:
             raise TypeError("permit completion request must be exact")
         mutation = await self._mutate(
             request.permit_id,
-            lambda permit, sequence: evaluate_permit_completion(
+            lambda permit, sequence, audit_not_before: evaluate_permit_completion(
                 permit,
                 request,
                 audit_sequence=sequence,
+                audit_not_before=audit_not_before,
             ),
         )
         if mutation.denial_reason is not None:

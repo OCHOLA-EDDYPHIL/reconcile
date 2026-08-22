@@ -17,15 +17,17 @@ from reconcile.contracts import (
 from reconcile.controller.permits import PermitAuthority, action_permit_from_certificate
 from reconcile.persistence.permits import (
     PERMIT_CLAIM_REQUEST_VERSION,
+    PERMIT_COMPLETION_REQUEST_VERSION,
     PermitAuditKind,
     PermitClaimDenied,
     PermitClaimRequest,
+    PermitCompletionDenied,
+    PermitCompletionRequest,
     PermitCorruptState,
     PermitDenialReason,
 )
 from reconcile.persistence.sqlite_runtime import SqliteDurableRuntimeStore
-from tests._permit_support import make_permit_certificate
-from tests.contract._factories import NOW
+from tests._permit_support import NOW, make_permit_certificate
 
 pytestmark = pytest.mark.unit
 
@@ -61,7 +63,9 @@ def test_certificate_derives_one_stable_exact_permit_and_no_transition_issues_no
     tmp_path,
 ) -> None:
     async def scenario() -> None:
-        certificate, _arguments, _precondition = make_permit_certificate()
+        certificate, _semantic_action, _arguments, _precondition = (
+            make_permit_certificate()
+        )
         first = action_permit_from_certificate(certificate)
         second = action_permit_from_certificate(certificate)
         assert first == second
@@ -86,7 +90,9 @@ def test_sqlite_thirty_two_concurrent_claims_have_exactly_one_winner(
     tmp_path,
 ) -> None:
     async def scenario() -> None:
-        certificate, arguments, precondition = make_permit_certificate()
+        certificate, semantic_action, arguments, precondition = (
+            make_permit_certificate()
+        )
         store = _store(tmp_path)
         issuer = PermitAuthority(
             store,
@@ -104,6 +110,7 @@ def test_sqlite_thirty_two_concurrent_claims_have_exactly_one_winner(
             return await authority.claim_for_dispatch(
                 permit_id=permit.permit_id,
                 certificate=certificate,
+                semantic_action=semantic_action,
                 tool_name=permit.tool_name,
                 tool_version=permit.tool_version,
                 arguments=arguments,
@@ -145,7 +152,9 @@ def test_sqlite_completion_is_terminal_and_audited(
     audit_kind: PermitAuditKind,
 ) -> None:
     async def scenario() -> None:
-        certificate, arguments, precondition = make_permit_certificate()
+        certificate, semantic_action, arguments, precondition = (
+            make_permit_certificate()
+        )
         store = _store(tmp_path, f"{outcome.value}.sqlite3")
         issuer = PermitAuthority(
             store,
@@ -161,6 +170,7 @@ def test_sqlite_completion_is_terminal_and_audited(
         claimed = await claimer.claim_for_dispatch(
             permit_id=permit.permit_id,
             certificate=certificate,
+            semantic_action=semantic_action,
             tool_name=permit.tool_name,
             tool_version=permit.tool_version,
             arguments=arguments,
@@ -178,10 +188,16 @@ def test_sqlite_completion_is_terminal_and_audited(
             audit_kind
         )
 
+        replay_authority = PermitAuthority(
+            store,
+            clock=lambda: NOW + timedelta(seconds=9),
+            claim_id_factory=lambda: "claim-terminal-replay",
+        )
         with pytest.raises(PermitClaimDenied) as replay:
-            await claimer.claim_for_dispatch(
+            await replay_authority.claim_for_dispatch(
                 permit_id=permit.permit_id,
                 certificate=certificate,
+                semantic_action=semantic_action,
                 tool_name=permit.tool_name,
                 tool_version=permit.tool_version,
                 arguments=arguments,
@@ -193,9 +209,75 @@ def test_sqlite_completion_is_terminal_and_audited(
     asyncio.run(scenario())
 
 
+def test_regressed_clocks_never_regress_audit_timestamps(tmp_path) -> None:
+    async def scenario() -> None:
+        certificate, semantic_action, arguments, precondition = (
+            make_permit_certificate()
+        )
+        store = _store(tmp_path)
+        permit = await PermitAuthority(
+            store,
+            clock=lambda: NOW + timedelta(seconds=6),
+        ).issue_permit(certificate)
+        assert permit is not None
+        claimed = await PermitAuthority(
+            store,
+            clock=lambda: NOW + timedelta(seconds=7),
+            claim_id_factory=lambda: "claim-monotonic",
+        ).claim_for_dispatch(
+            permit_id=permit.permit_id,
+            certificate=certificate,
+            semantic_action=semantic_action,
+            tool_name=permit.tool_name,
+            tool_version=permit.tool_version,
+            arguments=arguments,
+            target=certificate.target,
+            precondition=precondition,
+        )
+
+        regressed_claim = PermitClaimRequest.model_validate(
+            _claim_request(permit).model_copy(
+                update={
+                    "claim_id": "claim-regressed",
+                    "requested_at": NOW + timedelta(seconds=6),
+                }
+            )
+        )
+        with pytest.raises(PermitClaimDenied) as claim_denied:
+            await store.claim_permit(regressed_claim)
+        assert claim_denied.value.reason is PermitDenialReason.NON_MONOTONIC_TIME
+
+        regressed_completion = PermitCompletionRequest(
+            schema_version=PERMIT_COMPLETION_REQUEST_VERSION,
+            permit_id=claimed.permit_id,
+            claim_id=claimed.claim_id,
+            claimed_permit_sha256=canonical_sha256(claimed),
+            outcome=PermitCompletionOutcome.SUCCEEDED,
+            completed_at=NOW + timedelta(seconds=6),
+        )
+        with pytest.raises(PermitCompletionDenied) as completion_denied:
+            await store.complete_permit(regressed_completion)
+        assert completion_denied.value.reason is (PermitDenialReason.NON_MONOTONIC_TIME)
+
+        events = await store.permit_audit_events(permit.permit_id)
+        occurred_at = [event.occurred_at for event in events]
+        assert occurred_at == sorted(occurred_at)
+        assert occurred_at[-2:] == [
+            NOW + timedelta(seconds=7),
+            NOW + timedelta(seconds=7),
+        ]
+        assert (await store.get_permit(permit.permit_id)).state is (
+            ActionPermitState.CLAIMED
+        )
+
+    asyncio.run(scenario())
+
+
 def test_expired_and_modified_permits_fail_closed_with_audit(tmp_path) -> None:
     async def scenario() -> None:
-        certificate, arguments, precondition = make_permit_certificate()
+        certificate, semantic_action, arguments, precondition = (
+            make_permit_certificate()
+        )
 
         expired_store = _store(tmp_path, "expired.sqlite3")
         issued = action_permit_from_certificate(certificate)
@@ -210,6 +292,7 @@ def test_expired_and_modified_permits_fail_closed_with_audit(tmp_path) -> None:
             await expired_authority.claim_for_dispatch(
                 permit_id=issued.permit_id,
                 certificate=certificate,
+                semantic_action=semantic_action,
                 tool_name=issued.tool_name,
                 tool_version=issued.tool_version,
                 arguments=arguments,
@@ -238,6 +321,7 @@ def test_expired_and_modified_permits_fail_closed_with_audit(tmp_path) -> None:
             await modified_authority.claim_for_dispatch(
                 permit_id=issued.permit_id,
                 certificate=certificate,
+                semantic_action=semantic_action,
                 tool_name=issued.tool_name,
                 tool_version=issued.tool_version,
                 arguments=arguments,
@@ -277,7 +361,9 @@ def test_every_dispatch_binding_must_match_before_claim(
     replacement: str,
 ) -> None:
     async def scenario() -> None:
-        certificate, _arguments, _precondition = make_permit_certificate()
+        certificate, _semantic_action, _arguments, _precondition = (
+            make_permit_certificate()
+        )
         permit = action_permit_from_certificate(certificate)
         assert permit is not None
         store = _store(tmp_path)
@@ -301,7 +387,9 @@ def test_every_dispatch_binding_must_match_before_claim(
 
 def test_claim_survives_process_boundary_and_corruption_fails_closed(tmp_path) -> None:
     async def scenario() -> None:
-        certificate, arguments, precondition = make_permit_certificate()
+        certificate, semantic_action, arguments, precondition = (
+            make_permit_certificate()
+        )
         database = tmp_path / "runtime.sqlite3"
         store = SqliteDurableRuntimeStore(database)
         issuer = PermitAuthority(
@@ -318,6 +406,7 @@ def test_claim_survives_process_boundary_and_corruption_fails_closed(tmp_path) -
         await first_process.claim_for_dispatch(
             permit_id=permit.permit_id,
             certificate=certificate,
+            semantic_action=semantic_action,
             tool_name=permit.tool_name,
             tool_version=permit.tool_version,
             arguments=arguments,
@@ -335,6 +424,7 @@ def test_claim_survives_process_boundary_and_corruption_fails_closed(tmp_path) -
             await second_process.claim_for_dispatch(
                 permit_id=permit.permit_id,
                 certificate=certificate,
+                semantic_action=semantic_action,
                 tool_name=permit.tool_name,
                 tool_version=permit.tool_version,
                 arguments=arguments,

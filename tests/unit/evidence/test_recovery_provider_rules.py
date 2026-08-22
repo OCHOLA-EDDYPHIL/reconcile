@@ -55,6 +55,7 @@ from reconcile.evidence.recovery_rules import (
     STAGE_REVISION_EFFECT_SCOPE,
     STAGE_TRAFFIC_EFFECT_SCOPE,
     RecoveryRuleViolation,
+    validate_recovery_dispatch,
     validate_recovery_proof,
 )
 
@@ -186,6 +187,83 @@ def _action(
         ),
         effects,
     )
+
+
+def test_recovery_dispatch_accepts_only_the_exact_profile_binding() -> None:
+    action, _effects = _action(PROMOTE_CLOUD_RUN_TRAFFIC_PROFILE_VERSION)
+
+    profile = validate_recovery_dispatch(
+        action,
+        tool_name=action.tool_name,
+        tool_version=action.tool_version,
+        arguments=dict(action.semantic_arguments),
+        target=action.target,
+        precondition={"service_etag": "etag-release-7"},
+    )
+
+    assert profile is PROMOTE_CLOUD_RUN_TRAFFIC_PROFILE
+
+
+@pytest.mark.parametrize(
+    ("case", "message"),
+    (
+        ("wrong-target", "identity"),
+        ("missing-revision", "identity"),
+        ("wrong-argument-type", "identity"),
+        ("wrong-argument-value", "identity"),
+        ("wrong-tool", "identity"),
+        ("wrong-version", "identity"),
+        ("missing-precondition", "precondition"),
+        ("extra-precondition", "precondition"),
+        ("wrong-precondition-type", "precondition"),
+        ("empty-precondition-value", "precondition"),
+    ),
+)
+def test_recovery_dispatch_rejects_adversarial_runtime_bindings(
+    case: str,
+    message: str,
+) -> None:
+    action, _effects = _action(PROMOTE_CLOUD_RUN_TRAFFIC_PROFILE_VERSION)
+    tool_name = action.tool_name
+    tool_version = action.tool_version
+    arguments = dict(action.semantic_arguments)
+    target = action.target
+    precondition: dict[str, object] = {"service_etag": "etag-release-7"}
+
+    if case == "wrong-target":
+        target = TargetBinding.model_validate(
+            target.model_copy(update={"resource": {"service": "other-service"}})
+        )
+    elif case == "missing-revision":
+        arguments.pop("revision")
+    elif case == "wrong-argument-type":
+        arguments["percent"] = True
+    elif case == "wrong-argument-value":
+        arguments["percent"] = 99
+    elif case == "wrong-tool":
+        tool_name = "stage-cloud-run-revision"
+    elif case == "wrong-version":
+        tool_version = "2.0.0"
+    elif case == "missing-precondition":
+        precondition = {}
+    elif case == "extra-precondition":
+        precondition["unexpected"] = True
+    elif case == "wrong-precondition-type":
+        precondition["service_etag"] = 7
+    elif case == "empty-precondition-value":
+        precondition["service_etag"] = ""
+    else:  # pragma: no cover - the parameter inventory is exhaustive
+        raise AssertionError(case)
+
+    with pytest.raises(RecoveryRuleViolation, match=message):
+        validate_recovery_dispatch(
+            action,
+            tool_name=tool_name,
+            tool_version=tool_version,
+            arguments=arguments,
+            target=target,
+            precondition=precondition,
+        )
 
 
 def _source_record(

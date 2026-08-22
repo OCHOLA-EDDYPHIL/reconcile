@@ -39,6 +39,7 @@ class PermitAuditKind(StrEnum):
 
 class PermitDenialReason(StrEnum):
     BINDING_MISMATCH = "BINDING_MISMATCH"
+    NON_MONOTONIC_TIME = "NON_MONOTONIC_TIME"
     NOT_YET_VALID = "NOT_YET_VALID"
     EXPIRED = "EXPIRED"
     ALREADY_CLAIMED = "ALREADY_CLAIMED"
@@ -269,6 +270,7 @@ def validate_permit_audit_history(
     if not events or events[0] != issued_audit_event(issued):
         raise ValueError("permit audit history does not begin at issuance")
     current = issued
+    previous_at = events[0].occurred_at
     for sequence, event in enumerate(events, 1):
         if (
             type(event) is not PermitAuditEvent
@@ -279,6 +281,9 @@ def validate_permit_audit_history(
             raise ValueError("permit audit sequence is invalid")
         if sequence == 1:
             continue
+        if event.occurred_at < previous_at:
+            raise ValueError("permit audit timestamps are not monotonic")
+        previous_at = event.occurred_at
         if event.kind is PermitAuditKind.BLOCKED:
             replacement = current
         elif (
@@ -367,13 +372,18 @@ def evaluate_permit_claim(
     request: PermitClaimRequest,
     *,
     audit_sequence: int,
+    audit_not_before: datetime,
 ) -> PermitMutation:
     """Apply one claim attempt without performing persistence I/O."""
 
     if type(permit) is not ActionPermit or type(request) is not PermitClaimRequest:
         raise TypeError("exact permit claim inputs are required")
-    if request.requested_at < permit.issued_at:
+    if request.requested_at < audit_not_before:
+        reason = PermitDenialReason.NON_MONOTONIC_TIME
+        audit_at = audit_not_before
+    elif request.requested_at < permit.issued_at:
         reason = PermitDenialReason.NOT_YET_VALID
+        audit_at = permit.issued_at
     elif permit.state is ActionPermitState.ISSUED and (
         request.requested_at >= permit.expires_at
     ):
@@ -400,10 +410,13 @@ def evaluate_permit_claim(
         )
     elif permit.state is ActionPermitState.CLAIMED:
         reason = PermitDenialReason.ALREADY_CLAIMED
+        audit_at = request.requested_at
     elif permit.state in {ActionPermitState.COMPLETED, ActionPermitState.EXPIRED}:
         reason = PermitDenialReason.ALREADY_COMPLETED
+        audit_at = request.requested_at
     elif not _claim_bindings(permit, request):
         reason = PermitDenialReason.BINDING_MISMATCH
+        audit_at = request.requested_at
     else:
         claimed = ActionPermit.model_validate(
             permit.model_copy(
@@ -432,7 +445,7 @@ def evaluate_permit_claim(
             permit,
             sequence=audit_sequence,
             kind=PermitAuditKind.BLOCKED,
-            occurred_at=request.requested_at,
+            occurred_at=audit_at,
             claim_id=request.claim_id,
             denial_reason=reason,
         ),
@@ -445,6 +458,7 @@ def evaluate_permit_completion(
     request: PermitCompletionRequest,
     *,
     audit_sequence: int,
+    audit_not_before: datetime,
 ) -> PermitMutation:
     """Apply one terminal completion without performing persistence I/O."""
 
@@ -456,6 +470,7 @@ def evaluate_permit_completion(
         and request.claimed_permit_sha256 == canonical_sha256(permit)
         and permit.claimed_at is not None
         and request.completed_at >= permit.claimed_at
+        and request.completed_at >= audit_not_before
     )
     if permit.state is ActionPermitState.CLAIMED and exact_claim:
         completed = ActionPermit.model_validate(
@@ -488,7 +503,11 @@ def evaluate_permit_completion(
     reason = (
         PermitDenialReason.ALREADY_COMPLETED
         if permit.state in {ActionPermitState.COMPLETED, ActionPermitState.EXPIRED}
-        else PermitDenialReason.BINDING_MISMATCH
+        else (
+            PermitDenialReason.NON_MONOTONIC_TIME
+            if request.completed_at < audit_not_before
+            else PermitDenialReason.BINDING_MISMATCH
+        )
     )
     return PermitMutation(
         permit=permit,
@@ -496,7 +515,7 @@ def evaluate_permit_completion(
             permit,
             sequence=audit_sequence,
             kind=PermitAuditKind.BLOCKED,
-            occurred_at=request.completed_at,
+            occurred_at=max(request.completed_at, audit_not_before),
             claim_id=request.claim_id,
             denial_reason=reason,
         ),
