@@ -26,6 +26,10 @@ _APPLY_EMAIL = f"rec-p5-apply@{_PROJECT}.iam.gserviceaccount.com"
 _APPLY_MEMBER = f"serviceAccount:{_APPLY_EMAIL}"
 _OPERATOR_MEMBER = _APPLY_MEMBER
 _PROVIDER = "registry.terraform.io/hashicorp/google"
+_OFFLINE_DOCKER_IMAGE = (
+    "python:3.12.13-slim-bookworm@"
+    "sha256:6e13e65c55e33adf203d77ee371cf8bf5d81bd4902ef07565721f46bf44917af"
+)
 _DIGEST = "0" * 64
 _IMAGE_DIGEST = f"sha256:{_DIGEST}"
 _IMAGE_REFERENCE = (
@@ -1386,13 +1390,15 @@ def _run(
     return result
 
 
-def _offline_command(command: list[str], working_directory: Path) -> list[str]:
-    bwrap = shutil.which("bwrap")
-    if bwrap is None:
-        raise RuntimeError("bwrap is required for network-isolated plans")
+def _offline_command(
+    command: list[str], working_directory: Path, *, bwrap: Path | None = None
+) -> list[str]:
+    resolved_bwrap = str(bwrap) if bwrap is not None else shutil.which("bwrap")
+    if resolved_bwrap is None:
+        raise RuntimeError("bwrap is unavailable for network-isolated plans")
     temporary_directory = working_directory.parent / "tmp"
     return [
-        bwrap,
+        resolved_bwrap,
         "--die-with-parent",
         "--new-session",
         "--unshare-net",
@@ -1413,6 +1419,152 @@ def _offline_command(command: list[str], working_directory: Path) -> list[str]:
         str(working_directory),
         *command,
     ]
+
+
+def _bubblewrap_usable(bwrap: Path) -> bool:
+    try:
+        result = subprocess.run(
+            [
+                str(bwrap),
+                "--die-with-parent",
+                "--new-session",
+                "--unshare-net",
+                "--ro-bind",
+                "/",
+                "/",
+                "--dev",
+                "/dev",
+                "--proc",
+                "/proc",
+                "/bin/true",
+            ],
+            check=False,
+            capture_output=True,
+            env=_minimal_environment(network=False),
+            text=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return result.returncode == 0
+
+
+def _docker_environment(root: Path) -> dict[str, str]:
+    environment = _minimal_environment(network=False)
+    docker_host = os.environ.get("DOCKER_HOST")
+    if docker_host:
+        environment["DOCKER_HOST"] = docker_host
+    environment["DOCKER_CONFIG"] = str(root / "docker-config")
+    environment["HOME"] = str(root)
+    environment["NO_PROXY"] = "127.0.0.1,localhost"
+    return environment
+
+
+def _select_offline_backend(root: Path) -> tuple[str, Path]:
+    bwrap = shutil.which("bwrap")
+    if bwrap is not None and _bubblewrap_usable(Path(bwrap)):
+        return "bubblewrap", Path(bwrap)
+
+    docker = shutil.which("docker")
+    if docker is None:
+        raise RuntimeError(
+            "network-isolated plans require usable bwrap or a Docker daemon"
+        )
+    (root / "docker-config").mkdir(mode=0o700)
+    environment = _docker_environment(root)
+    present = _run(
+        [docker, "image", "inspect", _OFFLINE_DOCKER_IMAGE],
+        environment=environment,
+        expected=frozenset({0, 1}),
+    )
+    if present.returncode == 1:
+        _run(
+            [docker, "pull", _OFFLINE_DOCKER_IMAGE],
+            environment=environment,
+        )
+    return "docker", Path(docker)
+
+
+def _docker_offline_command(
+    command: list[str],
+    working_directory: Path,
+    *,
+    docker: Path,
+    environment: dict[str, str],
+    read_only_paths: tuple[Path, ...],
+) -> list[str]:
+    if not command:
+        raise RuntimeError("offline command is empty")
+    root = working_directory.parent.resolve()
+    executable = Path(command[0]).resolve()
+    container_executable = Path("/reconcile-bin") / executable.name
+    invocation = [
+        str(docker),
+        "run",
+        "--rm",
+        "--network",
+        "none",
+        "--read-only",
+        "--cap-drop",
+        "ALL",
+        "--security-opt",
+        "no-new-privileges",
+        "--pids-limit",
+        "256",
+        "--memory",
+        "1536m",
+        "--cpus",
+        "1.0",
+        "--user",
+        f"{os.getuid()}:{os.getgid()}",
+        "--volume",
+        f"{root}:{root}:rw",
+        "--volume",
+        f"{executable}:{container_executable}:ro",
+        "--workdir",
+        str(working_directory.resolve()),
+    ]
+    for path in sorted({item.resolve() for item in read_only_paths}):
+        invocation.extend(["--volume", f"{path}:{path}:ro"])
+    for name, value in sorted(environment.items()):
+        invocation.extend(["--env", f"{name}={value}"])
+    return [
+        *invocation,
+        _OFFLINE_DOCKER_IMAGE,
+        str(container_executable),
+        *command[1:],
+    ]
+
+
+def _run_offline(
+    command: list[str],
+    *,
+    working_directory: Path,
+    environment: dict[str, str],
+    backend: tuple[str, Path],
+    read_only_paths: tuple[Path, ...],
+    expected: frozenset[int] = frozenset({0}),
+) -> subprocess.CompletedProcess[str]:
+    kind, executable = backend
+    if kind == "bubblewrap":
+        invocation = _offline_command(
+            command,
+            working_directory,
+            bwrap=executable,
+        )
+        host_environment = environment
+    elif kind == "docker":
+        invocation = _docker_offline_command(
+            command,
+            working_directory,
+            docker=executable,
+            environment=environment,
+            read_only_paths=read_only_paths,
+        )
+        host_environment = _docker_environment(working_directory.parent)
+    else:
+        raise RuntimeError(f"unsupported offline backend: {kind}")
+    return _run(invocation, environment=host_environment, expected=expected)
 
 
 def _minimal_environment(*, network: bool) -> dict[str, str]:
@@ -1532,6 +1684,8 @@ def _offline_create(
             encoding="utf-8",
         )
         base_environment["TF_CLI_CONFIG_FILE"] = str(cli_config)
+        backend = _select_offline_backend(root)
+        read_only_paths = (provider_mirror,)
         create_plans: dict[str, dict[str, Any]] = {}
         for stack in stacks:
             working = root / stack.name
@@ -1543,81 +1697,81 @@ def _offline_create(
             environment = base_environment | {
                 "TF_DATA_DIR": str(root / f"{stack.name}-data")
             }
-            _run(
-                _offline_command(
-                    [
-                        str(terraform),
-                        f"-chdir={working}",
-                        "init",
-                        "-input=false",
-                        "-lockfile=readonly",
-                        "-no-color",
-                    ],
-                    working,
-                ),
+            _run_offline(
+                [
+                    str(terraform),
+                    f"-chdir={working}",
+                    "init",
+                    "-input=false",
+                    "-lockfile=readonly",
+                    "-no-color",
+                ],
+                working_directory=working,
                 environment=environment,
+                backend=backend,
+                read_only_paths=read_only_paths,
             )
-            _run(
-                _offline_command(
-                    [
-                        str(terraform),
-                        f"-chdir={working}",
-                        "validate",
-                        "-no-color",
-                    ],
-                    working,
-                ),
+            _run_offline(
+                [
+                    str(terraform),
+                    f"-chdir={working}",
+                    "validate",
+                    "-no-color",
+                ],
+                working_directory=working,
                 environment=environment,
+                backend=backend,
+                read_only_paths=read_only_paths,
             )
-            stack_version = _run(
-                _offline_command(
-                    [
-                        str(terraform),
-                        f"-chdir={working}",
-                        "version",
-                        "-json",
-                    ],
-                    working,
-                ),
+            stack_version = _run_offline(
+                [
+                    str(terraform),
+                    f"-chdir={working}",
+                    "version",
+                    "-json",
+                ],
+                working_directory=working,
                 environment=environment,
+                backend=backend,
+                read_only_paths=read_only_paths,
             )
             selections = json.loads(stack_version.stdout).get("provider_selections")
             if selections != {_PROVIDER: "7.44.0"}:
                 _fail(f"{stack.name} selected an unexpected provider")
             plan_path = root / f"{stack.name}.tfplan"
-            plan = _run(
-                _offline_command(
-                    [
-                        str(terraform),
-                        f"-chdir={working}",
-                        "plan",
-                        "-detailed-exitcode",
-                        "-input=false",
-                        "-lock=false",
-                        "-no-color",
-                        "-out",
-                        str(plan_path),
-                        "-refresh=false",
-                    ],
-                    working,
-                ),
+            plan = _run_offline(
+                [
+                    str(terraform),
+                    f"-chdir={working}",
+                    "plan",
+                    "-detailed-exitcode",
+                    "-input=false",
+                    "-lock=false",
+                    "-no-color",
+                    "-out",
+                    str(plan_path),
+                    "-refresh=false",
+                ],
+                working_directory=working,
                 environment=environment,
+                backend=backend,
+                read_only_paths=read_only_paths,
                 expected=frozenset({2}),
             )
             if plan.stdout.count("Plan:") != 1:
                 _fail(f"{stack.name} did not produce one create plan")
-            rendered = _run(
-                _offline_command(
-                    [
-                        str(terraform),
-                        f"-chdir={working}",
-                        "show",
-                        "-json",
-                        str(plan_path),
-                    ],
-                    working,
-                ),
+            rendered = _run_offline(
+                [
+                    str(terraform),
+                    f"-chdir={working}",
+                    "show",
+                    "-json",
+                    str(plan_path),
+                ],
+                working_directory=working,
                 environment=environment,
+                backend=backend,
+                read_only_paths=read_only_paths,
             )
             plan_path.unlink()
             rendered_plan = json.loads(rendered.stdout)
