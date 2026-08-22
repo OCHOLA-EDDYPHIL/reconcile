@@ -444,6 +444,13 @@ def test_smoke_environment_loads_each_exact_component(component: str) -> None:
     assert config.component.value == component
     assert "GOOGLE_APPLICATION_CREDENTIALS" not in environment
     assert "CLOUDSDK_CONFIG" not in environment
+    if component == "fault-proxy":
+        assert config.canary_location == "us-central1"
+        assert config.canary_service == "reconcile-p5-canary"
+        assert (
+            config.canary_baseline_revision
+            == (environment["RECONCILE_CANARY_BASELINE_REVISION"])
+        )
 
 
 def _mock_gate_runtime(

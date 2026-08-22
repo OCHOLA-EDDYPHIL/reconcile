@@ -1041,6 +1041,30 @@ def _approved_audiences() -> dict[str, str]:
     }
 
 
+def _canary_baseline_revision(
+    *,
+    source_revision: str,
+    image_digest: str,
+) -> str:
+    identity = {
+        "image_digest": image_digest,
+        "infrastructure_revision": "1" * 64,
+        "project_id": _PROJECT,
+        "region": _REGION,
+        "request_timeout_seconds": 60,
+        "semantic_config_sha256": "2" * 64,
+        "service_account_email": (f"rec-p5-canary@{_PROJECT}.iam.gserviceaccount.com"),
+        "source_revision": source_revision,
+    }
+    encoded = json.dumps(
+        identity,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    return f"reconcile-p5-canary-b-{hashlib.sha256(encoded).hexdigest()[:16]}"
+
+
 def component_environment(
     component: str,
     *,
@@ -1096,6 +1120,15 @@ def component_environment(
                 f"rec-p5-api@{_PROJECT}.iam.gserviceaccount.com"
             ),
             "RECONCILE_RUNTIME_DATABASE": "reconcile-p5-runtime",
+            "RECONCILE_CANARY_AUDIENCE": (
+                f"https://reconcile.invalid/phase5/{_PROJECT}/canary"
+            ),
+            "RECONCILE_CANARY_BASELINE_REVISION": _canary_baseline_revision(
+                source_revision=source_revision,
+                image_digest=image_digest,
+            ),
+            "RECONCILE_CANARY_LOCATION": _REGION,
+            "RECONCILE_CANARY_SERVICE": "reconcile-p5-canary",
             "RECONCILE_SANDBOX_AUDIENCE": audiences["sandbox"],
             "RECONCILE_SANDBOX_URL": "https://sandbox.example.test",
             "RECONCILE_TARGET_BUCKET": f"{_PROJECT}-p5-target",
