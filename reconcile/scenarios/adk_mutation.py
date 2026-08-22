@@ -7,15 +7,18 @@ import hashlib
 import inspect
 import json
 from collections.abc import AsyncGenerator, Callable, Mapping
+from dataclasses import dataclass
 from functools import wraps
 from typing import Any, cast
 
 from google.adk.agents import LlmAgent
+from google.adk.agents.context import Context
 from google.adk.models import LlmRequest, LlmResponse
 from google.adk.models.base_llm import BaseLlm
 from google.adk.runners import Runner
 from google.adk.sessions import InMemorySessionService
 from google.adk.tools import FunctionTool
+from google.adk.tools.base_tool import BaseTool
 from google.adk.utils.context_utils import find_context_parameter
 from google.genai import types
 from pydantic import ConfigDict, JsonValue, PrivateAttr, TypeAdapter, ValidationError
@@ -27,6 +30,13 @@ from reconcile.contracts.base import (
     canonical_json_value_bytes,
     reject_sensitive_keys,
 )
+from reconcile.contracts.common import TargetBinding
+from reconcile.contracts.recovery import (
+    ActionPermit,
+    PermitCompletionOutcome,
+    VerifiedCertificate,
+)
+from reconcile.controller.permits import PermitAuthority
 
 _APP_NAME = "reconcile_scenario_mutation"
 _AGENT_NAME = "scenario_mutation_agent"
@@ -34,6 +44,15 @@ _MODEL_NAME = "reconcile-scripted-mutation"
 _USER_ID = "scenario-runner"
 _MAX_ARGUMENT_BYTES = 16_384
 _MAX_PUBLIC_RESPONSE_BYTES = 4_096
+_CONTROLLER_ARGUMENT_NAMES = frozenset(
+    {
+        "permit_id",
+        "certificate_id",
+        "certificate_sha256",
+        "precondition_sha256",
+        "semantic_action_sha256",
+    }
+)
 
 _ARGUMENTS_ADAPTER = TypeAdapter(ArgumentsObject)
 _IDENTIFIER_ADAPTER = TypeAdapter(Identifier)
@@ -45,6 +64,29 @@ type PublicObject = dict[str, JsonValue]
 
 class AdkMutationError(RuntimeError):
     """A safe failure raised when the local ADK mutation turn is incomplete."""
+
+
+class ExplicitMutationRejection(RuntimeError):
+    """A sanitized, authoritative provider rejection after dispatch contact."""
+
+
+@dataclass(frozen=True, slots=True)
+class PermitDispatchBinding:
+    """Controller-owned permit context that is never included in model arguments."""
+
+    authority: PermitAuthority
+    permit_id: str
+    certificate: VerifiedCertificate
+    tool_version: str
+    target: TargetBinding
+    precondition: PublicObject
+
+
+@dataclass(slots=True)
+class _PermitCallbackState:
+    claimed: ActionPermit | None = None
+    completion_attempted: bool = False
+    completion_outcome: PermitCompletionOutcome | None = None
 
 
 def _isolated_json_object(value: Mapping[str, JsonValue]) -> PublicObject:
@@ -220,6 +262,7 @@ async def _run_adk_mutation(
     public_response: PublicObject,
     function_call_id: str,
     invocation_id: str,
+    permit_dispatch: PermitDispatchBinding | None = None,
 ) -> PublicObject:
     invocation_markers: list[None] = []
     wrapped_tool = _public_tool_wrapper(tool, public_response, invocation_markers)
@@ -234,12 +277,87 @@ async def _run_adk_mutation(
         arguments=arguments,
         public_response=public_response,
     )
+    permit_state = _PermitCallbackState()
+
+    async def claim_before_tool(
+        tool: BaseTool,
+        args: dict[str, Any],
+        tool_context: Context,
+    ) -> dict[str, object] | None:
+        del tool_context
+        if permit_dispatch is None:
+            return None
+        permit_state.claimed = await permit_dispatch.authority.claim_for_dispatch(
+            permit_id=permit_dispatch.permit_id,
+            certificate=permit_dispatch.certificate,
+            tool_name=tool.name,
+            tool_version=permit_dispatch.tool_version,
+            arguments=cast(dict[str, JsonValue], args),
+            target=permit_dispatch.target,
+            precondition=permit_dispatch.precondition,
+        )
+        return None
+
+    async def complete_after_tool(
+        tool: BaseTool,
+        args: dict[str, Any],
+        tool_context: Context,
+        tool_response: dict[str, Any],
+    ) -> dict[str, object] | None:
+        del tool, args, tool_context, tool_response
+        if permit_dispatch is None:
+            return None
+        if permit_state.claimed is None or permit_state.completion_attempted:
+            raise AdkMutationError("permit completion boundary is inconsistent")
+        permit_state.completion_attempted = True
+        permit_state.completion_outcome = PermitCompletionOutcome.SUCCEEDED
+        await permit_dispatch.authority.complete_dispatch(
+            permit_state.claimed,
+            PermitCompletionOutcome.SUCCEEDED,
+        )
+        return None
+
+    async def complete_after_error(
+        tool: BaseTool,
+        args: dict[str, Any],
+        tool_context: Context,
+        error: Exception,
+    ) -> dict[str, object] | None:
+        del tool, args, tool_context
+        if (
+            permit_dispatch is None
+            or permit_state.claimed is None
+            or permit_state.completion_attempted
+        ):
+            return None
+        outcome = (
+            PermitCompletionOutcome.REJECTED
+            if isinstance(error, ExplicitMutationRejection)
+            else PermitCompletionOutcome.OUTCOME_UNKNOWN
+        )
+        permit_state.completion_attempted = True
+        permit_state.completion_outcome = outcome
+        await permit_dispatch.authority.complete_dispatch(
+            permit_state.claimed,
+            outcome,
+        )
+        return None
+
     agent = LlmAgent(
         name=_AGENT_NAME,
         description="Runs one locally scripted scenario mutation.",
         instruction="Issue the single declared tool call and then stop.",
         model=model,
         tools=[function_tool],
+        before_tool_callback=(
+            claim_before_tool if permit_dispatch is not None else None
+        ),
+        after_tool_callback=(
+            complete_after_tool if permit_dispatch is not None else None
+        ),
+        on_tool_error_callback=(
+            complete_after_error if permit_dispatch is not None else None
+        ),
     )
     session_service = InMemorySessionService()
     session_id = (
@@ -294,6 +412,12 @@ async def _run_adk_mutation(
         raise AdkMutationError("ADK did not preserve the mutation identity")
     if not isinstance(response.response, dict):
         raise AdkMutationError("ADK returned a malformed public tool response")
+    if permit_dispatch is not None and (
+        permit_state.claimed is None
+        or not permit_state.completion_attempted
+        or permit_state.completion_outcome is not PermitCompletionOutcome.SUCCEEDED
+    ):
+        raise AdkMutationError("the permitted mutation did not complete")
     return _validate_object(
         response.response,
         adapter=_PUBLIC_RESPONSE_ADAPTER,
@@ -355,4 +479,95 @@ def run_adk_mutation(
     )
 
 
-__all__ = ["AdkMutationError", "ScriptedModel", "run_adk_mutation"]
+def run_permitted_adk_mutation(
+    tool: MutationTool,
+    *,
+    arguments: Mapping[str, JsonValue],
+    public_response: Mapping[str, JsonValue],
+    function_call_id: str,
+    invocation_id: str,
+    authority: PermitAuthority,
+    permit_id: str,
+    certificate: VerifiedCertificate,
+    tool_version: str,
+    target: TargetBinding,
+    precondition: Mapping[str, JsonValue],
+) -> PublicObject:
+    """Dispatch one mutation only after the ADK callback claims an exact permit."""
+
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        pass
+    else:
+        raise RuntimeError(
+            "run_permitted_adk_mutation cannot run inside an active event loop"
+        )
+    validated_arguments = _validate_object(
+        arguments,
+        adapter=_ARGUMENTS_ADAPTER,
+        byte_limit=_MAX_ARGUMENT_BYTES,
+        label="tool arguments",
+    )
+    if _CONTROLLER_ARGUMENT_NAMES & set(validated_arguments):
+        raise ValueError("permit authority fields are controller-owned")
+    validated_response = _validate_object(
+        public_response,
+        adapter=_PUBLIC_RESPONSE_ADAPTER,
+        byte_limit=_MAX_PUBLIC_RESPONSE_BYTES,
+        label="public response",
+    )
+    validated_precondition = _validate_object(
+        precondition,
+        adapter=_ARGUMENTS_ADAPTER,
+        byte_limit=_MAX_ARGUMENT_BYTES,
+        label="dispatch precondition",
+    )
+    validated_call_id = _validate_identifier(
+        function_call_id,
+        label="function-call identifier",
+    )
+    if validated_call_id.startswith("adk-"):
+        raise ValueError("function-call identifier uses an ADK-reserved prefix")
+    validated_invocation_id = _validate_identifier(
+        invocation_id,
+        label="invocation identifier",
+    )
+    validated_permit_id = _validate_identifier(permit_id, label="permit identifier")
+    validated_tool_version = _validate_identifier(tool_version, label="tool version")
+    if type(authority) is not PermitAuthority:
+        raise TypeError("permit authority must be exact")
+    if type(certificate) is not VerifiedCertificate:
+        raise TypeError("verified certificate must be exact")
+    if type(target) is not TargetBinding:
+        raise TypeError("dispatch target must be exact")
+    tool_name = _validate_tool_signature(tool, validated_arguments)
+
+    return asyncio.run(
+        _run_adk_mutation(
+            tool=tool,
+            tool_name=tool_name,
+            arguments=validated_arguments,
+            public_response=validated_response,
+            function_call_id=validated_call_id,
+            invocation_id=validated_invocation_id,
+            permit_dispatch=PermitDispatchBinding(
+                authority=authority,
+                permit_id=validated_permit_id,
+                certificate=certificate,
+                tool_version=validated_tool_version,
+                target=target,
+                precondition=validated_precondition,
+            ),
+        )
+    )
+
+
+__all__ = [
+    "AdkMutationError",
+    "ExplicitMutationRejection",
+    "PermitDispatchBinding",
+    "ScriptedModel",
+    "run_adk_mutation",
+    "run_permitted_adk_mutation",
+]

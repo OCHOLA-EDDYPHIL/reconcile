@@ -25,6 +25,7 @@ from reconcile.contracts.codec import (
     decode_contract,
 )
 from reconcile.contracts.envelope import ExecutionEnvelope, ProbeRequest
+from reconcile.contracts.recovery import ActionPermit, ActionPermitState
 from reconcile.contracts.report import (
     InvestigationReport,
     InvestigationStatus,
@@ -79,8 +80,24 @@ from reconcile.persistence.events import (
     OutOfOrderEvent,
     TerminalEventJournal,
 )
+from reconcile.persistence.permits import (
+    PermitAuditEvent,
+    PermitClaimDenied,
+    PermitClaimRequest,
+    PermitCompletionDenied,
+    PermitCompletionRequest,
+    PermitConflict,
+    PermitCorruptState,
+    PermitNotFound,
+    PermitStoreError,
+    evaluate_permit_claim,
+    evaluate_permit_completion,
+    issued_audit_event,
+    validate_permit_audit_history,
+)
 
-_SQLITE_SCHEMA_VERSION = "4"
+_SQLITE_SCHEMA_VERSION = "5"
+_SQLITE_PREVIOUS_SCHEMA_VERSION = "4"
 _BUSY_TIMEOUT_MS = 5_000
 
 
@@ -168,6 +185,10 @@ class SqliteDurableRuntimeStore:
                     WHERE metadata_key = 'schema_version'
                     """
                 ).fetchone()
+                migrating_from_v4 = (
+                    schema is not None
+                    and schema["metadata_value"] == _SQLITE_PREVIOUS_SCHEMA_VERSION
+                )
                 if schema is None:
                     connection.execute(
                         """
@@ -176,7 +197,10 @@ class SqliteDurableRuntimeStore:
                         """,
                         (_SQLITE_SCHEMA_VERSION,),
                     )
-                elif schema["metadata_value"] != _SQLITE_SCHEMA_VERSION:
+                elif (
+                    schema["metadata_value"] != _SQLITE_SCHEMA_VERSION
+                    and not migrating_from_v4
+                ):
                     raise UnsupportedDurableSchema
 
                 connection.executescript(
@@ -303,8 +327,38 @@ class SqliteDurableRuntimeStore:
                             REFERENCES scenario_work_items(investigation_id)
                             ON DELETE CASCADE
                     );
+
+                    CREATE TABLE IF NOT EXISTS action_permits (
+                        permit_id TEXT PRIMARY KEY,
+                        certificate_id TEXT NOT NULL,
+                        state TEXT NOT NULL,
+                        revision INTEGER NOT NULL,
+                        payload BLOB NOT NULL
+                    );
+
+                    CREATE TABLE IF NOT EXISTS action_permit_audits (
+                        permit_id TEXT NOT NULL,
+                        sequence INTEGER NOT NULL,
+                        event_id TEXT NOT NULL,
+                        payload BLOB NOT NULL,
+                        PRIMARY KEY (permit_id, sequence),
+                        UNIQUE (permit_id, event_id),
+                        FOREIGN KEY (permit_id)
+                            REFERENCES action_permits(permit_id)
+                            ON DELETE CASCADE
+                    );
                     """
                 )
+                if migrating_from_v4:
+                    connection.execute(
+                        """
+                        UPDATE runtime_metadata
+                        SET metadata_value = ?
+                        WHERE metadata_key = 'schema_version'
+                          AND metadata_value = ?
+                        """,
+                        (_SQLITE_SCHEMA_VERSION, _SQLITE_PREVIOUS_SCHEMA_VERSION),
+                    )
         except UnsupportedDurableSchema:
             raise
         except sqlite3.DatabaseError as error:
@@ -1947,6 +2001,262 @@ class SqliteDurableRuntimeStore:
             raise
         except sqlite3.DatabaseError as error:
             raise CorruptDurableState(investigation_id) from error
+
+    @staticmethod
+    def _decode_permit(payload: object, permit_id: str) -> ActionPermit:
+        try:
+            return decode_contract(_blob(payload), ActionPermit)
+        except (ContractError, TypeError, ValueError) as error:
+            raise PermitCorruptState(permit_id) from error
+
+    @staticmethod
+    def _decode_permit_audit(payload: object, permit_id: str) -> PermitAuditEvent:
+        try:
+            return decode_contract(_blob(payload), PermitAuditEvent)
+        except (ContractError, TypeError, ValueError) as error:
+            raise PermitCorruptState(permit_id) from error
+
+    def _permit_locked(
+        self,
+        connection: sqlite3.Connection,
+        permit_id: str,
+    ) -> ActionPermit:
+        row = connection.execute(
+            """
+            SELECT certificate_id, state, revision, payload
+            FROM action_permits
+            WHERE permit_id = ?
+            """,
+            (permit_id,),
+        ).fetchone()
+        if row is None:
+            raise PermitNotFound(permit_id)
+        permit = self._decode_permit(row["payload"], permit_id)
+        if (
+            permit.permit_id != permit_id
+            or row["certificate_id"] != permit.certificate_id
+            or row["state"] != permit.state.value
+            or row["revision"] != permit.revision
+        ):
+            raise PermitCorruptState(permit_id)
+        return permit
+
+    def _permit_audits_locked(
+        self,
+        connection: sqlite3.Connection,
+        permit: ActionPermit,
+    ) -> tuple[PermitAuditEvent, ...]:
+        rows = connection.execute(
+            """
+            SELECT sequence, event_id, payload
+            FROM action_permit_audits
+            WHERE permit_id = ?
+            ORDER BY sequence
+            """,
+            (permit.permit_id,),
+        ).fetchall()
+        events = tuple(
+            self._decode_permit_audit(row["payload"], permit.permit_id) for row in rows
+        )
+        if any(
+            row["sequence"] != sequence
+            or row["event_id"] != event.event_id
+            or event.permit_id != permit.permit_id
+            or event.sequence != sequence
+            for sequence, (row, event) in enumerate(
+                zip(rows, events, strict=True),
+                1,
+            )
+        ):
+            raise PermitCorruptState(permit.permit_id)
+        try:
+            validate_permit_audit_history(permit, events)
+        except (TypeError, ValueError) as error:
+            raise PermitCorruptState(permit.permit_id) from error
+        return events
+
+    @staticmethod
+    def _replace_permit_locked(
+        connection: sqlite3.Connection,
+        current: ActionPermit,
+        replacement: ActionPermit,
+    ) -> None:
+        cursor = connection.execute(
+            """
+            UPDATE action_permits
+            SET state = ?, revision = ?, payload = ?
+            WHERE permit_id = ? AND revision = ? AND payload = ?
+            """,
+            (
+                replacement.state.value,
+                replacement.revision,
+                canonical_json_bytes(replacement),
+                current.permit_id,
+                current.revision,
+                canonical_json_bytes(current),
+            ),
+        )
+        if cursor.rowcount != 1:
+            raise PermitConflict(current.permit_id)
+
+    @staticmethod
+    def _append_permit_audit_locked(
+        connection: sqlite3.Connection,
+        event: PermitAuditEvent,
+    ) -> None:
+        connection.execute(
+            """
+            INSERT INTO action_permit_audits (
+                permit_id, sequence, event_id, payload
+            ) VALUES (?, ?, ?, ?)
+            """,
+            (
+                event.permit_id,
+                event.sequence,
+                event.event_id,
+                canonical_json_bytes(event),
+            ),
+        )
+
+    async def issue_permit(self, permit: ActionPermit) -> ActionPermit:
+        return await asyncio.to_thread(self._issue_permit, permit)
+
+    def _issue_permit(self, permit: ActionPermit) -> ActionPermit:
+        if type(permit) is not ActionPermit or (
+            permit.state is not ActionPermitState.ISSUED
+        ):
+            raise TypeError("an exact issued action permit is required")
+        try:
+            with self._write() as connection:
+                row = connection.execute(
+                    "SELECT payload FROM action_permits WHERE permit_id = ?",
+                    (permit.permit_id,),
+                ).fetchone()
+                if row is not None:
+                    current = self._permit_locked(connection, permit.permit_id)
+                    if canonical_json_bytes(current) != canonical_json_bytes(permit):
+                        raise PermitConflict(permit.permit_id)
+                    self._permit_audits_locked(connection, current)
+                    return current
+                connection.execute(
+                    """
+                    INSERT INTO action_permits (
+                        permit_id, certificate_id, state, revision, payload
+                    ) VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (
+                        permit.permit_id,
+                        permit.certificate_id,
+                        permit.state.value,
+                        permit.revision,
+                        canonical_json_bytes(permit),
+                    ),
+                )
+                self._append_permit_audit_locked(
+                    connection,
+                    issued_audit_event(permit),
+                )
+                return permit
+        except PermitStoreError:
+            raise
+        except sqlite3.DatabaseError as error:
+            raise PermitCorruptState(permit.permit_id) from error
+
+    async def get_permit(self, permit_id: str) -> ActionPermit:
+        return await asyncio.to_thread(self._get_permit, permit_id)
+
+    def _get_permit(self, permit_id: str) -> ActionPermit:
+        try:
+            with self._connect() as connection:
+                permit = self._permit_locked(connection, permit_id)
+                self._permit_audits_locked(connection, permit)
+                return permit
+        except PermitStoreError:
+            raise
+        except sqlite3.DatabaseError as error:
+            raise PermitCorruptState(permit_id) from error
+
+    async def claim_permit(self, request: PermitClaimRequest) -> ActionPermit:
+        return await asyncio.to_thread(self._claim_permit, request)
+
+    def _claim_permit(self, request: PermitClaimRequest) -> ActionPermit:
+        if type(request) is not PermitClaimRequest:
+            raise TypeError("permit claim request must be exact")
+        try:
+            with self._write() as connection:
+                current = self._permit_locked(connection, request.permit_id)
+                audits = self._permit_audits_locked(connection, current)
+                mutation = evaluate_permit_claim(
+                    current,
+                    request,
+                    audit_sequence=len(audits) + 1,
+                )
+                if mutation.permit != current:
+                    self._replace_permit_locked(
+                        connection,
+                        current,
+                        mutation.permit,
+                    )
+                self._append_permit_audit_locked(connection, mutation.event)
+        except PermitStoreError:
+            raise
+        except sqlite3.DatabaseError as error:
+            raise PermitCorruptState(request.permit_id) from error
+        if mutation.denial_reason is not None:
+            raise PermitClaimDenied(request.permit_id, mutation.denial_reason)
+        return mutation.permit
+
+    async def complete_permit(
+        self,
+        request: PermitCompletionRequest,
+    ) -> ActionPermit:
+        return await asyncio.to_thread(self._complete_permit, request)
+
+    def _complete_permit(self, request: PermitCompletionRequest) -> ActionPermit:
+        if type(request) is not PermitCompletionRequest:
+            raise TypeError("permit completion request must be exact")
+        try:
+            with self._write() as connection:
+                current = self._permit_locked(connection, request.permit_id)
+                audits = self._permit_audits_locked(connection, current)
+                mutation = evaluate_permit_completion(
+                    current,
+                    request,
+                    audit_sequence=len(audits) + 1,
+                )
+                if mutation.permit != current:
+                    self._replace_permit_locked(
+                        connection,
+                        current,
+                        mutation.permit,
+                    )
+                self._append_permit_audit_locked(connection, mutation.event)
+        except PermitStoreError:
+            raise
+        except (TypeError, ValueError, sqlite3.DatabaseError) as error:
+            raise PermitCorruptState(request.permit_id) from error
+        if mutation.denial_reason is not None:
+            raise PermitCompletionDenied(request.permit_id, mutation.denial_reason)
+        return mutation.permit
+
+    async def permit_audit_events(
+        self,
+        permit_id: str,
+    ) -> tuple[PermitAuditEvent, ...]:
+        return await asyncio.to_thread(self._permit_audit_events, permit_id)
+
+    def _permit_audit_events(
+        self,
+        permit_id: str,
+    ) -> tuple[PermitAuditEvent, ...]:
+        try:
+            with self._connect() as connection:
+                permit = self._permit_locked(connection, permit_id)
+                return self._permit_audits_locked(connection, permit)
+        except PermitStoreError:
+            raise
+        except sqlite3.DatabaseError as error:
+            raise PermitCorruptState(permit_id) from error
 
 
 DurableRuntimeExceptionTypes = (
