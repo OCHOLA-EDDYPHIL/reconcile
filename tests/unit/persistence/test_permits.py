@@ -14,7 +14,11 @@ from reconcile.contracts import (
     PermitCompletionOutcome,
     canonical_sha256,
 )
-from reconcile.controller.permits import PermitAuthority, action_permit_from_certificate
+from reconcile.controller.permits import (
+    PermitAuthority,
+    PermitAuthorityError,
+    action_permit_from_certificate,
+)
 from reconcile.persistence.permits import (
     PERMIT_CLAIM_REQUEST_VERSION,
     PERMIT_COMPLETION_REQUEST_VERSION,
@@ -23,11 +27,16 @@ from reconcile.persistence.permits import (
     PermitClaimRequest,
     PermitCompletionDenied,
     PermitCompletionRequest,
+    PermitConflict,
     PermitCorruptState,
     PermitDenialReason,
 )
 from reconcile.persistence.sqlite_runtime import SqliteDurableRuntimeStore
-from tests._permit_support import NOW, make_permit_certificate
+from tests._permit_support import (
+    NOW,
+    make_permit_certificate,
+    make_permit_certificate_presentation_variant,
+)
 
 pytestmark = pytest.mark.unit
 
@@ -66,10 +75,14 @@ def test_certificate_derives_one_stable_exact_permit_and_no_transition_issues_no
         certificate, _semantic_action, _arguments, _precondition = (
             make_permit_certificate()
         )
+        variant = make_permit_certificate_presentation_variant(certificate)
         first = action_permit_from_certificate(certificate)
-        second = action_permit_from_certificate(certificate)
-        assert first == second
+        second = action_permit_from_certificate(variant)
         assert first is not None
+        assert second is not None
+        assert first.permit_id == second.permit_id
+        assert first.certificate_sha256 != second.certificate_sha256
+        assert first != second
         assert first.action_profile_version == "promote-cloud-run-traffic-profile-v1"
 
         store = _store(tmp_path)
@@ -78,7 +91,7 @@ def test_certificate_derives_one_stable_exact_permit_and_no_transition_issues_no
             clock=lambda: NOW + timedelta(seconds=6),
         )
         assert await authority.issue_permit(certificate) == first
-        assert await authority.issue_permit(certificate) == first
+        assert await authority.issue_permit(variant) == first
         assert len(await store.permit_audit_events(first.permit_id)) == 1
         no_transition = certificate.model_copy(update={"transition": None})
         assert await authority.issue_permit(no_transition) is None
@@ -93,13 +106,22 @@ def test_sqlite_thirty_two_concurrent_claims_have_exactly_one_winner(
         certificate, semantic_action, arguments, precondition = (
             make_permit_certificate()
         )
+        variant = make_permit_certificate_presentation_variant(certificate)
         store = _store(tmp_path)
         issuer = PermitAuthority(
             store,
             clock=lambda: NOW + timedelta(seconds=6),
         )
-        permit = await issuer.issue_permit(certificate)
+        issued = await asyncio.gather(
+            *(
+                issuer.issue_permit(certificate if index % 2 == 0 else variant)
+                for index in range(32)
+            )
+        )
+        permit = issued[0]
         assert permit is not None
+        assert all(item == permit for item in issued)
+        assert len(await store.permit_audit_events(permit.permit_id)) == 1
 
         async def claim(index: int) -> ActionPermit:
             authority = PermitAuthority(
@@ -109,7 +131,7 @@ def test_sqlite_thirty_two_concurrent_claims_have_exactly_one_winner(
             )
             return await authority.claim_for_dispatch(
                 permit_id=permit.permit_id,
-                certificate=certificate,
+                certificate=certificate if index % 2 == 0 else variant,
                 semantic_action=semantic_action,
                 tool_name=permit.tool_name,
                 tool_version=permit.tool_version,
@@ -187,6 +209,12 @@ def test_sqlite_completion_is_terminal_and_audited(
         assert (await store.permit_audit_events(permit.permit_id))[-1].kind is (
             audit_kind
         )
+        replayed_issue = await PermitAuthority(
+            store,
+            clock=lambda: NOW + timedelta(seconds=9),
+        ).issue_permit(make_permit_certificate_presentation_variant(certificate))
+        assert replayed_issue == completed
+        assert len(await store.permit_audit_events(permit.permit_id)) == 3
 
         replay_authority = PermitAuthority(
             store,
@@ -317,7 +345,7 @@ def test_expired_and_modified_permits_fail_closed_with_audit(tmp_path) -> None:
             clock=lambda: NOW + timedelta(seconds=7),
             claim_id_factory=lambda: "claim-modified",
         )
-        with pytest.raises(PermitClaimDenied) as mismatch:
+        with pytest.raises(PermitAuthorityError, match="durable permit"):
             await modified_authority.claim_for_dispatch(
                 permit_id=issued.permit_id,
                 certificate=certificate,
@@ -328,10 +356,37 @@ def test_expired_and_modified_permits_fail_closed_with_audit(tmp_path) -> None:
                 target=certificate.target,
                 precondition=precondition,
             )
-        assert mismatch.value.reason is PermitDenialReason.BINDING_MISMATCH
-        assert (await modified_store.permit_audit_events(issued.permit_id))[
-            -1
-        ].kind is (PermitAuditKind.BLOCKED)
+        assert [
+            event.kind
+            for event in await modified_store.permit_audit_events(issued.permit_id)
+        ] == [PermitAuditKind.ISSUED]
+
+    asyncio.run(scenario())
+
+
+def test_sqlite_stable_permit_id_rejects_semantic_drift(tmp_path) -> None:
+    async def scenario() -> None:
+        certificate, _semantic_action, _arguments, _precondition = (
+            make_permit_certificate()
+        )
+        issued = action_permit_from_certificate(certificate)
+        assert issued is not None
+        drifted_certificate = certificate.model_copy(
+            update={"action_policy_version": "modified-policy-v1"}
+        )
+        drifted = action_permit_from_certificate(
+            type(certificate).model_validate(drifted_certificate)
+        )
+        assert drifted is not None
+        assert drifted.permit_id == issued.permit_id
+
+        store = _store(tmp_path, "semantic-drift.sqlite3")
+        await store.issue_permit(issued)
+        with pytest.raises(PermitConflict):
+            await store.issue_permit(drifted)
+
+        assert await store.get_permit(issued.permit_id) == issued
+        assert len(await store.permit_audit_events(issued.permit_id)) == 1
 
     asyncio.run(scenario())
 
@@ -390,6 +445,7 @@ def test_claim_survives_process_boundary_and_corruption_fails_closed(tmp_path) -
         certificate, semantic_action, arguments, precondition = (
             make_permit_certificate()
         )
+        variant = make_permit_certificate_presentation_variant(certificate)
         database = tmp_path / "runtime.sqlite3"
         store = SqliteDurableRuntimeStore(database)
         issuer = PermitAuthority(
@@ -420,10 +476,13 @@ def test_claim_survives_process_boundary_and_corruption_fails_closed(tmp_path) -
             clock=lambda: NOW + timedelta(seconds=8),
             claim_id_factory=lambda: "claim-after-crash",
         )
+        assert await second_process.issue_permit(variant) == (
+            await restarted.get_permit(permit.permit_id)
+        )
         with pytest.raises(PermitClaimDenied) as replay:
             await second_process.claim_for_dispatch(
                 permit_id=permit.permit_id,
-                certificate=certificate,
+                certificate=variant,
                 semantic_action=semantic_action,
                 tool_name=permit.tool_name,
                 tool_version=permit.tool_version,

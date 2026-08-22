@@ -36,6 +36,8 @@ from reconcile.persistence.permits import (
     ActionPermitStore,
     PermitClaimRequest,
     PermitCompletionRequest,
+    action_permit_id,
+    same_action_permit_authority,
 )
 
 _ALLOWED_TRANSITIONS = {
@@ -110,18 +112,9 @@ def action_permit_from_certificate(
     if transition is None:
         return None
     profile_version = _target_profile_version(trusted)
-    digest = hashlib.sha256(
-        canonical_json_value_bytes(
-            {
-                "certificate_sha256": canonical_sha256(trusted),
-                "schema_version": ACTION_PERMIT_VERSION,
-                "transition": transition.model_dump(mode="json"),
-            }
-        )
-    ).hexdigest()
     return ActionPermit(
         schema_version=ACTION_PERMIT_VERSION,
-        permit_id=f"permit-{digest[:32]}",
+        permit_id=action_permit_id(trusted.certificate_id, transition),
         certificate_id=trusted.certificate_id,
         certificate_sha256=canonical_sha256(trusted),
         chain_id=trusted.chain_id,
@@ -191,7 +184,17 @@ class PermitAuthority:
             raise PermitAuthorityError(
                 "certificate is outside its permit issuance interval"
             )
-        return await self._store.issue_permit(permit)
+        stored = await self._store.issue_permit(permit)
+        try:
+            valid = type(stored) is ActionPermit and same_action_permit_authority(
+                stored,
+                permit,
+            )
+        except (TypeError, ValueError):
+            valid = False
+        if not valid:
+            raise PermitAuthorityError("permit store returned another authority")
+        return stored
 
     async def claim_for_dispatch(
         self,
@@ -209,6 +212,19 @@ class PermitAuthority:
         expected = action_permit_from_certificate(trusted)
         if expected is None:
             raise PermitAuthorityError("certificate does not authorize dispatch")
+        if permit_id != expected.permit_id:
+            raise PermitAuthorityError("permit identifier does not match certificate")
+        persisted = await self._store.get_permit(permit_id)
+        try:
+            persisted_matches = type(
+                persisted
+            ) is ActionPermit and same_action_permit_authority(persisted, expected)
+        except (TypeError, ValueError):
+            persisted_matches = False
+        if not persisted_matches:
+            raise PermitAuthorityError(
+                "durable permit does not match the certificate authority"
+            )
         trusted_action = _semantic_action(semantic_action)
         try:
             isolated_arguments = dict(arguments)
@@ -243,15 +259,15 @@ class PermitAuthority:
             schema_version=PERMIT_CLAIM_REQUEST_VERSION,
             permit_id=permit_id,
             claim_id=claim_id,
-            issued_permit_sha256=canonical_sha256(expected),
-            certificate_id=trusted.certificate_id,
-            certificate_sha256=canonical_sha256(trusted),
-            chain_id=trusted.chain_id,
-            source_node_id=expected.source_node_id,
-            target_node_id=expected.target_node_id,
-            semantic_action_sha256=expected.semantic_action_sha256,
-            action_profile_version=expected.action_profile_version,
-            action_policy_version=trusted.action_policy_version,
+            issued_permit_sha256=canonical_sha256(persisted),
+            certificate_id=persisted.certificate_id,
+            certificate_sha256=persisted.certificate_sha256,
+            chain_id=persisted.chain_id,
+            source_node_id=persisted.source_node_id,
+            target_node_id=persisted.target_node_id,
+            semantic_action_sha256=persisted.semantic_action_sha256,
+            action_profile_version=persisted.action_profile_version,
+            action_policy_version=persisted.action_policy_version,
             tool_name=tool_name,
             tool_version=tool_version,
             arguments_sha256=arguments_sha256,
@@ -261,7 +277,7 @@ class PermitAuthority:
         )
         claimed = await self._store.claim_permit(request)
         expected_claimed = ActionPermit.model_validate(
-            expected.model_copy(
+            persisted.model_copy(
                 update={
                     "state": ActionPermitState.CLAIMED,
                     "revision": 1,

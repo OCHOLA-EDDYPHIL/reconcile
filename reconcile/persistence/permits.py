@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
@@ -10,8 +11,10 @@ from typing import Literal, Protocol, runtime_checkable
 from pydantic import Field, model_validator
 
 from reconcile.contracts import (
+    ACTION_PERMIT_VERSION,
     ActionPermit,
     ActionPermitState,
+    CertifiedTransition,
     PermitCompletionOutcome,
     canonical_sha256,
 )
@@ -20,11 +23,96 @@ from reconcile.contracts.base import (
     Identifier,
     Sha256Digest,
     StrictModel,
+    canonical_json_value_bytes,
 )
 
 PERMIT_AUDIT_EVENT_VERSION = "reconcile/permit-audit-event/v1"
 PERMIT_CLAIM_REQUEST_VERSION = "reconcile/permit-claim-request/v1"
 PERMIT_COMPLETION_REQUEST_VERSION = "reconcile/permit-completion-request/v1"
+
+_PERMIT_PRESENTATION_AND_LIFECYCLE_FIELDS = {
+    "certificate_sha256",
+    "issued_at",
+    "state",
+    "revision",
+    "claim_id",
+    "claimed_at",
+    "completed_at",
+    "completion_outcome",
+    "expired_at",
+}
+
+
+def action_permit_id(
+    certificate_id: str,
+    transition: CertifiedTransition,
+) -> str:
+    """Identify one logical certificate transition, not its audit presentation."""
+
+    if type(certificate_id) is not str or not certificate_id:
+        raise TypeError("certificate identifier must be a nonempty string")
+    if type(transition) is not CertifiedTransition:
+        raise TypeError("certified transition must be exact")
+    digest = hashlib.sha256(
+        canonical_json_value_bytes(
+            {
+                "certificate_id": certificate_id,
+                "schema_version": ACTION_PERMIT_VERSION,
+                "transition": transition.model_dump(mode="json"),
+            }
+        )
+    ).hexdigest()
+    return f"permit-{digest[:32]}"
+
+
+def action_permit_transition(permit: ActionPermit) -> CertifiedTransition:
+    """Reconstruct the certified transition sealed into a durable permit."""
+
+    if type(permit) is not ActionPermit:
+        raise TypeError("action permit must be exact")
+    return CertifiedTransition(
+        action=permit.action,
+        source_node_id=permit.source_node_id,
+        target_node_id=permit.target_node_id,
+        semantic_action_sha256=permit.semantic_action_sha256,
+        tool_name=permit.tool_name,
+        tool_version=permit.tool_version,
+        arguments_sha256=permit.arguments_sha256,
+        target_sha256=permit.target_sha256,
+        precondition_sha256=permit.precondition_sha256,
+    )
+
+
+def validate_action_permit_identity(permit: ActionPermit) -> None:
+    """Require the storage key to match the permit's stable logical authority."""
+
+    expected = action_permit_id(
+        permit.certificate_id,
+        action_permit_transition(permit),
+    )
+    if permit.permit_id != expected:
+        raise ValueError("permit identifier does not match its logical authority")
+
+
+def same_action_permit_authority(
+    left: ActionPermit,
+    right: ActionPermit,
+) -> bool:
+    """Compare immutable authority while ignoring audit presentation and lifecycle."""
+
+    validate_action_permit_identity(left)
+    validate_action_permit_identity(right)
+    return canonical_json_value_bytes(
+        left.model_dump(
+            mode="json",
+            exclude=_PERMIT_PRESENTATION_AND_LIFECYCLE_FIELDS,
+        )
+    ) == canonical_json_value_bytes(
+        right.model_dump(
+            mode="json",
+            exclude=_PERMIT_PRESENTATION_AND_LIFECYCLE_FIELDS,
+        )
+    )
 
 
 class PermitAuditKind(StrEnum):
@@ -542,8 +630,12 @@ __all__ = [
     "PermitStoreError",
     "PermitStoreOutcomeUnknown",
     "PermitStoreUnavailable",
+    "action_permit_id",
+    "action_permit_transition",
     "evaluate_permit_claim",
     "evaluate_permit_completion",
     "issued_audit_event",
+    "same_action_permit_authority",
+    "validate_action_permit_identity",
     "validate_permit_audit_history",
 ]

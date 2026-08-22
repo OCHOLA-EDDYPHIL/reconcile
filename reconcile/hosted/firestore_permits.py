@@ -37,6 +37,8 @@ from reconcile.persistence.permits import (
     evaluate_permit_claim,
     evaluate_permit_completion,
     issued_audit_event,
+    same_action_permit_authority,
+    validate_action_permit_identity,
     validate_permit_audit_history,
 )
 
@@ -104,6 +106,7 @@ def _decode_aggregate(
             snapshot.document.payload_bytes,
             FirestoreActionPermitAggregate,
         )
+        validate_action_permit_identity(aggregate.permit)
         if snapshot.document.logical_id != aggregate.permit.permit_id:
             raise ValueError("snapshot logical identity is invalid")
         if snapshot.document.revision != len(aggregate.audit_events) - 1:
@@ -151,6 +154,10 @@ class FirestoreActionPermitStore:
             permit.state is not ActionPermitState.ISSUED
         ):
             raise TypeError("an exact issued action permit is required")
+        try:
+            validate_action_permit_identity(permit)
+        except (TypeError, ValueError) as error:
+            raise PermitConflict(permit.permit_id) from error
         aggregate = FirestoreActionPermitAggregate(
             schema_version=FIRESTORE_ACTION_PERMIT_AGGREGATE_VERSION,
             permit=permit,
@@ -166,7 +173,7 @@ class FirestoreActionPermitStore:
                 _snapshot, existing = await self._read(permit.permit_id)
             except PermitStoreError:
                 raise PermitConflict(permit.permit_id) from None
-            if existing != aggregate:
+            if not same_action_permit_authority(existing.permit, permit):
                 raise PermitConflict(permit.permit_id) from None
             return existing.permit
         except FirestoreCasOutcomeUnknown:

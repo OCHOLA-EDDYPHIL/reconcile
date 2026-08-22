@@ -23,7 +23,11 @@ from reconcile.scenarios.adk_mutation import (
     run_adk_mutation,
     run_permitted_adk_mutation,
 )
-from tests._permit_support import NOW, make_permit_certificate
+from tests._permit_support import (
+    NOW,
+    make_permit_certificate,
+    make_permit_certificate_presentation_variant,
+)
 
 pytestmark = pytest.mark.unit
 
@@ -210,6 +214,7 @@ def test_permit_is_claimed_in_before_tool_callback_and_completed_afterward(
     tmp_path,
 ) -> None:
     certificate, semantic_action, arguments, precondition = make_permit_certificate()
+    variant = make_permit_certificate_presentation_variant(certificate)
     store = SqliteDurableRuntimeStore(tmp_path / "runtime.sqlite3")
     permit = asyncio.run(
         PermitAuthority(
@@ -237,7 +242,7 @@ def test_permit_is_claimed_in_before_tool_callback_and_completed_afterward(
         invocation_id="invocation-permitted",
         authority=authority,
         permit_id=permit.permit_id,
-        certificate=certificate,
+        certificate=variant,
         semantic_action=semantic_action,
         tool_version=permit.tool_version,
         target=certificate.target,

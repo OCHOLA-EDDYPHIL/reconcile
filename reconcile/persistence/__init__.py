@@ -76,6 +76,10 @@ from reconcile.persistence.permits import (
     PermitStoreError,
     PermitStoreOutcomeUnknown,
     PermitStoreUnavailable,
+    action_permit_id,
+    action_permit_transition,
+    same_action_permit_authority,
+    validate_action_permit_identity,
 )
 from reconcile.persistence.repository import (
     CorruptStoredRecord,
@@ -198,8 +202,12 @@ __all__ = [
     "UnsupportedDurableSchema",
     "UnsupportedRecoveryState",
     "WriteOutcomeUnknown",
+    "action_permit_id",
+    "action_permit_transition",
     "build_probe_resume_plan",
     "new_investigation_record",
     "runtime_limits_for",
+    "same_action_permit_authority",
     "sanitize_runtime_telemetry_attributes",
+    "validate_action_permit_identity",
 ]

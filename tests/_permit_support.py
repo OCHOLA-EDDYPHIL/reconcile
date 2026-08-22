@@ -132,3 +132,20 @@ def make_permit_certificate() -> tuple[
         expires_at=NOW + timedelta(seconds=20),
     )
     return certificate, semantic_action, arguments, precondition
+
+
+def make_permit_certificate_presentation_variant(
+    certificate: VerifiedCertificate,
+) -> VerifiedCertificate:
+    """Change audit-only fields while preserving the certificate authority ID."""
+
+    if type(certificate) is not VerifiedCertificate:
+        raise TypeError("verified certificate must be exact")
+    return VerifiedCertificate.model_validate(
+        certificate.model_copy(
+            update={
+                "report_sha256": "9" * 64,
+                "issued_at": certificate.issued_at + timedelta(seconds=1),
+            }
+        )
+    )

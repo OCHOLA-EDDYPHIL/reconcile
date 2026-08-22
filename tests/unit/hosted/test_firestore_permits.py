@@ -12,7 +12,7 @@ from reconcile.contracts import (
     ActionPermitState,
     PermitCompletionOutcome,
 )
-from reconcile.controller.permits import PermitAuthority
+from reconcile.controller.permits import PermitAuthority, action_permit_from_certificate
 from reconcile.hosted.firestore_cas import (
     FirestoreCasCollection,
     FirestoreCasConflict,
@@ -25,6 +25,7 @@ from reconcile.hosted.firestore_permits import FirestoreActionPermitStore
 from reconcile.persistence.permits import (
     PermitAuditKind,
     PermitClaimDenied,
+    PermitConflict,
     PermitDenialReason,
     PermitStoreOutcomeUnknown,
 )
@@ -32,7 +33,11 @@ from reconcile.scenarios.adk_mutation import (
     run_permitted_adk_mutation,
     run_permitted_adk_mutation_async,
 )
-from tests._permit_support import NOW, make_permit_certificate
+from tests._permit_support import (
+    NOW,
+    make_permit_certificate,
+    make_permit_certificate_presentation_variant,
+)
 
 pytestmark = pytest.mark.unit
 
@@ -98,12 +103,22 @@ def test_firestore_thirty_two_concurrent_claims_have_exactly_one_winner() -> Non
         certificate, semantic_action, arguments, precondition = (
             make_permit_certificate()
         )
+        variant = make_permit_certificate_presentation_variant(certificate)
         store = FirestoreActionPermitStore(_MemoryCas())
-        permit = await PermitAuthority(
+        issuer = PermitAuthority(
             store,
             clock=lambda: NOW + timedelta(seconds=6),
-        ).issue_permit(certificate)
+        )
+        issued = await asyncio.gather(
+            *(
+                issuer.issue_permit(certificate if index % 2 == 0 else variant)
+                for index in range(32)
+            )
+        )
+        permit = issued[0]
         assert permit is not None
+        assert all(item == permit for item in issued)
+        assert len(await store.permit_audit_events(permit.permit_id)) == 1
 
         async def claim(index: int) -> ActionPermit:
             authority = PermitAuthority(
@@ -113,7 +128,7 @@ def test_firestore_thirty_two_concurrent_claims_have_exactly_one_winner() -> Non
             )
             return await authority.claim_for_dispatch(
                 permit_id=permit.permit_id,
-                certificate=certificate,
+                certificate=certificate if index % 2 == 0 else variant,
                 semantic_action=semantic_action,
                 tool_name=permit.tool_name,
                 tool_version=permit.tool_version,
@@ -145,6 +160,44 @@ def test_firestore_thirty_two_concurrent_claims_have_exactly_one_winner() -> Non
         assert (await store.permit_audit_events(permit.permit_id))[-1].kind is (
             PermitAuditKind.COMPLETED
         )
+        assert (
+            await PermitAuthority(
+                store,
+                clock=lambda: NOW + timedelta(seconds=9),
+            ).issue_permit(variant)
+            == completed
+        )
+        assert len(await store.permit_audit_events(permit.permit_id)) == 34
+
+    asyncio.run(scenario())
+
+
+def test_firestore_stable_permit_id_rejects_semantic_drift() -> None:
+    async def scenario() -> None:
+        certificate, _semantic_action, _arguments, _precondition = (
+            make_permit_certificate()
+        )
+        cas = _MemoryCas()
+        store = FirestoreActionPermitStore(cas)
+        original = await PermitAuthority(
+            store,
+            clock=lambda: NOW + timedelta(seconds=6),
+        ).issue_permit(certificate)
+        assert original is not None
+        drifted_certificate = type(certificate).model_validate(
+            certificate.model_copy(
+                update={"action_policy_version": "modified-policy-v1"}
+            )
+        )
+        drifted = action_permit_from_certificate(drifted_certificate)
+        assert drifted is not None
+        assert drifted.permit_id == original.permit_id
+
+        with pytest.raises(PermitConflict):
+            await store.issue_permit(drifted)
+
+        assert await store.get_permit(original.permit_id) == original
+        assert len(await store.permit_audit_events(original.permit_id)) == 1
 
     asyncio.run(scenario())
 

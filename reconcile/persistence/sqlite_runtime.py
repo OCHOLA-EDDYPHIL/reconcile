@@ -93,6 +93,8 @@ from reconcile.persistence.permits import (
     evaluate_permit_claim,
     evaluate_permit_completion,
     issued_audit_event,
+    same_action_permit_authority,
+    validate_action_permit_identity,
     validate_permit_audit_history,
 )
 
@@ -2032,6 +2034,10 @@ class SqliteDurableRuntimeStore:
         if row is None:
             raise PermitNotFound(permit_id)
         permit = self._decode_permit(row["payload"], permit_id)
+        try:
+            validate_action_permit_identity(permit)
+        except (TypeError, ValueError) as error:
+            raise PermitCorruptState(permit_id) from error
         if (
             permit.permit_id != permit_id
             or row["certificate_id"] != permit.certificate_id
@@ -2127,6 +2133,10 @@ class SqliteDurableRuntimeStore:
         ):
             raise TypeError("an exact issued action permit is required")
         try:
+            validate_action_permit_identity(permit)
+        except (TypeError, ValueError) as error:
+            raise PermitConflict(permit.permit_id) from error
+        try:
             with self._write() as connection:
                 row = connection.execute(
                     "SELECT payload FROM action_permits WHERE permit_id = ?",
@@ -2134,9 +2144,9 @@ class SqliteDurableRuntimeStore:
                 ).fetchone()
                 if row is not None:
                     current = self._permit_locked(connection, permit.permit_id)
-                    if canonical_json_bytes(current) != canonical_json_bytes(permit):
-                        raise PermitConflict(permit.permit_id)
                     self._permit_audits_locked(connection, current)
+                    if not same_action_permit_authority(current, permit):
+                        raise PermitConflict(permit.permit_id)
                     return current
                 connection.execute(
                     """
