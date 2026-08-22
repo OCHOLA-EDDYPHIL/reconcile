@@ -31,10 +31,14 @@ _PINNED_OPERATOR_PYTHON = Path(
 _PINNED_OPERATOR_PYTHON_SHA256 = (
     "021044895e95be79dc2f110367607e684119afbc8ce75f6f0eec94844e0acec7"
 )
+_PINNED_OPERATOR_TERRAFORM = Path("/usr/local/libexec/reconcile/terraform-1.15.8")
+_PINNED_OPERATOR_TERRAFORM_SHA256 = (
+    "8b6cb96cd46080ee1287baf646c70078715a99123b9b3a6ce2a7fe3892ec703a"
+)
 
 
 @pytest.fixture(autouse=True)
-def _isolate_production_python_attestation(
+def _isolate_production_host_attestation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     verify_root_owned_binary = operator._verify_root_owned_binary
@@ -43,6 +47,10 @@ def _isolate_production_python_attestation(
         if failure == "PYTHON_INTERPRETER_DRIFT":
             assert path == _PINNED_OPERATOR_PYTHON
             assert digest == _PINNED_OPERATOR_PYTHON_SHA256
+            return
+        if failure == "TERRAFORM_BINARY_DRIFT":
+            assert path == _PINNED_OPERATOR_TERRAFORM
+            assert digest == _PINNED_OPERATOR_TERRAFORM_SHA256
             return
         verify_root_owned_binary(path, digest, failure)
 
