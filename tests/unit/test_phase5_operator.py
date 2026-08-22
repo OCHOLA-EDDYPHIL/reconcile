@@ -35,6 +35,28 @@ _PINNED_OPERATOR_TERRAFORM = Path("/usr/local/libexec/reconcile/terraform-1.15.8
 _PINNED_OPERATOR_TERRAFORM_SHA256 = (
     "8b6cb96cd46080ee1287baf646c70078715a99123b9b3a6ce2a7fe3892ec703a"
 )
+_PINNED_HOST_BINARIES = {
+    "DOCKER_BINARY_DRIFT": (
+        Path("/usr/local/libexec/reconcile/docker-29.6.2"),
+        "dda0804fca9b37a16e688356049ddf51fdd4c1a435c0a41055ec81cdf121535a",
+    ),
+    "GCLOUD_CREDENTIAL_HELPER_DRIFT": (
+        Path("/usr/lib/google-cloud-sdk/bin/docker-credential-gcloud"),
+        "12fe4830c186064fb2202a96058a3abd4abf8a8a17bafead45054a7068019179",
+    ),
+    "GIT_BINARY_DRIFT": (
+        Path("/usr/bin/git"),
+        "2a8c18fbf43da9f692d75474c72bea9dfd796c260b0f3dfe456376abc3bbd668",
+    ),
+    "PYTHON_INTERPRETER_DRIFT": (
+        _PINNED_OPERATOR_PYTHON,
+        _PINNED_OPERATOR_PYTHON_SHA256,
+    ),
+    "TERRAFORM_BINARY_DRIFT": (
+        _PINNED_OPERATOR_TERRAFORM,
+        _PINNED_OPERATOR_TERRAFORM_SHA256,
+    ),
+}
 
 
 @pytest.fixture(autouse=True)
@@ -44,13 +66,9 @@ def _isolate_production_host_attestation(
     verify_root_owned_binary = operator._verify_root_owned_binary
 
     def verify(path: Path, digest: str, failure: str) -> None:
-        if failure == "PYTHON_INTERPRETER_DRIFT":
-            assert path == _PINNED_OPERATOR_PYTHON
-            assert digest == _PINNED_OPERATOR_PYTHON_SHA256
-            return
-        if failure == "TERRAFORM_BINARY_DRIFT":
-            assert path == _PINNED_OPERATOR_TERRAFORM
-            assert digest == _PINNED_OPERATOR_TERRAFORM_SHA256
+        expected = _PINNED_HOST_BINARIES.get(failure)
+        if expected is not None:
+            assert (path, digest) == expected
             return
         verify_root_owned_binary(path, digest, failure)
 
