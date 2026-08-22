@@ -369,6 +369,10 @@ class _StatusOnlyNormalizer:
             status = OperationStatus.ACTIVE
             verdict = RuleVerdict.AUTHORITATIVE_PENDING
             assertions = ()
+        elif kind == "status-unresolved":
+            status = OperationStatus.UNRESOLVED
+            verdict = RuleVerdict.AUTHORITATIVE_PENDING
+            assertions = ()
         elif kind == "effects-established":
             status = None
             verdict = RuleVerdict.AUTHORITATIVE_EFFECTS
@@ -415,6 +419,12 @@ def test_status_only_conflict_has_two_ids_and_distinct_histories(
                 fixtures.NOW + timedelta(seconds=3),
                 None,
             ),
+            (
+                "cloud-run-operation-get",
+                "status-unresolved",
+                fixtures.NOW + timedelta(seconds=4),
+                None,
+            ),
         ),
     )
     evaluation, report = run.evaluation_and_report()
@@ -442,6 +452,24 @@ def test_status_only_conflict_has_two_ids_and_distinct_histories(
         Classification.NOT_COMMITTED,
         Classification.PENDING,
     }
+    conflict_ids = set(artifact.conflicting_evidence_ids)
+    assert all(
+        not conflict_ids <= set(history.compatible_evidence_ids)
+        for history in artifact.possible_histories
+    )
+    non_execution = next(
+        history
+        for history in artifact.possible_histories
+        if history.classification is Classification.NOT_COMMITTED
+    )
+    status_by_id = {
+        item.evidence_id: item.operation_status for item in evaluation.evidence
+    }
+    assert all(
+        status_by_id[evidence_id] is OperationStatus.TERMINAL_NOT_COMMITTED
+        for evidence_id in non_execution.compatible_evidence_ids
+        if status_by_id[evidence_id] is not None
+    )
 
 
 def test_established_effect_and_status_only_nonexecution_return_conflict_witness(

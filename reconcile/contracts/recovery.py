@@ -229,6 +229,33 @@ class PossibleHistory(StrictModel):
             self.compatible_evidence_ids,
             "history evidence identifiers",
         )
+        compatible = set(self.compatible_evidence_ids)
+        cited = {
+            evidence_id
+            for effect in self.effect_states
+            for evidence_id in effect.cited_evidence_ids
+        }
+        if not cited <= compatible:
+            raise ValueError("history effect citations must be compatible evidence")
+        states = tuple(effect.state for effect in self.effect_states)
+        if self.classification is Classification.COMMITTED and any(
+            state is not EffectAssertionState.ESTABLISHED for state in states
+        ):
+            raise ValueError("COMMITTED history requires every effect established")
+        if self.classification is Classification.NOT_COMMITTED and any(
+            state is not EffectAssertionState.NOT_ESTABLISHED for state in states
+        ):
+            raise ValueError("NOT_COMMITTED history requires every effect absent")
+        if self.classification is Classification.PARTIAL and (
+            EffectAssertionState.UNVERIFIED in states
+            or EffectAssertionState.ESTABLISHED not in states
+            or EffectAssertionState.NOT_ESTABLISHED not in states
+        ):
+            raise ValueError("PARTIAL history requires a complete mixed effect state")
+        if self.classification is Classification.PENDING and (
+            EffectAssertionState.UNVERIFIED not in states
+        ):
+            raise ValueError("PENDING history requires an unresolved effect")
         return self
 
 
@@ -511,12 +538,20 @@ class AmbiguityWitness(StrictModel):
             (
                 history.classification,
                 tuple(
-                    (effect.effect_id, effect.state) for effect in history.effect_states
+                    (
+                        effect.effect_id,
+                        effect.state,
+                        tuple(sorted(effect.cited_evidence_ids)),
+                    )
+                    for effect in history.effect_states
                 ),
+                tuple(sorted(history.compatible_evidence_ids)),
             )
             for history in self.possible_histories
         )
-        _require_unique(signatures, "possible history outcomes")
+        _require_unique(
+            signatures, "possible history outcomes and evidence alternatives"
+        )
         known_evidence = set(evidence_ids)
         if any(
             not set(history.compatible_evidence_ids) <= known_evidence

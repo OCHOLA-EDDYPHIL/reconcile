@@ -6,7 +6,7 @@ import hashlib
 import re
 from datetime import datetime
 from enum import StrEnum
-from itertools import pairwise
+from itertools import combinations, pairwise
 from types import MappingProxyType
 from typing import Literal
 
@@ -860,6 +860,65 @@ def _require_consistent_observations(
             )
 
 
+def _require_stage_revision_coherence(
+    observations: tuple[ProviderObservation, ...],
+) -> None:
+    revisions = {
+        item.revision
+        for item in observations
+        if type(item)
+        in {
+            _CloudRunServiceObservation,
+            _CloudRunRevisionObservation,
+            _CloudRunOperationObservation,
+            _CloudRunHealthObservation,
+        }
+    }
+    if len(revisions) > 1:
+        raise RecoveryRuleViolation(
+            "staging observations do not identify one exact revision"
+        )
+
+
+def recovery_provider_conflict_pairs(
+    profile: RecoveryActionProfile,
+    action: SemanticActionIdentity,
+    evidence: tuple[NormalizedEvidence, ...],
+) -> tuple[tuple[str, str], ...]:
+    """Return every deterministic two-observation provider contradiction.
+
+    Each observation must first be independently admissible for the sealed
+    action. Pairwise evaluation then exposes conflicts that the generic effect
+    classifier cannot see, such as divergent ETags or an LRO state regression.
+    """
+
+    validate_recovery_evidence(profile, action, evidence)
+    observations = tuple(_provider_observation(item) for item in evidence)
+    conflicts: set[tuple[str, str]] = set()
+    for left_index, right_index in combinations(range(len(evidence)), 2):
+        pair_evidence = (evidence[left_index], evidence[right_index])
+        pair_observations = (
+            observations[left_index],
+            observations[right_index],
+        )
+        try:
+            _require_consistent_observations(pair_evidence, pair_observations)
+            if profile is STAGE_CLOUD_RUN_REVISION_PROFILE:
+                _require_stage_revision_coherence(pair_observations)
+        except RecoveryRuleViolation:
+            conflicts.add(
+                tuple(
+                    sorted(
+                        (
+                            evidence[left_index].evidence_id,
+                            evidence[right_index].evidence_id,
+                        )
+                    )
+                )
+            )
+    return tuple(sorted(conflicts))
+
+
 def _expected_effects_by_scope(
     profile: RecoveryActionProfile,
     action: SemanticActionIdentity,
@@ -1053,9 +1112,6 @@ def _require_stage_commit(
     health = tuple(
         item for item in observations if type(item) is _CloudRunHealthObservation
     )
-    operations = tuple(
-        item for item in observations if type(item) is _CloudRunOperationObservation
-    )
     if not services or not revisions or not health:
         raise RecoveryRuleViolation(
             "committed staging requires service, revision, and health observations"
@@ -1082,13 +1138,7 @@ def _require_stage_commit(
         raise RecoveryRuleViolation(
             "staged revision lacks a successful exact-revision health result"
         )
-    revisions_seen = {
-        item.revision for item in (*services, *revisions, *health, *operations)
-    }
-    if len(revisions_seen) != 1:
-        raise RecoveryRuleViolation(
-            "staging observations do not identify one exact revision"
-        )
+    _require_stage_revision_coherence(observations)
     if len({item.service_etag for item in services}) != 1:
         raise RecoveryRuleViolation(
             "staging observations do not carry one consistent service ETag"
@@ -1151,6 +1201,8 @@ def validate_recovery_proof(
     observations = tuple(_provider_observation(item) for item in evidence)
     if classification is not Classification.UNKNOWN:
         _require_consistent_observations(evidence, observations)
+        if profile is STAGE_CLOUD_RUN_REVISION_PROFILE:
+            _require_stage_revision_coherence(observations)
     states = _assertion_states(effects, evidence)
     definitive = {
         effect_id: values - {EffectAssertionState.UNVERIFIED}
@@ -1219,6 +1271,13 @@ def validate_recovery_proof(
         ):
             raise RecoveryRuleViolation(
                 "partial proof requires explicit mixed Cloud Run stage effects"
+            )
+        revision_effect_id = effects[STAGE_REVISION_EFFECT_SCOPE].effect_id
+        if revision_effect_id in established and not any(
+            type(item) is _CloudRunRevisionObservation for item in observations
+        ):
+            raise RecoveryRuleViolation(
+                "partial staged revision creation requires an exact revision read"
             )
         return
     raise RecoveryRuleViolation("classification is outside the sealed inventory")
@@ -1320,6 +1379,7 @@ __all__ = [
     "RecoveryPreconditionKind",
     "RecoveryRuleViolation",
     "recovery_precondition_sha256",
+    "recovery_provider_conflict_pairs",
     "resolve_recovery_action_profile",
     "validate_recovery_action",
     "validate_recovery_evidence",

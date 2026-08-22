@@ -530,10 +530,10 @@ class SanitizedInvestigationReport(StrictModel):
                 expected_status = None
             elif terminal_committed:
                 expected_status = OperationStatus.TERMINAL_COMMITTED
-            elif OperationStatus.ACTIVE in statuses:
-                expected_status = OperationStatus.ACTIVE
             elif OperationStatus.UNRESOLVED in statuses:
                 expected_status = OperationStatus.UNRESOLVED
+            elif OperationStatus.ACTIVE in statuses:
+                expected_status = OperationStatus.ACTIVE
             elif terminal_not_committed:
                 expected_status = OperationStatus.TERMINAL_NOT_COMMITTED
             else:
@@ -598,10 +598,8 @@ class SanitizedInvestigationReport(StrictModel):
                 if effect_ids <= not_established_ids
             }
             all_established = len(established_ids) == len(states)
-            active = self.proof.operation_status in {
-                OperationStatus.ACTIVE,
-                OperationStatus.UNRESOLVED,
-            }
+            operation_active = self.proof.operation_status is OperationStatus.ACTIVE
+            operation_failed = self.proof.operation_status is OperationStatus.UNRESOLVED
             terminal_not_committed = self.proof.operation_status is (
                 OperationStatus.TERMINAL_NOT_COMMITTED
             )
@@ -615,10 +613,12 @@ class SanitizedInvestigationReport(StrictModel):
                 expected_classification = Classification.UNKNOWN
             elif all_established:
                 expected_classification = Classification.COMMITTED
-            elif active:
+            elif operation_active:
                 expected_classification = Classification.PENDING
             elif partial:
                 expected_classification = Classification.PARTIAL
+            elif operation_failed:
+                expected_classification = Classification.PENDING
             elif terminal_not_committed and not established_ids:
                 expected_classification = Classification.NOT_COMMITTED
             else:

@@ -349,16 +349,17 @@ def evaluate_evidence(
         operation_status = None
     elif OperationStatus.TERMINAL_COMMITTED in status_values:
         operation_status = OperationStatus.TERMINAL_COMMITTED
-    elif OperationStatus.ACTIVE in status_values:
-        operation_status = OperationStatus.ACTIVE
     elif OperationStatus.UNRESOLVED in status_values:
         operation_status = OperationStatus.UNRESOLVED
+    elif OperationStatus.ACTIVE in status_values:
+        operation_status = OperationStatus.ACTIVE
     elif terminal_not_committed:
         operation_status = OperationStatus.TERMINAL_NOT_COMMITTED
     else:
         operation_status = None
 
-    active = bool(status_values & {OperationStatus.ACTIVE, OperationStatus.UNRESOLVED})
+    operation_active = operation_status is OperationStatus.ACTIVE
+    operation_failed = operation_status is OperationStatus.UNRESOLVED
     effects_by_scope: dict[str, set[str]] = defaultdict(set)
     for effect in expected_effects:
         effects_by_scope[effect.commit_scope].add(effect.effect_id)
@@ -377,7 +378,7 @@ def evaluate_evidence(
         classification = Classification.UNKNOWN
     elif all_established:
         classification = Classification.COMMITTED
-    elif active:
+    elif operation_active:
         classification = Classification.PENDING
     elif (
         len(effects_by_scope) >= 2
@@ -386,6 +387,12 @@ def evaluate_evidence(
         == set(effects_by_scope)
     ):
         classification = Classification.PARTIAL
+    elif operation_failed:
+        # A terminal provider failure does not prove that no effect occurred.
+        # Keep incomplete evidence pending, but do not let that uncertainty hide
+        # an otherwise complete, explicit mixture of established and absent
+        # effects (handled as PARTIAL immediately above).
+        classification = Classification.PENDING
     elif terminal_not_committed and not established_effects:
         classification = Classification.NOT_COMMITTED
     else:

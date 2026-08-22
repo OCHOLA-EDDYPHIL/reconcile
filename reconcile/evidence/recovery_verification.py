@@ -49,6 +49,7 @@ from reconcile.evidence.recovery_rules import (
     RecoveryActionProfile,
     RecoveryRuleViolation,
     recovery_precondition_sha256,
+    recovery_provider_conflict_pairs,
     resolve_recovery_action_profile,
     validate_recovery_proof,
 )
@@ -507,26 +508,62 @@ def _retry_transition(
     )
 
 
-def _artifact_identifier(
-    prefix: str,
+def _proof_authority_value(evaluation: CoreEvaluation) -> dict[str, object]:
+    return {
+        "admitted_evidence_ids": sorted(evaluation.proof.admitted_evidence_ids),
+        "conflicting_authority": evaluation.proof.conflicting_authority,
+        "effect_findings": sorted(
+            (
+                {
+                    "commit_scope": finding.commit_scope,
+                    "effect_id": finding.effect_id,
+                    "evidence_ids": sorted(finding.evidence_ids),
+                    "state": finding.state.value,
+                }
+                for finding in evaluation.proof.effect_findings
+            ),
+            key=lambda finding: (finding["effect_id"], finding["commit_scope"]),
+        ),
+        "operation_status": (
+            evaluation.proof.operation_status.value
+            if evaluation.proof.operation_status is not None
+            else None
+        ),
+    }
+
+
+def _artifact_identifier(prefix: str, authority: dict[str, object]) -> str:
+    """Identify logical proof authority, never its advisory presentation."""
+
+    digest = hashlib.sha256(canonical_json_value_bytes(authority)).hexdigest()
+    return f"{prefix}-{digest}"
+
+
+def _base_authority(
     *,
     chain: RecoveryChain,
     node: RecoveryActionNode,
-    report: InvestigationReport,
-    verified_at: datetime,
-) -> str:
-    digest = hashlib.sha256(
-        canonical_json_value_bytes(
-            {
-                "chain_sha256": canonical_sha256(chain),
-                "node_sha256": canonical_sha256(node),
-                "report_sha256": canonical_sha256(report),
-                "verified_at": verified_at.isoformat(),
-                "verifier_version": RECOVERY_VERIFIER_VERSION,
-            }
-        )
-    ).hexdigest()
-    return f"{prefix}-{digest[:32]}"
+    envelope: ExecutionEnvelope,
+    evaluation: CoreEvaluation,
+    profile: RecoveryActionProfile,
+    evidence: tuple[NormalizedEvidence, ...],
+) -> dict[str, object]:
+    return {
+        "action_profile_version": profile.profile_version,
+        "action_policy_version": envelope.context.policies.action,
+        "authority_policy_version": envelope.context.policies.authority,
+        "chain_sha256": canonical_sha256(chain),
+        "classification": evaluation.classification.value,
+        "classification_policy_version": envelope.context.policies.classification,
+        "correlation_policy_version": RECOVERY_CORRELATION_POLICY_VERSION,
+        "envelope_sha256": canonical_sha256(envelope),
+        "evidence_sha256s": sorted(canonical_sha256(item) for item in evidence),
+        "freshness_policy_version": RECOVERY_FRESHNESS_POLICY_VERSION,
+        "node_sha256": canonical_sha256(node),
+        "proof": _proof_authority_value(evaluation),
+        "semantic_action_sha256": node.semantic_action.semantic_action_sha256,
+        "verifier_version": RECOVERY_VERIFIER_VERSION,
+    }
 
 
 def _history_classification(
@@ -536,8 +573,10 @@ def _history_classification(
         return Classification.COMMITTED
     if all(state is EffectAssertionState.NOT_ESTABLISHED for state in states):
         return Classification.NOT_COMMITTED
-    if any(state is EffectAssertionState.ESTABLISHED for state in states) and any(
-        state is EffectAssertionState.NOT_ESTABLISHED for state in states
+    if (
+        EffectAssertionState.UNVERIFIED not in states
+        and any(state is EffectAssertionState.ESTABLISHED for state in states)
+        and any(state is EffectAssertionState.NOT_ESTABLISHED for state in states)
     ):
         return Classification.PARTIAL
     return Classification.UNKNOWN
@@ -559,9 +598,16 @@ def _evidence_compatible_with_history(
     if status is OperationStatus.TERMINAL_NOT_COMMITTED:
         return classification is Classification.NOT_COMMITTED
     if status is OperationStatus.TERMINAL_COMMITTED:
-        return classification in {Classification.COMMITTED, Classification.PARTIAL}
+        return classification in {
+            Classification.COMMITTED,
+            Classification.PARTIAL,
+            Classification.UNKNOWN,
+        }
     if status in {OperationStatus.ACTIVE, OperationStatus.UNRESOLVED}:
-        return classification in {Classification.PENDING, Classification.UNKNOWN}
+        # Neither status settles target state. It is compatible with histories
+        # in which effects have already occurred, have not occurred, or remain
+        # unresolved; only target-state assertions can narrow those histories.
+        return True
     return True
 
 
@@ -573,6 +619,7 @@ def _history(
     evidence: tuple[NormalizedEvidence, ...],
     preserve_findings: bool,
     classification_override: Classification | None = None,
+    excluded_evidence_ids: frozenset[str] = frozenset(),
 ) -> PossibleHistory:
     states = {
         finding.effect_id: (
@@ -588,7 +635,8 @@ def _history(
     compatible = tuple(
         item.evidence_id
         for item in evidence
-        if _evidence_compatible_with_history(item, states, classification)
+        if item.evidence_id not in excluded_evidence_ids
+        and _evidence_compatible_with_history(item, states, classification)
     )
     compatible_set = set(compatible)
     effects = tuple(
@@ -630,10 +678,10 @@ def _history(
     )
 
 
-def _minimal_conflict(
+def _generic_conflict_pairs(
     evaluation: CoreEvaluation,
     evidence: tuple[NormalizedEvidence, ...],
-) -> tuple[str, ...]:
+) -> tuple[tuple[str, str], ...]:
     pairs: set[tuple[str, str]] = set()
     for finding in evaluation.proof.effect_findings:
         established = sorted(
@@ -696,14 +744,21 @@ def _minimal_conflict(
         for left in established_ids
         for right in status_ids[OperationStatus.TERMINAL_NOT_COMMITTED]
     )
-    if not pairs:
-        return ()
-    return min(pairs)
+    return tuple(sorted(pairs))
+
+
+def _minimal_conflict(
+    evaluation: CoreEvaluation,
+    evidence: tuple[NormalizedEvidence, ...],
+) -> tuple[str, ...]:
+    pairs = _generic_conflict_pairs(evaluation, evidence)
+    return pairs[0] if pairs else ()
 
 
 def _status_conflict_histories(
     *,
     conflict_ids: tuple[str, ...],
+    conflict_pairs: tuple[tuple[str, str], ...],
     evaluation: CoreEvaluation,
     evidence: tuple[NormalizedEvidence, ...],
 ) -> tuple[PossibleHistory, PossibleHistory] | None:
@@ -747,6 +802,11 @@ def _status_conflict_histories(
             evidence=evidence,
             preserve_findings=False,
             classification_override=status_history[item.operation_status][1],
+            excluded_evidence_ids=frozenset(
+                right if left == item.evidence_id else left
+                for left, right in conflict_pairs
+                if item.evidence_id in {left, right}
+            ),
         )
         for item in pair
     )
@@ -760,6 +820,109 @@ def _status_conflict_histories(
     if len(signatures) != 2:
         return None
     return histories[0], histories[1]
+
+
+def _provider_conflict_history(
+    *,
+    history_id: str,
+    anchor_id: str,
+    conflict_pairs: tuple[tuple[str, str], ...],
+    evaluation: CoreEvaluation,
+    evidence: tuple[NormalizedEvidence, ...],
+) -> PossibleHistory:
+    conflicts_by_id: dict[str, set[str]] = {}
+    for left, right in conflict_pairs:
+        conflicts_by_id.setdefault(left, set()).add(right)
+        conflicts_by_id.setdefault(right, set()).add(left)
+    by_id = {item.evidence_id: item for item in evidence}
+    selected_ids = [anchor_id]
+    for evidence_id in sorted(by_id):
+        if evidence_id == anchor_id or any(
+            evidence_id in conflicts_by_id.get(selected, set())
+            for selected in selected_ids
+        ):
+            continue
+        selected_ids.append(evidence_id)
+    candidates = tuple(by_id[evidence_id] for evidence_id in selected_ids)
+    states: dict[str, EffectAssertionState] = {}
+    for finding in evaluation.proof.effect_findings:
+        definitive = {
+            assertion.state
+            for item in candidates
+            for assertion in item.effect_assertions
+            if assertion.effect_id == finding.effect_id
+            and assertion.state is not EffectAssertionState.UNVERIFIED
+        }
+        states[finding.effect_id] = (
+            next(iter(definitive))
+            if len(definitive) == 1
+            else EffectAssertionState.UNVERIFIED
+        )
+
+    classification = _history_classification(tuple(states.values()))
+    if classification is Classification.UNKNOWN and any(
+        item.operation_status in {OperationStatus.ACTIVE, OperationStatus.UNRESOLVED}
+        for item in candidates
+    ):
+        classification = Classification.PENDING
+    compatible = tuple(
+        sorted(
+            item.evidence_id
+            for item in candidates
+            if _evidence_compatible_with_history(item, states, classification)
+        )
+    )
+    compatible_set = set(compatible)
+    effects = tuple(
+        HypothesizedEffect(
+            effect_id=finding.effect_id,
+            state=states[finding.effect_id],
+            cited_evidence_ids=tuple(
+                sorted(
+                    item.evidence_id
+                    for item in candidates
+                    if item.evidence_id in compatible_set
+                    and any(
+                        assertion.effect_id == finding.effect_id
+                        and assertion.state is states[finding.effect_id]
+                        for assertion in item.effect_assertions
+                    )
+                )
+            ),
+        )
+        for finding in evaluation.proof.effect_findings
+    )
+    return PossibleHistory(
+        history_id=history_id,
+        classification=classification,
+        effect_states=effects,
+        compatible_evidence_ids=compatible,
+        summary=(
+            f"Provider observation {anchor_id} is current; observations that "
+            "contradict it are stale or superseded."
+        ),
+    )
+
+
+def _provider_conflict_histories(
+    *,
+    conflict_ids: tuple[str, ...],
+    conflict_pairs: tuple[tuple[str, str], ...],
+    evaluation: CoreEvaluation,
+    evidence: tuple[NormalizedEvidence, ...],
+) -> tuple[PossibleHistory, PossibleHistory] | None:
+    if len(conflict_ids) != 2 or conflict_ids not in conflict_pairs:
+        return None
+    return tuple(
+        _provider_conflict_history(
+            history_id=f"provider-state-{index}",
+            anchor_id=evidence_id,
+            conflict_pairs=conflict_pairs,
+            evaluation=evaluation,
+            evidence=evidence,
+        )
+        for index, evidence_id in enumerate(conflict_ids, start=1)
+    )
 
 
 def _discriminating_observations(
@@ -842,6 +1005,72 @@ def _discriminating_observations(
     )
 
 
+def _conflict_discriminating_observations(
+    *,
+    conflict_ids: tuple[str, ...],
+    evidence: tuple[NormalizedEvidence, ...],
+    history_ids: tuple[str, ...],
+) -> tuple[DiscriminatingObservation, ...]:
+    by_id = {item.evidence_id: item for item in evidence}
+    selected = tuple(by_id[evidence_id] for evidence_id in conflict_ids)
+    by_capability: dict[tuple[str, str], list[NormalizedEvidence]] = {}
+    for item in selected:
+        by_capability.setdefault(
+            (item.capability_name, item.capability_version), []
+        ).append(item)
+    descriptions = {
+        "cloud-run-service-get": (
+            "Re-read the exact Cloud Run service to establish its current "
+            "generation, ETag, revision, and traffic."
+        ),
+        "cloud-run-revision-get": (
+            "Re-read the exact Cloud Run revision to establish its current "
+            "identity and readiness."
+        ),
+        "cloud-run-operation-get": (
+            "Re-read the exact Cloud Run operation to establish its current "
+            "lifecycle state."
+        ),
+        "cloud-run-revision-health": (
+            "Repeat the exact revision health observation to establish its "
+            "current readiness."
+        ),
+        "firestore-release-record-get": (
+            "Re-read the exact Firestore release record to establish its "
+            "current existence and payload."
+        ),
+        "reconcile-dispatch-receipt-get": (
+            "Re-read the exact dispatch receipt to establish whether provider "
+            "contact occurred."
+        ),
+    }
+    return tuple(
+        DiscriminatingObservation(
+            observation_id=f"resolve-conflict-{index}",
+            description=descriptions.get(
+                capability_name,
+                "Repeat the exact conflicting observation to establish current state.",
+            ),
+            capability_name=capability_name,
+            capability_version=capability_version,
+            relevant_effect_ids=tuple(
+                sorted(
+                    {
+                        assertion.effect_id
+                        for item in items
+                        for assertion in item.effect_assertions
+                    }
+                )
+            ),
+            distinguishes_history_ids=history_ids,
+        )
+        for index, ((capability_name, capability_version), items) in enumerate(
+            sorted(by_capability.items()),
+            start=1,
+        )
+    )
+
+
 def _witness(
     *,
     chain: RecoveryChain,
@@ -858,38 +1087,71 @@ def _witness(
         finding.state is EffectAssertionState.UNVERIFIED
         for finding in evaluation.proof.effect_findings
     )
-    conflict_ids = (
-        _minimal_conflict(evaluation, evidence)
+    generic_conflicts = (
+        _generic_conflict_pairs(evaluation, evidence)
         if evaluation.proof.conflicting_authority
         else ()
     )
+    generic_conflict = generic_conflicts[0] if generic_conflicts else ()
+    try:
+        provider_conflicts = recovery_provider_conflict_pairs(
+            profile,
+            node.semantic_action,
+            evidence,
+        )
+    except RecoveryRuleViolation:
+        provider_conflicts = ()
+    conflict_candidates = {
+        pair
+        for pair in (
+            *provider_conflicts,
+            *((generic_conflict,) if generic_conflict else ()),
+        )
+        if len(pair) == 2
+    }
+    conflict_ids = min(conflict_candidates) if conflict_candidates else ()
+    all_conflict_pairs = tuple(sorted({*provider_conflicts, *generic_conflicts}))
     if evaluation.proof.conflicting_authority and len(conflict_ids) != 2:
         raise RecoveryVerificationError(
             "conflicting authority has no minimal contradictory evidence pair"
         )
     histories = (
-        _status_conflict_histories(
-            conflict_ids=conflict_ids,
-            evaluation=evaluation,
-            evidence=evidence,
+        (
+            _status_conflict_histories(
+                conflict_ids=conflict_ids,
+                conflict_pairs=all_conflict_pairs,
+                evaluation=evaluation,
+                evidence=evidence,
+            )
+            if conflict_ids
+            else None
         )
-        if conflict_ids
-        else None
-    ) or (
-        _history(
-            history_id="effects-occurred",
-            assignment=EffectAssertionState.ESTABLISHED,
-            evaluation=evaluation,
-            evidence=evidence,
-            preserve_findings=preserve_findings,
-        ),
-        _history(
-            history_id="effects-not-occurred",
-            assignment=EffectAssertionState.NOT_ESTABLISHED,
-            evaluation=evaluation,
-            evidence=evidence,
-            preserve_findings=preserve_findings,
-        ),
+        or (
+            _provider_conflict_histories(
+                conflict_ids=conflict_ids,
+                conflict_pairs=all_conflict_pairs,
+                evaluation=evaluation,
+                evidence=evidence,
+            )
+            if conflict_ids
+            else None
+        )
+        or (
+            _history(
+                history_id="effects-occurred",
+                assignment=EffectAssertionState.ESTABLISHED,
+                evaluation=evaluation,
+                evidence=evidence,
+                preserve_findings=preserve_findings,
+            ),
+            _history(
+                history_id="effects-not-occurred",
+                assignment=EffectAssertionState.NOT_ESTABLISHED,
+                evaluation=evaluation,
+                evidence=evidence,
+                preserve_findings=preserve_findings,
+            ),
+        )
     )
     unresolved = tuple(
         finding.effect_id
@@ -897,15 +1159,43 @@ def _witness(
         if finding.state is EffectAssertionState.UNVERIFIED
     ) or tuple(finding.effect_id for finding in evaluation.proof.effect_findings)
     history_ids = tuple(history.history_id for history in histories)
+    discriminating = (
+        _conflict_discriminating_observations(
+            conflict_ids=conflict_ids,
+            evidence=evidence,
+            history_ids=history_ids,
+        )
+        if conflict_ids
+        else _discriminating_observations(
+            profile=profile,
+            envelope=envelope,
+            unresolved_effect_ids=unresolved,
+            history_ids=history_ids,
+        )
+    )
+    authority = _base_authority(
+        chain=chain,
+        node=node,
+        envelope=envelope,
+        evaluation=evaluation,
+        profile=profile,
+        evidence=evidence,
+    )
+    authority.update(
+        {
+            "artifact_kind": "ambiguity-witness",
+            "conflicting_evidence_ids": list(conflict_ids),
+            "discriminating_observations": [
+                item.model_dump(mode="json") for item in discriminating
+            ],
+            "possible_histories": [
+                history.model_dump(mode="json") for history in histories
+            ],
+        }
+    )
     return AmbiguityWitness(
         schema_version=AMBIGUITY_WITNESS_VERSION,
-        witness_id=_artifact_identifier(
-            "witness",
-            chain=chain,
-            node=node,
-            report=report,
-            verified_at=verified_at,
-        ),
+        witness_id=_artifact_identifier("witness", authority),
         chain_id=chain.chain_id,
         node_id=node.node_id,
         semantic_action_sha256=node.semantic_action.semantic_action_sha256,
@@ -918,12 +1208,7 @@ def _witness(
         target_sha256=canonical_sha256(node.semantic_action.target),
         evidence=_bindings(evidence),
         possible_histories=histories,
-        discriminating_observations=_discriminating_observations(
-            profile=profile,
-            envelope=envelope,
-            unresolved_effect_ids=unresolved,
-            history_ids=history_ids,
-        ),
+        discriminating_observations=discriminating,
         conflicting_evidence_ids=conflict_ids,
         verifier_version=RECOVERY_VERIFIER_VERSION,
         created_at=verified_at,
@@ -1014,15 +1299,32 @@ def verify_recovery(
         transition = _retry_transition(node, profile, evaluation, supporting)
 
     expires_at = min(item.freshness.valid_until for item in supporting)
+    authority = _base_authority(
+        chain=chain,
+        node=node,
+        envelope=envelope,
+        evaluation=evaluation,
+        profile=profile,
+        evidence=relevant,
+    )
+    authority.update(
+        {
+            "artifact_kind": "verified-certificate",
+            "expires_at": expires_at.isoformat(),
+            "supporting_evidence_sha256s": sorted(
+                canonical_sha256(item) for item in supporting
+            ),
+            "transition": (
+                transition.model_dump(mode="json") if transition is not None else None
+            ),
+        }
+    )
+    # report_sha256 below preserves the complete investigation audit, including
+    # advisory prose. certificate_id is the stable authority/deduplication key
+    # and intentionally excludes that presentation-only material.
     return VerifiedCertificate(
         schema_version=VERIFIED_CERTIFICATE_VERSION,
-        certificate_id=_artifact_identifier(
-            "certificate",
-            chain=chain,
-            node=node,
-            report=report,
-            verified_at=verified_at,
-        ),
+        certificate_id=_artifact_identifier("certificate", authority),
         chain_id=chain.chain_id,
         node_id=node.node_id,
         semantic_action_sha256=node.semantic_action.semantic_action_sha256,
