@@ -786,6 +786,15 @@ class CloudRunObservationNormalizer:
             else:
                 operation_status = None
                 verdict = RuleVerdict.ABSENCE_ONLY
+        elif (
+            type(observation) in {_ServiceObservation, _RevisionObservation}
+            and observation.reconciling == "true"
+        ):
+            # A target-bound Cloud Run resource is itself authoritative that
+            # reconciliation remains active even when the lost response hid the
+            # long-running operation name.
+            operation_status = OperationStatus.ACTIVE
+            verdict = RuleVerdict.AUTHORITATIVE_PENDING
         elif EffectAssertionState.ESTABLISHED in definitive:
             verdict = RuleVerdict.AUTHORITATIVE_EFFECTS
         else:

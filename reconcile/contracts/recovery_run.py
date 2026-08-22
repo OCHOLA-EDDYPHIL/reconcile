@@ -24,12 +24,14 @@ from reconcile.contracts.codec import canonical_sha256
 from reconcile.contracts.common import Classification, TargetBinding
 from reconcile.contracts.recovery import (
     ActionPermit,
+    ActionPermitState,
     AmbiguityWitness,
     GeminiHypothesis,
     PermitAction,
     RecoveryChain,
     VerifiedCertificate,
 )
+from reconcile.contracts.recovery_scenario import RecoveryDispatchReceipt
 from reconcile.contracts.report import InvestigationReport
 
 RECOVERY_RUN_REQUEST_VERSION = "reconcile/recovery-run-request/v1"
@@ -323,6 +325,7 @@ class RecoveryRunEventType(StrEnum):
     DECISION = "DECISION"
     LAUNCH_PERMIT = "LAUNCH_PERMIT"
     ACTION_PERMIT = "ACTION_PERMIT"
+    DISPATCH_RECEIPT = "DISPATCH_RECEIPT"
 
 
 class RecoveryRunEventPayload(StrictModel):
@@ -338,6 +341,7 @@ class RecoveryRunEventPayload(StrictModel):
     witness: AmbiguityWitness | None = None
     launch_permit: RecoveryLaunchPermit | None = None
     action_permit: ActionPermit | None = None
+    dispatch_receipt: RecoveryDispatchReceipt | None = None
     note: SanitizedText | None = None
 
 
@@ -375,6 +379,7 @@ class RecoveryRunEvent(StrictModel):
             RecoveryRunEventType.DECISION: {"decision"},
             RecoveryRunEventType.LAUNCH_PERMIT: {"launch_permit"},
             RecoveryRunEventType.ACTION_PERMIT: {"action_permit"},
+            RecoveryRunEventType.DISPATCH_RECEIPT: {"dispatch_receipt"},
         }[self.type]
         if self.type is RecoveryRunEventType.LIFECYCLE:
             failed = self.payload.lifecycle in {
@@ -472,6 +477,10 @@ class RecoveryRunSnapshot(StrictModel):
     action_permits: tuple[ActionPermit, ...] = Field(
         default_factory=tuple, max_length=32
     )
+    dispatch_receipts: tuple[RecoveryDispatchReceipt, ...] = Field(
+        default_factory=tuple,
+        max_length=64,
+    )
     decision: RecoveryDecision | None = None
     failure_category: RecoveryRunFailureCategory | None = None
     created_at: AwareDatetime
@@ -523,6 +532,56 @@ class RecoveryRunSnapshot(StrictModel):
             for permit in self.action_permits
         ):
             raise ValueError("action permit is not bound to this recovery chain")
+        receipt_ids = tuple(receipt.receipt_id for receipt in self.dispatch_receipts)
+        if len(receipt_ids) != len(set(receipt_ids)):
+            raise ValueError("dispatch receipt identifiers must be unique")
+        if any(
+            receipt.run_id != self.request.run_id
+            or receipt.node_id not in chain_node_ids
+            or receipt.release_id
+            != chain_nodes[receipt.node_id].semantic_action.semantic_arguments.get(
+                "release_id"
+            )
+            or receipt.semantic_action_sha256
+            != chain_nodes[receipt.node_id].semantic_action.semantic_action_sha256
+            for receipt in self.dispatch_receipts
+        ):
+            raise ValueError("dispatch receipt is not bound to this recovery chain")
+        for receipt in self.dispatch_receipts:
+            launch = self.launch_permit
+            launch_match = bool(
+                launch is not None
+                and launch.state
+                in {
+                    RecoveryLaunchPermitState.CLAIMED,
+                    RecoveryLaunchPermitState.COMPLETED,
+                }
+                and launch.launch_permit_id == receipt.authority_id
+                and launch.claim_id == receipt.claim_id
+                and launch.node_id == receipt.node_id
+                and launch.action_request_sha256 == receipt.action_request_sha256
+                and launch.claimed_at is not None
+                and receipt.recorded_at >= launch.claimed_at
+            )
+            action_matches = tuple(
+                permit
+                for permit in self.action_permits
+                if permit.state
+                in {ActionPermitState.CLAIMED, ActionPermitState.COMPLETED}
+                and permit.permit_id == receipt.authority_id
+                and permit.claim_id == receipt.claim_id
+                and permit.target_node_id == receipt.node_id
+                and permit.semantic_action_sha256 == receipt.semantic_action_sha256
+                and permit.claimed_at is not None
+                and receipt.recorded_at >= permit.claimed_at
+            )
+            progress = next(
+                node for node in self.nodes if node.node_id == receipt.node_id
+            )
+            if int(launch_match) + len(action_matches) != 1 or receipt.attempt > max(
+                1, progress.attempt
+            ):
+                raise ValueError("dispatch receipt lacks matching claimed authority")
         report_sha256s = {canonical_sha256(report) for report in self.reports}
         for artifact in (*self.certificates, *self.witnesses, *self.hypotheses):
             if (

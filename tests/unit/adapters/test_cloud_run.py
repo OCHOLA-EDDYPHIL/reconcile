@@ -33,6 +33,7 @@ from reconcile.contracts import (
     ExecutionEnvelope,
     ExpectedEffect,
     FreshnessPolicy,
+    OperationStatus,
     OriginalInvocation,
     PolicyReferences,
     ProbeRequest,
@@ -320,6 +321,49 @@ def test_revision_failure_is_mixed_effect_evidence_not_non_execution() -> None:
     }
     assert result.operation_status is None
     assert result.verdict is RuleVerdict.AUTHORITATIVE_EFFECTS
+
+
+def test_reconciling_revision_is_authoritative_pending_without_operation_name() -> None:
+    envelope = _envelope()
+    effect_ids = tuple(
+        effect.effect_id
+        for effect in envelope.expected_effects
+        if effect.commit_scope
+        in {STAGE_REVISION_EFFECT_SCOPE, STAGE_READINESS_EFFECT_SCOPE}
+    )
+
+    result = build_cloud_run_rule_registration(
+        capability_name=CLOUD_RUN_REVISION_CAPABILITY,
+        binding=_binding(),
+    ).normalizer(
+        _rule_input(
+            capability=CLOUD_RUN_REVISION_CAPABILITY,
+            relevant_effect_ids=effect_ids,
+            payload={
+                "observation": {
+                    "observation_schema": CLOUD_RUN_REVISION_OBSERVATION_VERSION,
+                    "release_id": RELEASE,
+                    "release_label": RELEASE,
+                    "revision": REVISION,
+                    "image_digest": DIGEST,
+                    "configuration_sha256": CONFIGURATION,
+                    "generation": "1",
+                    "observed_generation": "0",
+                    "reconciling": "true",
+                    "terminal_condition": "NONE",
+                    "readiness": "UNKNOWN",
+                }
+            },
+            envelope=envelope,
+        )
+    )
+
+    assert result.verdict is RuleVerdict.AUTHORITATIVE_PENDING
+    assert result.operation_status is OperationStatus.ACTIVE
+    assert tuple(item.state for item in result.effect_assertions) == (
+        EffectAssertionState.ESTABLISHED,
+        EffectAssertionState.UNVERIFIED,
+    )
 
 
 def test_failed_operation_stays_unresolved_and_never_proves_non_execution() -> None:

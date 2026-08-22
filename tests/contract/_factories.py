@@ -24,7 +24,11 @@ from reconcile.contracts import (
     PROBE_REQUEST_VERSION,
     RECOVERY_ACTION_SCOPE_VERSION,
     RECOVERY_CHAIN_VERSION,
+    RECOVERY_DISPATCH_RECEIPT_VERSION,
     RECOVERY_LAUNCH_PERMIT_VERSION,
+    RECOVERY_POLICY_COMPARISON_VERSION,
+    RECOVERY_POLICY_RESULT_VERSION,
+    RECOVERY_RESET_RESULT_VERSION,
     RECOVERY_RUN_EVENT_VERSION,
     RECOVERY_RUN_REQUEST_VERSION,
     RECOVERY_RUN_SNAPSHOT_VERSION,
@@ -121,11 +125,19 @@ from reconcile.contracts import (
     RecoveryActionScope,
     RecoveryAuthorityKind,
     RecoveryChain,
+    RecoveryCloudRunObservation,
+    RecoveryDispatchReceipt,
     RecoveryEvidenceBinding,
+    RecoveryFirestoreObservation,
     RecoveryLaunchPermit,
     RecoveryLaunchPermitState,
+    RecoveryMutationCounters,
     RecoveryNodeProgress,
     RecoveryNodeState,
+    RecoveryPolicyComparison,
+    RecoveryPolicyResult,
+    RecoveryReceiptOutcome,
+    RecoveryResetResult,
     RecoveryRunEvent,
     RecoveryRunEventPayload,
     RecoveryRunEventType,
@@ -134,6 +146,7 @@ from reconcile.contracts import (
     RecoveryRunPolicy,
     RecoveryRunRequest,
     RecoveryRunSnapshot,
+    RecoveryTimelineEntry,
     RequestedAction,
     ScenarioCallerObservation,
     ScenarioCleanupDisposition,
@@ -1344,6 +1357,133 @@ def make_recovery_run_examples() -> tuple[
     return request, event, launch, snapshot, scope
 
 
+def make_recovery_scenario_examples() -> tuple[
+    RecoveryDispatchReceipt,
+    RecoveryPolicyComparison,
+]:
+    common = {
+        "target_sha256": "1" * 64,
+        "input_intent_sha256": "2" * 64,
+        "fault_boundary_sha256": "3" * 64,
+        "observation_catalog_sha256": "4" * 64,
+    }
+    receipt = RecoveryDispatchReceipt(
+        schema_version=RECOVERY_DISPATCH_RECEIPT_VERSION,
+        receipt_id="dispatch-receipt-7",
+        run_id="adaptive-run-7",
+        release_id="release-7",
+        node_id="record",
+        semantic_action_sha256="5" * 64,
+        action_request_sha256="6" * 64,
+        authority_id="permit-7",
+        claim_id="claim-7",
+        attempt=1,
+        provider_contact=False,
+        outcome=RecoveryReceiptOutcome.SUPPRESSED_BEFORE_DISPATCH,
+        recorded_at=NOW,
+    )
+    lanes = tuple(
+        RecoveryPolicyResult(
+            schema_version=RECOVERY_POLICY_RESULT_VERSION,
+            run_id=f"{policy}-run-7",
+            policy=policy,
+            fault="drop-after-accept",
+            **common,
+            chain_completed=policy != "blind-abort",
+            terminal_disposition=(
+                "ABORTED" if policy == "blind-abort" else "COMPLETED"
+            ),
+            counters=RecoveryMutationCounters(
+                revisions_created=2 if policy == "blind-retry" else 1,
+                promotions_accepted=0 if policy == "blind-abort" else 1,
+                release_records_created=0 if policy == "blind-abort" else 1,
+                provider_contacts=(
+                    4
+                    if policy == "blind-retry"
+                    else 1
+                    if policy == "blind-abort"
+                    else 3
+                ),
+                continue_permits_issued=2 if policy in {"fixed", "adaptive"} else 0,
+                retry_permits_issued=0,
+                retry_permits_consumed=0,
+                action_permits_consumed=2 if policy in {"fixed", "adaptive"} else 0,
+            ),
+            cloud_run=RecoveryCloudRunObservation(
+                baseline_revision="canary-baseline",
+                intended_revision="canary-release-a",
+                release_revisions=(
+                    ("canary-release-a", "canary-release-b")
+                    if policy == "blind-retry"
+                    else ("canary-release-a",)
+                ),
+                serving_revision=(
+                    "canary-baseline"
+                    if policy == "blind-abort"
+                    else "canary-release-b"
+                    if policy == "blind-retry"
+                    else "canary-release-a"
+                ),
+                serving_percent=100,
+                observed_service_etag_sha256="7" * 64,
+            ),
+            firestore=RecoveryFirestoreObservation(
+                release_id="release-7",
+                document_path="releases/release-7",
+                payload_sha256="8" * 64,
+                exists=policy != "blind-abort",
+                cloud_run_revision=(
+                    None
+                    if policy == "blind-abort"
+                    else "canary-release-b"
+                    if policy == "blind-retry"
+                    else "canary-release-a"
+                ),
+            ),
+            dispatch_receipts=(),
+            timeline=(
+                RecoveryTimelineEntry(
+                    sequence=1,
+                    node_id="stage",
+                    event="policy-finished",
+                    detail="The isolated policy lane reached its recorded outcome.",
+                ),
+            ),
+            certificate_sha256s=(
+                ("9" * 64,) if policy in {"fixed", "adaptive"} else ()
+            ),
+            witness_sha256s=(),
+        )
+        for policy in ("blind-retry", "blind-abort", "fixed", "adaptive")
+    )
+    resets = tuple(
+        RecoveryResetResult(
+            schema_version=RECOVERY_RESET_RESULT_VERSION,
+            release_id="release-7",
+            baseline_revision="canary-baseline",
+            serving_revision="canary-baseline",
+            serving_percent=100,
+            release_record_absent=True,
+            release_revisions_before=("canary-release-a",),
+            release_revisions_after=("canary-release-a",),
+            reset_operation_name_sha256=str(index) * 64,
+            verified_at=NOW,
+        )
+        for index in range(1, 5)
+    )
+    comparison = RecoveryPolicyComparison(
+        schema_version=RECOVERY_POLICY_COMPARISON_VERSION,
+        comparison_id="comparison-7",
+        release_id="release-7",
+        fault="drop-after-accept",
+        **common,
+        lanes=lanes,
+        reset_results=resets,
+        created_at=NOW,
+    )
+    return receipt, comparison
+
+
 def public_examples() -> tuple[object, ...]:
     envelope = make_envelope()
     capability = make_capability()
@@ -1372,6 +1512,7 @@ def public_examples() -> tuple[object, ...]:
         *qualification,
         *make_recovery_examples(),
         *make_recovery_run_examples(),
+        *make_recovery_scenario_examples(),
     )
 
 

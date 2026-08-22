@@ -1102,6 +1102,7 @@ def _firestore_get(
     effects: tuple[ExpectedEffect, ...],
     *,
     exists: str,
+    cloud_run_revision: str = REVISION,
 ) -> NormalizedEvidence:
     return _evidence(
         action,
@@ -1110,7 +1111,9 @@ def _firestore_get(
         correlation={
             "observation_schema": FIRESTORE_DOCUMENT_OBSERVATION_VERSION,
             "release_id": RELEASE_ID,
+            "cloud_run_revision": cloud_run_revision,
             "payload_sha256": PAYLOAD_SHA256,
+            "semantic_action_sha256": action.semantic_action_sha256,
             "exists": exists,
         },
         assertions=_assertions(
@@ -1135,6 +1138,47 @@ def test_firestore_exact_document_can_prove_commit() -> None:
         Classification.COMMITTED,
         (_firestore_get(action, effects, exists="true"),),
     )
+
+
+def test_firestore_enhanced_effect_rejects_a_record_for_another_revision() -> None:
+    effects = tuple(
+        effect.model_copy(
+            update={
+                "predicate": {
+                    **effect.predicate,
+                    "cloud_run_revision": REVISION,
+                }
+            }
+        )
+        for effect in _effects(CREATE_FIRESTORE_RELEASE_RECORD_PROFILE_VERSION)
+    )
+    action, effects = _action(
+        CREATE_FIRESTORE_RELEASE_RECORD_PROFILE_VERSION,
+        effects,
+    )
+
+    validate_recovery_proof(
+        CREATE_FIRESTORE_RELEASE_RECORD_PROFILE,
+        action,
+        effects,
+        Classification.COMMITTED,
+        (_firestore_get(action, effects, exists="true"),),
+    )
+    with pytest.raises(RecoveryRuleViolation, match="intended Cloud Run revision"):
+        validate_recovery_proof(
+            CREATE_FIRESTORE_RELEASE_RECORD_PROFILE,
+            action,
+            effects,
+            Classification.COMMITTED,
+            (
+                _firestore_get(
+                    action,
+                    effects,
+                    exists="true",
+                    cloud_run_revision="reconcile-canary-wrong",
+                ),
+            ),
+        )
 
 
 def test_firestore_get_not_found_remains_unknown_not_nonexecution_proof() -> None:
