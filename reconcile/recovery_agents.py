@@ -146,8 +146,7 @@ def _planner_input(
         raise TypeError("recovery agent envelope must be exact")
     admitted, weak, rejected = _evidence_views(report)
     metadata = planner.metadata
-    consumed = len(report.probe_audit)
-    budget = envelope.context.evidence_budget
+    remaining = recovery_remaining_budget(envelope, report, now=now)
     return AdaptivePlannerInput(
         schema_version=ADAPTIVE_PLANNER_INPUT_VERSION,
         phase=AdaptivePlannerPhase.ACQUIRE_EVIDENCE,
@@ -160,7 +159,7 @@ def _planner_input(
                 read_only=capability.read_only,
                 argument_schema=capability.argument_schema,
                 cost_units=capability.cost_units,
-                remaining_invocations=max(0, budget.max_probes - consumed),
+                remaining_invocations=remaining.probes,
             )
             for capability in capabilities
         ),
@@ -173,14 +172,7 @@ def _planner_input(
             for effect_id in missing.effect_ids
         ),
         prior_executable_request_hashes=prior_probe_sha256s,
-        remaining_budget=PlannerRemainingBudget(
-            probes=max(0, budget.max_probes - consumed),
-            elapsed_ms=budget.max_elapsed_ms,
-            result_bytes=budget.max_total_result_bytes,
-            cost_units=budget.max_cost_units,
-            deadline_at=max(now, envelope.invoked_at)
-            + timedelta(milliseconds=budget.max_elapsed_ms),
-        ),
+        remaining_budget=remaining,
         versions=PlannerVersionMetadata(
             provider_name=metadata.provider_name,
             model_name=metadata.configured_model,
@@ -193,6 +185,65 @@ def _planner_input(
             action_policy_version=envelope.context.policies.action,
             input_schema_version=metadata.input_schema_version,
             output_schema_version=metadata.output_schema_version,
+        ),
+    )
+
+
+def recovery_remaining_budget(
+    envelope: object,
+    report: InvestigationReport,
+    *,
+    now: datetime,
+) -> PlannerRemainingBudget:
+    """Derive fail-closed remaining probe authority from durable audit totals."""
+
+    from reconcile.contracts import ExecutionEnvelope
+
+    if (
+        type(envelope) is not ExecutionEnvelope
+        or type(report) is not InvestigationReport
+    ):
+        raise TypeError("exact recovery budget inputs are required")
+    if now.tzinfo is None or now.utcoffset() is None:
+        raise ValueError("recovery budget clock must be timezone-aware")
+    now = now.astimezone(UTC)
+    maximum = envelope.context.evidence_budget
+    audits = report.probe_audit
+    probes_used = max(
+        len(audits),
+        max((item.probe_count_used for item in audits), default=0),
+    )
+    reported_elapsed_ms = max(
+        (item.session_elapsed_ms for item in audits),
+        default=0,
+    )
+    wall_elapsed_ms = max(
+        0,
+        int((now - report.created_at).total_seconds() * 1_000),
+    )
+    result_bytes_used = max(
+        (item.result_bytes_acquired for item in audits),
+        default=0,
+    )
+    cost_units_used = max(
+        (item.cost_units_used for item in audits),
+        default=0,
+    )
+    remaining_elapsed_ms = max(
+        0,
+        maximum.max_elapsed_ms - max(reported_elapsed_ms, wall_elapsed_ms),
+    )
+    return PlannerRemainingBudget(
+        probes=max(0, maximum.max_probes - probes_used),
+        elapsed_ms=remaining_elapsed_ms,
+        result_bytes=max(
+            0,
+            maximum.max_total_result_bytes - result_bytes_used,
+        ),
+        cost_units=max(0, maximum.max_cost_units - cost_units_used),
+        deadline_at=max(
+            envelope.invoked_at,
+            report.created_at + timedelta(milliseconds=maximum.max_elapsed_ms),
         ),
     )
 
@@ -511,4 +562,5 @@ __all__ = [
     "RecoveryDispatchReceipt",
     "RolloutAgent",
     "probe_request_sha256",
+    "recovery_remaining_budget",
 ]

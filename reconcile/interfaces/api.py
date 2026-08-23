@@ -1034,12 +1034,20 @@ def _validated_recovery_event_snapshot(
             raise _InternalApiFailure
         if terminal_positions:
             if any(
-                event.type is not RecoveryRunEventType.ACTION_PERMIT
+                event.type
+                not in {
+                    RecoveryRunEventType.LAUNCH_PERMIT,
+                    RecoveryRunEventType.ACTION_PERMIT,
+                }
                 for event in value.events[terminal_positions[0] + 1 :]
             ):
                 raise _InternalApiFailure
         elif any(
-            event.type is not RecoveryRunEventType.ACTION_PERMIT
+            event.type
+            not in {
+                RecoveryRunEventType.LAUNCH_PERMIT,
+                RecoveryRunEventType.ACTION_PERMIT,
+            }
             for event in value.events
         ):
             raise _InternalApiFailure

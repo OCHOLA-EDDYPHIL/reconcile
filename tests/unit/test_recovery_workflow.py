@@ -18,6 +18,7 @@ from reconcile.contracts import (
     Classification,
     PermitCompletionOutcome,
     PlannerCitationRefs,
+    PlannerRemainingBudget,
     ProbeRequest,
     RecoveryAuthorityKind,
     RecoveryDispatchOutcome,
@@ -149,6 +150,43 @@ class _UnsupportedProbePlanner(_Planner):
         )
         self.output = base.model_copy(
             update={"probe_proposals": (probe,), "explanation": explanation}
+        )
+        return await _Planner.plan(self, planner_input)
+
+
+class _ValidProbePlanner(_Planner):
+    def __init__(self) -> None:
+        super().__init__(output=_output(probe_count=0))
+
+    async def plan(self, planner_input):
+        base = _output(probe_count=0)
+        evidence_id = planner_input.admitted_evidence[0].evidence_id
+        capability = planner_input.capabilities[0]
+        self.output = base.model_copy(
+            update={
+                "probe_proposals": (
+                    ProbeRequest(
+                        schema_version=PROBE_REQUEST_VERSION,
+                        capability_name=capability.name,
+                        capability_version=capability.version,
+                        relevant_effect_ids=(
+                            planner_input.envelope.expected_effects[0].effect_id,
+                        ),
+                        arguments={},
+                        rationale="Read the declared target state.",
+                    ),
+                ),
+                "explanation": base.explanation.model_copy(
+                    update={
+                        "citations": PlannerCitationRefs(
+                            admitted_evidence_ids=(evidence_id,),
+                            weak_evidence_ids=(),
+                            rejected_evidence_ids=(),
+                            missing_effect_ids=(),
+                        )
+                    }
+                ),
+            }
         )
         return await _Planner.plan(self, planner_input)
 
@@ -377,6 +415,21 @@ class _BlockingClaimGateway(_Gateway):
         raise AssertionError("blocked dispatch unexpectedly resumed")
 
 
+class _CancelAfterCompletionGateway(_Gateway):
+    def __init__(self, store, authority, definition) -> None:
+        super().__init__(store, authority, definition)
+        self.completed = asyncio.Event()
+
+    async def dispatch(self, prepared, scope):
+        receipt = await super().dispatch(prepared, scope)
+        if scope.authority_kind is RecoveryAuthorityKind.ACTION_PERMIT:
+            self.completed.set()
+            task = asyncio.current_task()
+            assert task is not None
+            task.cancel()
+        return receipt
+
+
 class _ProcessCrash(BaseException):
     """Simulate abrupt worker loss, bypassing in-process error recovery."""
 
@@ -457,12 +510,20 @@ def test_issued_launch_permit_resumes_through_dispatch_pending_after_restart(
 
 def test_model_action_and_repeated_probe_are_never_selected_for_execution() -> None:
     action_hypothesis = make_recovery_examples()[1]
+    remaining = PlannerRemainingBudget(
+        probes=1,
+        elapsed_ms=1,
+        result_bytes=1,
+        cost_units=1,
+        deadline_at=NOW,
+    )
     assert (
         workflow_module._probe_disposition(
             action_hypothesis,
             envelope=make_envelope(),
             capabilities=(make_capability(),),
             prior_probe_sha256s=frozenset(),
+            remaining_budget=remaining,
         ).value
         == "UNSUPPORTED_ACTION"
     )
@@ -481,8 +542,107 @@ def test_model_action_and_repeated_probe_are_never_selected_for_execution() -> N
             prior_probe_sha256s=frozenset(
                 {workflow_module.probe_request_sha256(probe)}
             ),
+            remaining_budget=remaining,
         ).value
         == "DUPLICATE_PROBE"
+    )
+
+
+@pytest.mark.parametrize(
+    "exhausted",
+    ("probes", "elapsed_ms", "result_bytes", "cost_units"),
+)
+def test_valid_probe_is_rejected_when_any_budget_dimension_is_exhausted(
+    exhausted: str,
+) -> None:
+    base = {
+        "probes": 1,
+        "elapsed_ms": 1,
+        "result_bytes": 1,
+        "cost_units": 1,
+    }
+    base[exhausted] = 0
+    action_hypothesis = make_recovery_examples()[1]
+    valid_probe_hypothesis = type(action_hypothesis).model_validate(
+        action_hypothesis.model_copy(
+            update={"proposed_probe": make_probe(), "proposed_transition": None}
+        )
+    )
+
+    disposition = workflow_module._probe_disposition(
+        valid_probe_hypothesis,
+        envelope=make_envelope(),
+        capabilities=(make_capability(),),
+        prior_probe_sha256s=frozenset(),
+        remaining_budget=PlannerRemainingBudget(
+            **base,
+            deadline_at=NOW,
+        ),
+    )
+
+    assert disposition is workflow_module.RecoveryHypothesisDisposition.BUDGET_EXHAUSTED
+
+
+def test_deterministic_budget_blocks_valid_model_probe_without_fixed_probe(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    definition, states = _definition_and_states()
+    request = RecoveryRunRequest(
+        schema_version=RECOVERY_RUN_REQUEST_VERSION,
+        run_id="recovery-budget-exhausted-7",
+        scenario="cloud-run-rollout",
+        policy=RecoveryRunPolicy.ADAPTIVE,
+        fault=RecoveryRunFault.DROP_AFTER_ACCEPT,
+    )
+    store = InMemoryRecoveryRunStore()
+    authority = PermitAuthority(
+        SqliteDurableRuntimeStore(tmp_path / "budget-exhausted.sqlite3"),
+        clock=lambda: NOW + timedelta(seconds=7),
+    )
+    evidence = _Evidence(states)
+    workflow = ProofToPermitWorkflow(
+        store=store,
+        definition_factory=lambda _request: definition,
+        evidence_source=evidence,
+        action_preparer=_Preparer(),
+        recovery_agent=RecoveryAgent(_ValidProbePlanner()),
+        rollout_agent=RolloutAgent(_Gateway(store, authority, definition)),
+        permit_authority=authority,
+        clock=lambda: NOW + timedelta(seconds=7),
+        claim_id_factory=iter(
+            ("claim-launch", "claim-promote", "claim-record")
+        ).__next__,
+    )
+    monkeypatch.setattr(
+        workflow_module,
+        "recovery_remaining_budget",
+        lambda *_args, **_kwargs: PlannerRemainingBudget(
+            probes=0,
+            elapsed_ms=0,
+            result_bytes=0,
+            cost_units=0,
+            deadline_at=NOW,
+        ),
+    )
+
+    async def exercise():
+        await store.create(request, definition.chain, created_at=NOW)
+        completed = await workflow.run(request.run_id)
+        return completed, await store.events(request.run_id)
+
+    completed, events = asyncio.run(exercise())
+
+    assert completed.lifecycle is RecoveryRunLifecycle.COMPLETED
+    assert evidence.probe_calls == []
+    assert evidence.fixed_calls == []
+    assert (
+        tuple(
+            event.payload.hypothesis_disposition
+            for event in events.events
+            if event.type is RecoveryRunEventType.HYPOTHESIS
+        )
+        == (workflow_module.RecoveryHypothesisDisposition.BUDGET_EXHAUSTED,) * 3
     )
 
 
@@ -1241,6 +1401,62 @@ def test_cancellation_after_action_claim_mirrors_authority_and_never_redispatche
     )
     assert asyncio.run(replay.run(request.run_id)) == cancelled
     assert replay_gateway.scopes == []
+
+
+def test_cancellation_after_action_completion_mirrors_authority_before_terminal(
+    tmp_path,
+) -> None:
+    definition, states = _definition_and_states()
+    request = RecoveryRunRequest(
+        schema_version=RECOVERY_RUN_REQUEST_VERSION,
+        run_id="recovery-cancel-after-completion-7",
+        scenario="cloud-run-rollout",
+        policy=RecoveryRunPolicy.ADAPTIVE,
+        fault=RecoveryRunFault.DROP_AFTER_ACCEPT,
+    )
+    store = InMemoryRecoveryRunStore()
+    authority = PermitAuthority(
+        SqliteDurableRuntimeStore(tmp_path / "cancel-after-completion.sqlite3"),
+        clock=lambda: NOW + timedelta(seconds=7),
+    )
+    gateway = _CancelAfterCompletionGateway(store, authority, definition)
+    service = RecoveryRunApplicationService(
+        ProofToPermitWorkflow(
+            store=store,
+            definition_factory=lambda _request: definition,
+            evidence_source=_Evidence(states),
+            action_preparer=_Preparer(),
+            recovery_agent=RecoveryAgent(_DynamicPlanner()),
+            rollout_agent=RolloutAgent(gateway),
+            permit_authority=authority,
+            clock=lambda: NOW + timedelta(seconds=7),
+            claim_id_factory=iter(("claim-launch", "claim-promote")).__next__,
+        ),
+        store,
+        clock=lambda: NOW,
+    )
+
+    async def cancel_after_completion():
+        await service.launch(request)
+        await asyncio.wait_for(gateway.completed.wait(), timeout=10)
+        cancelled = await service.cancel(request.run_id)
+        permit = await authority.get_permit(cancelled.action_permits[0].permit_id)
+        events = await store.events(request.run_id)
+        await service.aclose()
+        return cancelled, permit, events
+
+    cancelled, durable_permit, events = asyncio.run(cancel_after_completion())
+    projected_permit = cancelled.action_permits[0]
+
+    assert cancelled.lifecycle is RecoveryRunLifecycle.CANCELLED
+    assert cancelled.failure_category is RecoveryRunFailureCategory.CANCELLED
+    assert projected_permit.state is ActionPermitState.COMPLETED
+    assert projected_permit == durable_permit
+    assert gateway.provider_calls == 1
+    assert tuple(event.type for event in events.events[-2:]) == (
+        RecoveryRunEventType.ACTION_PERMIT,
+        RecoveryRunEventType.LIFECYCLE,
+    )
 
 
 @pytest.mark.parametrize(

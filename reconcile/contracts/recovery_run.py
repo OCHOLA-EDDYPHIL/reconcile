@@ -85,6 +85,7 @@ class RecoveryHypothesisDisposition(StrEnum):
     SELECTED = "SELECTED"
     NO_PROBE = "NO_PROBE"
     DUPLICATE_PROBE = "DUPLICATE_PROBE"
+    BUDGET_EXHAUSTED = "BUDGET_EXHAUSTED"
     UNSUPPORTED_PROBE = "UNSUPPORTED_PROBE"
     UNSUPPORTED_ACTION = "UNSUPPORTED_ACTION"
     INVALID_BINDING = "INVALID_BINDING"
@@ -389,6 +390,7 @@ class RecoveryRunEvent(StrictModel):
                 RecoveryHypothesisDisposition.SELECTED,
                 RecoveryHypothesisDisposition.NO_PROBE,
                 RecoveryHypothesisDisposition.DUPLICATE_PROBE,
+                RecoveryHypothesisDisposition.BUDGET_EXHAUSTED,
                 RecoveryHypothesisDisposition.UNSUPPORTED_PROBE,
                 RecoveryHypothesisDisposition.UNSUPPORTED_ACTION,
                 RecoveryHypothesisDisposition.INVALID_BINDING,

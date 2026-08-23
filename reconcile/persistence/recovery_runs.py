@@ -316,20 +316,31 @@ def apply_recovery_event(
 
     if type(snapshot) is not RecoveryRunSnapshot or type(event) is not RecoveryRunEvent:
         raise TypeError("exact recovery projection inputs are required")
-    terminal_permit_audit = (
-        is_terminal_recovery_run(snapshot.lifecycle)
-        and event.type is RecoveryRunEventType.ACTION_PERMIT
-        and event.payload.action_permit is not None
-        and any(
-            permit.permit_id == event.payload.action_permit.permit_id
-            for permit in snapshot.action_permits
+    terminal_authority_audit = is_terminal_recovery_run(snapshot.lifecycle) and (
+        (
+            event.type is RecoveryRunEventType.ACTION_PERMIT
+            and event.payload.action_permit is not None
+            and any(
+                permit.permit_id == event.payload.action_permit.permit_id
+                for permit in snapshot.action_permits
+            )
+        )
+        or (
+            event.type is RecoveryRunEventType.LAUNCH_PERMIT
+            and event.payload.launch_permit is not None
+            and snapshot.launch_permit is not None
+            and snapshot.launch_permit.launch_permit_id
+            == event.payload.launch_permit.launch_permit_id
         )
     )
     if (
         event.run_id != snapshot.request.run_id
         or event.cursor != snapshot.event_cursor + 1
         or event.occurred_at < snapshot.updated_at
-        or (is_terminal_recovery_run(snapshot.lifecycle) and not terminal_permit_audit)
+        or (
+            is_terminal_recovery_run(snapshot.lifecycle)
+            and not terminal_authority_audit
+        )
     ):
         raise RecoveryRunConflict(snapshot.request.run_id)
 

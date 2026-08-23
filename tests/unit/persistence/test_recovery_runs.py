@@ -14,6 +14,7 @@ from reconcile.contracts import (
     RecoveryNodeState,
     RecoveryRunEventPayload,
     RecoveryRunEventType,
+    RecoveryRunFailureCategory,
     RecoveryRunLifecycle,
 )
 from reconcile.persistence import (
@@ -143,6 +144,90 @@ def test_launch_permit_has_one_atomic_winner_under_concurrency() -> None:
         ]
         assert len(winners) == 1
         assert len(denials) == 31
+
+    asyncio.run(exercise())
+
+
+def test_claimed_launch_permit_can_complete_after_terminal_cancellation(
+    tmp_path,
+) -> None:
+    request, _event, launch, snapshot, _scope = make_recovery_run_examples()
+    database = tmp_path / "late-launch-completion.sqlite3"
+
+    async def exercise() -> None:
+        store = SqliteRecoveryRunStore(database)
+        current, _created = await store.create(
+            request,
+            snapshot.chain,
+            created_at=NOW,
+        )
+        current = await store.append(
+            request.run_id,
+            expected_revision=current.revision,
+            event_type=RecoveryRunEventType.LIFECYCLE,
+            payload=RecoveryRunEventPayload(lifecycle=RecoveryRunLifecycle.RUNNING),
+            occurred_at=NOW + timedelta(seconds=1),
+        )
+        current = await store.append(
+            request.run_id,
+            expected_revision=current.revision,
+            event_type=RecoveryRunEventType.LAUNCH_PERMIT,
+            payload=RecoveryRunEventPayload(launch_permit=launch),
+            occurred_at=NOW + timedelta(seconds=2),
+        )
+        await store.claim_launch(
+            request.run_id,
+            launch_permit_id=launch.launch_permit_id,
+            claim_id="claim-before-cancel-7",
+            action_request_sha256=launch.action_request_sha256,
+            claimed_at=NOW + timedelta(seconds=3),
+        )
+        current = await store.get(request.run_id)
+        await store.append(
+            request.run_id,
+            expected_revision=current.revision,
+            event_type=RecoveryRunEventType.LIFECYCLE,
+            payload=RecoveryRunEventPayload(
+                lifecycle=RecoveryRunLifecycle.CANCELLED,
+                failure_category=RecoveryRunFailureCategory.CANCELLED,
+            ),
+            occurred_at=NOW + timedelta(seconds=4),
+        )
+        current = await store.get(request.run_id)
+        with pytest.raises(RecoveryRunConflict):
+            await store.append(
+                request.run_id,
+                expected_revision=current.revision,
+                event_type=RecoveryRunEventType.LAUNCH_PERMIT,
+                payload=RecoveryRunEventPayload(
+                    launch_permit=launch.model_copy(
+                        update={"launch_permit_id": "different-launch-7"}
+                    )
+                ),
+                occurred_at=NOW + timedelta(seconds=5),
+            )
+
+        completed = await store.complete_launch(
+            request.run_id,
+            launch_permit_id=launch.launch_permit_id,
+            claim_id="claim-before-cancel-7",
+            outcome=RecoveryDispatchOutcome.SUCCEEDED,
+            completed_at=NOW + timedelta(seconds=6),
+        )
+        reopened = SqliteRecoveryRunStore(database)
+        final = await reopened.get(request.run_id)
+        events = await reopened.events(request.run_id)
+
+        assert completed.state is RecoveryLaunchPermitState.COMPLETED
+        assert final.lifecycle is RecoveryRunLifecycle.CANCELLED
+        assert final.launch_permit == completed
+        assert tuple(event.type for event in events.events[-2:]) == (
+            RecoveryRunEventType.LIFECYCLE,
+            RecoveryRunEventType.LAUNCH_PERMIT,
+        )
+        assert tuple(event.cursor for event in events.events) == tuple(
+            range(1, events.cursor + 1)
+        )
 
     asyncio.run(exercise())
 

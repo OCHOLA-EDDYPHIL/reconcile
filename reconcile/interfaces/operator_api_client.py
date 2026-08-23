@@ -837,8 +837,8 @@ class OperatorApiClient:
         reconnect_limit: int,
     ) -> AsyncIterator[RecoveryRunEvent]:
         reconnects = 0
+        terminal_seen = False
         while True:
-            terminal_seen = False
             try:
                 headers = await self._request_headers("text/event-stream")
                 if cursor:
@@ -860,10 +860,10 @@ class OperatorApiClient:
                             run_id=run_id,
                             expected_cursor=cursor + 1,
                         )
-                        if (
-                            terminal_seen
-                            and event.type is not RecoveryRunEventType.ACTION_PERMIT
-                        ):
+                        if terminal_seen and event.type not in {
+                            RecoveryRunEventType.LAUNCH_PERMIT,
+                            RecoveryRunEventType.ACTION_PERMIT,
+                        }:
                             raise _protocol_error() from None
                         cursor = event.cursor
                         if _is_recovery_terminal(event):
@@ -881,11 +881,15 @@ class OperatorApiClient:
                     RecoveryRunLifecycle.FAILED,
                     RecoveryRunLifecycle.CANCELLED,
                 }
-                if terminal_seen or (
-                    terminal_snapshot and snapshot.event_cursor == cursor
-                ):
-                    if snapshot.event_cursor != cursor or not terminal_snapshot:
+                if terminal_seen:
+                    if not terminal_snapshot:
                         raise _protocol_error() from None
+                    if snapshot.event_cursor == cursor:
+                        return
+                    # An already-issued authority may advance after the terminal
+                    # lifecycle. Resume from the confirmed cursor to consume it.
+                    raise StreamInterruptedError(cursor)
+                if terminal_snapshot and snapshot.event_cursor == cursor:
                     return
                 raise StreamInterruptedError(cursor)
             except _IdentityUnavailableError:

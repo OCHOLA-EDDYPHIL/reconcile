@@ -26,6 +26,7 @@ from reconcile.contracts import (
     InvestigationReport,
     ObservationCapability,
     PermitAction,
+    PlannerRemainingBudget,
     RecoveryActionNode,
     RecoveryActionScope,
     RecoveryAuthorityKind,
@@ -74,6 +75,7 @@ from reconcile.recovery_agents import (
     RecoveryAgent,
     RolloutAgent,
     probe_request_sha256,
+    recovery_remaining_budget,
 )
 
 _MAX_ADAPTIVE_TURNS = 8
@@ -241,6 +243,7 @@ def _probe_disposition(
     envelope: ExecutionEnvelope,
     capabilities: tuple[ObservationCapability, ...],
     prior_probe_sha256s: frozenset[str],
+    remaining_budget: PlannerRemainingBudget,
 ) -> RecoveryHypothesisDisposition:
     if hypothesis.proposed_transition is not None:
         return RecoveryHypothesisDisposition.UNSUPPORTED_ACTION
@@ -266,6 +269,14 @@ def _probe_disposition(
         )
     ):
         return RecoveryHypothesisDisposition.UNSUPPORTED_PROBE
+    capability = matches[0]
+    if (
+        remaining_budget.probes == 0
+        or remaining_budget.elapsed_ms == 0
+        or remaining_budget.result_bytes == 0
+        or capability.cost_units > remaining_budget.cost_units
+    ):
+        return RecoveryHypothesisDisposition.BUDGET_EXHAUSTED
     return RecoveryHypothesisDisposition.SELECTED
 
 
@@ -277,6 +288,21 @@ def _planner_disposition(failure: PlannerFailureKind) -> RecoveryHypothesisDispo
             RecoveryHypothesisDisposition.MALFORMED_MODEL_OUTPUT
         ),
     }[failure]
+
+
+async def _finish_before_cancellation(operation: Awaitable[None]) -> None:
+    """Let a started durable projection finish before propagating cancellation."""
+
+    task = asyncio.create_task(operation)
+    cancellation: asyncio.CancelledError | None = None
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError as error:
+            cancellation = error
+    task.result()
+    if cancellation is not None:
+        raise cancellation
 
 
 def _certificate_decision(
@@ -705,11 +731,17 @@ class ProofToPermitWorkflow:
             ):
                 disposition = RecoveryHypothesisDisposition.INVALID_BINDING
             else:
+                remaining_budget = recovery_remaining_budget(
+                    envelope,
+                    state.report,
+                    now=self._now(),
+                )
                 disposition = _probe_disposition(
                     hypothesis,
                     envelope=envelope,
                     capabilities=definition.capabilities[node.node_id],
                     prior_probe_sha256s=frozenset(prior),
+                    remaining_budget=remaining_budget,
                 )
             await self._append(
                 run_id,
@@ -741,11 +773,14 @@ class ProofToPermitWorkflow:
                     return state, artifact
                 continue
             if disposition in {
+                RecoveryHypothesisDisposition.BUDGET_EXHAUSTED,
                 RecoveryHypothesisDisposition.UNSUPPORTED_PROBE,
                 RecoveryHypothesisDisposition.UNSUPPORTED_ACTION,
                 RecoveryHypothesisDisposition.DUPLICATE_PROBE,
                 RecoveryHypothesisDisposition.INVALID_BINDING,
             }:
+                if disposition is RecoveryHypothesisDisposition.BUDGET_EXHAUSTED:
+                    return state, self._verify(definition, node, state)
                 state = await self._evidence.fixed(run_id, node, envelope)
                 await self._append(
                     run_id,
@@ -995,7 +1030,7 @@ class ProofToPermitWorkflow:
                             attempt=max(1, source_progress.attempt),
                         )
 
-            await asyncio.shield(preserve_action_authority())
+            await _finish_before_cancellation(preserve_action_authority())
             raise
         except Exception:
             latest = await self._permit_authority.get_permit(permit.permit_id)
@@ -1032,7 +1067,7 @@ class ProofToPermitWorkflow:
             raise RecoveryWorkflowError(
                 "permitted dispatch authority was not completed"
             )
-        await self._mirror_action_permit(run_id, completed)
+        await _finish_before_cancellation(self._mirror_action_permit(run_id, completed))
 
     async def run(self, run_id: str) -> RecoveryRunSnapshot:
         snapshot = await self._store.get(run_id)

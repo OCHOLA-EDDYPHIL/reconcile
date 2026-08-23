@@ -135,6 +135,25 @@ class _TerminalAuditService:
         return None
 
 
+class _AdvancingTerminalAuditService(_TerminalAuditService):
+    def __init__(
+        self,
+        snapshot: RecoveryRunSnapshot,
+        events: RecoveryRunEventSnapshot,
+    ) -> None:
+        super().__init__(snapshot, events)
+        self.after_calls: list[int] = []
+
+    async def snapshot(self, run_id: str, *, after: int = 0):
+        assert run_id == self._snapshot.request.run_id
+        self.after_calls.append(after)
+        if after == 0:
+            return self._events.model_copy(
+                update={"cursor": 2, "events": self._events.events[:2]}
+            )
+        return await super().snapshot(run_id, after=after)
+
+
 def test_recovery_api_launch_get_and_resumable_sse() -> None:
     request = make_recovery_run_examples()[0]
     service = _RecoveryService()
@@ -323,6 +342,29 @@ def test_terminal_recovery_suffix_accepts_late_permit_audit() -> None:
             return tuple(events)
 
     assert asyncio.run(consume_without_reconnect()) == full.events
+
+    advancing_service = _AdvancingTerminalAuditService(final_snapshot, full)
+    advancing_application = create_app(
+        recovery_service=advancing_service,
+        hosted=True,
+    )
+
+    async def consume_with_reconnect() -> tuple[RecoveryRunEvent, ...]:
+        async with OperatorApiClient(
+            transport=httpx.ASGITransport(app=advancing_application)
+        ) as client:
+            return tuple(
+                [
+                    event
+                    async for event in client.recovery_events(
+                        request.run_id,
+                        max_reconnects=1,
+                    )
+                ]
+            )
+
+    assert asyncio.run(consume_with_reconnect()) == full.events
+    assert advancing_service.after_calls == [0, 2]
 
     maximum_audit = audit.model_copy(update={"cursor": MAX_RECOVERY_RUN_EVENTS})
     maximum_events = full.model_copy(

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import UTC, datetime
+from datetime import timedelta
 
 import pytest
 
@@ -24,7 +24,7 @@ from reconcile.contracts import (
     PlannerStopAdvice,
     canonical_sha256,
 )
-from reconcile.recovery_agents import RecoveryAgent
+from reconcile.recovery_agents import RecoveryAgent, recovery_remaining_budget
 from tests.contract._factories import (
     make_capability,
     make_envelope,
@@ -109,9 +109,10 @@ class _Planner:
 
 def test_recovery_agent_builds_evidence_cited_non_authoritative_hypothesis() -> None:
     planner = _Planner(output=_output())
+    report = make_report(Classification.COMMITTED)
     agent = RecoveryAgent(
         planner,
-        clock=lambda: datetime(2026, 8, 22, 12, 0, tzinfo=UTC),
+        clock=lambda: report.updated_at,
     )
     chain = make_recovery_examples()[0]
 
@@ -120,7 +121,7 @@ def test_recovery_agent_builds_evidence_cited_non_authoritative_hypothesis() -> 
             chain=chain,
             node=chain.nodes[0],
             envelope=make_envelope(),
-            report=make_report(Classification.COMMITTED),
+            report=report,
             capabilities=(make_capability(),),
         )
 
@@ -134,6 +135,36 @@ def test_recovery_agent_builds_evidence_cited_non_authoritative_hypothesis() -> 
     assert turn.hypothesis.proposed_transition is None
     assert turn.hypothesis.proposed_classification is Classification.UNKNOWN
     assert planner.inputs[0].envelope == make_envelope()
+    assert planner.inputs[0].remaining_budget.probes == 2
+    assert planner.inputs[0].remaining_budget.elapsed_ms == 0
+    assert planner.inputs[0].remaining_budget.result_bytes == 65_024
+    assert planner.inputs[0].remaining_budget.cost_units == 2
+    assert planner.inputs[0].remaining_budget.deadline_at == report.updated_at
+    assert planner.inputs[0].capabilities[0].remaining_invocations == 2
+
+
+def test_recovery_agent_uses_one_stable_cumulative_budget_deadline() -> None:
+    envelope = make_envelope()
+    report = make_report(Classification.COMMITTED)
+    at_deadline = recovery_remaining_budget(
+        envelope,
+        report,
+        now=report.updated_at,
+    )
+    long_after_deadline = recovery_remaining_budget(
+        envelope,
+        report,
+        now=report.updated_at + timedelta(hours=1),
+    )
+
+    assert at_deadline.probes == 2
+    assert at_deadline.elapsed_ms == 0
+    assert at_deadline.result_bytes == 65_024
+    assert at_deadline.cost_units == 2
+    assert at_deadline.deadline_at == report.created_at + timedelta(
+        milliseconds=envelope.context.evidence_budget.max_elapsed_ms
+    )
+    assert long_after_deadline == at_deadline
 
 
 @pytest.mark.parametrize(
