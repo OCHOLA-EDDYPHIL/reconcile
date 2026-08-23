@@ -321,13 +321,20 @@ class RecoveryAgent:
         planner: AdvisoryPlanner,
         *,
         clock: Callable[[], datetime] | None = None,
+        hypothesis_transformer: Callable[
+            [GeminiHypothesis, InvestigationReport], GeminiHypothesis
+        ]
+        | None = None,
     ) -> None:
         if not callable(getattr(planner, "plan", None)) or not hasattr(
             planner, "metadata"
         ):
             raise TypeError("RecoveryAgent requires an advisory planner")
+        if hypothesis_transformer is not None and not callable(hypothesis_transformer):
+            raise TypeError("hypothesis transformer must be callable")
         self._planner = planner
         self._clock = clock or (lambda: datetime.now(UTC))
+        self._hypothesis_transformer = hypothesis_transformer
 
     @classmethod
     def from_vertex_adc(
@@ -481,6 +488,15 @@ class RecoveryAgent:
                 explanation=output.explanation.summary,
                 created_at=now,
             )
+            if self._hypothesis_transformer is not None:
+                transformed = self._hypothesis_transformer(hypothesis, report)
+                if type(transformed) is not GeminiHypothesis:
+                    raise TypeError(
+                        "hypothesis transformer must return an exact hypothesis"
+                    )
+                hypothesis = GeminiHypothesis.model_validate_json(
+                    canonical_json_bytes(transformed)
+                )
         except Exception:
             return RecoveryAgentTurn(
                 hypothesis=None,

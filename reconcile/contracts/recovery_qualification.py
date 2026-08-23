@@ -22,13 +22,17 @@ from reconcile.contracts.base import (
     canonical_json_value_bytes,
 )
 from reconcile.contracts.codec import canonical_sha256
+from reconcile.contracts.common import Classification
+from reconcile.contracts.evidence import EffectAssertionState
 from reconcile.contracts.recovery import (
     ActionPermit,
     ActionPermitState,
+    GeminiHypothesis,
     PermitAction,
     PermitCompletionOutcome,
 )
 from reconcile.contracts.recovery_run import RecoveryHypothesisDisposition
+from reconcile.contracts.report import InvestigationReport
 
 RECOVERY_QUALIFICATION_BUNDLE_FORMAT = "proof-to-permit-qualification-v1"
 RECOVERY_QUALIFICATION_MANIFEST_VERSION = "reconcile/recovery-qualification-manifest/v1"
@@ -136,6 +140,12 @@ class RecoveryQualificationArtifactKind(StrEnum):
 class RecoveryQualificationWitnessReplayKind(StrEnum):
     EVIDENCE_DUPLICATION = "EVIDENCE_DUPLICATION"
     ZERO_EVIDENCE_REPLAY = "ZERO_EVIDENCE_REPLAY"
+
+
+class RecoveryQualificationHypothesisWrongnessKind(StrEnum):
+    CLASSIFICATION = "CLASSIFICATION"
+    EFFECT_STATE = "EFFECT_STATE"
+    ALTERNATIVE_HISTORIES = "ALTERNATIVE_HISTORIES"
 
 
 class RecoveryQualificationArchetype(StrictModel):
@@ -278,7 +288,9 @@ class RecoveryQualificationEnvironment(StrictModel):
     dependency_lock_sha256: Sha256Digest
     test_commands: tuple[SanitizedText, ...] = Field(min_length=1, max_length=16)
     provider_name: Identifier | None = None
+    provider_project: Identifier | None = None
     model_name: Identifier | None = None
+    reported_model_revision: Identifier | None = None
     vertex_location: Identifier | None = None
     generated_at: AwareDatetime
 
@@ -286,13 +298,21 @@ class RecoveryQualificationEnvironment(StrictModel):
     def validate_execution_basis(self) -> RecoveryQualificationEnvironment:
         if len(self.test_commands) != len(set(self.test_commands)):
             raise ValueError("qualification test commands must be unique")
-        provider = (self.provider_name, self.model_name, self.vertex_location)
+        provider = (
+            self.provider_name,
+            self.provider_project,
+            self.model_name,
+            self.reported_model_revision,
+            self.vertex_location,
+        )
         if self.execution_basis is RecoveryQualificationExecutionBasis.SCRIPTED:
-            if provider != (None, None, None):
+            if provider != (None, None, None, None, None):
                 raise ValueError("scripted qualification cannot claim a live provider")
         elif (
-            self.provider_name != "vertex-ai"
+            self.provider_name != "google-vertex-ai"
+            or self.provider_project is None
             or self.model_name is None
+            or self.reported_model_revision is None
             or self.vertex_location is None
         ):
             raise ValueError("live qualification requires an exact Vertex binding")
@@ -356,7 +376,7 @@ class RecoveryQualificationModelUsage(StrictModel):
             )
         elif self.status is RecoveryQualificationModelUsageStatus.MEASURED:
             valid = (
-                self.provider_name == "vertex-ai"
+                self.provider_name == "google-vertex-ai"
                 and self.model_name is not None
                 and self.model_call_count > 0
                 and self.total_token_count > 0
@@ -364,7 +384,7 @@ class RecoveryQualificationModelUsage(StrictModel):
             )
         else:
             valid = (
-                self.provider_name == "vertex-ai"
+                self.provider_name == "google-vertex-ai"
                 and self.model_name is not None
                 and self.model_call_count > 0
                 and self.total_token_count == 0
@@ -522,10 +542,180 @@ class RecoveryQualificationLaneResult(StrictModel):
         return self
 
 
+class RecoveryQualificationEffectFact(StrictModel):
+    effect_id: Identifier
+    state: EffectAssertionState
+
+
+class RecoveryQualificationHistoryFact(StrictModel):
+    classification: Classification
+    effect_states: tuple[RecoveryQualificationEffectFact, ...] = Field(
+        min_length=1,
+        max_length=64,
+    )
+
+    @model_validator(mode="after")
+    def validate_effects(self) -> RecoveryQualificationHistoryFact:
+        identifiers = tuple(item.effect_id for item in self.effect_states)
+        if identifiers != tuple(sorted(identifiers)) or len(identifiers) != len(
+            set(identifiers)
+        ):
+            raise ValueError("history facts require unique sorted effects")
+        return self
+
+
+class RecoveryQualificationHypothesisFacts(StrictModel):
+    classification: Classification
+    effect_states: tuple[RecoveryQualificationEffectFact, ...] = Field(
+        min_length=1,
+        max_length=64,
+    )
+    alternative_histories: tuple[RecoveryQualificationHistoryFact, ...] = Field(
+        max_length=8
+    )
+
+    @model_validator(mode="after")
+    def validate_facts(self) -> RecoveryQualificationHypothesisFacts:
+        identifiers = tuple(item.effect_id for item in self.effect_states)
+        if identifiers != tuple(sorted(identifiers)) or len(identifiers) != len(
+            set(identifiers)
+        ):
+            raise ValueError("hypothesis facts require unique sorted effects")
+        history_values = tuple(
+            canonical_json_value_bytes(item.model_dump(mode="json"))
+            for item in self.alternative_histories
+        )
+        if history_values != tuple(sorted(history_values)) or len(
+            history_values
+        ) != len(set(history_values)):
+            raise ValueError("hypothesis facts require unique sorted histories")
+        return self
+
+
+def _qualification_hypothesis_facts(
+    hypothesis: GeminiHypothesis,
+) -> RecoveryQualificationHypothesisFacts:
+    effects = tuple(
+        sorted(
+            (
+                RecoveryQualificationEffectFact(
+                    effect_id=item.effect_id,
+                    state=item.state,
+                )
+                for item in hypothesis.effect_hypotheses
+            ),
+            key=lambda item: item.effect_id,
+        )
+    )
+    histories = tuple(
+        sorted(
+            (
+                RecoveryQualificationHistoryFact(
+                    classification=history.classification,
+                    effect_states=tuple(
+                        sorted(
+                            (
+                                RecoveryQualificationEffectFact(
+                                    effect_id=item.effect_id,
+                                    state=item.state,
+                                )
+                                for item in history.effect_states
+                            ),
+                            key=lambda item: item.effect_id,
+                        )
+                    ),
+                )
+                for history in hypothesis.alternative_histories
+            ),
+            key=lambda item: canonical_json_value_bytes(item.model_dump(mode="json")),
+        )
+    )
+    return RecoveryQualificationHypothesisFacts(
+        classification=hypothesis.proposed_classification,
+        effect_states=effects,
+        alternative_histories=histories,
+    )
+
+
+def _qualification_report_facts(
+    report: InvestigationReport,
+) -> RecoveryQualificationHypothesisFacts:
+    if report.proof is None or report.classification is None:
+        raise ValueError("wrong-hypothesis oracle requires a classified proof")
+    effects = tuple(
+        sorted(
+            (
+                RecoveryQualificationEffectFact(
+                    effect_id=item.effect_id,
+                    state=item.state,
+                )
+                for item in report.proof.effect_findings
+            ),
+            key=lambda item: item.effect_id,
+        )
+    )
+    unresolved = any(
+        item.state is EffectAssertionState.UNVERIFIED
+        for item in report.proof.effect_findings
+    )
+    histories = []
+    if unresolved:
+        for unresolved_state in (
+            EffectAssertionState.ESTABLISHED,
+            EffectAssertionState.NOT_ESTABLISHED,
+        ):
+            history_effects = tuple(
+                RecoveryQualificationEffectFact(
+                    effect_id=item.effect_id,
+                    state=(
+                        item.state
+                        if item.state is not EffectAssertionState.UNVERIFIED
+                        else unresolved_state
+                    ),
+                )
+                for item in report.proof.effect_findings
+            )
+            states = {item.state for item in history_effects}
+            classification = (
+                Classification.COMMITTED
+                if states == {EffectAssertionState.ESTABLISHED}
+                else (
+                    Classification.NOT_COMMITTED
+                    if states == {EffectAssertionState.NOT_ESTABLISHED}
+                    else Classification.PARTIAL
+                )
+            )
+            histories.append(
+                RecoveryQualificationHistoryFact(
+                    classification=classification,
+                    effect_states=tuple(
+                        sorted(history_effects, key=lambda item: item.effect_id)
+                    ),
+                )
+            )
+    return RecoveryQualificationHypothesisFacts(
+        classification=report.classification,
+        effect_states=effects,
+        alternative_histories=tuple(
+            sorted(
+                histories,
+                key=lambda item: canonical_json_value_bytes(
+                    item.model_dump(mode="json")
+                ),
+            )
+        ),
+    )
+
+
 class RecoveryQualificationHypothesisReplay(StrictModel):
     variant_id: Identifier
+    wrongness_kind: RecoveryQualificationHypothesisWrongnessKind
     provider_name: Literal["gemini"]
     planner_output_sha256: Sha256Digest
+    report: InvestigationReport
+    expected_hypothesis: GeminiHypothesis
+    expected_hypothesis_sha256: Sha256Digest
+    hypothesis: GeminiHypothesis
     hypothesis_sha256: Sha256Digest
     disposition: RecoveryHypothesisDisposition
     observed_decision_sha256: Sha256Digest
@@ -534,15 +724,88 @@ class RecoveryQualificationHypothesisReplay(StrictModel):
     permit_diverged: bool
 
     @model_validator(mode="after")
-    def validate_rejected_hypothesis(
+    def validate_wrong_hypothesis(
         self,
     ) -> RecoveryQualificationHypothesisReplay:
+        expected_variant = {
+            RecoveryQualificationHypothesisWrongnessKind.CLASSIFICATION: (
+                "wrong-classification"
+            ),
+            RecoveryQualificationHypothesisWrongnessKind.EFFECT_STATE: (
+                "wrong-effect-state"
+            ),
+            RecoveryQualificationHypothesisWrongnessKind.ALTERNATIVE_HISTORIES: (
+                "wrong-alternative-history"
+            ),
+        }[self.wrongness_kind]
+        if self.variant_id != expected_variant:
+            raise ValueError("wrong-hypothesis variant and kind disagree")
+        if self.hypothesis_sha256 != canonical_sha256(self.hypothesis):
+            raise ValueError("wrong-hypothesis identity changed")
+        if self.expected_hypothesis_sha256 != canonical_sha256(
+            self.expected_hypothesis
+        ):
+            raise ValueError("expected-hypothesis identity changed")
+        report_sha256 = canonical_sha256(self.report)
+        if (
+            self.hypothesis.report_sha256 != report_sha256
+            or self.expected_hypothesis.report_sha256 != report_sha256
+        ):
+            raise ValueError("wrong-hypothesis oracle is not bound to its report")
+        if self.expected_hypothesis.proposed_probe is not None:
+            raise ValueError("wrong-hypothesis oracle requires terminal evidence")
+        if self.expected_hypothesis.proposed_transition is not None:
+            raise ValueError("expected hypothesis cannot propose an action")
+        if self.hypothesis.proposed_transition is not None:
+            raise ValueError("wrong-hypothesis replay cannot propose an action")
+        if (self.disposition is RecoveryHypothesisDisposition.SELECTED) is not (
+            self.hypothesis.proposed_probe is not None
+        ):
+            raise ValueError("wrong-hypothesis probe disposition changed")
         if self.disposition not in {
-            RecoveryHypothesisDisposition.UNSUPPORTED_ACTION,
-            RecoveryHypothesisDisposition.UNSUPPORTED_PROBE,
-            RecoveryHypothesisDisposition.INVALID_BINDING,
+            RecoveryHypothesisDisposition.SELECTED,
+            RecoveryHypothesisDisposition.NO_PROBE,
         }:
-            raise ValueError("wrong-hypothesis replay requires a rejecting disposition")
+            raise ValueError("wrong factual hypotheses require a supported probe path")
+        non_factual_fields = {
+            "proposed_classification",
+            "effect_hypotheses",
+            "alternative_histories",
+        }
+        if self.hypothesis.model_dump(
+            mode="python",
+            exclude=non_factual_fields,
+        ) != self.expected_hypothesis.model_dump(
+            mode="python",
+            exclude=non_factual_fields,
+        ):
+            raise ValueError("wrong hypothesis changed a non-factual field")
+        expected = _qualification_report_facts(self.report)
+        if _qualification_hypothesis_facts(self.expected_hypothesis) != expected:
+            raise ValueError("expected hypothesis does not reproduce its report facts")
+        observed = _qualification_hypothesis_facts(self.hypothesis)
+        mismatches = {
+            kind
+            for differs, kind in (
+                (
+                    observed.classification != expected.classification,
+                    RecoveryQualificationHypothesisWrongnessKind.CLASSIFICATION,
+                ),
+                (
+                    observed.effect_states != expected.effect_states,
+                    RecoveryQualificationHypothesisWrongnessKind.EFFECT_STATE,
+                ),
+                (
+                    observed.alternative_histories != expected.alternative_histories,
+                    RecoveryQualificationHypothesisWrongnessKind.ALTERNATIVE_HISTORIES,
+                ),
+            )
+            if differs
+        }
+        if mismatches != {self.wrongness_kind}:
+            raise ValueError(
+                "wrong hypothesis must differ in exactly its declared fact"
+            )
         return self
 
 
@@ -1312,10 +1575,14 @@ __all__ = [
     "RecoveryQualificationComparison",
     "RecoveryQualificationContention",
     "RecoveryQualificationContentionTrial",
+    "RecoveryQualificationEffectFact",
     "RecoveryQualificationEnvironment",
     "RecoveryQualificationExecutionBasis",
     "RecoveryQualificationFaultClass",
+    "RecoveryQualificationHistoryFact",
+    "RecoveryQualificationHypothesisFacts",
     "RecoveryQualificationHypothesisReplay",
+    "RecoveryQualificationHypothesisWrongnessKind",
     "RecoveryQualificationIndex",
     "RecoveryQualificationLaneResult",
     "RecoveryQualificationManifest",

@@ -8,6 +8,7 @@ from datetime import UTC, datetime
 
 import pytest
 
+import reconcile.recovery_qualification as recovery_qualification_module
 from reconcile.contracts import (
     PermitAction,
     RecoveryHypothesisDisposition,
@@ -17,6 +18,7 @@ from reconcile.contracts.recovery_qualification import (
     RECOVERY_QUALIFICATION_SEEDS,
     RecoveryQualificationExecutionBasis,
     RecoveryQualificationFaultClass,
+    RecoveryQualificationHypothesisWrongnessKind,
     RecoveryQualificationOpportunity,
     RecoveryQualificationPolicy,
     RecoveryQualificationResolution,
@@ -25,6 +27,7 @@ from reconcile.contracts.recovery_qualification import (
 )
 from reconcile.recovery_qualification import (
     RecoveryQualificationError,
+    _execute_qualification_cases,
     build_recovery_qualification_environment,
     build_recovery_qualification_manifest,
     compare_recovery_qualification,
@@ -35,6 +38,7 @@ from reconcile.recovery_qualification import (
 )
 from reconcile.recovery_qualification_execution import (
     _fault,
+    _run_to_qualification_dispatch_boundary,
     execute_recovery_qualification_proof_lane,
 )
 from reconcile.recovery_qualification_fixtures import (
@@ -45,6 +49,7 @@ from reconcile.recovery_qualification_provider import (
     build_recovery_qualification_provider,
     recovery_qualification_provider_scenario,
 )
+from tests.contract._factories import make_recovery_qualification_examples
 
 NOW = datetime(2026, 8, 23, tzinfo=UTC)
 
@@ -68,12 +73,20 @@ def _environment(manifest, *, live: bool = False):
             if live
             else RecoveryQualificationExecutionBasis.SCRIPTED
         ),
-        provider_name="vertex-ai" if live else None,
+        provider_name="google-vertex-ai" if live else None,
+        provider_project="qualification-project" if live else None,
         model_name="gemini-2.5-flash" if live else None,
+        reported_model_revision="gemini-2.5-flash-001" if live else None,
         vertex_location="us-central1" if live else None,
         python_version="3.12.13",
         platform_name="qualification-test",
     )
+
+
+@pytest.fixture(scope="module")
+def qualification_matrix():
+    manifest, environment, results, *_ = make_recovery_qualification_examples()
+    return manifest, environment, results
 
 
 def test_frozen_matrix_has_exact_schedule_and_required_coverage() -> None:
@@ -181,16 +194,122 @@ def test_witness_replay_distinguishes_admitted_from_zero_evidence(
     assert result.witness_replay_kind is expected_kind
     assert result.replayed_witness_semantic_sha256 == result.witness_semantic_sha256
     assert all(item.hypothesis_sha256 for item in result.wrong_hypotheses)
-    assert {item.disposition for item in result.wrong_hypotheses} == {
-        RecoveryHypothesisDisposition.UNSUPPORTED_PROBE
+    assert {item.disposition for item in result.wrong_hypotheses} <= {
+        RecoveryHypothesisDisposition.SELECTED,
+        RecoveryHypothesisDisposition.NO_PROBE,
     }
+    assert tuple(item.wrongness_kind for item in result.wrong_hypotheses) == tuple(
+        RecoveryQualificationHypothesisWrongnessKind
+    )
 
 
-def test_matrix_records_four_hundred_lanes_and_all_safety_replays() -> None:
-    manifest = _manifest()
-    environment = _environment(manifest)
+def test_wrong_hypothesis_replay_uses_certificate_case_clock(tmp_path) -> None:
+    fixture = build_recovery_qualification_fixtures()[0]
 
-    results = run_recovery_qualification(manifest, environment)
+    result = asyncio.run(
+        execute_recovery_qualification_proof_lane(
+            fixture,
+            policy=RecoveryQualificationPolicy.FIXED,
+            state_directory=tmp_path / fixture.case_id,
+            restart=False,
+        )
+    )
+
+    assert result.permit_sha256 is not None
+    assert len(result.wrong_hypotheses) == len(
+        RecoveryQualificationHypothesisWrongnessKind
+    )
+    assert all(
+        replay.permit_sha256 == result.permit_sha256
+        for replay in result.wrong_hypotheses
+    )
+
+
+def test_external_cancellation_is_not_treated_as_a_qualification_boundary() -> None:
+    async def exercise() -> None:
+        entered = asyncio.Event()
+
+        class BlockingWorkflow:
+            async def run(self, _run_id):
+                entered.set()
+                await asyncio.Event().wait()
+
+        task = asyncio.create_task(
+            _run_to_qualification_dispatch_boundary(
+                BlockingWorkflow(),  # type: ignore[arg-type]
+                "externally-cancelled-run",
+            )
+        )
+        await entered.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(exercise())
+
+
+def test_matrix_execution_is_sequential_and_preserves_canonical_lane_order(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    fixtures = build_recovery_qualification_fixtures()[:2]
+    calls: list[tuple[str, RecoveryQualificationPolicy]] = []
+    active = 0
+    max_active = 0
+
+    async def record(fixture, policy):
+        nonlocal active, max_active
+        active += 1
+        max_active = max(max_active, active)
+        calls.append((fixture.case_id, policy))
+        await asyncio.sleep(0)
+        active -= 1
+        return object()
+
+    async def blind(fixture, *, policy):
+        return await record(fixture, policy)
+
+    async def proof(fixture, *, policy, state_directory, restart):
+        assert state_directory == tmp_path / fixture.case_id / policy.value
+        assert restart is (
+            policy is RecoveryQualificationPolicy.FIXED
+            and fixture.seed == RECOVERY_QUALIFICATION_SEEDS[0]
+        )
+        return await record(fixture, policy)
+
+    monkeypatch.setattr(
+        recovery_qualification_module,
+        "execute_recovery_qualification_blind_lane",
+        blind,
+    )
+    monkeypatch.setattr(
+        recovery_qualification_module,
+        "execute_recovery_qualification_proof_lane",
+        proof,
+    )
+
+    executions = asyncio.run(
+        _execute_qualification_cases(fixtures, state_root=tmp_path)
+    )
+
+    assert tuple(item.fixture for item in executions) == fixtures
+    assert max_active == 1
+    assert calls == [
+        (fixture.case_id, policy)
+        for fixture in fixtures
+        for policy in (
+            RecoveryQualificationPolicy.BLIND_RETRY,
+            RecoveryQualificationPolicy.BLIND_ABORT,
+            RecoveryQualificationPolicy.FIXED,
+            RecoveryQualificationPolicy.ADAPTIVE,
+        )
+    ]
+
+
+def test_matrix_contract_records_four_hundred_lanes_and_all_safety_replays(
+    qualification_matrix,
+) -> None:
+    _manifest_value, environment, results = qualification_matrix
 
     assert results.case_count == 100
     assert results.lane_result_count == 400
@@ -271,12 +390,10 @@ def test_adaptive_efficiency_gate_includes_exact_25_percent_boundary() -> None:
     assert recovery_qualification_adaptive_threshold_met(2499) is False
 
 
-def test_scripted_comparison_records_zero_model_cost_and_cannot_authorize_value() -> (
-    None
-):
-    manifest = _manifest()
-    environment = _environment(manifest)
-    results = run_recovery_qualification(manifest, environment)
+def test_scripted_comparison_records_zero_model_cost_and_cannot_authorize_value(
+    qualification_matrix,
+) -> None:
+    manifest, environment, results = qualification_matrix
 
     comparison = compare_recovery_qualification(manifest, environment, results)
 

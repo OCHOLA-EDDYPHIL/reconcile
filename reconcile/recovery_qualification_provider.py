@@ -1736,6 +1736,7 @@ def build_recovery_qualification_foundation(
     state_directory: str | Path,
     invoked_at: datetime | None = None,
     scenario: RecoveryQualificationProviderScenario | None = None,
+    permit_clock: Callable[[], datetime] | None = None,
 ) -> RecoveryQualificationFoundation:
     """Build provider adapters and restart-safe stores for one isolated lane."""
 
@@ -1747,7 +1748,7 @@ def build_recovery_qualification_foundation(
     stores = build_recovery_qualification_store_factory(
         fixture,
         state_directory=state_directory,
-        clock=provider.clock,
+        clock=provider.clock if permit_clock is None else permit_clock,
         counters=provider.counters,
     )
     return RecoveryQualificationFoundation(provider=provider, stores=stores)

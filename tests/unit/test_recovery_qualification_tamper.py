@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import subprocess
 from datetime import timedelta
+from pathlib import Path
 
 import pytest
 
@@ -18,6 +20,10 @@ from reconcile.contracts import (
 from reconcile.contracts.base import canonical_json_value_bytes
 from reconcile.contracts.recovery_qualification import (
     RecoveryQualificationContention,
+    RecoveryQualificationExecutionBasis,
+    RecoveryQualificationModelUsage,
+    RecoveryQualificationModelUsageStatus,
+    RecoveryQualificationPolicy,
     RecoveryQualificationResults,
 )
 from reconcile.recovery_qualification import (
@@ -25,8 +31,10 @@ from reconcile.recovery_qualification import (
     RecoveryQualificationError,
     authorize_recovery_qualification_claims,
     build_recovery_qualification_bundle,
+    build_recovery_qualification_environment,
     compare_recovery_qualification,
     export_recovery_qualification_bundle,
+    recovery_qualification_adaptive_threshold_met,
     verify_recovery_qualification_bundle,
 )
 from reconcile.recovery_qualification_execution import (
@@ -58,8 +66,14 @@ def _install_fast_bundle_execution(monkeypatch) -> None:
             ).model_dump(mode="python")
         )
 
-    async def fake_contention(manifest, results, *, working_directory=None):
-        del working_directory
+    async def fake_contention(
+        manifest,
+        results,
+        *,
+        environment=None,
+        working_directory=None,
+    ):
+        del environment, working_directory
         template = make_recovery_qualification_examples()[3]
         return RecoveryQualificationContention.model_validate(
             template.model_copy(
@@ -82,12 +96,136 @@ def _install_fast_bundle_execution(monkeypatch) -> None:
     )
 
 
+def _install_example_source(tmp_path, monkeypatch) -> Path:
+    manifest, environment, *_ = make_recovery_qualification_examples()
+    repository = tmp_path / "example-source"
+    repository.mkdir()
+    (repository / "uv.lock").write_text("version = 1\n", encoding="utf-8")
+    measured = (
+        repository,
+        manifest.source_revision,
+        manifest.source_tree_sha256,
+        environment.repository_clean,
+        environment.dependency_lock_sha256,
+    )
+    monkeypatch.setattr(
+        recovery_qualification_module,
+        "_measured_recovery_qualification_source",
+        lambda _repository: measured,
+    )
+    return repository
+
+
+def _committed_source_repository(tmp_path: Path, *, track_lock: bool = True) -> Path:
+    repository = tmp_path / "committed-source"
+    repository.mkdir(parents=True)
+    (repository / "uv.lock").write_text("version = 1\n", encoding="utf-8")
+    (repository / "tracked.py").write_text("VALUE = 1\n", encoding="utf-8")
+    subprocess.run(("git", "init", "-q"), cwd=repository, check=True)
+    paths = ("uv.lock", "tracked.py") if track_lock else ("tracked.py",)
+    subprocess.run(("git", "add", "--", *paths), cwd=repository, check=True)
+    subprocess.run(
+        (
+            "git",
+            "-c",
+            "user.name=RECONCILE Qualification",
+            "-c",
+            "user.email=qualification@example.invalid",
+            "commit",
+            "-qm",
+            "qualification source",
+        ),
+        cwd=repository,
+        check=True,
+    )
+    return repository.resolve()
+
+
 def test_evidence_semantics_are_strict_json_values() -> None:
     evidence, _decision = make_evidence(Classification.COMMITTED)
     semantics = _evidence_semantics(evidence)
 
     assert canonical_json_value_bytes(semantics)
     assert all(type(item) is dict for item in semantics["effect_assertions"])
+
+
+def test_source_measurement_rejects_a_git_subdirectory(tmp_path) -> None:
+    repository = _committed_source_repository(tmp_path)
+    subdirectory = repository / "nested"
+    subdirectory.mkdir()
+
+    with pytest.raises(RecoveryQualificationError, match="Git top-level"):
+        recovery_qualification_module.recovery_qualification_source_state(subdirectory)
+
+
+def test_source_measurement_detects_assume_unchanged_content(tmp_path) -> None:
+    repository = _committed_source_repository(tmp_path)
+    _revision, original_tree, original_clean = (
+        recovery_qualification_module.recovery_qualification_source_state(repository)
+    )
+    subprocess.run(
+        ("git", "update-index", "--assume-unchanged", "tracked.py"),
+        cwd=repository,
+        check=True,
+    )
+    (repository / "tracked.py").write_text("VALUE = 2\n", encoding="utf-8")
+    assert (
+        subprocess.run(
+            ("git", "status", "--porcelain"),
+            cwd=repository,
+            check=True,
+            capture_output=True,
+        ).stdout
+        == b""
+    )
+
+    _revision, changed_tree, changed_clean = (
+        recovery_qualification_module.recovery_qualification_source_state(repository)
+    )
+
+    assert original_clean is True
+    assert changed_clean is False
+    assert changed_tree != original_tree
+
+
+@pytest.mark.parametrize("mutation", ("addition", "modification"))
+def test_source_measurement_rejects_staged_index_drift(tmp_path, mutation) -> None:
+    repository = _committed_source_repository(tmp_path)
+    if mutation == "addition":
+        path = repository / "injected.py"
+        path.write_text("INJECTED = True\n", encoding="utf-8")
+    else:
+        path = repository / "tracked.py"
+        path.write_text("VALUE = 2\n", encoding="utf-8")
+    subprocess.run(("git", "add", "--", path.name), cwd=repository, check=True)
+
+    with pytest.raises(RecoveryQualificationError, match="index must exactly match"):
+        recovery_qualification_module.recovery_qualification_source_state(repository)
+
+
+def test_measured_source_requires_the_executing_tree_and_tracked_lock(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    repository = _committed_source_repository(tmp_path / "tracked")
+    with pytest.raises(RecoveryQualificationError, match="measured repository"):
+        recovery_qualification_module._measured_recovery_qualification_source(
+            repository
+        )
+
+    untracked_lock_repository = _committed_source_repository(
+        tmp_path / "untracked",
+        track_lock=False,
+    )
+    monkeypatch.setattr(
+        recovery_qualification_module,
+        "_recovery_qualification_executing_repository",
+        lambda: untracked_lock_repository,
+    )
+    with pytest.raises(RecoveryQualificationError, match=r"checked-in uv\.lock"):
+        recovery_qualification_module._measured_recovery_qualification_source(
+            untracked_lock_repository
+        )
 
 
 def test_scripted_planner_never_cites_rejected_evidence() -> None:
@@ -170,7 +308,12 @@ def test_comparison_rejects_demonstrated_evidence_profile_drift(mutation: str) -
     "mutation",
     ("completion_outcome", "receipt_identity"),
 )
-def test_authorization_rejects_contention_identity_drift(mutation: str) -> None:
+def test_authorization_rejects_contention_identity_drift(
+    mutation: str,
+    tmp_path,
+    monkeypatch,
+) -> None:
+    repository = _install_example_source(tmp_path, monkeypatch)
     manifest, environment, results, contention, comparison, *_ = (
         make_recovery_qualification_examples()
     )
@@ -205,10 +348,15 @@ def test_authorization_rejects_contention_identity_drift(mutation: str) -> None:
             results,
             tampered_contention,
             comparison,
+            source_repository=repository,
         )
 
 
-def test_authorization_rejects_invalid_claimed_permit_revision() -> None:
+def test_authorization_rejects_invalid_claimed_permit_revision(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    repository = _install_example_source(tmp_path, monkeypatch)
     manifest, environment, results, contention, comparison, *_ = (
         make_recovery_qualification_examples()
     )
@@ -234,6 +382,7 @@ def test_authorization_rejects_invalid_claimed_permit_revision() -> None:
             results,
             tampered_contention,
             comparison,
+            source_repository=repository,
         )
 
 
@@ -246,10 +395,16 @@ def test_bundle_runner_derives_source_and_reproduces_seeded_bytes(
     repository.mkdir()
     lock = b"version = 1\n"
     (repository / "uv.lock").write_bytes(lock)
-    source_state = ("d" * 40, "e" * 64, True)
+    source_state = (
+        repository.resolve(),
+        "d" * 40,
+        "e" * 64,
+        True,
+        hashlib.sha256(lock).hexdigest(),
+    )
     monkeypatch.setattr(
         recovery_qualification_module,
-        "recovery_qualification_source_state",
+        "_measured_recovery_qualification_source",
         lambda _repository: source_state,
     )
 
@@ -260,8 +415,8 @@ def test_bundle_runner_derives_source_and_reproduces_seeded_bytes(
         build_recovery_qualification_bundle(source_repository=repository)
     )
 
-    assert first.manifest.source_revision == source_state[0]
-    assert first.manifest.source_tree_sha256 == source_state[1]
+    assert first.manifest.source_revision == source_state[1]
+    assert first.manifest.source_tree_sha256 == source_state[2]
     assert first.environment.repository_clean is True
     assert first.environment.dependency_lock_sha256 == hashlib.sha256(lock).hexdigest()
     for field in (
@@ -287,13 +442,25 @@ def test_bundle_runner_rejects_source_change_during_execution(
     (repository / "uv.lock").write_text("version = 1\n", encoding="utf-8")
     states = iter(
         (
-            ("d" * 40, "e" * 64, True),
-            ("d" * 40, "f" * 64, False),
+            (
+                repository.resolve(),
+                "d" * 40,
+                "e" * 64,
+                True,
+                hashlib.sha256(b"version = 1\n").hexdigest(),
+            ),
+            (
+                repository.resolve(),
+                "d" * 40,
+                "f" * 64,
+                False,
+                hashlib.sha256(b"version = 1\n").hexdigest(),
+            ),
         )
     )
     monkeypatch.setattr(
         recovery_qualification_module,
-        "recovery_qualification_source_state",
+        "_measured_recovery_qualification_source",
         lambda _repository: next(states),
     )
 
@@ -301,7 +468,11 @@ def test_bundle_runner_rejects_source_change_during_execution(
         asyncio.run(build_recovery_qualification_bundle(source_repository=repository))
 
 
-def test_authorization_recomputes_comparison_from_results() -> None:
+def test_authorization_recomputes_comparison_from_results(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    repository = _install_example_source(tmp_path, monkeypatch)
     manifest, environment, results, contention, comparison, *_ = (
         make_recovery_qualification_examples()
     )
@@ -325,10 +496,167 @@ def test_authorization_recomputes_comparison_from_results() -> None:
             results,
             contention,
             tampered_comparison,
+            source_repository=repository,
         )
 
 
-def test_bundle_verification_binds_index_creation_time(tmp_path) -> None:
+def test_public_claim_boundaries_require_a_measured_repository(tmp_path) -> None:
+    manifest, environment, results, contention, comparison, claims, _index = (
+        make_recovery_qualification_examples()
+    )
+    bundle = RecoveryQualificationBundle(
+        manifest=manifest,
+        environment=environment,
+        results=results,
+        contention=contention,
+        comparison=comparison,
+        claim_authorization=claims,
+    )
+
+    with pytest.raises(TypeError, match="source_repository"):
+        authorize_recovery_qualification_claims(  # type: ignore[call-arg]
+            manifest,
+            environment,
+            results,
+            contention,
+            comparison,
+        )
+    with pytest.raises(TypeError, match="source_repository"):
+        export_recovery_qualification_bundle(  # type: ignore[call-arg]
+            tmp_path / "omitted-source",
+            bundle,
+        )
+    with pytest.raises(TypeError, match="source_repository"):
+        verify_recovery_qualification_bundle(  # type: ignore[call-arg]
+            tmp_path / "omitted-source"
+        )
+
+
+def test_fabricated_source_identity_cannot_authorize_or_export(tmp_path) -> None:
+    manifest, environment, results, contention, comparison, claims, _index = (
+        make_recovery_qualification_examples()
+    )
+    bundle = RecoveryQualificationBundle(
+        manifest=manifest,
+        environment=environment,
+        results=results,
+        contention=contention,
+        comparison=comparison,
+        claim_authorization=claims,
+    )
+    repository = Path(__file__).parents[2]
+
+    with pytest.raises(RecoveryQualificationError, match="measured source"):
+        authorize_recovery_qualification_claims(
+            manifest,
+            environment,
+            results,
+            contention,
+            comparison,
+            source_repository=repository,
+        )
+    destination = tmp_path / "forged-source"
+    with pytest.raises(RecoveryQualificationError, match="measured source"):
+        export_recovery_qualification_bundle(
+            destination,
+            bundle,
+            source_repository=repository,
+        )
+    assert not destination.exists()
+
+
+def test_self_attested_live_measurement_cannot_authorize_efficiency(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    repository = _install_example_source(tmp_path, monkeypatch)
+    manifest, scripted_environment, template, template_contention, *_ = (
+        make_recovery_qualification_examples()
+    )
+    scripted_comparison = compare_recovery_qualification(
+        manifest,
+        scripted_environment,
+        template,
+    )
+    scripted_claims = authorize_recovery_qualification_claims(
+        manifest,
+        scripted_environment,
+        template,
+        template_contention,
+        scripted_comparison,
+        source_repository=repository,
+    )
+    assert scripted_claims.adaptive_efficiency_claim_authorized is False
+
+    environment = build_recovery_qualification_environment(
+        manifest,
+        repository_clean=True,
+        dependency_lock_sha256=scripted_environment.dependency_lock_sha256,
+        generated_at=scripted_environment.generated_at,
+        execution_basis=RecoveryQualificationExecutionBasis.LIVE_VERTEX,
+        provider_name="google-vertex-ai",
+        provider_project="qualification-project",
+        model_name="gemini-2.5-flash",
+        reported_model_revision="gemini-2.5-flash-001",
+        vertex_location="us-central1",
+        python_version=scripted_environment.python_version,
+        platform_name=scripted_environment.platform,
+    )
+    measured_usage = RecoveryQualificationModelUsage(
+        status=RecoveryQualificationModelUsageStatus.MEASURED,
+        provider_name="google-vertex-ai",
+        model_name="gemini-2.5-flash",
+        model_call_count=1,
+        input_token_count=10,
+        output_token_count=5,
+        total_token_count=15,
+        input_cost_nano_units_per_token=2,
+        output_cost_nano_units_per_token=3,
+        model_cost_nano_units=35,
+        live_vertex_backed=True,
+    )
+    lanes = tuple(
+        lane.model_copy(update={"model_usage": measured_usage})
+        if lane.policy is RecoveryQualificationPolicy.ADAPTIVE
+        else lane
+        for lane in template.lane_results
+    )
+    results = RecoveryQualificationResults.model_validate(
+        template.model_copy(
+            update={
+                "environment_sha256": canonical_sha256(environment),
+                "lane_results": lanes,
+            }
+        ).model_dump(mode="python")
+    )
+    contention = RecoveryQualificationContention.model_validate(
+        template_contention.model_copy(
+            update={"results_sha256": canonical_sha256(results)}
+        ).model_dump(mode="python")
+    )
+    comparison = compare_recovery_qualification(manifest, environment, results)
+    claims = authorize_recovery_qualification_claims(
+        manifest,
+        environment,
+        results,
+        contention,
+        comparison,
+        source_repository=repository,
+    )
+
+    assert comparison.live_vertex_model_usage_measured is False
+    assert claims.live_vertex_backed is False
+    assert claims.model_usage_measured is False
+    assert claims.adaptive_efficiency_claim_authorized is False
+
+
+def test_efficiency_threshold_is_exact_but_unverified_evidence_is_denied() -> None:
+    assert recovery_qualification_adaptive_threshold_met(2499) is False
+    assert recovery_qualification_adaptive_threshold_met(2500) is True
+
+
+def test_bundle_verification_binds_index_creation_time(tmp_path, monkeypatch) -> None:
+    repository = _install_example_source(tmp_path, monkeypatch)
     manifest, environment, results, contention, comparison, claims, _index = (
         make_recovery_qualification_examples()
     )
@@ -341,7 +669,11 @@ def test_bundle_verification_binds_index_creation_time(tmp_path) -> None:
         claim_authorization=claims,
     )
     destination = tmp_path / "qualification"
-    index = export_recovery_qualification_bundle(destination, bundle)
+    index = export_recovery_qualification_bundle(
+        destination,
+        bundle,
+        source_repository=repository,
+    )
     tampered_index = index.model_copy(
         update={"created_at": index.created_at + timedelta(seconds=1)}
     )
@@ -351,4 +683,45 @@ def test_bundle_verification_binds_index_creation_time(tmp_path) -> None:
         RecoveryQualificationError,
         match="bundle binding changed",
     ):
-        verify_recovery_qualification_bundle(destination)
+        verify_recovery_qualification_bundle(
+            destination,
+            source_repository=repository,
+        )
+
+
+def test_bundle_verification_remeasures_source(tmp_path, monkeypatch) -> None:
+    repository = _install_example_source(tmp_path, monkeypatch)
+    manifest, environment, results, contention, comparison, claims, _index = (
+        make_recovery_qualification_examples()
+    )
+    bundle = RecoveryQualificationBundle(
+        manifest=manifest,
+        environment=environment,
+        results=results,
+        contention=contention,
+        comparison=comparison,
+        claim_authorization=claims,
+    )
+    destination = tmp_path / "qualification"
+    export_recovery_qualification_bundle(
+        destination,
+        bundle,
+        source_repository=repository,
+    )
+    monkeypatch.setattr(
+        recovery_qualification_module,
+        "_measured_recovery_qualification_source",
+        lambda _repository: (
+            repository,
+            manifest.source_revision,
+            "f" * 64,
+            True,
+            environment.dependency_lock_sha256,
+        ),
+    )
+
+    with pytest.raises(RecoveryQualificationError, match="measured source"):
+        verify_recovery_qualification_bundle(
+            destination,
+            source_repository=repository,
+        )

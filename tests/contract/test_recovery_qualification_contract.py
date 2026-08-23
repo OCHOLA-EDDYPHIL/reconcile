@@ -8,7 +8,12 @@ import pytest
 from jsonschema import Draft202012Validator
 from pydantic import ValidationError
 
-from reconcile.contracts import RecoveryHypothesisDisposition, canonical_json_bytes
+from reconcile.contracts import (
+    GeminiHypothesis,
+    RecoveryHypothesisDisposition,
+    canonical_json_bytes,
+    canonical_sha256,
+)
 from scripts.generate_contract_schemas import PUBLIC_SCHEMAS, generated_artifacts
 from tests.contract._factories import make_recovery_qualification_examples
 
@@ -65,13 +70,43 @@ def test_results_reject_false_permit_accounting_drift() -> None:
         type(results).model_validate(payload)
 
 
-def test_results_reject_a_non_rejecting_wrong_hypothesis_disposition() -> None:
+def test_results_reject_an_unsupported_wrong_hypothesis_probe() -> None:
     results = make_recovery_qualification_examples()[2]
     payload = results.model_dump(mode="python")
     replay = payload["case_proofs"][0]["wrong_hypothesis_replays"][0]
-    replay["disposition"] = RecoveryHypothesisDisposition.SELECTED
+    replay["disposition"] = RecoveryHypothesisDisposition.UNSUPPORTED_PROBE
 
-    with pytest.raises(ValidationError, match="rejecting disposition"):
+    with pytest.raises(ValidationError, match="supported probe path"):
+        type(results).model_validate(payload)
+
+
+def test_results_require_the_declared_factual_hypothesis_error() -> None:
+    results = make_recovery_qualification_examples()[2]
+    payload = results.model_dump(mode="python")
+    replay = payload["case_proofs"][0]["wrong_hypothesis_replays"][0]
+    replay["hypothesis"]["proposed_classification"] = replay["expected_hypothesis"][
+        "proposed_classification"
+    ]
+    replay["hypothesis_sha256"] = canonical_sha256(
+        GeminiHypothesis.model_validate(replay["hypothesis"])
+    )
+
+    with pytest.raises(ValidationError, match="exactly its declared fact"):
+        type(results).model_validate(payload)
+
+
+def test_wrong_hypothesis_oracle_is_derived_from_its_retained_report() -> None:
+    results = make_recovery_qualification_examples()[2]
+    payload = results.model_dump(mode="python")
+    replay = payload["case_proofs"][0]["wrong_hypothesis_replays"][0]
+    replay["expected_hypothesis"]["proposed_classification"] = replay["hypothesis"][
+        "proposed_classification"
+    ]
+    replay["expected_hypothesis_sha256"] = canonical_sha256(
+        GeminiHypothesis.model_validate(replay["expected_hypothesis"])
+    )
+
+    with pytest.raises(ValidationError, match="reproduce its report facts"):
         type(results).model_validate(payload)
 
 

@@ -151,6 +151,7 @@ from reconcile.contracts import (
     RecoveryQualificationContentionTrial,
     RecoveryQualificationEnvironment,
     RecoveryQualificationHypothesisReplay,
+    RecoveryQualificationHypothesisWrongnessKind,
     RecoveryQualificationIndex,
     RecoveryQualificationLaneResult,
     RecoveryQualificationManifest,
@@ -208,7 +209,7 @@ from reconcile.qualification import (
 )
 from reconcile.recovery_qualification import (
     _CONTENTION_NOW,
-    authorize_recovery_qualification_claims,
+    _derive_recovery_qualification_claims,
     build_recovery_qualification_environment,
     build_recovery_qualification_manifest,
     compare_recovery_qualification,
@@ -1751,19 +1752,101 @@ def make_recovery_qualification_examples() -> tuple[
                 else None
             )
         )
+        recovery_chain, template_hypothesis, *_ = make_recovery_examples()
+        report = make_report(Classification.COMMITTED).model_copy(
+            update={
+                "investigation_id": f"investigation-{digest(fixture.case_id)[:24]}",
+            }
+        )
+        expected_effects = tuple(
+            HypothesizedEffect(
+                effect_id=finding.effect_id,
+                state=finding.state,
+                cited_evidence_ids=finding.evidence_ids,
+            )
+            for finding in report.proof.effect_findings  # type: ignore[union-attr]
+        )
+        expected_hypothesis = GeminiHypothesis.model_validate(
+            template_hypothesis.model_copy(
+                update={
+                    "hypothesis_id": f"expected-{digest(fixture.case_id)[:24]}",
+                    "chain_id": recovery_chain.chain_id,
+                    "node_id": archetype.stage.value,
+                    "report_sha256": canonical_sha256(report),
+                    "proposed_classification": report.classification,
+                    "effect_hypotheses": expected_effects,
+                    "cited_evidence_ids": tuple(
+                        item.evidence_id for item in report.evidence
+                    ),
+                    "alternative_histories": (),
+                    "missing_evidence": (),
+                    "proposed_probe": None,
+                    "proposed_transition": None,
+                }
+            ).model_dump(mode="python")
+        )
+        wrong_effects = list(expected_hypothesis.effect_hypotheses)
+        wrong_effects[0] = wrong_effects[0].model_copy(
+            update={"state": EffectAssertionState.NOT_ESTABLISHED}
+        )
+        wrong_history_effects = tuple(
+            item.model_copy(update={"state": EffectAssertionState.NOT_ESTABLISHED})
+            for item in expected_hypothesis.effect_hypotheses
+        )
+        wrong_histories = (
+            PossibleHistory(
+                history_id="qualification-wrong-alternative",
+                classification=Classification.NOT_COMMITTED,
+                effect_states=wrong_history_effects,
+                compatible_evidence_ids=expected_hypothesis.cited_evidence_ids,
+                summary="A schema-valid but factually incorrect history.",
+            ),
+        )
+        wrong_values = (
+            (
+                "wrong-classification",
+                RecoveryQualificationHypothesisWrongnessKind.CLASSIFICATION,
+                {"proposed_classification": Classification.NOT_COMMITTED},
+            ),
+            (
+                "wrong-effect-state",
+                RecoveryQualificationHypothesisWrongnessKind.EFFECT_STATE,
+                {"effect_hypotheses": tuple(wrong_effects)},
+            ),
+            (
+                "wrong-alternative-history",
+                RecoveryQualificationHypothesisWrongnessKind.ALTERNATIVE_HISTORIES,
+                {"alternative_histories": wrong_histories},
+            ),
+        )
         wrong_hypotheses = tuple(
             RecoveryQualificationHypothesisReplay(
-                variant_id=f"wrong-gemini-hypothesis-{index}",
+                variant_id=variant_id,
+                wrongness_kind=wrongness_kind,
                 provider_name="gemini",
-                planner_output_sha256=digest("planner-output", fixture.case_id, index),
-                hypothesis_sha256=digest("hypothesis", fixture.case_id, index),
-                disposition=RecoveryHypothesisDisposition.UNSUPPORTED_PROBE,
+                planner_output_sha256=digest(
+                    "planner-output", fixture.case_id, variant_id
+                ),
+                report=report,
+                expected_hypothesis=expected_hypothesis,
+                expected_hypothesis_sha256=canonical_sha256(expected_hypothesis),
+                hypothesis=(
+                    hypothesis := GeminiHypothesis.model_validate(
+                        expected_hypothesis.model_copy(
+                            update={
+                                **updates,
+                            }
+                        ).model_dump(mode="python")
+                    )
+                ),
+                hypothesis_sha256=canonical_sha256(hypothesis),
+                disposition=RecoveryHypothesisDisposition.NO_PROBE,
                 observed_decision_sha256=decision_sha256,
                 observed_permit_sha256=permit_sha256,
                 decision_diverged=False,
                 permit_diverged=False,
             )
-            for index in range(1, 4)
+            for variant_id, wrongness_kind, updates in wrong_values
         )
         case_proofs.append(
             RecoveryQualificationCaseProof(
@@ -1970,12 +2053,13 @@ def make_recovery_qualification_examples() -> tuple[
         passed=True,
     )
     comparison = compare_recovery_qualification(manifest, environment, results)
-    claims = authorize_recovery_qualification_claims(
+    claims = _derive_recovery_qualification_claims(
         manifest,
         environment,
         results,
         contention,
         comparison,
+        source_exact=True,
     )
     documents = (
         ("manifest.json", manifest),

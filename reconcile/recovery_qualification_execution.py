@@ -47,11 +47,15 @@ from reconcile.contracts import (
     AdaptivePlannerInput,
     AdaptivePlannerOutput,
     AmbiguityWitness,
+    Classification,
     EffectAssertionState,
     EvidenceAuthority,
     EvidenceDisposition,
     EvidenceReason,
     ExecutionEnvelope,
+    GeminiHypothesis,
+    HypothesizedEffect,
+    InvestigationReport,
     NormalizedEvidence,
     OperationStatus,
     PermitAction,
@@ -59,6 +63,7 @@ from reconcile.contracts import (
     PlannerCitationRefs,
     PlannerExplanation,
     PlannerStopAdvice,
+    PossibleHistory,
     ProbeOutcome,
     ProbeRequest,
     RecoveryActionNode,
@@ -78,6 +83,7 @@ from reconcile.contracts.base import canonical_json_value_bytes
 from reconcile.contracts.recovery_qualification import (
     RECOVERY_QUALIFICATION_CONTENTION_WIDTH,
     RecoveryQualificationArtifactKind,
+    RecoveryQualificationHypothesisWrongnessKind,
     RecoveryQualificationModelUsage,
     RecoveryQualificationModelUsageStatus,
     RecoveryQualificationPolicy,
@@ -147,9 +153,9 @@ from reconcile.recovery_workflow import (
 )
 
 _WRONG_VARIANTS = (
-    "unknown-capability",
-    "invalid-arguments",
-    "unsupported-version",
+    "wrong-classification",
+    "wrong-effect-state",
+    "wrong-alternative-history",
 )
 _UNSUPPORTED_STOP_REASONS = frozenset(
     {
@@ -173,7 +179,11 @@ _UNSUPPORTED_STOP_REASONS = frozenset(
 @dataclass(frozen=True, slots=True)
 class RecoveryQualificationWrongExecution:
     variant_id: str
+    wrongness_kind: RecoveryQualificationHypothesisWrongnessKind
     planner_output_sha256: str
+    report: InvestigationReport
+    expected_hypothesis: GeminiHypothesis
+    hypothesis: GeminiHypothesis
     hypothesis_sha256: str
     disposition: RecoveryHypothesisDisposition
     decision_sha256: str
@@ -261,14 +271,37 @@ class _ClaimRendezvousStore:
         return await self._delegate.permit_audit_events(permit_id)
 
 
+def _different_classification(value: Classification) -> Classification:
+    return (
+        Classification.NOT_COMMITTED
+        if value is Classification.COMMITTED
+        else Classification.COMMITTED
+    )
+
+
+def _different_effect_state(value: EffectAssertionState) -> EffectAssertionState:
+    return (
+        EffectAssertionState.NOT_ESTABLISHED
+        if value is EffectAssertionState.ESTABLISHED
+        else EffectAssertionState.ESTABLISHED
+    )
+
+
 class _ScriptedPlanner:
     """Deterministic Gemini-shaped planner with no mutation authority."""
 
-    def __init__(self, variant: str = "normal") -> None:
+    def __init__(
+        self,
+        variant: str = "normal",
+        *,
+        target_node_id: str | None = None,
+    ) -> None:
         self.variant = variant
+        self.target_node_id = target_node_id
         self.turns: list[AdvisoryPlannerTurn] = []
         self.call_tools: list[str] = []
         self.calls_by_tool: dict[str, int] = {}
+        self.expected_hypotheses_by_id: dict[str, GeminiHypothesis] = {}
         self.last_output_sha256: str | None = None
         self.metadata = AdvisoryPlannerMetadata(
             provider_name="scripted-gemini",
@@ -307,18 +340,18 @@ class _ScriptedPlanner:
         tool_name = planner_input.envelope.context.invocation.tool_name
         self.calls_by_tool[tool_name] = self.calls_by_tool.get(tool_name, 0) + 1
         capability = self._normal_capability(planner_input)
+        target_tool_name = {
+            "stage": "stage-cloud-run-revision",
+            "promote": "promote-cloud-run-traffic",
+            "record": "create-firestore-release-record",
+        }.get(self.target_node_id)
+        if self.variant in _WRONG_VARIANTS and tool_name == target_tool_name:
+            capability = None
         arguments: dict[str, object] = {}
         effects = tuple(
             effect.effect_id for effect in planner_input.envelope.expected_effects
         )
-        if self.variant == "unknown-capability":
-            capability = "qualification-untrusted-write"
-        elif self.variant == "invalid-arguments":
-            capability = capability or planner_input.capabilities[0].name
-            arguments = {"unexpected": True}
-        elif self.variant == "unsupported-version":
-            capability = capability or planner_input.capabilities[0].name
-        elif self.variant != "normal":
+        if self.variant not in {"normal", *_WRONG_VARIANTS}:
             raise ValueError("unknown scripted qualification planner variant")
 
         admitted = tuple(item.evidence_id for item in planner_input.admitted_evidence)
@@ -343,9 +376,7 @@ class _ScriptedPlanner:
                 ProbeRequest(
                     schema_version=PROBE_REQUEST_VERSION,
                     capability_name=capability,
-                    capability_version=(
-                        "9.9.9" if self.variant == "unsupported-version" else "1.0.0"
-                    ),
+                    capability_version="1.0.0",
                     relevant_effect_ids=effects,
                     arguments=arguments,
                     rationale="Acquire one bounded provider observation.",
@@ -356,7 +387,11 @@ class _ScriptedPlanner:
             schema_version=ADAPTIVE_PLANNER_OUTPUT_VERSION,
             probe_proposals=proposal,
             acquisition_advice=PlannerAcquisitionAdvice(
-                summary="Use one bounded read from the sealed catalog."
+                summary=(
+                    "Use one bounded read from the sealed catalog."
+                    if self.variant == "normal"
+                    else f"Use one bounded read for {self.variant}."
+                )
             ),
             stop_advice=PlannerStopAdvice(
                 recommend_stop=not proposal,
@@ -396,6 +431,63 @@ class _ScriptedPlanner:
         self.call_tools.append(tool_name)
         return turn
 
+    def transform_hypothesis(
+        self,
+        hypothesis: GeminiHypothesis,
+        _report: InvestigationReport,
+    ) -> GeminiHypothesis:
+        """Inject one schema-valid factual error at the selected target node."""
+
+        if self.variant == "normal" or hypothesis.node_id != self.target_node_id:
+            return hypothesis
+        self.expected_hypotheses_by_id[hypothesis.hypothesis_id] = hypothesis
+        update: dict[str, object]
+        if self.variant == "wrong-classification":
+            update = {
+                "proposed_classification": _different_classification(
+                    hypothesis.proposed_classification
+                )
+            }
+        elif self.variant == "wrong-effect-state":
+            effects = list(hypothesis.effect_hypotheses)
+            first = effects[0]
+            effects[0] = first.model_copy(
+                update={"state": _different_effect_state(first.state)}
+            )
+            update = {"effect_hypotheses": tuple(effects)}
+        elif self.variant == "wrong-alternative-history":
+            classification = _different_classification(
+                hypothesis.proposed_classification
+            )
+            state = (
+                EffectAssertionState.ESTABLISHED
+                if classification is Classification.COMMITTED
+                else EffectAssertionState.NOT_ESTABLISHED
+            )
+            update = {
+                "alternative_histories": (
+                    PossibleHistory(
+                        history_id="qualification-wrong-alternative",
+                        classification=classification,
+                        effect_states=tuple(
+                            HypothesizedEffect(
+                                effect_id=item.effect_id,
+                                state=state,
+                                cited_evidence_ids=item.cited_evidence_ids,
+                            )
+                            for item in hypothesis.effect_hypotheses
+                        ),
+                        compatible_evidence_ids=hypothesis.cited_evidence_ids,
+                        summary="A schema-valid but factually incorrect history.",
+                    ),
+                )
+            }
+        else:  # pragma: no cover - constructor/plan validates the variant
+            raise AssertionError("unknown wrong-hypothesis variant")
+        return GeminiHypothesis.model_validate(
+            hypothesis.model_copy(update=update).model_dump(mode="python")
+        )
+
 
 class _RecordingEvidenceSource:
     def __init__(
@@ -404,10 +496,12 @@ class _RecordingEvidenceSource:
         target_node_id: str,
         *,
         repeat_target_primary: bool,
+        target_replay_state: RecoveryEvidenceState | None,
     ) -> None:
         self.delegate = delegate
         self.target_node_id = target_node_id
         self.repeat_target_primary = repeat_target_primary
+        self.target_replay_state = target_replay_state
         self._target_primary_repeated = False
         self.probe_count = 0
         self.elapsed_ms = 0
@@ -475,6 +569,8 @@ class _RecordingEvidenceSource:
         node: RecoveryActionNode,
         envelope: ExecutionEnvelope,
     ) -> RecoveryEvidenceState:
+        if node.node_id == self.target_node_id and self.target_replay_state is not None:
+            return self._record(node, self.target_replay_state, refresh=True)
         state = await self.delegate.current(run_id, node, envelope)
         if (
             node.node_id == self.target_node_id
@@ -597,6 +693,22 @@ class _CrashAfterCompletedTargetDispatch:
         return receipt
 
 
+class _QualificationDispatchHeld(asyncio.CancelledError):
+    """Internal signal that a safety replay reached its dispatch boundary."""
+
+
+async def _run_to_qualification_dispatch_boundary(
+    workflow: ProofToPermitWorkflow,
+    run_id: str,
+) -> RecoveryRunSnapshot | None:
+    """Return ``None`` only for the runner's private dispatch-hold signal."""
+
+    try:
+        return await workflow.run(run_id)
+    except _QualificationDispatchHeld:
+        return None
+
+
 class _StopBeforeTargetDispatch:
     """Stop a safety replay after its target permit is durably issued."""
 
@@ -617,7 +729,7 @@ class _StopBeforeTargetDispatch:
             scope.authority_kind is RecoveryAuthorityKind.ACTION_PERMIT
             and prepared.source_node_id == self._target_node_id
         ):
-            raise asyncio.CancelledError
+            raise _QualificationDispatchHeld
         return await self._delegate.dispatch(prepared, scope)
 
 
@@ -1230,6 +1342,7 @@ async def _wrong_hypotheses(
     baseline_decision: RecoveryDecision,
     baseline_artifact: VerifiedCertificate | AmbiguityWitness,
     baseline_state: RecoveryEvidenceState,
+    permit_clock: Callable[[], datetime],
 ) -> tuple[RecoveryQualificationWrongExecution, ...]:
     """Run each bad Gemini proposal through an isolated production workflow."""
 
@@ -1244,6 +1357,9 @@ async def _wrong_hypotheses(
         foundation = build_recovery_qualification_foundation(
             fixture,
             state_directory=state_directory / variant,
+            # Replay certificates retain the baseline evidence timestamp, so
+            # their authority must advance from that same per-case clock.
+            permit_clock=permit_clock,
         )
         provider = foundation.provider
         provider.require_supported()
@@ -1259,7 +1375,7 @@ async def _wrong_hypotheses(
                 ),
                 conflicting=True,
             )
-        planner = _ScriptedPlanner(variant)
+        planner = _ScriptedPlanner(variant, target_node_id=target_node_id)
         stores = foundation.stores.open()
         workflow, source = _build_workflow(
             foundation=foundation,
@@ -1269,6 +1385,7 @@ async def _wrong_hypotheses(
             target_node_id=target_node_id,
             fixture=fixture,
             stop_before_target_dispatch=True,
+            target_replay_state=baseline_state,
         )
         request = RecoveryRunRequest(
             schema_version=RECOVERY_RUN_REQUEST_VERSION,
@@ -1282,9 +1399,11 @@ async def _wrong_hypotheses(
             definition.chain,
             created_at=provider.invoked_at,
         )
-        try:
-            snapshot = await workflow.run(request.run_id)
-        except asyncio.CancelledError:
+        snapshot = await _run_to_qualification_dispatch_boundary(
+            workflow,
+            request.run_id,
+        )
+        if snapshot is None:
             snapshot = await stores.run_store.get(request.run_id)
         events = await stores.run_store.events(request.run_id)
         decision, artifact = _target_decision(events, target_node_id)
@@ -1321,18 +1440,37 @@ async def _wrong_hypotheses(
         if hypothesis.node_id != target_node_id:
             raise AssertionError("wrong hypothesis audit changed target identity")
         if disposition not in {
-            RecoveryHypothesisDisposition.UNSUPPORTED_ACTION,
-            RecoveryHypothesisDisposition.UNSUPPORTED_PROBE,
-            RecoveryHypothesisDisposition.INVALID_BINDING,
+            RecoveryHypothesisDisposition.SELECTED,
+            RecoveryHypothesisDisposition.NO_PROBE,
         }:
-            raise AssertionError("wrong qualification hypothesis was not rejected")
+            raise AssertionError("wrong factual hypothesis used an invalid probe path")
+        expected_hypothesis = planner.expected_hypotheses_by_id.get(
+            hypothesis.hypothesis_id
+        )
+        if expected_hypothesis is None:
+            raise AssertionError("wrong hypothesis lacks its expected oracle")
+        wrongness_kind = {
+            "wrong-classification": (
+                RecoveryQualificationHypothesisWrongnessKind.CLASSIFICATION
+            ),
+            "wrong-effect-state": (
+                RecoveryQualificationHypothesisWrongnessKind.EFFECT_STATE
+            ),
+            "wrong-alternative-history": (
+                RecoveryQualificationHypothesisWrongnessKind.ALTERNATIVE_HISTORIES
+            ),
+        }[variant]
         decision_sha256 = _decision_semantic_sha256(decision, artifact, state)
         permit_sha256 = _permit_semantic_sha256(artifact)
         _require_exact_artifact_permit(snapshot.action_permits, artifact)
         results.append(
             RecoveryQualificationWrongExecution(
-                variant_id=f"wrong-gemini-hypothesis-{index}",
+                variant_id=variant,
+                wrongness_kind=wrongness_kind,
                 planner_output_sha256=planner.turns[target_index].output_sha256,
+                report=state.report,
+                expected_hypothesis=expected_hypothesis,
+                hypothesis=hypothesis,
                 hypothesis_sha256=canonical_sha256(hypothesis),
                 disposition=disposition,
                 decision_sha256=decision_sha256,
@@ -1343,7 +1481,11 @@ async def _wrong_hypotheses(
             decision_sha256 != baseline_decision_sha256
             or permit_sha256 != baseline_permit
         ):
-            raise AssertionError("wrong hypothesis changed deterministic authority")
+            raise AssertionError(
+                f"wrong hypothesis {variant!r} changed deterministic authority: "
+                f"decision {decision_sha256} != {baseline_decision_sha256} or "
+                f"permit {permit_sha256} != {baseline_permit}"
+            )
     return tuple(results)
 
 
@@ -1543,6 +1685,11 @@ async def _duplicate_witness_state(
             rationale="Replay one exact target-bound provider observation.",
         )
         execution = await controller.execute(request)
+        if execution.audit.sequence <= len(engine.attempts):
+            raise AssertionError(
+                "witness replay reached a terminal controller state before "
+                "the preregistered sequence completed"
+            )
         engine.process(ProbeRun(request=request, execution=execution))
     audit = controller.audit_trail
     evaluation = engine.evaluate(audit)
@@ -1714,6 +1861,7 @@ def _build_workflow(
     fixture: RecoveryQualificationFixture,
     crash_after_completed_target_dispatch: bool = False,
     stop_before_target_dispatch: bool = False,
+    target_replay_state: RecoveryEvidenceState | None = None,
 ) -> tuple[ProofToPermitWorkflow, _RecordingEvidenceSource]:
     provider = foundation.provider
     evidence = _RecordingEvidenceSource(
@@ -1729,6 +1877,7 @@ def _build_workflow(
         target_node_id,
         repeat_target_primary=provider.archetype_id
         in {"stage-conflict", "promote-conflict"},
+        target_replay_state=target_replay_state,
     )
     gateway = ReleaseChainDispatchGateway(
         settings=provider.settings,
@@ -1751,7 +1900,13 @@ def _build_workflow(
         definition_factory=lambda _request: definition,
         evidence_source=evidence,
         action_preparer=ReleaseChainActionPreparer(),
-        recovery_agent=RecoveryAgent(planner, clock=provider.clock),
+        recovery_agent=RecoveryAgent(
+            planner,
+            clock=provider.clock,
+            hypothesis_transformer=(
+                planner.transform_hypothesis if planner.variant != "normal" else None
+            ),
+        ),
         rollout_agent=RolloutAgent(dispatch_gateway),
         permit_authority=stores.permit_authority,
         clock=provider.clock,
@@ -1802,11 +1957,11 @@ async def prepare_recovery_qualification_contention_dispatch(
         definition.chain,
         created_at=provider.invoked_at,
     )
-    try:
-        await workflow.run(request.run_id)
-    except asyncio.CancelledError:
-        pass
-    else:  # pragma: no cover - guarded by the stop-before-dispatch boundary
+    held_snapshot = await _run_to_qualification_dispatch_boundary(
+        workflow,
+        request.run_id,
+    )
+    if held_snapshot is not None:  # pragma: no cover - guarded by the boundary
         raise AssertionError("contention setup dispatched its target transition")
 
     snapshot = await stores.run_store.get(request.run_id)
@@ -1991,6 +2146,9 @@ async def execute_recovery_qualification_proof_lane(
         try:
             await workflow.run(request.run_id)
         except asyncio.CancelledError:
+            current_task = asyncio.current_task()
+            if current_task is not None and current_task.cancelling():
+                raise
             pass
         else:  # pragma: no cover - guarded by the deterministic fault boundary
             raise AssertionError("qualification restart boundary did not interrupt")
@@ -2069,6 +2227,7 @@ async def execute_recovery_qualification_proof_lane(
             baseline_decision=decision,
             baseline_artifact=artifact,
             baseline_state=state,
+            permit_clock=provider.clock,
         )
         if policy is RecoveryQualificationPolicy.FIXED and _include_safety_replays
         else ()

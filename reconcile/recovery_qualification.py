@@ -156,6 +156,7 @@ def _require_environment_matches_manifest(
 def _require_results_match_manifest(
     manifest: RecoveryQualificationManifest,
     results: RecoveryQualificationResults,
+    environment: RecoveryQualificationEnvironment | None = None,
 ) -> None:
     """Cross-check facts that cannot be derived inside one standalone record."""
 
@@ -196,20 +197,32 @@ def _require_results_match_manifest(
             and lane.issued_permit_action is archetype.expected_permit_action
             for lane in lanes[2:]
         )
-        metrics_match = (
+        fixed_metrics_match = (
             lanes[2].probe_count == archetype.fixed_probe_count
-            and lanes[3].probe_count == archetype.adaptive_probe_count
             and lanes[2].unsupported_probe_count
             == archetype.fixed_unsupported_probe_count
+        )
+        adaptive_metrics_match = (
+            environment is not None
+            and environment.execution_basis
+            is RecoveryQualificationExecutionBasis.LIVE_VERTEX
+        ) or (
+            lanes[3].probe_count == archetype.adaptive_probe_count
             and lanes[3].unsupported_probe_count
             == archetype.adaptive_unsupported_probe_count
         )
+        metrics_match = fixed_metrics_match and adaptive_metrics_match
         profile_matches = all(
             lane.demonstrated_evidence_profile == archetype.evidence_profile
             for lane in lanes[2:]
         )
         restart_matches = proof.restart_exercised is (fixture.seed == manifest.seeds[0])
         variants = tuple(replay.variant_id for replay in proof.wrong_hypothesis_replays)
+        wrong_hypotheses_bound = all(
+            replay.hypothesis.node_id == archetype.stage.value
+            and replay.expected_hypothesis.node_id == archetype.stage.value
+            for replay in proof.wrong_hypothesis_replays
+        )
         if (
             not common
             or results.suite_id != manifest.suite_id
@@ -218,8 +231,13 @@ def _require_results_match_manifest(
             or not metrics_match
             or not profile_matches
             or not restart_matches
+            or not wrong_hypotheses_bound
             or variants
-            != tuple(f"wrong-gemini-hypothesis-{value}" for value in range(1, 4))
+            != (
+                "wrong-classification",
+                "wrong-effect-state",
+                "wrong-alternative-history",
+            )
         ):
             raise RecoveryQualificationError(
                 "qualification results contradict the frozen manifest"
@@ -319,63 +337,253 @@ def _sha256_file(path: Path) -> str:
 def recovery_qualification_source_state(
     repository: str | Path,
 ) -> tuple[str, str, bool]:
-    """Return the exact Git revision, worktree content digest, and clean flag."""
+    """Measure worktree bytes and modes directly against the committed tree."""
 
-    root = Path(repository).resolve()
+    try:
+        root = Path(repository).resolve(strict=True)
+    except OSError as error:
+        raise RecoveryQualificationError(
+            "qualification repository is unavailable"
+        ) from error
     if not root.is_dir():
         raise RecoveryQualificationError("qualification repository is unavailable")
     try:
+        top_level = Path(
+            subprocess.run(
+                ("git", "rev-parse", "--show-toplevel"),
+                cwd=root,
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+        ).resolve(strict=True)
+        if top_level != root:
+            raise RecoveryQualificationError(
+                "qualification repository must be the Git top-level"
+            )
         revision = subprocess.run(
-            ("git", "rev-parse", "HEAD"),
+            ("git", "rev-parse", "--verify", "HEAD^{commit}"),
             cwd=root,
             check=True,
             capture_output=True,
             text=True,
         ).stdout.strip()
-        names = subprocess.run(
-            (
-                "git",
-                "ls-files",
-                "--cached",
-                "--others",
-                "--exclude-standard",
-                "-z",
-            ),
+        index_status = subprocess.run(
+            ("git", "diff-index", "--cached", "--quiet", "HEAD", "--"),
+            cwd=root,
+            check=False,
+            capture_output=True,
+        )
+        if index_status.returncode == 1:
+            raise RecoveryQualificationError(
+                "qualification Git index must exactly match HEAD"
+            )
+        if index_status.returncode != 0:
+            raise RecoveryQualificationError(
+                "qualification Git index identity is unavailable"
+            )
+        tree_output = subprocess.run(
+            ("git", "ls-tree", "-rz", "--full-tree", "HEAD"),
             cwd=root,
             check=True,
             capture_output=True,
-        ).stdout.split(b"\0")
-        dirty = bool(
-            subprocess.run(
-                ("git", "status", "--porcelain", "--untracked-files=all"),
+        ).stdout
+        untracked = tuple(
+            name
+            for name in subprocess.run(
+                ("git", "ls-files", "--others", "--exclude-standard", "-z"),
                 cwd=root,
                 check=True,
                 capture_output=True,
-            ).stdout
+            ).stdout.split(b"\0")
+            if name
         )
+    except RecoveryQualificationError:
+        raise
     except (OSError, subprocess.CalledProcessError) as error:
         raise RecoveryQualificationError(
             "qualification source identity is unavailable"
         ) from error
-    digest = hashlib.sha256()
-    for encoded_name in sorted(name for name in names if name):
+
+    tracked: list[tuple[bytes, bytes, bytes]] = []
+    for entry in tree_output.split(b"\0"):
+        if not entry:
+            continue
         try:
-            name = encoded_name.decode("utf-8")
-            path = root / name
-            payload = (
-                os.fsencode(os.readlink(path))
-                if path.is_symlink()
-                else path.read_bytes()
+            metadata, encoded_name = entry.split(b"\t", 1)
+            mode, kind, object_id = metadata.split(b" ", 2)
+        except ValueError as error:
+            raise RecoveryQualificationError(
+                "qualification Git tree is malformed"
+            ) from error
+        if kind != b"blob" or mode not in {b"100644", b"100755", b"120000"}:
+            raise RecoveryQualificationError(
+                "qualification Git tree contains an unsupported entry"
             )
-        except (OSError, UnicodeDecodeError) as error:
+        tracked.append((encoded_name, mode, object_id))
+    if not tracked:
+        raise RecoveryQualificationError("qualification Git tree is empty")
+    try:
+        batch = subprocess.run(
+            (
+                "git",
+                "cat-file",
+                "--batch",
+            ),
+            cwd=root,
+            check=True,
+            input=b"".join(object_id + b"\n" for _, _, object_id in tracked),
+            capture_output=True,
+        ).stdout
+    except (OSError, subprocess.CalledProcessError) as error:
+        raise RecoveryQualificationError(
+            "qualification source identity is unavailable"
+        ) from error
+
+    head_payloads: dict[bytes, bytes] = {}
+    offset = 0
+    for _encoded_name, _mode, object_id in tracked:
+        header_end = batch.find(b"\n", offset)
+        if header_end < 0:
+            raise RecoveryQualificationError("qualification Git object is truncated")
+        header = batch[offset:header_end].split(b" ")
+        if len(header) != 3 or header[0] != object_id or header[1] != b"blob":
+            raise RecoveryQualificationError("qualification Git object changed")
+        try:
+            size = int(header[2])
+        except ValueError as error:
+            raise RecoveryQualificationError(
+                "qualification Git object size is invalid"
+            ) from error
+        payload_start = header_end + 1
+        payload_end = payload_start + size
+        if payload_end >= len(batch) or batch[payload_end : payload_end + 1] != b"\n":
+            raise RecoveryQualificationError("qualification Git object is truncated")
+        head_payloads[object_id] = batch[payload_start:payload_end]
+        offset = payload_end + 1
+    if offset != len(batch):
+        raise RecoveryQualificationError("qualification Git object stream changed")
+
+    actual: dict[bytes, tuple[bytes, bytes]] = {}
+    clean = not untracked
+    tracked_names = {name for name, _, _ in tracked}
+    all_names = tracked_names.union(untracked)
+    head_by_name = {name: (mode, object_id) for name, mode, object_id in tracked}
+    digest = hashlib.sha256()
+    for encoded_name in sorted(all_names):
+        try:
+            path = root / os.fsdecode(encoded_name)
+            metadata = path.lstat()
+            if stat.S_ISLNK(metadata.st_mode):
+                mode = b"120000"
+                payload = os.fsencode(os.readlink(path))
+            elif stat.S_ISREG(metadata.st_mode):
+                mode = b"100755" if metadata.st_mode & 0o111 else b"100644"
+                payload = path.read_bytes()
+            else:
+                raise OSError("unsupported worktree entry")
+        except OSError as error:
             raise RecoveryQualificationError(
                 "qualification source tree cannot be read exactly"
             ) from error
+        actual[encoded_name] = (mode, payload)
+        committed = head_by_name.get(encoded_name)
+        if committed is None:
+            clean = False
+        else:
+            head_mode, object_id = committed
+            if (mode, payload) != (head_mode, head_payloads[object_id]):
+                clean = False
+        digest.update(len(mode).to_bytes(8, "big"))
+        digest.update(mode)
         digest.update(len(encoded_name).to_bytes(8, "big"))
         digest.update(encoded_name)
         digest.update(len(payload).to_bytes(8, "big"))
         digest.update(payload)
-    return revision, digest.hexdigest(), not dirty
+    return revision, digest.hexdigest(), clean
+
+
+def _measured_recovery_qualification_source(
+    repository: str | Path,
+) -> tuple[Path, str, str, bool, str]:
+    try:
+        root = Path(repository).resolve(strict=True)
+    except OSError as error:
+        raise RecoveryQualificationError(
+            "qualification source is unavailable"
+        ) from error
+    if not root.is_dir():
+        raise RecoveryQualificationError("qualification source must be a directory")
+    executing_root = _recovery_qualification_executing_repository()
+    if root != executing_root:
+        raise RecoveryQualificationError(
+            "qualification must execute from the measured repository"
+        )
+    lock_path = root / "uv.lock"
+    try:
+        lock_entry = subprocess.run(
+            ("git", "ls-tree", "HEAD", "--", "uv.lock"),
+            cwd=root,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+    except (OSError, subprocess.CalledProcessError) as error:
+        raise RecoveryQualificationError(
+            "qualification lock identity is unavailable"
+        ) from error
+    if (
+        not lock_path.is_file()
+        or lock_path.is_symlink()
+        or not lock_entry.startswith(("100644 blob ", "100755 blob "))
+    ):
+        raise RecoveryQualificationError(
+            "qualification requires the checked-in uv.lock"
+        )
+    revision, tree_sha256, clean = recovery_qualification_source_state(root)
+    return root, revision, tree_sha256, clean, _sha256_file(lock_path)
+
+
+def _recovery_qualification_executing_repository() -> Path:
+    return Path(__file__).resolve().parents[1]
+
+
+def _source_matches_environment(
+    manifest: RecoveryQualificationManifest,
+    environment: RecoveryQualificationEnvironment,
+    measured: tuple[Path, str, str, bool, str],
+) -> bool:
+    _root, revision, tree_sha256, clean, lock_sha256 = measured
+    return all(
+        (
+            clean,
+            environment.repository_clean,
+            revision == manifest.source_revision,
+            tree_sha256 == manifest.source_tree_sha256,
+            environment.source_revision == revision,
+            environment.source_tree_sha256 == tree_sha256,
+            environment.dependency_lock_sha256 == lock_sha256,
+        )
+    )
+
+
+def _require_measured_source_binding(
+    manifest: RecoveryQualificationManifest,
+    environment: RecoveryQualificationEnvironment,
+    measured: tuple[Path, str, str, bool, str],
+) -> None:
+    _root, revision, tree_sha256, clean, lock_sha256 = measured
+    if (
+        revision != manifest.source_revision
+        or tree_sha256 != manifest.source_tree_sha256
+        or environment.source_revision != revision
+        or environment.source_tree_sha256 != tree_sha256
+        or clean is not environment.repository_clean
+        or lock_sha256 != environment.dependency_lock_sha256
+    ):
+        raise RecoveryQualificationError(
+            "qualification artifacts do not match the measured source"
+        )
 
 
 def build_recovery_qualification_manifest(
@@ -422,7 +630,9 @@ def build_recovery_qualification_environment(
         RecoveryQualificationExecutionBasis.SCRIPTED
     ),
     provider_name: str | None = None,
+    provider_project: str | None = None,
     model_name: str | None = None,
+    reported_model_revision: str | None = None,
     vertex_location: str | None = None,
     python_version: str | None = None,
     platform_name: str | None = None,
@@ -447,7 +657,9 @@ def build_recovery_qualification_environment(
         dependency_lock_sha256=dependency_lock_sha256,
         test_commands=test_commands,
         provider_name=provider_name,
+        provider_project=provider_project,
         model_name=model_name,
+        reported_model_revision=reported_model_revision,
         vertex_location=vertex_location,
         generated_at=_now(generated_at),
     )
@@ -690,33 +902,30 @@ async def _execute_qualification_case(
     fixture: RecoveryQualificationFixture,
     *,
     state_root: Path,
-    proof_slots: asyncio.Semaphore,
 ) -> _RecoveryQualificationCaseExecutions:
-    async def proof(
-        policy: RecoveryQualificationPolicy,
-    ) -> RecoveryQualificationProofExecution:
-        async with proof_slots:
-            return await execute_recovery_qualification_proof_lane(
-                fixture,
-                policy=policy,
-                state_directory=state_root / fixture.case_id / policy.value,
-                restart=(
-                    policy is RecoveryQualificationPolicy.FIXED
-                    and fixture.seed == RECOVERY_QUALIFICATION_SEEDS[0]
-                ),
-            )
-
-    blind_retry, blind_abort, fixed, adaptive = await asyncio.gather(
-        execute_recovery_qualification_blind_lane(
-            fixture,
-            policy=RecoveryQualificationPolicy.BLIND_RETRY,
+    blind_retry = await execute_recovery_qualification_blind_lane(
+        fixture,
+        policy=RecoveryQualificationPolicy.BLIND_RETRY,
+    )
+    blind_abort = await execute_recovery_qualification_blind_lane(
+        fixture,
+        policy=RecoveryQualificationPolicy.BLIND_ABORT,
+    )
+    fixed = await execute_recovery_qualification_proof_lane(
+        fixture,
+        policy=RecoveryQualificationPolicy.FIXED,
+        state_directory=(
+            state_root / fixture.case_id / RecoveryQualificationPolicy.FIXED.value
         ),
-        execute_recovery_qualification_blind_lane(
-            fixture,
-            policy=RecoveryQualificationPolicy.BLIND_ABORT,
+        restart=fixture.seed == RECOVERY_QUALIFICATION_SEEDS[0],
+    )
+    adaptive = await execute_recovery_qualification_proof_lane(
+        fixture,
+        policy=RecoveryQualificationPolicy.ADAPTIVE,
+        state_directory=(
+            state_root / fixture.case_id / RecoveryQualificationPolicy.ADAPTIVE.value
         ),
-        proof(RecoveryQualificationPolicy.FIXED),
-        proof(RecoveryQualificationPolicy.ADAPTIVE),
+        restart=False,
     )
     return _RecoveryQualificationCaseExecutions(
         fixture=fixture,
@@ -725,6 +934,24 @@ async def _execute_qualification_case(
         fixed=fixed,
         adaptive=adaptive,
     )
+
+
+async def _execute_qualification_cases(
+    selected: tuple[RecoveryQualificationFixture, ...],
+    *,
+    state_root: Path,
+) -> tuple[_RecoveryQualificationCaseExecutions, ...]:
+    """Execute the frozen matrix in its declared order without host-load races."""
+
+    executions = []
+    for fixture in selected:
+        executions.append(
+            await _execute_qualification_case(
+                fixture,
+                state_root=state_root,
+            )
+        )
+    return tuple(executions)
 
 
 def _blind_lane_result(
@@ -871,8 +1098,13 @@ def _case_proof(
     wrong = tuple(
         RecoveryQualificationHypothesisReplay(
             variant_id=item.variant_id,
+            wrongness_kind=item.wrongness_kind,
             provider_name="gemini",
             planner_output_sha256=item.planner_output_sha256,
+            report=item.report,
+            expected_hypothesis=item.expected_hypothesis,
+            expected_hypothesis_sha256=canonical_sha256(item.expected_hypothesis),
+            hypothesis=item.hypothesis,
             hypothesis_sha256=item.hypothesis_sha256,
             disposition=item.disposition,
             observed_decision_sha256=item.decision_sha256,
@@ -979,16 +1211,9 @@ async def _run_recovery_qualification_in_directory(
     selected: tuple[RecoveryQualificationFixture, ...],
     state_root: Path,
 ) -> RecoveryQualificationResults:
-    proof_slots = asyncio.Semaphore(4)
-    executions = await asyncio.gather(
-        *(
-            _execute_qualification_case(
-                fixture,
-                state_root=state_root,
-                proof_slots=proof_slots,
-            )
-            for fixture in selected
-        )
+    executions = await _execute_qualification_cases(
+        selected,
+        state_root=state_root,
     )
     lane_results: list[RecoveryQualificationLaneResult] = []
     case_proofs: list[RecoveryQualificationCaseProof] = []
@@ -1226,7 +1451,7 @@ def compare_recovery_qualification(
         or results.environment_sha256 != environment_sha256
     ):
         raise RecoveryQualificationError("qualification comparison binding changed")
-    _require_results_match_manifest(manifest, results)
+    _require_results_match_manifest(manifest, results, environment)
     lanes = tuple(
         _aggregate_metrics(policy, results.lane_results)
         for policy in RECOVERY_QUALIFICATION_POLICIES
@@ -1245,8 +1470,8 @@ def compare_recovery_qualification(
         fixed_values,
         adaptive_values,
     )
-    # v1 ships only the scripted runner.  Self-attested lane fields are not an
-    # authenticated Vertex receipt and therefore cannot authorize live wording.
+    # A hosted execution cannot authorize model-use wording until issue #173
+    # supplies an independently verifiable provider evidence artifact.
     measured = False
     return RecoveryQualificationComparison(
         schema_version=RECOVERY_QUALIFICATION_COMPARISON_VERSION,
@@ -1417,11 +1642,12 @@ async def run_recovery_qualification_contention(
     manifest: RecoveryQualificationManifest,
     results: RecoveryQualificationResults,
     *,
+    environment: RecoveryQualificationEnvironment | None = None,
     working_directory: str | Path | None = None,
 ) -> RecoveryQualificationContention:
     """Exercise 32-way CONTINUE and RETRY claims in SQLite and Firestore."""
 
-    _require_results_match_manifest(manifest, results)
+    _require_results_match_manifest(manifest, results, environment)
     if (
         results.suite_id != manifest.suite_id
         or results.manifest_sha256 != canonical_sha256(manifest)
@@ -1432,6 +1658,7 @@ async def run_recovery_qualification_contention(
             return await run_recovery_qualification_contention(
                 manifest,
                 results,
+                environment=environment,
                 working_directory=value,
             )
     directory = Path(working_directory)
@@ -1456,15 +1683,19 @@ async def run_recovery_qualification_contention(
     )
 
 
-def authorize_recovery_qualification_claims(
+def _derive_recovery_qualification_claims(
     manifest: RecoveryQualificationManifest,
     environment: RecoveryQualificationEnvironment,
     results: RecoveryQualificationResults,
     contention: RecoveryQualificationContention,
     comparison: RecoveryQualificationComparison,
+    *,
+    source_exact: bool,
 ) -> RecoveryQualificationClaimAuthorization:
-    """Authorize safety separately from live-provider adaptive efficiency."""
+    """Derive claim fields after the caller establishes source provenance."""
 
+    if type(source_exact) is not bool:
+        raise TypeError("source provenance decision must be boolean")
     _require_frozen_manifest(manifest)
     _require_environment_matches_manifest(manifest, environment)
     manifest_sha256 = canonical_sha256(manifest)
@@ -1488,23 +1719,21 @@ def authorize_recovery_qualification_claims(
         )
     ):
         raise RecoveryQualificationError("claim evidence binding changed")
-    _require_results_match_manifest(manifest, results)
+    _require_results_match_manifest(manifest, results, environment)
     _require_contention_matches_protocol(manifest, results, contention)
     if comparison != compare_recovery_qualification(manifest, environment, results):
         raise RecoveryQualificationError(
             "qualification comparison does not reproduce its results"
         )
-    source_exact = all(
-        (
-            environment.repository_clean,
-            environment.source_revision == manifest.source_revision,
-            environment.source_tree_sha256 == manifest.source_tree_sha256,
-        )
-    )
-    # No authenticated live-Vertex execution path exists in the v1 runner.
-    # Keep both gates closed rather than treating model fields as provenance.
+    # The scripted runner cannot authenticate a Vertex execution.  Hosted
+    # evidence and its verifier are delivered together in issue #173; caller-
+    # supplied model fields must never open either public-claim gate here.
     live_vertex = False
     measured = False
+    if comparison.live_vertex_model_usage_measured:
+        raise RecoveryQualificationError(
+            "qualification comparison model evidence changed"
+        )
     divergences = (
         results.wrong_hypothesis_decision_divergence_count
         + results.wrong_hypothesis_permit_divergence_count
@@ -1519,16 +1748,7 @@ def authorize_recovery_qualification_claims(
             divergences == 0,
         )
     )
-    efficiency = all(
-        (
-            safety,
-            live_vertex,
-            measured,
-            recovery_qualification_adaptive_threshold_met(
-                comparison.median_probe_reduction_basis_points
-            ),
-        )
-    )
+    efficiency = False
     safety_wording = "proof-to-permit safety on the frozen recovery matrix"
     efficiency_wording = (
         "adaptive investigation reduced median probe count by at least 25 percent"
@@ -1576,6 +1796,29 @@ def authorize_recovery_qualification_claims(
     )
 
 
+def authorize_recovery_qualification_claims(
+    manifest: RecoveryQualificationManifest,
+    environment: RecoveryQualificationEnvironment,
+    results: RecoveryQualificationResults,
+    contention: RecoveryQualificationContention,
+    comparison: RecoveryQualificationComparison,
+    *,
+    source_repository: str | Path,
+) -> RecoveryQualificationClaimAuthorization:
+    """Authorize claims only against source facts measured from a repository."""
+
+    measured = _measured_recovery_qualification_source(source_repository)
+    _require_measured_source_binding(manifest, environment, measured)
+    return _derive_recovery_qualification_claims(
+        manifest,
+        environment,
+        results,
+        contention,
+        comparison,
+        source_exact=_source_matches_environment(manifest, environment, measured),
+    )
+
+
 async def build_recovery_qualification_bundle(
     *,
     source_repository: str | Path,
@@ -1584,17 +1827,14 @@ async def build_recovery_qualification_bundle(
 ) -> RecoveryQualificationBundle:
     """Build artifacts from source facts measured directly by this runner."""
 
-    repository = Path(source_repository).resolve(strict=True)
-    if not repository.is_dir():
-        raise RecoveryQualificationError("qualification source must be a directory")
-    lock_path = repository / "uv.lock"
-    if not lock_path.is_file():
-        raise RecoveryQualificationError(
-            "qualification requires the checked-in uv.lock"
-        )
-    source_state = recovery_qualification_source_state(repository)
-    source_revision, source_tree_sha256, repository_clean = source_state
-    dependency_lock_sha256 = hashlib.sha256(lock_path.read_bytes()).hexdigest()
+    measured_source = _measured_recovery_qualification_source(source_repository)
+    (
+        repository,
+        source_revision,
+        source_tree_sha256,
+        repository_clean,
+        dependency_lock_sha256,
+    ) = measured_source
     generated_at = _now(_CONTENTION_NOW if created_at is None else created_at)
     manifest = build_recovery_qualification_manifest(
         source_revision=source_revision,
@@ -1612,14 +1852,11 @@ async def build_recovery_qualification_bundle(
     contention = await run_recovery_qualification_contention(
         manifest,
         results,
+        environment=environment,
         working_directory=contention_directory,
     )
-    final_source_state = recovery_qualification_source_state(repository)
-    final_lock_sha256 = hashlib.sha256(lock_path.read_bytes()).hexdigest()
-    if (
-        final_source_state != source_state
-        or final_lock_sha256 != dependency_lock_sha256
-    ):
+    final_source = _measured_recovery_qualification_source(repository)
+    if final_source != measured_source:
         raise RecoveryQualificationError(
             "qualification source changed while the matrix was running"
         )
@@ -1630,6 +1867,7 @@ async def build_recovery_qualification_bundle(
         results,
         contention,
         comparison,
+        source_repository=repository,
     )
     return RecoveryQualificationBundle(
         manifest=manifest,
@@ -1713,54 +1951,42 @@ def export_recovery_qualification_bundle(
     directory: str | Path,
     bundle: RecoveryQualificationBundle,
     *,
-    source_repository: str | Path | None = None,
+    source_repository: str | Path,
 ) -> RecoveryQualificationIndex:
     """Create a private, non-overwriting qualification evidence directory."""
 
     if type(bundle) is not RecoveryQualificationBundle:
         raise TypeError("an exact recovery qualification bundle is required")
+    measured_source = _measured_recovery_qualification_source(source_repository)
+    source = measured_source[0]
+    target = Path(directory)
+    if not target.name or not target.parent.is_dir() or target.is_symlink():
+        raise ValueError("qualification bundle path is invalid")
+    resolved_parent = target.parent.resolve(strict=True)
+    resolved_target = resolved_parent / target.name
+    if (
+        resolved_target == source
+        or source in resolved_target.parents
+        or (resolved_target in source.parents)
+    ):
+        raise RecoveryQualificationError(
+            "qualification output must not overlap the measured source"
+        )
+    _require_measured_source_binding(
+        bundle.manifest,
+        bundle.environment,
+        measured_source,
+    )
     expected_claims = authorize_recovery_qualification_claims(
         bundle.manifest,
         bundle.environment,
         bundle.results,
         bundle.contention,
         bundle.comparison,
+        source_repository=source,
     )
     if bundle.claim_authorization != expected_claims:
         raise RecoveryQualificationError("qualification bundle claims are not bound")
-    target = Path(directory)
-    if not target.name or not target.parent.is_dir() or target.is_symlink():
-        raise ValueError("qualification bundle path is invalid")
-    resolved_parent = target.parent.resolve(strict=True)
-    resolved_target = resolved_parent / target.name
-    if source_repository is not None:
-        source = Path(source_repository).resolve(strict=True)
-        if (
-            resolved_target == source
-            or source in resolved_target.parents
-            or (resolved_target in source.parents)
-        ):
-            raise RecoveryQualificationError(
-                "qualification output must not overlap the measured source"
-            )
-        source_revision, source_tree_sha256, repository_clean = (
-            recovery_qualification_source_state(source)
-        )
-        lock_path = source / "uv.lock"
-        if not lock_path.is_file():
-            raise RecoveryQualificationError(
-                "qualification requires the checked-in uv.lock"
-            )
-        if (
-            source_revision != bundle.manifest.source_revision
-            or source_tree_sha256 != bundle.manifest.source_tree_sha256
-            or repository_clean is not bundle.environment.repository_clean
-            or hashlib.sha256(lock_path.read_bytes()).hexdigest()
-            != bundle.environment.dependency_lock_sha256
-        ):
-            raise RecoveryQualificationError(
-                "qualification source changed before bundle publication"
-            )
     if target.exists() or target.is_symlink():
         raise FileExistsError(target)
     staging = resolved_parent / f".{target.name}.tmp-{uuid4().hex}"
@@ -1807,6 +2033,11 @@ def export_recovery_qualification_bundle(
             os.fsync(directory_descriptor)
         finally:
             os.close(directory_descriptor)
+        _require_measured_source_binding(
+            bundle.manifest,
+            bundle.environment,
+            _measured_recovery_qualification_source(source),
+        )
         _rename_directory_noreplace(staging, resolved_target)
         parent_descriptor = os.open(resolved_parent, os.O_RDONLY)
         try:
@@ -1841,8 +2072,10 @@ def _read_private_canonical(path: Path) -> bytes:
 
 def verify_recovery_qualification_bundle(
     directory: str | Path,
+    *,
+    source_repository: str | Path,
 ) -> RecoveryQualificationIndex:
-    """Verify exact membership, canonical bytes, modes, hashes, and bindings."""
+    """Verify canonical artifacts and their independently measured source."""
 
     target = Path(directory)
     try:
@@ -1904,12 +2137,15 @@ def verify_recovery_qualification_bundle(
         )
     ):
         raise RecoveryQualificationError("qualification artifact type changed")
+    measured_source = _measured_recovery_qualification_source(source_repository)
+    _require_measured_source_binding(manifest, environment, measured_source)
     expected = authorize_recovery_qualification_claims(
         manifest,
         environment,
         results,
         contention,
         comparison,
+        source_repository=measured_source[0],
     )
     if claims != expected or (
         index.safety_claim_authorized != claims.safety_claim_authorized

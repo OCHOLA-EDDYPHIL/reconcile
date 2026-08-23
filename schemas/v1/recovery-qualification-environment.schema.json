@@ -70,11 +70,41 @@
       "default": null,
       "title": "Provider Name"
     },
+    "provider_project": {
+      "anyOf": [
+        {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Provider Project"
+    },
     "python_version": {
       "maxLength": 4096,
       "minLength": 1,
       "title": "Python Version",
       "type": "string"
+    },
+    "reported_model_revision": {
+      "anyOf": [
+        {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Reported Model Revision"
     },
     "repository_clean": {
       "title": "Repository Clean",

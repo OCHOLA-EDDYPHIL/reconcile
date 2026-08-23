@@ -33,7 +33,10 @@ async def _run(arguments: argparse.Namespace) -> int:
         bundle,
         source_repository=repository,
     )
-    verify_recovery_qualification_bundle(arguments.output)
+    verify_recovery_qualification_bundle(
+        arguments.output,
+        source_repository=repository,
+    )
     print(
         json.dumps(
             {

@@ -36,7 +36,8 @@ from reconcile.persistence.recovery_runs import (
     RecoveryRunEventSnapshot,
     RecoveryRunNotFound,
     RecoveryRunStoreUnavailable,
-    append_recovery_event,
+    _append_decoded_recovery_event,
+    _RecoveryRunAggregateCache,
     claim_recovery_launch,
     complete_recovery_launch,
     create_recovery_run_aggregate,
@@ -108,6 +109,40 @@ class FirestoreRecoveryRunStore:
         ):
             raise TypeError("Firestore recovery store requires a CAS store")
         self._cas = cas_store
+        self._aggregate_cache = _RecoveryRunAggregateCache()
+
+    @staticmethod
+    def _cache_identity(snapshot: FirestoreCasSnapshot) -> tuple[str | int, ...]:
+        document = snapshot.document
+        return (
+            snapshot.collection.value,
+            snapshot.document_key,
+            document.schema_version,
+            document.kind.value,
+            document.logical_id,
+            document.revision,
+            document.mutation_id,
+            document.payload_sha256,
+            snapshot.update_time.isoformat(),
+        )
+
+    def _cache_verified(
+        self,
+        run_id: str,
+        snapshot: FirestoreCasSnapshot,
+        aggregate: RecoveryRunAggregate,
+    ) -> None:
+        if (
+            snapshot.document.logical_id != run_id
+            or aggregate.snapshot.request.run_id != run_id
+        ):
+            raise RecoveryRunCorruptState(run_id)
+        self._aggregate_cache.put(
+            run_id,
+            identity=self._cache_identity(snapshot),
+            payload=snapshot.document.payload_bytes,
+            aggregate=aggregate,
+        )
 
     async def _read(
         self,
@@ -123,7 +158,18 @@ class FirestoreRecoveryRunStore:
             raise RecoveryRunStoreUnavailable from None
         if snapshot is None:
             raise RecoveryRunNotFound(run_id)
-        return snapshot, _decode(snapshot)
+        if snapshot.document.logical_id != run_id:
+            raise RecoveryRunCorruptState(run_id)
+        cached = self._aggregate_cache.get(
+            run_id,
+            identity=self._cache_identity(snapshot),
+            payload=snapshot.document.payload_bytes,
+        )
+        if cached is not None:
+            return snapshot, cached
+        aggregate = _decode(snapshot)
+        self._cache_verified(run_id, snapshot, aggregate)
+        return snapshot, aggregate
 
     async def create(
         self,
@@ -145,8 +191,9 @@ class FirestoreRecoveryRunStore:
             return existing.snapshot, False
         except Exception:
             raise RecoveryRunStoreUnavailable from None
-        if written.document != document or _decode(written) != aggregate:
+        if written.document != document:
             raise RecoveryRunCorruptState(request.run_id)
+        self._cache_verified(request.run_id, written, aggregate)
         return aggregate.snapshot, True
 
     async def get(self, run_id: str) -> RecoveryRunSnapshot:
@@ -182,8 +229,9 @@ class FirestoreRecoveryRunStore:
                 continue
             except Exception:
                 raise RecoveryRunStoreUnavailable from None
-            if written.document != document or _decode(written) != replacement:
+            if written.document != document:
                 raise RecoveryRunCorruptState(run_id)
+            self._cache_verified(run_id, written, replacement)
             return replacement
         raise RecoveryRunStoreUnavailable
 
@@ -199,7 +247,7 @@ class FirestoreRecoveryRunStore:
         def mutate(aggregate: RecoveryRunAggregate) -> RecoveryRunAggregate:
             if aggregate.snapshot.revision != expected_revision:
                 raise RecoveryRunConflict(run_id)
-            return append_recovery_event(
+            return _append_decoded_recovery_event(
                 aggregate,
                 event_type=event_type,
                 payload=payload,

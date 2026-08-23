@@ -31,9 +31,10 @@ def test_both_permit_actions_survive_32_way_sqlite_and_firestore_contention(
     tmp_path,
     monkeypatch,
 ) -> None:
+    repository = Path(__file__).parents[2]
     bundle = asyncio.run(
         build_recovery_qualification_bundle(
-            source_repository=Path(__file__).parents[2],
+            source_repository=repository,
             created_at=NOW,
             contention_directory=tmp_path,
         )
@@ -71,9 +72,19 @@ def test_both_permit_actions_survive_32_way_sqlite_and_firestore_contention(
     assert bundle.claim_authorization.adaptive_efficiency_claim_authorized is False
 
     destination = tmp_path / "proof-to-permit-qualification-v1"
-    index = export_recovery_qualification_bundle(destination, bundle)
+    index = export_recovery_qualification_bundle(
+        destination,
+        bundle,
+        source_repository=repository,
+    )
 
-    assert verify_recovery_qualification_bundle(destination) == index
+    assert (
+        verify_recovery_qualification_bundle(
+            destination,
+            source_repository=repository,
+        )
+        == index
+    )
     assert {item.name for item in destination.iterdir()} == {
         "manifest.json",
         "environment.json",
@@ -87,13 +98,17 @@ def test_both_permit_actions_survive_32_way_sqlite_and_firestore_contention(
         stat.S_IMODE(item.stat().st_mode) == 0o600 for item in destination.iterdir()
     )
     with pytest.raises(FileExistsError):
-        export_recovery_qualification_bundle(destination, bundle)
+        export_recovery_qualification_bundle(
+            destination,
+            bundle,
+            source_repository=repository,
+        )
 
     with pytest.raises(RecoveryQualificationError, match="must not overlap"):
         export_recovery_qualification_bundle(
-            tmp_path / "inside-source",
+            repository / ".qualification-inside-source-test",
             bundle,
-            source_repository=tmp_path,
+            source_repository=repository,
         )
 
     original_write = recovery_qualification_module._write_exclusive
@@ -113,11 +128,18 @@ def test_both_permit_actions_survive_32_way_sqlite_and_firestore_contention(
     )
     interrupted = tmp_path / "interrupted-bundle"
     with pytest.raises(OSError, match="injected qualification"):
-        export_recovery_qualification_bundle(interrupted, bundle)
+        export_recovery_qualification_bundle(
+            interrupted,
+            bundle,
+            source_repository=repository,
+        )
     assert not interrupted.exists()
     assert not tuple(tmp_path.glob(".interrupted-bundle.tmp-*"))
 
     environment_path = destination / "environment.json"
     os.chmod(environment_path, 0o644)
     with pytest.raises(RecoveryQualificationError, match="mode is not 0600"):
-        verify_recovery_qualification_bundle(destination)
+        verify_recovery_qualification_bundle(
+            destination,
+            source_repository=repository,
+        )
