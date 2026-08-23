@@ -13,6 +13,7 @@ from typing import Literal
 from pydantic import Field, ValidationError, model_validator
 
 from reconcile.contracts.base import (
+    ArgumentsObject,
     Identifier,
     NonEmptyText,
     Sha256Digest,
@@ -20,7 +21,7 @@ from reconcile.contracts.base import (
     canonical_json_value_bytes,
 )
 from reconcile.contracts.codec import canonical_sha256
-from reconcile.contracts.common import Classification
+from reconcile.contracts.common import Classification, TargetBinding
 from reconcile.contracts.envelope import ExpectedEffect
 from reconcile.contracts.evidence import (
     EffectAssertionState,
@@ -532,6 +533,57 @@ def resolve_recovery_action_profile(
     if profile is None:
         raise RecoveryRuleViolation("semantic action names an unsupported profile")
     validate_recovery_action(profile, action)
+    return profile
+
+
+def validate_recovery_dispatch(
+    action: SemanticActionIdentity,
+    *,
+    tool_name: str,
+    tool_version: str,
+    arguments: ArgumentsObject,
+    target: TargetBinding,
+    precondition: dict[str, object],
+) -> RecoveryActionProfile:
+    """Validate an outbound call against one sealed semantic action profile."""
+
+    profile = resolve_recovery_action_profile(action)
+    if type(target) is not TargetBinding:
+        raise TypeError("dispatch target must be exact")
+    if type(arguments) is not dict or type(precondition) is not dict:
+        raise TypeError("dispatch arguments and precondition must be exact objects")
+    if (
+        tool_name != action.tool_name
+        or tool_version != action.tool_version
+        or arguments != action.semantic_arguments
+        or target != action.target
+    ):
+        raise RecoveryRuleViolation(
+            "dispatch identity does not match the sealed semantic action"
+        )
+
+    if profile.precondition_kind is RecoveryPreconditionKind.NONE:
+        valid_precondition = set(precondition) == {"none"} and (
+            precondition["none"] is True
+        )
+    elif profile.precondition_kind is RecoveryPreconditionKind.CLOUD_RUN_SERVICE_ETAG:
+        etag = precondition.get("service_etag")
+        valid_precondition = set(precondition) == {"service_etag"} and type(etag) is str
+        if valid_precondition:
+            try:
+                _provider_value(etag, label="service_etag")
+            except ValueError:
+                valid_precondition = False
+    elif profile.precondition_kind is RecoveryPreconditionKind.FIRESTORE_MUST_NOT_EXIST:
+        valid_precondition = set(precondition) == {"exists"} and (
+            precondition["exists"] is False
+        )
+    else:  # pragma: no cover - the sealed inventory is exhaustive
+        valid_precondition = False
+    if not valid_precondition:
+        raise RecoveryRuleViolation(
+            "dispatch precondition does not match the sealed action profile"
+        )
     return profile
 
 
@@ -1382,6 +1434,7 @@ __all__ = [
     "recovery_provider_conflict_pairs",
     "resolve_recovery_action_profile",
     "validate_recovery_action",
+    "validate_recovery_dispatch",
     "validate_recovery_evidence",
     "validate_recovery_proof",
 ]

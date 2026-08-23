@@ -68,11 +68,11 @@ def test_fresh_runtime_records_current_schema_version(tmp_path: Path) -> None:
             """
         ).fetchone()[0]
 
-    assert version == "4"
+    assert version == "5"
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize("version", ("1", "2", "3", "5"))
+@pytest.mark.parametrize("version", ("1", "2", "3", "6"))
 def test_backward_and_forward_runtime_schemas_fail_closed(
     tmp_path: Path,
     version: str,
@@ -97,6 +97,53 @@ def test_backward_and_forward_runtime_schemas_fail_closed(
 
     with pytest.raises(UnsupportedDurableSchema):
         SqliteDurableRuntimeStore(database)
+
+
+@pytest.mark.unit
+def test_runtime_schema_v4_migrates_to_v5_without_losing_rows(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        store, envelope = await _created_store(tmp_path)
+        assert (await store.list_runs())[
+            0
+        ].investigation_id == envelope.investigation_id
+
+        database = tmp_path / "runtime.sqlite3"
+        with sqlite3.connect(database) as connection:
+            connection.execute("DROP TABLE action_permit_audits")
+            connection.execute("DROP TABLE action_permits")
+            connection.execute(
+                """
+                UPDATE runtime_metadata
+                SET metadata_value = '4'
+                WHERE metadata_key = 'schema_version'
+                """
+            )
+
+        migrated = SqliteDurableRuntimeStore(database)
+        assert (await migrated.list_runs())[0].investigation_id == (
+            envelope.investigation_id
+        )
+        with sqlite3.connect(database) as connection:
+            version = connection.execute(
+                """
+                SELECT metadata_value
+                FROM runtime_metadata
+                WHERE metadata_key = 'schema_version'
+                """
+            ).fetchone()[0]
+            permit_tables = {
+                row[0]
+                for row in connection.execute(
+                    """
+                    SELECT name FROM sqlite_master
+                    WHERE type = 'table' AND name LIKE 'action_permit%'
+                    """
+                )
+            }
+        assert version == "5"
+        assert permit_tables == {"action_permits", "action_permit_audits"}
+
+    asyncio.run(scenario())
 
 
 def _limits(envelope: ExecutionEnvelope):

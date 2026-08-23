@@ -27,6 +27,7 @@ from reconcile.evidence.recovery_rules import (
     recovery_precondition_sha256,
     resolve_recovery_action_profile,
     validate_recovery_action,
+    validate_recovery_dispatch,
     validate_recovery_evidence,
     validate_recovery_proof,
 )
@@ -98,6 +99,7 @@ __all__ = [
     "recovery_precondition_sha256",
     "resolve_recovery_action_profile",
     "validate_recovery_action",
+    "validate_recovery_dispatch",
     "validate_recovery_evidence",
     "validate_recovery_proof",
     "verify_recovery",
