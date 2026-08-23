@@ -1490,7 +1490,9 @@ def recovery_qualification_provider_scenario(
     try:
         expected_generation = RECOVERY_QUALIFICATION_SEEDS.index(fixture.seed) + 1
     except ValueError:
-        raise ValueError("qualification fixture seed is outside the frozen schedule") from None
+        raise ValueError(
+            "qualification fixture seed is outside the frozen schedule"
+        ) from None
     if fixture.initial_provider_generation != expected_generation:
         raise ValueError("qualification fixture provider generation changed")
     return replace(

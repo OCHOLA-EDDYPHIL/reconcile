@@ -2,19 +2,26 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import replace
 from datetime import UTC, datetime
 
 import pytest
 
-from reconcile.contracts import PermitAction
+from reconcile.contracts import (
+    PermitAction,
+    RecoveryHypothesisDisposition,
+    RecoveryRunFault,
+)
 from reconcile.contracts.recovery_qualification import (
     RECOVERY_QUALIFICATION_SEEDS,
     RecoveryQualificationExecutionBasis,
     RecoveryQualificationFaultClass,
     RecoveryQualificationOpportunity,
+    RecoveryQualificationPolicy,
     RecoveryQualificationResolution,
     RecoveryQualificationStage,
+    RecoveryQualificationWitnessReplayKind,
 )
 from reconcile.recovery_qualification import (
     RecoveryQualificationError,
@@ -25,6 +32,10 @@ from reconcile.recovery_qualification import (
     recovery_qualification_median_reduction_basis_points,
     replay_recovery_qualification_fixture,
     run_recovery_qualification,
+)
+from reconcile.recovery_qualification_execution import (
+    _fault,
+    execute_recovery_qualification_proof_lane,
 )
 from reconcile.recovery_qualification_fixtures import (
     RECOVERY_QUALIFICATION_ARCHETYPES,
@@ -101,14 +112,78 @@ def test_each_archetype_varies_provider_precondition_state_across_seeds() -> Non
     for fixture in fixtures:
         scenario = recovery_qualification_provider_scenario(fixture)
         provider = build_recovery_qualification_provider(fixture)
-        assert scenario.initial_service_generation == fixture.initial_provider_generation
+        assert (
+            scenario.initial_service_generation == fixture.initial_provider_generation
+        )
         generations_by_archetype.setdefault(
             fixture.archetype.archetype_id,
             set(),
         ).add(provider.snapshot().service_generation)
 
     assert len(fixtures) == 100
-    assert all(values == {1, 2, 3, 4, 5} for values in generations_by_archetype.values())
+    assert all(
+        values == {1, 2, 3, 4, 5} for values in generations_by_archetype.values()
+    )
+
+
+def test_only_explicit_fault_boundaries_use_production_fault_toggles() -> None:
+    fixtures = build_recovery_qualification_fixtures()
+
+    by_archetype = {
+        fixture.archetype.archetype_id: fixture
+        for fixture in fixtures
+        if fixture.seed == RECOVERY_QUALIFICATION_SEEDS[0]
+    }
+    assert _fault(by_archetype["stage-drop-committed"]) is (
+        RecoveryRunFault.DROP_AFTER_ACCEPT
+    )
+    assert _fault(by_archetype["record-predispatch-retry"]) is (
+        RecoveryRunFault.SUPPRESS_BEFORE_DISPATCH
+    )
+    assert _fault(by_archetype["promote-committed"]) is RecoveryRunFault.NO_FAULT
+    assert _fault(by_archetype["stage-unavailable"]) is RecoveryRunFault.NO_FAULT
+    assert _fault(by_archetype["record-outcome-unknown"]) is (RecoveryRunFault.NO_FAULT)
+
+
+@pytest.mark.parametrize(
+    ("archetype_id", "expected_kind"),
+    (
+        (
+            "stage-conflict",
+            RecoveryQualificationWitnessReplayKind.EVIDENCE_DUPLICATION,
+        ),
+        (
+            "stage-absence",
+            RecoveryQualificationWitnessReplayKind.ZERO_EVIDENCE_REPLAY,
+        ),
+    ),
+)
+def test_witness_replay_distinguishes_admitted_from_zero_evidence(
+    tmp_path,
+    archetype_id: str,
+    expected_kind: RecoveryQualificationWitnessReplayKind,
+) -> None:
+    fixture = next(
+        item
+        for item in build_recovery_qualification_fixtures()
+        if item.archetype.archetype_id == archetype_id
+    )
+
+    result = asyncio.run(
+        execute_recovery_qualification_proof_lane(
+            fixture,
+            policy=RecoveryQualificationPolicy.FIXED,
+            state_directory=tmp_path / archetype_id,
+            restart=False,
+        )
+    )
+
+    assert result.witness_replay_kind is expected_kind
+    assert result.replayed_witness_semantic_sha256 == result.witness_semantic_sha256
+    assert all(item.hypothesis_sha256 for item in result.wrong_hypotheses)
+    assert {item.disposition for item in result.wrong_hypotheses} == {
+        RecoveryHypothesisDisposition.UNSUPPORTED_PROBE
+    }
 
 
 def test_matrix_records_four_hundred_lanes_and_all_safety_replays() -> None:
@@ -125,6 +200,13 @@ def test_matrix_records_four_hundred_lanes_and_all_safety_replays() -> None:
     assert results.wrong_hypothesis_decision_divergence_count == 0
     assert results.wrong_hypothesis_permit_divergence_count == 0
     assert results.witness_replay_valid_count == results.witness_case_count == 55
+    assert results.witness_evidence_duplication_case_count > 0
+    assert results.witness_zero_evidence_replay_case_count > 0
+    assert (
+        results.witness_evidence_duplication_case_count
+        + results.witness_zero_evidence_replay_case_count
+        == results.witness_case_count
+    )
     assert results.non_authorizing_certificate_case_count == 15
     assert results.restart_valid_count == results.restart_case_count == 20
     assert (results.sqlite_case_count, results.firestore_case_count) == (50, 50)
@@ -153,9 +235,7 @@ def test_same_id_fixture_content_cannot_drift_from_frozen_catalog() -> None:
         run_recovery_qualification(manifest, environment, fixtures=tuple(fixtures))
 
 
-def test_hypotheses_and_evidence_order_cannot_change_deterministic_authority() -> (
-    None
-):
+def test_hypotheses_and_evidence_order_cannot_change_deterministic_authority() -> None:
     fixture = build_recovery_qualification_fixtures()[0]
     baseline = replay_recovery_qualification_fixture(fixture)
 

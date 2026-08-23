@@ -68,9 +68,7 @@ def test_both_permit_actions_survive_32_way_sqlite_and_firestore_contention(
     assert all(item.cas_conflict_count == 31 for item in firestore_trials)
     assert bundle.contention.passed is True
     assert bundle.claim_authorization.safety_claim_authorized is True
-    assert (
-        bundle.claim_authorization.adaptive_efficiency_claim_authorized is False
-    )
+    assert bundle.claim_authorization.adaptive_efficiency_claim_authorized is False
 
     destination = tmp_path / "proof-to-permit-qualification-v1"
     index = export_recovery_qualification_bundle(destination, bundle)
@@ -86,8 +84,7 @@ def test_both_permit_actions_survive_32_way_sqlite_and_firestore_contention(
         "index.json",
     }
     assert all(
-        stat.S_IMODE(item.stat().st_mode) == 0o600
-        for item in destination.iterdir()
+        stat.S_IMODE(item.stat().st_mode) == 0o600 for item in destination.iterdir()
     )
     with pytest.raises(FileExistsError):
         export_recovery_qualification_bundle(destination, bundle)

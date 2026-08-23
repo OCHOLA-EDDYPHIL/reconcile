@@ -18,13 +18,18 @@ from reconcile.contracts import (
     ADAPTIVE_PLANNER_OUTPUT_VERSION,
     AdaptivePlannerOutput,
     Classification,
+    EffectAssertionState,
     PlannerAcquisitionAdvice,
     PlannerCitationRefs,
     PlannerExplanation,
     PlannerStopAdvice,
     canonical_sha256,
 )
-from reconcile.recovery_agents import RecoveryAgent, recovery_remaining_budget
+from reconcile.recovery_agents import (
+    RecoveryAgent,
+    _alternative_histories,
+    recovery_remaining_budget,
+)
 from tests.contract._factories import (
     make_capability,
     make_envelope,
@@ -165,6 +170,24 @@ def test_recovery_agent_uses_one_stable_cumulative_budget_deadline() -> None:
         milliseconds=envelope.context.evidence_budget.max_elapsed_ms
     )
     assert long_after_deadline == at_deadline
+
+
+def test_alternative_histories_classify_mixed_known_and_unresolved_effects() -> None:
+    report = make_report(Classification.UNKNOWN)
+    findings = list(report.proof.effect_findings)
+    findings[0] = findings[0].model_copy(
+        update={"state": EffectAssertionState.ESTABLISHED}
+    )
+    report = report.model_copy(
+        update={"proof": report.proof.model_copy(update={"effect_findings": findings})}
+    )
+
+    histories = _alternative_histories(report)
+
+    assert tuple(item.classification for item in histories) == (
+        Classification.COMMITTED,
+        Classification.PARTIAL,
+    )
 
 
 @pytest.mark.parametrize(

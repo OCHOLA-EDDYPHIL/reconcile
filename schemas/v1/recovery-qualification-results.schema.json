@@ -13,6 +13,7 @@
         "SELECTED",
         "NO_PROBE",
         "DUPLICATE_PROBE",
+        "BUDGET_EXHAUSTED",
         "UNSUPPORTED_PROBE",
         "UNSUPPORTED_ACTION",
         "INVALID_BINDING",

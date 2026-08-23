@@ -255,10 +255,7 @@ def _require_contention_matches_protocol(
         receipt_ids = (
             "dispatch-"
             + hashlib.sha256(
-                (
-                    f"{trial.final_permit.permit_id}\0"
-                    f"{trial.winner_claim_id}"
-                ).encode()
+                (f"{trial.final_permit.permit_id}\0{trial.winner_claim_id}").encode()
             ).hexdigest()[:32],
         )
         expected_denied = tuple(
@@ -1044,8 +1041,7 @@ async def _run_recovery_qualification_in_directory(
     )
     witnesses = tuple(item for item in case_proofs if item.witness_exercised)
     witness_valid = sum(
-        item.witness_reorder_valid and item.witness_replay_valid
-        for item in witnesses
+        item.witness_reorder_valid and item.witness_replay_valid for item in witnesses
     )
     witness_evidence_duplications = sum(
         item.witness_replay_kind
@@ -1173,7 +1169,9 @@ def recovery_qualification_adaptive_threshold_met(
 
     if type(reduction_basis_points) is not int:
         raise TypeError("recovery qualification reduction must be an exact integer")
-    return reduction_basis_points >= RECOVERY_QUALIFICATION_ADAPTIVE_THRESHOLD_BASIS_POINTS
+    return (
+        reduction_basis_points >= RECOVERY_QUALIFICATION_ADAPTIVE_THRESHOLD_BASIS_POINTS
+    )
 
 
 def _aggregate_metrics(
@@ -1591,7 +1589,9 @@ async def build_recovery_qualification_bundle(
         raise RecoveryQualificationError("qualification source must be a directory")
     lock_path = repository / "uv.lock"
     if not lock_path.is_file():
-        raise RecoveryQualificationError("qualification requires the checked-in uv.lock")
+        raise RecoveryQualificationError(
+            "qualification requires the checked-in uv.lock"
+        )
     source_state = recovery_qualification_source_state(repository)
     source_revision, source_tree_sha256, repository_clean = source_state
     dependency_lock_sha256 = hashlib.sha256(lock_path.read_bytes()).hexdigest()
@@ -1616,7 +1616,10 @@ async def build_recovery_qualification_bundle(
     )
     final_source_state = recovery_qualification_source_state(repository)
     final_lock_sha256 = hashlib.sha256(lock_path.read_bytes()).hexdigest()
-    if final_source_state != source_state or final_lock_sha256 != dependency_lock_sha256:
+    if (
+        final_source_state != source_state
+        or final_lock_sha256 != dependency_lock_sha256
+    ):
         raise RecoveryQualificationError(
             "qualification source changed while the matrix was running"
         )

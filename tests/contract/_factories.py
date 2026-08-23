@@ -1741,7 +1741,10 @@ def make_recovery_qualification_examples() -> tuple[
         witness_replay_kind = (
             RecoveryQualificationWitnessReplayKind.ZERO_EVIDENCE_REPLAY
             if archetype.ambiguity_witness_required
-            and "unavailable" in archetype.archetype_id
+            and (
+                "unavailable" in archetype.archetype_id
+                or archetype.archetype_id in {"stage-absence", "stage-stale"}
+            )
             else (
                 RecoveryQualificationWitnessReplayKind.EVIDENCE_DUPLICATION
                 if archetype.ambiguity_witness_required

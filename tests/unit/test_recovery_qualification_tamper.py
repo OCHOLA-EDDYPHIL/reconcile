@@ -148,7 +148,9 @@ def test_authorization_rejects_contention_identity_drift(mutation: str) -> None:
             update={"provider_call_receipt_ids": (f"provider-call-receipt-{'f' * 32}",)}
         )
     else:
-        tampered_permit = trial.final_permit.model_copy(update={"completion_outcome": None})
+        tampered_permit = trial.final_permit.model_copy(
+            update={"completion_outcome": None}
+        )
         tampered_trial = trial.model_copy(
             update={
                 "final_permit": tampered_permit,

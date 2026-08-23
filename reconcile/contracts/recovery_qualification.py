@@ -983,8 +983,7 @@ class RecoveryQualificationContentionTrial(StrictModel):
             raise ValueError("contention identities must partition contenders")
         if (
             self.outbound_call_count != len(self.provider_call_receipt_ids)
-            or self.outbound_call_count
-            != self.provider_mutations.outbound_call_count
+            or self.outbound_call_count != self.provider_mutations.outbound_call_count
         ):
             raise ValueError("outbound calls require durable receipt identities")
         expected_target, expected_mutations = {

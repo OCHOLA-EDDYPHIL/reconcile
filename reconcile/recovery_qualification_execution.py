@@ -342,9 +342,7 @@ class _ScriptedPlanner:
                     schema_version=PROBE_REQUEST_VERSION,
                     capability_name=capability,
                     capability_version=(
-                        "9.9.9"
-                        if self.variant == "unsupported-version"
-                        else "1.0.0"
+                        "9.9.9" if self.variant == "unsupported-version" else "1.0.0"
                     ),
                     relevant_effect_ids=effects,
                     arguments=arguments,
@@ -544,67 +542,33 @@ class _QualificationControllerClock:
 class _ReplayObservationHandler:
     """Replay one captured provider response byte-for-byte on the final call."""
 
-    def __init__(self, delegate: object, replay_at_call: int) -> None:
+    def __init__(
+        self,
+        delegate: object,
+        replay_at_call: int,
+        replay_observation_index: int | None,
+    ) -> None:
         if not callable(delegate):
             raise TypeError("qualification replay requires a callable provider")
         self._delegate = delegate
         self._replay_at_call = replay_at_call
+        self._replay_observation_index = replay_observation_index
         self._calls = 0
         self._observations: list[object] = []
         self.replayed = False
 
     async def __call__(self, probe: object) -> object:
         self._calls += 1
-        if self._calls == self._replay_at_call and self._observations:
+        if (
+            self._calls == self._replay_at_call
+            and self._replay_observation_index is not None
+            and len(self._observations) > self._replay_observation_index
+        ):
             self.replayed = True
-            return self._observations[0]
+            return self._observations[self._replay_observation_index]
         value = await self._delegate(probe)  # type: ignore[misc]
         self._observations.append(value)
         return value
-
-
-class _QualificationActionPreparer:
-    """Bind #171's two fault toggles to only the frozen target boundary."""
-
-    def __init__(self, fixture: RecoveryQualificationFixture) -> None:
-        self._fixture = fixture
-        self._delegate = ReleaseChainActionPreparer()
-
-    def prepare(
-        self,
-        request: RecoveryRunRequest,
-        chain: object,
-        source_node: RecoveryActionNode,
-        target_node: RecoveryActionNode,
-        report: object | None,
-        certificate: VerifiedCertificate | None,
-    ) -> RecoveryPreparedAction:
-        target_stage = self._fixture.archetype.stage.value
-        if target_node.node_id == "stage":
-            fault = (
-                RecoveryRunFault.DROP_AFTER_ACCEPT
-                if target_stage == "stage"
-                and self._fixture.archetype.fault_class.value == "drop-after-accept"
-                else RecoveryRunFault.SUPPRESS_BEFORE_DISPATCH
-            )
-        elif target_node.node_id == "record":
-            fault = (
-                RecoveryRunFault.SUPPRESS_BEFORE_DISPATCH
-                if target_stage == "record"
-                and self._fixture.archetype.fault_class.value
-                == "suppress-before-dispatch"
-                else RecoveryRunFault.DROP_AFTER_ACCEPT
-            )
-        else:
-            fault = RecoveryRunFault.DROP_AFTER_ACCEPT
-        return self._delegate.prepare(
-            request.model_copy(update={"fault": fault}),
-            chain,  # type: ignore[arg-type]
-            source_node,
-            target_node,
-            report,
-            certificate,
-        )
 
 
 class _CrashAfterCompletedTargetDispatch:
@@ -662,12 +626,14 @@ def _target_node_id(fixture: RecoveryQualificationFixture) -> str:
 def _fault(fixture: RecoveryQualificationFixture) -> RecoveryRunFault:
     if fixture.archetype.archetype_id == "record-predispatch-retry":
         return RecoveryRunFault.SUPPRESS_BEFORE_DISPATCH
-    if fixture.archetype.fault_class.value == "drop-after-accept":
+    if (
+        fixture.archetype.stage.value == "stage"
+        and fixture.archetype.fault_class.value == "drop-after-accept"
+    ):
         return RecoveryRunFault.DROP_AFTER_ACCEPT
-    # #171 exposes two deliberate fault toggles.  Extended qualification
-    # states are supplied by provider scripts; this inert value is rewritten
-    # per target by ``_QualificationActionPreparer``.
-    return RecoveryRunFault.SUPPRESS_BEFORE_DISPATCH
+    # All other qualification states come from provider-visible observations;
+    # they must not borrow either production fault-injection boundary.
+    return RecoveryRunFault.NO_FAULT
 
 
 _EXPECTED_BLIND_CLOUD_ERRORS = {
@@ -1347,7 +1313,9 @@ async def _wrong_hypotheses(
         hypothesis = target_event.payload.hypothesis
         disposition = target_event.payload.hypothesis_disposition
         if hypothesis is None:
-            raise AssertionError("wrong hypothesis was not well formed")
+            raise AssertionError(
+                f"wrong hypothesis {variant!r} was not well formed: {disposition}"
+            )
         if hypothesis.node_id != target_node_id:
             raise AssertionError("wrong hypothesis audit changed target identity")
         if disposition not in {
@@ -1385,7 +1353,7 @@ async def _duplicate_witness_state(
     node: RecoveryActionNode,
     baseline: RecoveryEvidenceState,
 ) -> tuple[RecoveryEvidenceState, RecoveryQualificationWitnessReplayKind]:
-    """Repeat one target attempt, replaying raw bytes whenever a response exists."""
+    """Replay admitted bytes or repeat one response-free rejected request."""
 
     provider = foundation.provider
     envelope = baseline.envelope
@@ -1396,16 +1364,52 @@ async def _duplicate_witness_state(
     )
     if not capability_sequence:
         raise AssertionError("witness replay has no provider attempt to duplicate")
-    completed_capabilities = tuple(
-        record.capability_name
+    attempts_by_sequence = {
+        attempt.probe_sequence: attempt for attempt in baseline.evaluation.attempts
+    }
+    completed_admitted_records = tuple(
+        record
         for record in baseline.report.probe_audit
         if record.outcome is ProbeOutcome.COMPLETED
         and record.capability_name is not None
         and record.result_sha256 is not None
+        and (attempt := attempts_by_sequence.get(record.probe_sequence)) is not None
+        and attempt.evidence is not None
+        and attempt.decision.disposition is EvidenceDisposition.ADMITTED
     )
-    duplicate_capability = (
-        completed_capabilities[0] if completed_capabilities else capability_sequence[0]
-    )
+    if completed_admitted_records:
+        selected_record = completed_admitted_records[0]
+        duplicate_capability = selected_record.capability_name
+        if duplicate_capability is None:  # pragma: no cover - selection invariant
+            raise AssertionError("witness replay lost its selected capability")
+        selected_occurrence = sum(
+            record.capability_name == duplicate_capability
+            for record in baseline.report.probe_audit
+            if record.probe_sequence < selected_record.probe_sequence
+        )
+        replay_sequence = (*capability_sequence, duplicate_capability)
+        expected_replay_kind = (
+            RecoveryQualificationWitnessReplayKind.EVIDENCE_DUPLICATION
+        )
+    else:
+        # A weak, rejected, or unavailable observation is not admitted evidence.
+        # Exercise a literal response-free replay instead of mislabeling it as
+        # evidence duplication: the same unknown read is rejected twice before
+        # any provider handler can run.
+        duplicate_capability = "qualification-zero-evidence-probe"
+        selected_occurrence = None
+        replay_sequence = (
+            *capability_sequence,
+            duplicate_capability,
+            duplicate_capability,
+        )
+        expected_replay_kind = (
+            RecoveryQualificationWitnessReplayKind.ZERO_EVIDENCE_REPLAY
+        )
+    if len(replay_sequence) > envelope.context.evidence_budget.max_probes:
+        raise AssertionError(
+            "witness replay exceeds the preregistered probe-count boundary"
+        )
     invocation_counts = Counter(capability_sequence)
     capabilities = CapabilityRegistry()
     rules = TargetRuleRegistry()
@@ -1439,6 +1443,12 @@ async def _duplicate_witness_state(
                 replay_handler = _ReplayObservationHandler(
                     registration.handler,
                     invocation_counts[reference.name] + 1,
+                    (
+                        selected_occurrence
+                        if expected_replay_kind
+                        is RecoveryQualificationWitnessReplayKind.EVIDENCE_DUPLICATION
+                        else None
+                    ),
                 )
                 registration = CapabilityRegistration(
                     capability=registration.capability,
@@ -1486,6 +1496,12 @@ async def _duplicate_witness_state(
                 replay_handler = _ReplayObservationHandler(
                     registration.handler,
                     invocation_counts[reference.name] + 1,
+                    (
+                        selected_occurrence
+                        if expected_replay_kind
+                        is RecoveryQualificationWitnessReplayKind.EVIDENCE_DUPLICATION
+                        else None
+                    ),
                 )
                 registration = CapabilityRegistration(
                     capability=registration.capability,
@@ -1515,7 +1531,7 @@ async def _duplicate_witness_state(
     relevant_effect_ids = tuple(
         effect.effect_id for effect in envelope.expected_effects
     )
-    for capability_name in (*capability_sequence, duplicate_capability):
+    for capability_name in replay_sequence:
         request = ProbeRequest(
             schema_version=PROBE_REQUEST_VERSION,
             capability_name=capability_name,
@@ -1530,29 +1546,38 @@ async def _duplicate_witness_state(
     evaluation = engine.evaluate(audit)
     appended = evaluation.attempts[-1]
     prior = evaluation.attempts[:-1]
-    if replay_handler is None:  # pragma: no cover - enabled capability invariant
-        raise AssertionError("duplicate replay handler was not installed")
-    if replay_handler.replayed:
+    if (
+        expected_replay_kind
+        is RecoveryQualificationWitnessReplayKind.EVIDENCE_DUPLICATION
+    ):
         if (
-            appended.decision.disposition is not EvidenceDisposition.REJECTED
+            replay_handler is None
+            or not replay_handler.replayed
+            or appended.decision.disposition is not EvidenceDisposition.REJECTED
             or appended.decision.reason is not EvidenceReason.DUPLICATE_CANDIDATES
             or not any(
                 item.request_sha256 == appended.request_sha256
                 and item.raw_sha256 == appended.raw_sha256
+                and item.evidence is not None
+                and item.decision.disposition is EvidenceDisposition.ADMITTED
                 for item in prior
             )
         ):
             raise AssertionError("exact replay did not enter evidence deduplication")
         replay_kind = RecoveryQualificationWitnessReplayKind.EVIDENCE_DUPLICATION
-    elif appended.evidence is not None or not any(
-        item.evidence is None
-        and item.request_sha256 == appended.request_sha256
-        and item.raw_sha256 == appended.raw_sha256
-        and item.decision.reason is appended.decision.reason
-        for item in prior
-    ):
-        raise AssertionError("response-free witness attempt did not repeat exactly")
     else:
+        if (
+            replay_handler is not None
+            or appended.evidence is not None
+            or not any(
+                item.evidence is None
+                and item.request_sha256 == appended.request_sha256
+                and item.raw_sha256 == appended.raw_sha256
+                and item.decision.reason is appended.decision.reason
+                for item in prior
+            )
+        ):
+            raise AssertionError("zero-evidence witness attempt did not repeat exactly")
         replay_kind = RecoveryQualificationWitnessReplayKind.ZERO_EVIDENCE_REPLAY
     now = provider.clock()
     report = engine.report(
@@ -1723,7 +1748,7 @@ def _build_workflow(
         store=stores.run_store,
         definition_factory=lambda _request: definition,
         evidence_source=evidence,
-        action_preparer=_QualificationActionPreparer(fixture),
+        action_preparer=ReleaseChainActionPreparer(),
         recovery_agent=RecoveryAgent(planner, clock=provider.clock),
         rollout_agent=RolloutAgent(dispatch_gateway),
         permit_authority=stores.permit_authority,
@@ -1841,16 +1866,12 @@ async def prepare_recovery_qualification_contention_dispatch(
     elif permit_backend is not RecoveryQualificationStorageBackend.SQLITE:
         raise ValueError("contention permit backend is unsupported")
     source_node = next(
-        node
-        for node in definition.chain.nodes
-        if node.node_id == permit.source_node_id
+        node for node in definition.chain.nodes if node.node_id == permit.source_node_id
     )
     target_node = next(
-        node
-        for node in definition.chain.nodes
-        if node.node_id == permit.target_node_id
+        node for node in definition.chain.nodes if node.node_id == permit.target_node_id
     )
-    prepared = _QualificationActionPreparer(fixture).prepare(
+    prepared = ReleaseChainActionPreparer().prepare(
         request,
         definition.chain,
         source_node,

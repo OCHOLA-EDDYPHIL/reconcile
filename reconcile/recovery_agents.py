@@ -262,44 +262,55 @@ def _alternative_histories(report: InvestigationReport) -> tuple[PossibleHistory
     )
     if not unresolved:
         return ()
-    return tuple(
-        PossibleHistory(
-            history_id=history_id,
-            classification=classification,
-            effect_states=tuple(
-                HypothesizedEffect(
-                    effect_id=finding.effect_id,
-                    state=(
-                        finding.state
-                        if finding.state is not EffectAssertionState.UNVERIFIED
-                        else state
-                    ),
-                    cited_evidence_ids=(
-                        finding.evidence_ids
-                        if finding.state is not EffectAssertionState.UNVERIFIED
-                        else ()
-                    ),
-                )
-                for finding in report.proof.effect_findings
-            ),
-            compatible_evidence_ids=citations,
-            summary=summary,
+    histories = []
+    for history_id, unresolved_state, summary in (
+        (
+            "model-history-effects-occurred",
+            EffectAssertionState.ESTABLISHED,
+            "The unresolved effects may already have occurred.",
+        ),
+        (
+            "model-history-effects-not-occurred",
+            EffectAssertionState.NOT_ESTABLISHED,
+            "The unresolved effects may not have occurred.",
+        ),
+    ):
+        effect_states = tuple(
+            HypothesizedEffect(
+                effect_id=finding.effect_id,
+                state=(
+                    finding.state
+                    if finding.state is not EffectAssertionState.UNVERIFIED
+                    else unresolved_state
+                ),
+                cited_evidence_ids=(
+                    finding.evidence_ids
+                    if finding.state is not EffectAssertionState.UNVERIFIED
+                    else ()
+                ),
+            )
+            for finding in report.proof.effect_findings
         )
-        for history_id, classification, state, summary in (
-            (
-                "model-history-effects-occurred",
-                Classification.COMMITTED,
-                EffectAssertionState.ESTABLISHED,
-                "The unresolved effects may already have occurred.",
-            ),
-            (
-                "model-history-effects-not-occurred",
-                Classification.NOT_COMMITTED,
-                EffectAssertionState.NOT_ESTABLISHED,
-                "The unresolved effects may not have occurred.",
-            ),
+        states = {effect.state for effect in effect_states}
+        classification = (
+            Classification.COMMITTED
+            if states == {EffectAssertionState.ESTABLISHED}
+            else (
+                Classification.NOT_COMMITTED
+                if states == {EffectAssertionState.NOT_ESTABLISHED}
+                else Classification.PARTIAL
+            )
         )
-    )
+        histories.append(
+            PossibleHistory(
+                history_id=history_id,
+                classification=classification,
+                effect_states=effect_states,
+                compatible_evidence_ids=citations,
+                summary=summary,
+            )
+        )
+    return tuple(histories)
 
 
 class RecoveryAgent:
