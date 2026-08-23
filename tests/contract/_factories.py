@@ -1430,6 +1430,8 @@ def make_recovery_scenario_examples() -> tuple[
             firestore=RecoveryFirestoreObservation(
                 release_id="release-7",
                 document_path="releases/release-7",
+                expected_payload_sha256="8" * 64,
+                expected_semantic_action_sha256="9" * 64,
                 payload_sha256=None if policy == "blind-abort" else "8" * 64,
                 semantic_action_sha256=(None if policy == "blind-abort" else "9" * 64),
                 exists=policy != "blind-abort",

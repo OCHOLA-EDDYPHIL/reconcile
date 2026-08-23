@@ -184,6 +184,16 @@
           "title": "Exists",
           "type": "boolean"
         },
+        "expected_payload_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Expected Payload Sha256",
+          "type": "string"
+        },
+        "expected_semantic_action_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Expected Semantic Action Sha256",
+          "type": "string"
+        },
         "payload_sha256": {
           "anyOf": [
             {
@@ -221,6 +231,8 @@
       "required": [
         "release_id",
         "document_path",
+        "expected_payload_sha256",
+        "expected_semantic_action_sha256",
         "exists"
       ],
       "title": "RecoveryFirestoreObservation",

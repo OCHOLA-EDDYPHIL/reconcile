@@ -68,6 +68,22 @@ def test_proof_lane_requires_a_certificate_or_ambiguity_witness() -> None:
         RecoveryPolicyResult.model_validate_json(json.dumps(payload))
 
 
+@pytest.mark.parametrize(
+    "field",
+    ["payload_sha256", "semantic_action_sha256"],
+)
+def test_completed_result_rejects_drifted_release_record_identity(field: str) -> None:
+    _receipt, comparison = make_recovery_scenario_examples()
+    payload = _payload(comparison.lanes[-2])
+    payload["firestore"][field] = "a" * 64
+
+    with pytest.raises(
+        ValidationError,
+        match="completed release record differs from the sealed action",
+    ):
+        RecoveryPolicyResult.model_validate_json(json.dumps(payload))
+
+
 @pytest.mark.parametrize("changed", ["run", "fault", "binding", "release"])
 def test_comparison_rejects_non_equivalent_policy_lanes(changed: str) -> None:
     _receipt, comparison = make_recovery_scenario_examples()

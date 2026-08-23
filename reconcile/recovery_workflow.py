@@ -1120,11 +1120,24 @@ class ProofToPermitWorkflow:
                     RecoveryRunEventType.LIFECYCLE,
                     RecoveryRunEventPayload(lifecycle=RecoveryRunLifecycle.ESCALATED),
                 )
-            if index == 0 and progress.state in {
-                RecoveryNodeState.WAITING,
-                RecoveryNodeState.DISPATCH_PENDING,
-                RecoveryNodeState.DISPATCH_CLAIMED,
-            }:
+            resumes_action_dispatch = (
+                progress.state is RecoveryNodeState.DISPATCH_CLAIMED
+                and any(
+                    certificate.node_id == node.node_id
+                    and certificate.transition is not None
+                    for certificate in snapshot.certificates
+                )
+            )
+            if (
+                index == 0
+                and not resumes_action_dispatch
+                and progress.state
+                in {
+                    RecoveryNodeState.WAITING,
+                    RecoveryNodeState.DISPATCH_PENDING,
+                    RecoveryNodeState.DISPATCH_CLAIMED,
+                }
+            ):
                 await self._initial_dispatch(snapshot, definition, node)
             elif progress.state is RecoveryNodeState.WAITING:
                 # A successor cannot be reached without a completed permit dispatch.
@@ -1203,20 +1216,51 @@ class ProofToPermitWorkflow:
                 next_attempt = progress.attempt + int(
                     transition.target_node_id == node.node_id
                 )
-                await self._node_state(
-                    run_id,
-                    transition.target_node_id,
-                    RecoveryNodeState.RECONCILING,
-                    attempt=max(1, next_attempt),
+                latest = await self._store.get(run_id)
+                target_progress = next(
+                    item
+                    for item in latest.nodes
+                    if item.node_id == transition.target_node_id
                 )
+                if target_progress.state is not RecoveryNodeState.RECONCILING:
+                    expected_target_states = (
+                        {
+                            RecoveryNodeState.PERMITTED,
+                            RecoveryNodeState.DISPATCH_CLAIMED,
+                        }
+                        if transition.target_node_id == node.node_id
+                        else {RecoveryNodeState.WAITING}
+                    )
+                    if target_progress.state not in expected_target_states:
+                        raise RecoveryWorkflowError(
+                            "dispatch successor disagrees with durable node state"
+                        )
+                    await self._node_state(
+                        run_id,
+                        transition.target_node_id,
+                        RecoveryNodeState.RECONCILING,
+                        attempt=max(1, next_attempt),
+                    )
                 if transition.target_node_id == node.node_id:
                     continue
-                await self._node_state(
-                    run_id,
-                    node.node_id,
-                    RecoveryNodeState.COMPLETED,
-                    attempt=max(1, progress.attempt),
+                latest = await self._store.get(run_id)
+                source_progress = next(
+                    item for item in latest.nodes if item.node_id == node.node_id
                 )
+                if source_progress.state is not RecoveryNodeState.COMPLETED:
+                    if source_progress.state not in {
+                        RecoveryNodeState.PERMITTED,
+                        RecoveryNodeState.DISPATCH_CLAIMED,
+                    }:
+                        raise RecoveryWorkflowError(
+                            "dispatch source disagrees with durable node state"
+                        )
+                    await self._node_state(
+                        run_id,
+                        node.node_id,
+                        RecoveryNodeState.COMPLETED,
+                        attempt=max(1, source_progress.attempt),
+                    )
                 index += 1
                 continue
 

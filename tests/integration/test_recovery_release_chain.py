@@ -863,32 +863,72 @@ def test_wrong_release_record_binding_yields_ambiguity_without_retry(
         SqliteDurableRuntimeStore(tmp_path / f"{mismatch}.sqlite3"),
         clock=lambda: NOW + timedelta(seconds=2),
     )
+    agent = RecoveryAgent(_Planner(output=_output(probe_count=0)))
     workflow = build_release_chain_workflow(
         settings=settings,
         invoked_at=NOW,
         store=store,
         permit_authority=authority,
-        recovery_agent=RecoveryAgent(_Planner(output=_output(probe_count=0))),
+        recovery_agent=agent,
         cloud_action=action,
         cloud_reader=reader,
         firestore=firestore,
         clock=lambda: NOW + timedelta(seconds=2),
     )
+    resources = ReleaseChainLaneResources(
+        store=store,
+        permit_authority=authority,
+        recovery_agent=agent,
+        cloud_action=action,
+        cloud_reader=reader,
+        firestore=firestore,
+        baseline_revision=BASELINE,
+    )
+    executor = ReleaseChainPolicyLaneExecutor(
+        settings=settings,
+        invoked_at=NOW,
+        lane_factory=lambda **_kwargs: resources,
+        clock=lambda: NOW + timedelta(seconds=2),
+        reset_poll_interval_seconds=0,
+    )
+    fault = RecoveryRunFault.DROP_AFTER_ACCEPT
+    binding = recovery_experiment_binding(settings, fault)
     request = RecoveryRunRequest(
         schema_version=RECOVERY_RUN_REQUEST_VERSION,
-        run_id=f"fixed-{mismatch}",
+        run_id=executor._run_id(RecoveryRunPolicy.FIXED, fault, binding),
         scenario="cloud-run-rollout",
         policy=RecoveryRunPolicy.FIXED,
-        fault=RecoveryRunFault.DROP_AFTER_ACCEPT,
+        fault=fault,
     )
 
     async def exercise():
         await store.create(request, definition.chain, created_at=NOW)
-        return await workflow.run(request.run_id)
+        snapshot = await workflow.run(request.run_id)
+        result = await executor.execute(
+            policy="fixed",
+            fault=fault,
+            binding=binding,
+        )
+        return snapshot, result
 
-    snapshot = asyncio.run(exercise())
+    snapshot, result = asyncio.run(exercise())
 
     assert snapshot.lifecycle is RecoveryRunLifecycle.ESCALATED
+    assert result.chain_completed is False
+    assert result.terminal_disposition == "ESCALATED"
+    assert len(result.witness_sha256s) == 1
+    assert result.firestore.expected_payload_sha256 == settings.payload_sha256
+    assert result.firestore.payload_sha256 == settings.payload_sha256
+    assert result.firestore.semantic_action_sha256 == (
+        "f" * 64
+        if mismatch == "wrong-semantic-action"
+        else record_action.semantic_action_sha256
+    )
+    assert result.firestore.cloud_run_revision == (
+        f"{SERVICE}-wrong-revision"
+        if mismatch == "wrong-revision"
+        else settings.staged_revision
+    )
     assert len(snapshot.witnesses) == 1
     assert all(
         permit.action is PermitAction.CONTINUE for permit in snapshot.action_permits
@@ -898,7 +938,7 @@ def test_wrong_release_record_binding_yields_ambiguity_without_retry(
     assert reference.create_count == 0
 
 
-def test_policy_result_reports_the_observed_firestore_identity() -> None:
+def test_policy_observation_preserves_a_drifted_firestore_identity() -> None:
     settings = _settings()
     _state, _adapter, _action, reader, firestore, firestore_client = _provider(settings)
     reference = firestore_client.document("releases", settings.release_id)
@@ -923,6 +963,7 @@ def test_policy_result_reports_the_observed_firestore_identity() -> None:
     )
 
     assert records == 1
+    assert observed.expected_payload_sha256 == settings.payload_sha256
     assert observed.payload_sha256 == "d" * 64
     assert observed.semantic_action_sha256 == "e" * 64
 

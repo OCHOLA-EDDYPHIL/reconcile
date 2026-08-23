@@ -1739,6 +1739,14 @@ class RecoveryPolicyResultRecorder:
             raise ReleaseChainError("policy result has ambiguous Cloud Run traffic")
         selected = serving[0]
         record = await self._firestore.read(self._settings.release_id)
+        record_action = (
+            build_release_chain_definition(
+                self._settings,
+                invoked_at=datetime(2000, 1, 1, tzinfo=UTC),
+            )
+            .chain.nodes[-1]
+            .semantic_action
+        )
         created_revisions = len(set(revisions).difference(baseline.release_revisions))
         promotion_count = int(selected.revision != self._baseline_revision)
         record_count = int(record is not None)
@@ -1755,6 +1763,8 @@ class RecoveryPolicyResultRecorder:
         firestore = RecoveryFirestoreObservation(
             release_id=self._settings.release_id,
             document_path=firestore_release_document_path(self._settings.release_id),
+            expected_payload_sha256=self._settings.payload_sha256,
+            expected_semantic_action_sha256=record_action.semantic_action_sha256,
             payload_sha256=(None if record is None else record.record.payload_sha256),
             semantic_action_sha256=(
                 None if record is None else record.record.semantic_action_sha256
@@ -2160,10 +2170,7 @@ class ReleaseChainPolicyLaneExecutor:
             )
             if created:
                 raise ReleaseChainError("policy lane recovery state changed")
-            if existing.lifecycle in {
-                RecoveryRunLifecycle.CANCELLED,
-                RecoveryRunLifecycle.ESCALATED,
-            }:
+            if existing.lifecycle is RecoveryRunLifecycle.CANCELLED:
                 raise ReleaseChainError("terminal policy lane cannot be resumed")
             baseline = RecoveryLaneBaseline(release_revisions=())
         snapshot = await workflow.run(run_id)

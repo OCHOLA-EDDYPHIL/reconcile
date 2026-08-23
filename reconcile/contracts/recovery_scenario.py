@@ -94,6 +94,8 @@ class RecoveryCloudRunObservation(StrictModel):
 class RecoveryFirestoreObservation(StrictModel):
     release_id: Identifier
     document_path: SanitizedText
+    expected_payload_sha256: Sha256Digest
+    expected_semantic_action_sha256: Sha256Digest
     payload_sha256: Sha256Digest | None = None
     semantic_action_sha256: Sha256Digest | None = None
     exists: bool
@@ -159,6 +161,12 @@ class RecoveryPolicyResult(StrictModel):
             self.cloud_run.serving_percent == 100 and self.firestore.exists
         ):
             raise ValueError("completed release chain lacks its terminal effects")
+        if self.chain_completed and (
+            self.firestore.payload_sha256 != self.firestore.expected_payload_sha256
+            or self.firestore.semantic_action_sha256
+            != self.firestore.expected_semantic_action_sha256
+        ):
+            raise ValueError("completed release record differs from the sealed action")
         proof_policy = self.policy in {"fixed", "adaptive"}
         permit_counts = self.counters
         if not proof_policy and (
