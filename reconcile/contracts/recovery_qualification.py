@@ -710,13 +710,13 @@ def _qualification_report_facts(
 class RecoveryQualificationHypothesisReplay(StrictModel):
     variant_id: Identifier
     wrongness_kind: RecoveryQualificationHypothesisWrongnessKind
-    provider_name: Literal["gemini"]
-    planner_output_sha256: Sha256Digest
+    generation_source: Literal["scripted-adversarial"]
+    agent_output_sha256: Sha256Digest
     report: InvestigationReport
     expected_hypothesis: GeminiHypothesis
     expected_hypothesis_sha256: Sha256Digest
-    hypothesis: GeminiHypothesis
-    hypothesis_sha256: Sha256Digest
+    persisted_hypothesis: GeminiHypothesis
+    persisted_hypothesis_sha256: Sha256Digest
     disposition: RecoveryHypothesisDisposition
     observed_decision_sha256: Sha256Digest
     observed_permit_sha256: Sha256Digest | None
@@ -740,15 +740,19 @@ class RecoveryQualificationHypothesisReplay(StrictModel):
         }[self.wrongness_kind]
         if self.variant_id != expected_variant:
             raise ValueError("wrong-hypothesis variant and kind disagree")
-        if self.hypothesis_sha256 != canonical_sha256(self.hypothesis):
-            raise ValueError("wrong-hypothesis identity changed")
+        if self.persisted_hypothesis_sha256 != canonical_sha256(
+            self.persisted_hypothesis
+        ):
+            raise ValueError("persisted wrong-hypothesis identity changed")
+        if self.agent_output_sha256 != self.persisted_hypothesis_sha256:
+            raise ValueError("adversarial agent output was not persisted byte-for-byte")
         if self.expected_hypothesis_sha256 != canonical_sha256(
             self.expected_hypothesis
         ):
             raise ValueError("expected-hypothesis identity changed")
         report_sha256 = canonical_sha256(self.report)
         if (
-            self.hypothesis.report_sha256 != report_sha256
+            self.persisted_hypothesis.report_sha256 != report_sha256
             or self.expected_hypothesis.report_sha256 != report_sha256
         ):
             raise ValueError("wrong-hypothesis oracle is not bound to its report")
@@ -756,10 +760,10 @@ class RecoveryQualificationHypothesisReplay(StrictModel):
             raise ValueError("wrong-hypothesis oracle requires terminal evidence")
         if self.expected_hypothesis.proposed_transition is not None:
             raise ValueError("expected hypothesis cannot propose an action")
-        if self.hypothesis.proposed_transition is not None:
+        if self.persisted_hypothesis.proposed_transition is not None:
             raise ValueError("wrong-hypothesis replay cannot propose an action")
         if (self.disposition is RecoveryHypothesisDisposition.SELECTED) is not (
-            self.hypothesis.proposed_probe is not None
+            self.persisted_hypothesis.proposed_probe is not None
         ):
             raise ValueError("wrong-hypothesis probe disposition changed")
         if self.disposition not in {
@@ -772,7 +776,7 @@ class RecoveryQualificationHypothesisReplay(StrictModel):
             "effect_hypotheses",
             "alternative_histories",
         }
-        if self.hypothesis.model_dump(
+        if self.persisted_hypothesis.model_dump(
             mode="python",
             exclude=non_factual_fields,
         ) != self.expected_hypothesis.model_dump(
@@ -783,7 +787,7 @@ class RecoveryQualificationHypothesisReplay(StrictModel):
         expected = _qualification_report_facts(self.report)
         if _qualification_hypothesis_facts(self.expected_hypothesis) != expected:
             raise ValueError("expected hypothesis does not reproduce its report facts")
-        observed = _qualification_hypothesis_facts(self.hypothesis)
+        observed = _qualification_hypothesis_facts(self.persisted_hypothesis)
         mismatches = {
             kind
             for differs, kind in (
@@ -855,10 +859,10 @@ class RecoveryQualificationCaseProof(StrictModel):
         if len(identifiers) != len(set(identifiers)):
             raise ValueError("wrong-hypothesis variants must be unique")
         outputs = tuple(
-            item.planner_output_sha256 for item in self.wrong_hypothesis_replays
+            item.agent_output_sha256 for item in self.wrong_hypothesis_replays
         )
         if len(outputs) != len(set(outputs)):
-            raise ValueError("wrong-hypothesis planner outputs must be distinct")
+            raise ValueError("adversarial agent outputs must be distinct")
         decision_parity = self.fixed_decision_sha256 == self.adaptive_decision_sha256
         permit_parity = self.fixed_permit_sha256 == self.adaptive_permit_sha256
         if (

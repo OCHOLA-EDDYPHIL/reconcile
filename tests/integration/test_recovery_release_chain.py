@@ -82,6 +82,20 @@ BASELINE = "reconcile-canary-baseline"
 SERVICE_URI = "https://reconcile-canary-demo-hash-uc.a.run.app"
 
 
+def test_release_workflow_rejects_a_non_production_hypothesis_agent() -> None:
+    with pytest.raises(TypeError, match="exact RecoveryAgent"):
+        build_release_chain_workflow(
+            settings=object(),  # type: ignore[arg-type]
+            invoked_at=NOW,
+            store=object(),  # type: ignore[arg-type]
+            permit_authority=object(),  # type: ignore[arg-type]
+            recovery_agent=object(),
+            cloud_action=object(),
+            cloud_reader=object(),  # type: ignore[arg-type]
+            firestore=object(),  # type: ignore[arg-type]
+        )
+
+
 def _ready() -> run_v2.Condition:
     return run_v2.Condition(
         type_="Ready",

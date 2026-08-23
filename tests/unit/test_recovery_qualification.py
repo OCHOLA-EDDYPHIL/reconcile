@@ -271,7 +271,12 @@ def test_witness_replay_distinguishes_admitted_from_zero_evidence(
 
     assert result.witness_replay_kind is expected_kind
     assert result.replayed_witness_semantic_sha256 == result.witness_semantic_sha256
-    assert all(item.hypothesis_sha256 for item in result.wrong_hypotheses)
+    assert all(
+        item.agent_output_sha256
+        == item.persisted_hypothesis_sha256
+        == canonical_sha256(item.persisted_hypothesis)
+        for item in result.wrong_hypotheses
+    )
     assert {item.disposition for item in result.wrong_hypotheses} <= {
         RecoveryHypothesisDisposition.SELECTED,
         RecoveryHypothesisDisposition.NO_PROBE,
@@ -326,17 +331,20 @@ def test_pending_wrong_hypothesis_replay_keeps_first_oracle(
 
     assert len(result.wrong_hypotheses) == 3
     for replay in result.wrong_hypotheses:
-        assert replay.expected_hypothesis.created_at == replay.hypothesis.created_at
+        assert (
+            replay.expected_hypothesis.created_at
+            == replay.persisted_hypothesis.created_at
+        )
         RecoveryQualificationHypothesisReplay(
             variant_id=replay.variant_id,
             wrongness_kind=replay.wrongness_kind,
-            provider_name="gemini",
-            planner_output_sha256=replay.planner_output_sha256,
+            generation_source="scripted-adversarial",
+            agent_output_sha256=replay.agent_output_sha256,
             report=replay.report,
             expected_hypothesis=replay.expected_hypothesis,
             expected_hypothesis_sha256=canonical_sha256(replay.expected_hypothesis),
-            hypothesis=replay.hypothesis,
-            hypothesis_sha256=replay.hypothesis_sha256,
+            persisted_hypothesis=replay.persisted_hypothesis,
+            persisted_hypothesis_sha256=replay.persisted_hypothesis_sha256,
             disposition=replay.disposition,
             observed_decision_sha256=replay.decision_sha256,
             observed_permit_sha256=replay.permit_sha256,

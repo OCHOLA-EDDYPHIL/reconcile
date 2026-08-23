@@ -72,7 +72,7 @@ from reconcile.persistence.recovery_runs import (
     is_terminal_recovery_run,
 )
 from reconcile.recovery_agents import (
-    RecoveryAgent,
+    RecoveryHypothesisAgent,
     RolloutAgent,
     probe_request_sha256,
     recovery_remaining_budget,
@@ -343,7 +343,7 @@ class ProofToPermitWorkflow:
         definition_factory: RecoveryDefinitionFactory,
         evidence_source: RecoveryEvidenceSource,
         action_preparer: RecoveryActionPreparer,
-        recovery_agent: RecoveryAgent,
+        recovery_agent: RecoveryHypothesisAgent,
         rollout_agent: RolloutAgent,
         permit_authority: PermitAuthority,
         clock: Callable[[], datetime] | None = None,
@@ -355,8 +355,10 @@ class ProofToPermitWorkflow:
             raise TypeError("recovery workflow requires a definition factory")
         if not callable(getattr(action_preparer, "prepare", None)):
             raise TypeError("recovery workflow requires an action preparer")
-        if type(recovery_agent) is not RecoveryAgent:
-            raise TypeError("recovery workflow requires an exact RecoveryAgent")
+        if not callable(getattr(recovery_agent, "hypothesize", None)) or not callable(
+            getattr(recovery_agent, "aclose", None)
+        ):
+            raise TypeError("recovery workflow requires a hypothesis agent")
         if type(rollout_agent) is not RolloutAgent:
             raise TypeError("recovery workflow requires an exact RolloutAgent")
         if type(permit_authority) is not PermitAuthority:
@@ -716,7 +718,10 @@ class ProofToPermitWorkflow:
                     RecoveryRunEventType.HYPOTHESIS,
                     RecoveryRunEventPayload(
                         hypothesis_disposition=_planner_disposition(turn.failure),
-                        note="Gemini was unavailable or invalid; fixed read policy selected.",
+                        note=(
+                            "The advisory planner was unavailable or invalid; "
+                            "fixed read policy selected."
+                        ),
                     ),
                 )
                 state = await self._evidence.fixed(run_id, node, envelope)
@@ -749,7 +754,10 @@ class ProofToPermitWorkflow:
                 RecoveryRunEventPayload(
                     hypothesis=hypothesis,
                     hypothesis_disposition=disposition,
-                    note="Gemini advice was recorded without proof or mutation authority.",
+                    note=(
+                        "The advisory hypothesis was recorded without proof or "
+                        "mutation authority."
+                    ),
                 ),
             )
             if disposition is RecoveryHypothesisDisposition.SELECTED:

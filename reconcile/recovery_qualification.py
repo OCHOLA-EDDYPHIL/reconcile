@@ -219,7 +219,7 @@ def _require_results_match_manifest(
         restart_matches = proof.restart_exercised is (fixture.seed == manifest.seeds[0])
         variants = tuple(replay.variant_id for replay in proof.wrong_hypothesis_replays)
         wrong_hypotheses_bound = all(
-            replay.hypothesis.node_id == archetype.stage.value
+            replay.persisted_hypothesis.node_id == archetype.stage.value
             and replay.expected_hypothesis.node_id == archetype.stage.value
             for replay in proof.wrong_hypothesis_replays
         )
@@ -1099,13 +1099,13 @@ def _case_proof(
         RecoveryQualificationHypothesisReplay(
             variant_id=item.variant_id,
             wrongness_kind=item.wrongness_kind,
-            provider_name="gemini",
-            planner_output_sha256=item.planner_output_sha256,
+            generation_source="scripted-adversarial",
+            agent_output_sha256=item.agent_output_sha256,
             report=item.report,
             expected_hypothesis=item.expected_hypothesis,
             expected_hypothesis_sha256=canonical_sha256(item.expected_hypothesis),
-            hypothesis=item.hypothesis,
-            hypothesis_sha256=item.hypothesis_sha256,
+            persisted_hypothesis=item.persisted_hypothesis,
+            persisted_hypothesis_sha256=item.persisted_hypothesis_sha256,
             disposition=item.disposition,
             observed_decision_sha256=item.decision_sha256,
             observed_permit_sha256=item.permit_sha256,

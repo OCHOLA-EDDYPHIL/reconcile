@@ -1823,14 +1823,11 @@ def make_recovery_qualification_examples() -> tuple[
             RecoveryQualificationHypothesisReplay(
                 variant_id=variant_id,
                 wrongness_kind=wrongness_kind,
-                provider_name="gemini",
-                planner_output_sha256=digest(
-                    "planner-output", fixture.case_id, variant_id
-                ),
+                generation_source="scripted-adversarial",
                 report=report,
                 expected_hypothesis=expected_hypothesis,
                 expected_hypothesis_sha256=canonical_sha256(expected_hypothesis),
-                hypothesis=(
+                persisted_hypothesis=(
                     hypothesis := GeminiHypothesis.model_validate(
                         expected_hypothesis.model_copy(
                             update={
@@ -1839,7 +1836,8 @@ def make_recovery_qualification_examples() -> tuple[
                         ).model_dump(mode="python")
                     )
                 ),
-                hypothesis_sha256=canonical_sha256(hypothesis),
+                persisted_hypothesis_sha256=canonical_sha256(hypothesis),
+                agent_output_sha256=canonical_sha256(hypothesis),
                 disposition=RecoveryHypothesisDisposition.NO_PROBE,
                 observed_decision_sha256=decision_sha256,
                 observed_permit_sha256=permit_sha256,

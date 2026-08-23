@@ -84,12 +84,14 @@ def test_results_require_the_declared_factual_hypothesis_error() -> None:
     results = make_recovery_qualification_examples()[2]
     payload = results.model_dump(mode="python")
     replay = payload["case_proofs"][0]["wrong_hypothesis_replays"][0]
-    replay["hypothesis"]["proposed_classification"] = replay["expected_hypothesis"][
-        "proposed_classification"
-    ]
-    replay["hypothesis_sha256"] = canonical_sha256(
-        GeminiHypothesis.model_validate(replay["hypothesis"])
+    replay["persisted_hypothesis"]["proposed_classification"] = replay[
+        "expected_hypothesis"
+    ]["proposed_classification"]
+    digest = canonical_sha256(
+        GeminiHypothesis.model_validate(replay["persisted_hypothesis"])
     )
+    replay["persisted_hypothesis_sha256"] = digest
+    replay["agent_output_sha256"] = digest
 
     with pytest.raises(ValidationError, match="exactly its declared fact"):
         type(results).model_validate(payload)
@@ -99,14 +101,44 @@ def test_wrong_hypothesis_oracle_is_derived_from_its_retained_report() -> None:
     results = make_recovery_qualification_examples()[2]
     payload = results.model_dump(mode="python")
     replay = payload["case_proofs"][0]["wrong_hypothesis_replays"][0]
-    replay["expected_hypothesis"]["proposed_classification"] = replay["hypothesis"][
-        "proposed_classification"
-    ]
+    replay["expected_hypothesis"]["proposed_classification"] = replay[
+        "persisted_hypothesis"
+    ]["proposed_classification"]
     replay["expected_hypothesis_sha256"] = canonical_sha256(
         GeminiHypothesis.model_validate(replay["expected_hypothesis"])
     )
 
     with pytest.raises(ValidationError, match="reproduce its report facts"):
+        type(results).model_validate(payload)
+
+
+def test_wrong_hypothesis_rejects_a_false_generation_source() -> None:
+    results = make_recovery_qualification_examples()[2]
+    payload = results.model_dump(mode="python")
+    replay = payload["case_proofs"][0]["wrong_hypothesis_replays"][0]
+    replay["generation_source"] = "gemini"
+
+    with pytest.raises(ValidationError, match="scripted-adversarial"):
+        type(results).model_validate(payload)
+
+
+def test_wrong_hypothesis_rejects_a_stale_persisted_digest() -> None:
+    results = make_recovery_qualification_examples()[2]
+    payload = results.model_dump(mode="python")
+    replay = payload["case_proofs"][0]["wrong_hypothesis_replays"][0]
+    replay["persisted_hypothesis_sha256"] = "0" * 64
+
+    with pytest.raises(ValidationError, match="persisted wrong-hypothesis identity"):
+        type(results).model_validate(payload)
+
+
+def test_wrong_hypothesis_rejects_an_unpersisted_agent_output() -> None:
+    results = make_recovery_qualification_examples()[2]
+    payload = results.model_dump(mode="python")
+    replay = payload["case_proofs"][0]["wrong_hypothesis_replays"][0]
+    replay["agent_output_sha256"] = "0" * 64
+
+    with pytest.raises(ValidationError, match="persisted byte-for-byte"):
         type(results).model_validate(payload)
 
 

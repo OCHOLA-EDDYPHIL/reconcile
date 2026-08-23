@@ -1540,6 +1540,11 @@
     "RecoveryQualificationHypothesisReplay": {
       "additionalProperties": false,
       "properties": {
+        "agent_output_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Agent Output Sha256",
+          "type": "string"
+        },
         "decision_diverged": {
           "title": "Decision Diverged",
           "type": "boolean"
@@ -1555,12 +1560,9 @@
           "title": "Expected Hypothesis Sha256",
           "type": "string"
         },
-        "hypothesis": {
-          "$ref": "#/$defs/GeminiHypothesis"
-        },
-        "hypothesis_sha256": {
-          "pattern": "^[0-9a-f]{64}$",
-          "title": "Hypothesis Sha256",
+        "generation_source": {
+          "const": "scripted-adversarial",
+          "title": "Generation Source",
           "type": "string"
         },
         "observed_decision_sha256": {
@@ -1584,14 +1586,12 @@
           "title": "Permit Diverged",
           "type": "boolean"
         },
-        "planner_output_sha256": {
-          "pattern": "^[0-9a-f]{64}$",
-          "title": "Planner Output Sha256",
-          "type": "string"
+        "persisted_hypothesis": {
+          "$ref": "#/$defs/GeminiHypothesis"
         },
-        "provider_name": {
-          "const": "gemini",
-          "title": "Provider Name",
+        "persisted_hypothesis_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Persisted Hypothesis Sha256",
           "type": "string"
         },
         "report": {
@@ -1611,13 +1611,13 @@
       "required": [
         "variant_id",
         "wrongness_kind",
-        "provider_name",
-        "planner_output_sha256",
+        "generation_source",
+        "agent_output_sha256",
         "report",
         "expected_hypothesis",
         "expected_hypothesis_sha256",
-        "hypothesis",
-        "hypothesis_sha256",
+        "persisted_hypothesis",
+        "persisted_hypothesis_sha256",
         "disposition",
         "observed_decision_sha256",
         "observed_permit_sha256",

@@ -58,6 +58,7 @@ from reconcile.contracts import (
     HypothesizedEffect,
     InvestigationReport,
     NormalizedEvidence,
+    ObservationCapability,
     OperationStatus,
     PermitAction,
     PlannerAcquisitionAdvice,
@@ -70,6 +71,7 @@ from reconcile.contracts import (
     RecoveryActionNode,
     RecoveryActionScope,
     RecoveryAuthorityKind,
+    RecoveryChain,
     RecoveryDecision,
     RecoveryHypothesisDisposition,
     RecoveryPreparedAction,
@@ -78,6 +80,7 @@ from reconcile.contracts import (
     RecoveryRunRequest,
     RecoveryRunSnapshot,
     VerifiedCertificate,
+    canonical_json_bytes,
     canonical_sha256,
 )
 from reconcile.contracts.base import canonical_json_value_bytes
@@ -126,7 +129,9 @@ from reconcile.persistence.permits import ActionPermitStore
 from reconcile.persistence.recovery_runs import RecoveryRunEventSnapshot
 from reconcile.recovery_agents import (
     RecoveryAgent,
+    RecoveryAgentTurn,
     RecoveryDispatchReceipt,
+    RecoveryHypothesisAgent,
     RolloutAgent,
 )
 from reconcile.recovery_qualification_fixtures import RecoveryQualificationFixture
@@ -181,11 +186,11 @@ _UNSUPPORTED_STOP_REASONS = frozenset(
 class RecoveryQualificationWrongExecution:
     variant_id: str
     wrongness_kind: RecoveryQualificationHypothesisWrongnessKind
-    planner_output_sha256: str
+    agent_output_sha256: str
     report: InvestigationReport
     expected_hypothesis: GeminiHypothesis
-    hypothesis: GeminiHypothesis
-    hypothesis_sha256: str
+    persisted_hypothesis: GeminiHypothesis
+    persisted_hypothesis_sha256: str
     disposition: RecoveryHypothesisDisposition
     decision_sha256: str
     permit_sha256: str | None
@@ -289,7 +294,7 @@ def _different_effect_state(value: EffectAssertionState) -> EffectAssertionState
 
 
 class _ScriptedPlanner:
-    """Deterministic Gemini-shaped planner with no mutation authority."""
+    """Deterministic planner-shaped qualification double with no authority."""
 
     def __init__(
         self,
@@ -302,12 +307,11 @@ class _ScriptedPlanner:
         self.turns: list[AdvisoryPlannerTurn] = []
         self.call_tools: list[str] = []
         self.calls_by_tool: dict[str, int] = {}
-        self.expected_hypotheses_by_id: dict[str, GeminiHypothesis] = {}
         self.last_output_sha256: str | None = None
         self.metadata = AdvisoryPlannerMetadata(
-            provider_name="scripted-gemini",
-            configured_model="gemini-scripted-qualification",
-            reported_model="gemini-scripted-qualification",
+            provider_name="scripted-qualification",
+            configured_model="scripted-qualification",
+            reported_model="scripted-qualification",
             adk_version="qualification-v1",
             genai_version="qualification-v1",
             prompt_version="recovery-qualification-v1",
@@ -442,68 +446,127 @@ class _ScriptedPlanner:
         self.call_tools.append(tool_name)
         return turn
 
-    def transform_hypothesis(
-        self,
-        hypothesis: GeminiHypothesis,
-        _report: InvestigationReport,
-    ) -> GeminiHypothesis:
-        """Inject one schema-valid factual error at the selected target node."""
 
-        if self.variant == "normal" or hypothesis.node_id != self.target_node_id:
-            return hypothesis
-        # A pending report can be revisited without changing its deterministic
-        # identity.  Preserve the oracle for the first persisted occurrence;
-        # later occurrences have a newer ``created_at`` but the same ID.
-        self.expected_hypotheses_by_id.setdefault(
-            hypothesis.hypothesis_id,
-            hypothesis,
-        )
-        update: dict[str, object]
-        if self.variant == "wrong-classification":
-            update = {
-                "proposed_classification": _different_classification(
-                    hypothesis.proposed_classification
-                )
-            }
-        elif self.variant == "wrong-effect-state":
-            effects = list(hypothesis.effect_hypotheses)
-            first = effects[0]
-            effects[0] = first.model_copy(
-                update={"state": _different_effect_state(first.state)}
-            )
-            update = {"effect_hypotheses": tuple(effects)}
-        elif self.variant == "wrong-alternative-history":
-            classification = _different_classification(
+def _mutate_hypothesis(
+    hypothesis: GeminiHypothesis,
+    variant: str,
+) -> GeminiHypothesis:
+    """Change exactly one factual category in a schema-valid hypothesis."""
+
+    update: dict[str, object]
+    if variant == "wrong-classification":
+        update = {
+            "proposed_classification": _different_classification(
                 hypothesis.proposed_classification
             )
-            state = (
-                EffectAssertionState.ESTABLISHED
-                if classification is Classification.COMMITTED
-                else EffectAssertionState.NOT_ESTABLISHED
-            )
-            update = {
-                "alternative_histories": (
-                    PossibleHistory(
-                        history_id="qualification-wrong-alternative",
-                        classification=classification,
-                        effect_states=tuple(
-                            HypothesizedEffect(
-                                effect_id=item.effect_id,
-                                state=state,
-                                cited_evidence_ids=item.cited_evidence_ids,
-                            )
-                            for item in hypothesis.effect_hypotheses
-                        ),
-                        compatible_evidence_ids=hypothesis.cited_evidence_ids,
-                        summary="A schema-valid but factually incorrect history.",
-                    ),
-                )
-            }
-        else:  # pragma: no cover - constructor/plan validates the variant
-            raise AssertionError("unknown wrong-hypothesis variant")
-        return GeminiHypothesis.model_validate(
-            hypothesis.model_copy(update=update).model_dump(mode="python")
+        }
+    elif variant == "wrong-effect-state":
+        effects = list(hypothesis.effect_hypotheses)
+        first = effects[0]
+        effects[0] = first.model_copy(
+            update={"state": _different_effect_state(first.state)}
         )
+        update = {"effect_hypotheses": tuple(effects)}
+    elif variant == "wrong-alternative-history":
+        classification = _different_classification(hypothesis.proposed_classification)
+        state = (
+            EffectAssertionState.ESTABLISHED
+            if classification is Classification.COMMITTED
+            else EffectAssertionState.NOT_ESTABLISHED
+        )
+        update = {
+            "alternative_histories": (
+                PossibleHistory(
+                    history_id="qualification-wrong-alternative",
+                    classification=classification,
+                    effect_states=tuple(
+                        HypothesizedEffect(
+                            effect_id=item.effect_id,
+                            state=state,
+                            cited_evidence_ids=item.cited_evidence_ids,
+                        )
+                        for item in hypothesis.effect_hypotheses
+                    ),
+                    compatible_evidence_ids=hypothesis.cited_evidence_ids,
+                    summary="A schema-valid but factually incorrect history.",
+                ),
+            )
+        }
+    else:
+        raise ValueError("unknown wrong-hypothesis variant")
+    return GeminiHypothesis.model_validate_json(
+        canonical_json_bytes(hypothesis.model_copy(update=update))
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class _AdversarialHypothesisRecord:
+    expected_hypothesis: GeminiHypothesis
+    emitted_hypothesis_bytes: bytes
+    agent_output_sha256: str
+
+
+class _QualificationAdversarialAgent:
+    """Qualification-only fault injector at the advisory-agent boundary."""
+
+    def __init__(
+        self,
+        delegate: RecoveryAgent,
+        *,
+        variant: str,
+        target_node_id: str,
+    ) -> None:
+        if variant not in _WRONG_VARIANTS:
+            raise ValueError("an adversarial variant is required")
+        self._delegate = delegate
+        self._variant = variant
+        self._target_node_id = target_node_id
+        self.records: list[_AdversarialHypothesisRecord] = []
+
+    async def hypothesize(
+        self,
+        *,
+        chain: RecoveryChain,
+        node: RecoveryActionNode,
+        envelope: object,
+        report: InvestigationReport,
+        capabilities: tuple[ObservationCapability, ...],
+        prior_probe_sha256s: tuple[str, ...] = (),
+    ) -> RecoveryAgentTurn:
+        turn = await self._delegate.hypothesize(
+            chain=chain,
+            node=node,
+            envelope=envelope,
+            report=report,
+            capabilities=capabilities,
+            prior_probe_sha256s=prior_probe_sha256s,
+        )
+        if turn.hypothesis is None:
+            return turn
+        expected = turn.hypothesis
+        emitted = (
+            _mutate_hypothesis(expected, self._variant)
+            if node.node_id == self._target_node_id
+            else expected
+        )
+        agent_output_sha256 = canonical_sha256(emitted)
+        emitted_turn = RecoveryAgentTurn(
+            hypothesis=emitted,
+            failure=None,
+            input_sha256=turn.input_sha256,
+            output_sha256=agent_output_sha256,
+        )
+        self.records.append(
+            _AdversarialHypothesisRecord(
+                expected_hypothesis=expected,
+                emitted_hypothesis_bytes=canonical_json_bytes(emitted),
+                agent_output_sha256=agent_output_sha256,
+            )
+        )
+        return emitted_turn
+
+    async def aclose(self) -> None:
+        await self._delegate.aclose()
 
 
 class _RecordingEvidenceSource:
@@ -1380,7 +1443,7 @@ async def _wrong_hypotheses(
     baseline_state: RecoveryEvidenceState,
     permit_clock: Callable[[], datetime],
 ) -> tuple[RecoveryQualificationWrongExecution, ...]:
-    """Run each bad Gemini proposal through an isolated production workflow."""
+    """Run each scripted adversarial hypothesis through the real workflow."""
 
     baseline_decision_sha256 = _decision_semantic_sha256(
         baseline_decision,
@@ -1412,6 +1475,11 @@ async def _wrong_hypotheses(
                 conflicting=True,
             )
         planner = _ScriptedPlanner(variant, target_node_id=target_node_id)
+        adversarial_agent = _QualificationAdversarialAgent(
+            RecoveryAgent(planner, clock=provider.clock),
+            variant=variant,
+            target_node_id=target_node_id,
+        )
         stores = foundation.stores.open()
         workflow, source = _build_workflow(
             foundation=foundation,
@@ -1422,6 +1490,7 @@ async def _wrong_hypotheses(
             fixture=fixture,
             stop_before_target_dispatch=True,
             target_replay_state=baseline_state,
+            recovery_agent=adversarial_agent,
         )
         request = RecoveryRunRequest(
             schema_version=RECOVERY_RUN_REQUEST_VERSION,
@@ -1480,11 +1549,14 @@ async def _wrong_hypotheses(
             RecoveryHypothesisDisposition.NO_PROBE,
         }:
             raise AssertionError("wrong factual hypothesis used an invalid probe path")
-        expected_hypothesis = planner.expected_hypotheses_by_id.get(
-            hypothesis.hypothesis_id
-        )
-        if expected_hypothesis is None:
-            raise AssertionError("wrong hypothesis lacks its expected oracle")
+        if len(adversarial_agent.records) != len(planner.call_tools):
+            raise AssertionError("adversarial agent audit is incomplete")
+        target_record = adversarial_agent.records[target_index]
+        if target_record.emitted_hypothesis_bytes != canonical_json_bytes(hypothesis):
+            raise AssertionError(
+                "adversarial agent output differs from persisted HYPOTHESIS event"
+            )
+        expected_hypothesis = target_record.expected_hypothesis
         wrongness_kind = {
             "wrong-classification": (
                 RecoveryQualificationHypothesisWrongnessKind.CLASSIFICATION
@@ -1503,11 +1575,11 @@ async def _wrong_hypotheses(
             RecoveryQualificationWrongExecution(
                 variant_id=variant,
                 wrongness_kind=wrongness_kind,
-                planner_output_sha256=planner.turns[target_index].output_sha256,
+                agent_output_sha256=target_record.agent_output_sha256,
                 report=state.report,
                 expected_hypothesis=expected_hypothesis,
-                hypothesis=hypothesis,
-                hypothesis_sha256=canonical_sha256(hypothesis),
+                persisted_hypothesis=hypothesis,
+                persisted_hypothesis_sha256=canonical_sha256(hypothesis),
                 disposition=disposition,
                 decision_sha256=decision_sha256,
                 permit_sha256=permit_sha256,
@@ -1898,6 +1970,7 @@ def _build_workflow(
     crash_after_completed_target_dispatch: bool = False,
     stop_before_target_dispatch: bool = False,
     target_replay_state: RecoveryEvidenceState | None = None,
+    recovery_agent: RecoveryHypothesisAgent | None = None,
 ) -> tuple[ProofToPermitWorkflow, _RecordingEvidenceSource]:
     provider = foundation.provider
     evidence = _RecordingEvidenceSource(
@@ -1936,12 +2009,10 @@ def _build_workflow(
         definition_factory=lambda _request: definition,
         evidence_source=evidence,
         action_preparer=ReleaseChainActionPreparer(),
-        recovery_agent=RecoveryAgent(
-            planner,
-            clock=provider.clock,
-            hypothesis_transformer=(
-                planner.transform_hypothesis if planner.variant != "normal" else None
-            ),
+        recovery_agent=(
+            RecoveryAgent(planner, clock=provider.clock)
+            if recovery_agent is None
+            else recovery_agent
         ),
         rollout_agent=RolloutAgent(dispatch_gateway),
         permit_authority=stores.permit_authority,

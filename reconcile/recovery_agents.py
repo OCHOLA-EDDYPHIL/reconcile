@@ -61,6 +61,32 @@ class RecoveryAgentTurn:
     def __post_init__(self) -> None:
         if (self.hypothesis is None) == (self.failure is None):
             raise ValueError("a recovery turn requires one hypothesis or failure")
+        if self.hypothesis is not None:
+            if type(self.hypothesis) is not GeminiHypothesis:
+                raise TypeError(
+                    "successful recovery output requires an exact hypothesis"
+                )
+            if self.output_sha256 != canonical_sha256(self.hypothesis):
+                raise ValueError(
+                    "successful recovery output must identify its hypothesis"
+                )
+
+
+class RecoveryHypothesisAgent(Protocol):
+    """Narrow advisory boundary consumed by the deterministic workflow."""
+
+    async def hypothesize(
+        self,
+        *,
+        chain: RecoveryChain,
+        node: RecoveryActionNode,
+        envelope: object,
+        report: InvestigationReport,
+        capabilities: tuple[ObservationCapability, ...],
+        prior_probe_sha256s: tuple[str, ...] = (),
+    ) -> RecoveryAgentTurn: ...
+
+    async def aclose(self) -> None: ...
 
 
 def _evidence_views(
@@ -321,20 +347,13 @@ class RecoveryAgent:
         planner: AdvisoryPlanner,
         *,
         clock: Callable[[], datetime] | None = None,
-        hypothesis_transformer: Callable[
-            [GeminiHypothesis, InvestigationReport], GeminiHypothesis
-        ]
-        | None = None,
     ) -> None:
         if not callable(getattr(planner, "plan", None)) or not hasattr(
             planner, "metadata"
         ):
             raise TypeError("RecoveryAgent requires an advisory planner")
-        if hypothesis_transformer is not None and not callable(hypothesis_transformer):
-            raise TypeError("hypothesis transformer must be callable")
         self._planner = planner
         self._clock = clock or (lambda: datetime.now(UTC))
-        self._hypothesis_transformer = hypothesis_transformer
 
     @classmethod
     def from_vertex_adc(
@@ -488,15 +507,6 @@ class RecoveryAgent:
                 explanation=output.explanation.summary,
                 created_at=now,
             )
-            if self._hypothesis_transformer is not None:
-                transformed = self._hypothesis_transformer(hypothesis, report)
-                if type(transformed) is not GeminiHypothesis:
-                    raise TypeError(
-                        "hypothesis transformer must return an exact hypothesis"
-                    )
-                hypothesis = GeminiHypothesis.model_validate_json(
-                    canonical_json_bytes(transformed)
-                )
         except Exception:
             return RecoveryAgentTurn(
                 hypothesis=None,
@@ -587,6 +597,7 @@ __all__ = [
     "RecoveryAgentTurn",
     "RecoveryDispatchGateway",
     "RecoveryDispatchReceipt",
+    "RecoveryHypothesisAgent",
     "RolloutAgent",
     "probe_request_sha256",
     "recovery_remaining_budget",
