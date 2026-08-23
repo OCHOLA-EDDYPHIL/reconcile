@@ -185,9 +185,7 @@
       "type": "integer"
     },
     "controller_version": {
-      "maxLength": 128,
-      "minLength": 1,
-      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+      "const": "recovery-controller-v1",
       "title": "Controller Version",
       "type": "string"
     },
@@ -197,14 +195,12 @@
       "type": "string"
     },
     "decision_policy_version": {
-      "maxLength": 128,
-      "minLength": 1,
-      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+      "const": "recovery-decision-policy-v1",
       "title": "Decision Policy Version",
       "type": "string"
     },
     "fixture_catalog_sha256": {
-      "const": "2511e100241cc679765cec514f7d3a616fdf21b197925b3ab59eda611912f8f3",
+      "const": "76e4fe9067534c00ff138b45c83dd449bff97ee7b5aeb7aa8240ea32020ac42c",
       "title": "Fixture Catalog Sha256",
       "type": "string"
     },
@@ -214,9 +210,7 @@
       "type": "integer"
     },
     "permit_policy_version": {
-      "maxLength": 128,
-      "minLength": 1,
-      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+      "const": "recovery-permit-policy-v1",
       "title": "Permit Policy Version",
       "type": "string"
     },
@@ -261,9 +255,7 @@
       "type": "string"
     },
     "suite_id": {
-      "maxLength": 128,
-      "minLength": 1,
-      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+      "const": "proof-to-permit-qualification-v1",
       "title": "Suite Id",
       "type": "string"
     },

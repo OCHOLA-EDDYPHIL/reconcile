@@ -37,13 +37,17 @@ from reconcile.contracts.recovery_qualification import (
     RECOVERY_QUALIFICATION_COMPARISON_VERSION,
     RECOVERY_QUALIFICATION_CONTENTION_VERSION,
     RECOVERY_QUALIFICATION_CONTENTION_WIDTH,
+    RECOVERY_QUALIFICATION_CONTROLLER_VERSION,
+    RECOVERY_QUALIFICATION_DECISION_POLICY_VERSION,
     RECOVERY_QUALIFICATION_ENVIRONMENT_VERSION,
     RECOVERY_QUALIFICATION_FIXTURE_CATALOG_SHA256,
     RECOVERY_QUALIFICATION_INDEX_VERSION,
     RECOVERY_QUALIFICATION_LANE_COUNT,
     RECOVERY_QUALIFICATION_MANIFEST_VERSION,
+    RECOVERY_QUALIFICATION_PERMIT_POLICY_VERSION,
     RECOVERY_QUALIFICATION_POLICIES,
     RECOVERY_QUALIFICATION_RESULTS_VERSION,
+    RECOVERY_QUALIFICATION_RUNNER_VERSION,
     RECOVERY_QUALIFICATION_SEEDS,
     RecoveryQualificationAggregateMetrics,
     RecoveryQualificationArtifactIdentity,
@@ -93,10 +97,6 @@ from reconcile.recovery_qualification_provider import (
     build_recovery_qualification_provider,
 )
 
-RECOVERY_QUALIFICATION_RUNNER_VERSION = "recovery-qualification-runner-v1"
-RECOVERY_QUALIFICATION_CONTROLLER_VERSION = "recovery-controller-v1"
-RECOVERY_QUALIFICATION_DECISION_POLICY_VERSION = "recovery-decision-policy-v1"
-RECOVERY_QUALIFICATION_PERMIT_POLICY_VERSION = "recovery-permit-policy-v1"
 RECOVERY_QUALIFICATION_MEDIAN_FORMULA = (
     "(fixed_median_probe_count_x2-adaptive_median_probe_count_x2)"
     "*10000//fixed_median_probe_count_x2"
@@ -126,6 +126,170 @@ RECOVERY_QUALIFICATION_TEST_COMMANDS = (
 
 class RecoveryQualificationError(RuntimeError):
     """Qualification inputs or evidence violate the frozen protocol."""
+
+
+def _require_frozen_manifest(manifest: RecoveryQualificationManifest) -> None:
+    if (
+        manifest.suite_id != RECOVERY_QUALIFICATION_BUNDLE_FORMAT
+        or manifest.controller_version != RECOVERY_QUALIFICATION_CONTROLLER_VERSION
+        or manifest.decision_policy_version
+        != RECOVERY_QUALIFICATION_DECISION_POLICY_VERSION
+        or manifest.permit_policy_version
+        != RECOVERY_QUALIFICATION_PERMIT_POLICY_VERSION
+        or manifest.archetypes != RECOVERY_QUALIFICATION_ARCHETYPES
+        or manifest.seeds != RECOVERY_QUALIFICATION_SEEDS
+        or manifest.policies != RECOVERY_QUALIFICATION_POLICIES
+        or manifest.fixture_catalog_sha256
+        != recovery_qualification_fixture_catalog_sha256()
+    ):
+        raise RecoveryQualificationError("qualification manifest catalog changed")
+
+
+def _require_environment_matches_manifest(
+    manifest: RecoveryQualificationManifest,
+    environment: RecoveryQualificationEnvironment,
+) -> None:
+    if (
+        environment.suite_id != manifest.suite_id
+        or environment.manifest_sha256 != canonical_sha256(manifest)
+        or environment.source_revision != manifest.source_revision
+        or environment.source_tree_sha256 != manifest.source_tree_sha256
+        or environment.runner_version != RECOVERY_QUALIFICATION_RUNNER_VERSION
+        or environment.test_commands != RECOVERY_QUALIFICATION_TEST_COMMANDS
+    ):
+        raise RecoveryQualificationError("qualification environment binding changed")
+
+
+def _require_results_match_manifest(
+    manifest: RecoveryQualificationManifest,
+    results: RecoveryQualificationResults,
+) -> None:
+    """Cross-check facts that cannot be derived inside one standalone record."""
+
+    _require_frozen_manifest(manifest)
+    fixtures = build_recovery_qualification_fixtures()
+    for index, (fixture, proof) in enumerate(
+        zip(fixtures, results.case_proofs, strict=True)
+    ):
+        lanes = results.lane_results[index * 4 : index * 4 + 4]
+        archetype = fixture.archetype
+        expected_kind = (
+            RecoveryQualificationArtifactKind.AMBIGUITY_WITNESS
+            if archetype.ambiguity_witness_required
+            else RecoveryQualificationArtifactKind.VERIFIED_CERTIFICATE
+        )
+        common = (
+            proof.case_id == fixture.case_id
+            and proof.archetype_id == archetype.archetype_id
+            and proof.seed == fixture.seed
+            and proof.storage_backend is fixture.storage_backend
+            and proof.deterministic_resolution is archetype.expected_resolution
+            and proof.deterministic_permit_action is archetype.expected_permit_action
+            and proof.fixed_artifact_kind is expected_kind
+            and proof.adaptive_artifact_kind is expected_kind
+        )
+        lane_binding = all(
+            lane.case_id == fixture.case_id
+            and lane.archetype_id == archetype.archetype_id
+            and lane.seed == fixture.seed
+            and lane.storage_backend is fixture.storage_backend
+            and lane.fault_class is archetype.fault_class
+            and lane.expected_permit_action is archetype.expected_permit_action
+            for lane in lanes
+        )
+        proof_outcomes = all(
+            lane.resolution is archetype.expected_resolution
+            and lane.deterministic_artifact_kind is expected_kind
+            and lane.issued_permit_action is archetype.expected_permit_action
+            for lane in lanes[2:]
+        )
+        metrics_match = (
+            lanes[2].probe_count == archetype.fixed_probe_count
+            and lanes[3].probe_count == archetype.adaptive_probe_count
+            and lanes[2].unsupported_probe_count
+            == archetype.fixed_unsupported_probe_count
+            and lanes[3].unsupported_probe_count
+            == archetype.adaptive_unsupported_probe_count
+        )
+        profile_matches = all(
+            lane.demonstrated_evidence_profile == archetype.evidence_profile
+            for lane in lanes[2:]
+        )
+        restart_matches = proof.restart_exercised is (fixture.seed == manifest.seeds[0])
+        variants = tuple(replay.variant_id for replay in proof.wrong_hypothesis_replays)
+        if (
+            not common
+            or results.suite_id != manifest.suite_id
+            or not lane_binding
+            or not proof_outcomes
+            or not metrics_match
+            or not profile_matches
+            or not restart_matches
+            or variants
+            != tuple(f"wrong-gemini-hypothesis-{value}" for value in range(1, 4))
+        ):
+            raise RecoveryQualificationError(
+                "qualification results contradict the frozen manifest"
+            )
+
+
+def _require_contention_matches_protocol(
+    manifest: RecoveryQualificationManifest,
+    results: RecoveryQualificationResults,
+    contention: RecoveryQualificationContention,
+) -> None:
+    if (
+        contention.suite_id != manifest.suite_id
+        or contention.manifest_sha256 != canonical_sha256(manifest)
+        or contention.results_sha256 != canonical_sha256(results)
+    ):
+        raise RecoveryQualificationError("qualification contention binding changed")
+    expected_claim_ids = tuple(
+        f"qualification-claim-{index:02}"
+        for index in range(RECOVERY_QUALIFICATION_CONTENTION_WIDTH)
+    )
+    provider = build_recovery_qualification_provider(
+        build_recovery_qualification_fixtures()[0]
+    )
+    operation_name = (
+        f"projects/{provider.settings.project}/locations/"
+        f"{provider.settings.location}/operations/op-1"
+    )
+    for trial in contention.trials:
+        issued = _contention_permit(trial.backend, trial.permit_action)
+        expected_final = issued.model_copy(
+            update={
+                "state": ActionPermitState.CLAIMED,
+                "revision": 1,
+                "claim_id": trial.winner_claim_id,
+                "claimed_at": _CONTENTION_NOW + timedelta(seconds=1),
+            }
+        )
+        receipt_ids = (
+            (
+                "provider-call-receipt-"
+                + hashlib.sha256(
+                    (
+                        f"{trial.backend.value}\0{trial.permit_action.value}\0"
+                        f"{operation_name}"
+                    ).encode()
+                ).hexdigest()[:32]
+            ),
+        )
+        expected_denied = tuple(
+            claim_id
+            for claim_id in expected_claim_ids
+            if claim_id != trial.winner_claim_id
+        )
+        if (
+            trial.contender_claim_ids != expected_claim_ids
+            or trial.denied_claim_ids != expected_denied
+            or trial.final_permit != expected_final
+            or trial.provider_call_receipt_ids != receipt_ids
+        ):
+            raise RecoveryQualificationError(
+                "qualification contention trial contradicts the protocol"
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -209,7 +373,11 @@ def recovery_qualification_source_state(
         try:
             name = encoded_name.decode("utf-8")
             path = root / name
-            payload = path.read_bytes()
+            payload = (
+                os.fsencode(os.readlink(path))
+                if path.is_symlink()
+                else path.read_bytes()
+            )
         except (OSError, UnicodeDecodeError) as error:
             raise RecoveryQualificationError(
                 "qualification source tree cannot be read exactly"
@@ -441,24 +609,10 @@ def replay_recovery_qualification_fixture(
     elif {"record-exists", "record-payload-matches"} <= facts:
         resolution = RecoveryQualificationResolution.COMPLETED
         action = None
-    elif (
-        {
-            "stage-revision-exists",
-            "stage-revision-ready",
-            "stage-health-ready",
-            "stage-traffic-unchanged",
-        }
-        <= facts
-        or {"stage-revision-ready", "stage-health-ready"} <= facts
-        or {"promote-serving-intended", "promote-etag-fresh"} <= facts
-        or {
-            "cross-revision-ready",
-            "cross-health-ready",
-            "cross-traffic-unchanged",
-            "cross-record-absent",
-        }
-        <= facts
-    ):
+    elif {"stage-revision-ready", "stage-traffic-unchanged"} <= facts or {
+        "promote-serving-intended",
+        "promote-service-fresh",
+    } <= facts:
         resolution = RecoveryQualificationResolution.CONTINUE
         action = PermitAction.CONTINUE
     else:
@@ -513,14 +667,8 @@ def _validated_qualification_fixtures(
         or type(environment) is not RecoveryQualificationEnvironment
     ):
         raise TypeError("exact recovery qualification inputs are required")
-    manifest_sha256 = canonical_sha256(manifest)
-    if (
-        environment.suite_id != manifest.suite_id
-        or environment.manifest_sha256 != manifest_sha256
-        or environment.source_revision != manifest.source_revision
-        or environment.source_tree_sha256 != manifest.source_tree_sha256
-    ):
-        raise RecoveryQualificationError("qualification environment binding changed")
+    _require_frozen_manifest(manifest)
+    _require_environment_matches_manifest(manifest, environment)
     selected = build_recovery_qualification_fixtures() if fixtures is None else fixtures
     if (
         type(selected) is not tuple
@@ -618,6 +766,7 @@ def _blind_lane_result(
         storage_backend=fixture.storage_backend,
         fault_class=fixture.archetype.fault_class,
         admitted_evidence_sha256=evidence_sha256,
+        demonstrated_evidence_profile=(),
         deterministic_artifact_kind=RecoveryQualificationArtifactKind.NONE,
         deterministic_artifact_sha256=None,
         decision_sha256=decision_sha256,
@@ -669,6 +818,7 @@ def _proof_lane_result(
         storage_backend=fixture.storage_backend,
         fault_class=fixture.archetype.fault_class,
         admitted_evidence_sha256=execution.admitted_evidence_sha256,
+        demonstrated_evidence_profile=execution.demonstrated_evidence_profile,
         deterministic_artifact_kind=execution.artifact_kind,
         deterministic_artifact_sha256=execution.artifact_sha256,
         decision_sha256=execution.decision_sha256,
@@ -789,6 +939,9 @@ def _case_proof(
         restarted_permit_sha256=(
             fixed.restarted_permit_sha256 if restart_exercised else None
         ),
+        restarted_provider_mutations=(
+            fixed.restarted_provider_mutations if restart_exercised else None
+        ),
         restart_decision_valid=(
             not restart_exercised
             or fixed.restarted_decision_sha256 == fixed.decision_sha256
@@ -796,6 +949,10 @@ def _case_proof(
         restart_permit_valid=(
             not restart_exercised
             or fixed.restarted_permit_sha256 == fixed.permit_sha256
+        ),
+        restart_provider_mutations_valid=(
+            not restart_exercised
+            or fixed.restarted_provider_mutations == fixed.provider_mutations
         ),
     )
 
@@ -906,7 +1063,10 @@ async def _run_recovery_qualification_in_directory(
     )
     restarts = tuple(item for item in case_proofs if item.restart_exercised)
     restart_valid = sum(
-        item.restart_decision_valid and item.restart_permit_valid for item in restarts
+        item.restart_decision_valid
+        and item.restart_permit_valid
+        and item.restart_provider_mutations_valid
+        for item in restarts
     )
     actions = tuple(fixture.archetype.expected_permit_action for fixture in selected)
     sqlite_count = sum(
@@ -1043,13 +1203,17 @@ def compare_recovery_qualification(
 ) -> RecoveryQualificationComparison:
     """Aggregate all four lanes and calculate the exact median reduction."""
 
+    _require_frozen_manifest(manifest)
+    _require_environment_matches_manifest(manifest, environment)
     manifest_sha256 = canonical_sha256(manifest)
     environment_sha256 = canonical_sha256(environment)
     if (
-        results.manifest_sha256 != manifest_sha256
+        results.suite_id != manifest.suite_id
+        or results.manifest_sha256 != manifest_sha256
         or results.environment_sha256 != environment_sha256
     ):
         raise RecoveryQualificationError("qualification comparison binding changed")
+    _require_results_match_manifest(manifest, results)
     lanes = tuple(
         _aggregate_metrics(policy, results.lane_results)
         for policy in RECOVERY_QUALIFICATION_POLICIES
@@ -1068,16 +1232,9 @@ def compare_recovery_qualification(
         fixed_values,
         adaptive_values,
     )
-    adaptive_lanes = tuple(
-        item
-        for item in results.lane_results
-        if item.policy is RecoveryQualificationPolicy.ADAPTIVE
-    )
-    measured = bool(adaptive_lanes) and all(
-        item.model_usage.status is RecoveryQualificationModelUsageStatus.MEASURED
-        and item.model_usage.live_vertex_backed
-        for item in adaptive_lanes
-    )
+    # v1 ships only the scripted runner.  Self-attested lane fields are not an
+    # authenticated Vertex receipt and therefore cannot authorize live wording.
+    measured = False
     return RecoveryQualificationComparison(
         schema_version=RECOVERY_QUALIFICATION_COMPARISON_VERSION,
         bundle_format=RECOVERY_QUALIFICATION_BUNDLE_FORMAT,
@@ -1176,10 +1333,14 @@ async def _contention_trial(
         database = directory / f"{backend.value}-{action.value.lower()}.sqlite3"
         store = SqliteDurableRuntimeStore(database)
     else:
-        store = build_qualification_firestore_store_factory(
-            f"contention-{backend.value}-{action.value.lower()}",
-            lambda: _CONTENTION_NOW,
-        ).open().permit_store
+        store = (
+            build_qualification_firestore_store_factory(
+                f"contention-{backend.value}-{action.value.lower()}",
+                lambda: _CONTENTION_NOW,
+            )
+            .open()
+            .permit_store
+        )
     provider = build_recovery_qualification_provider(
         build_recovery_qualification_fixtures()[0]
     )
@@ -1257,7 +1418,11 @@ async def run_recovery_qualification_contention(
 ) -> RecoveryQualificationContention:
     """Exercise 32-way CONTINUE and RETRY claims in SQLite and Firestore."""
 
-    if results.manifest_sha256 != canonical_sha256(manifest):
+    _require_results_match_manifest(manifest, results)
+    if (
+        results.suite_id != manifest.suite_id
+        or results.manifest_sha256 != canonical_sha256(manifest)
+    ):
         raise RecoveryQualificationError("contention result binding changed")
     if working_directory is None:
         with tempfile.TemporaryDirectory(prefix="recovery-qualification-") as value:
@@ -1297,6 +1462,8 @@ def authorize_recovery_qualification_claims(
 ) -> RecoveryQualificationClaimAuthorization:
     """Authorize safety separately from live-provider adaptive efficiency."""
 
+    _require_frozen_manifest(manifest)
+    _require_environment_matches_manifest(manifest, environment)
     manifest_sha256 = canonical_sha256(manifest)
     environment_sha256 = canonical_sha256(environment)
     results_sha256 = canonical_sha256(results)
@@ -1304,6 +1471,9 @@ def authorize_recovery_qualification_claims(
     comparison_sha256 = canonical_sha256(comparison)
     if any(
         (
+            results.suite_id != manifest.suite_id,
+            contention.suite_id != manifest.suite_id,
+            comparison.suite_id != manifest.suite_id,
             environment.manifest_sha256 != manifest_sha256,
             results.manifest_sha256 != manifest_sha256,
             results.environment_sha256 != environment_sha256,
@@ -1315,6 +1485,12 @@ def authorize_recovery_qualification_claims(
         )
     ):
         raise RecoveryQualificationError("claim evidence binding changed")
+    _require_results_match_manifest(manifest, results)
+    _require_contention_matches_protocol(manifest, results, contention)
+    if comparison != compare_recovery_qualification(manifest, environment, results):
+        raise RecoveryQualificationError(
+            "qualification comparison does not reproduce its results"
+        )
     source_exact = all(
         (
             environment.repository_clean,
@@ -1322,20 +1498,10 @@ def authorize_recovery_qualification_claims(
             environment.source_tree_sha256 == manifest.source_tree_sha256,
         )
     )
-    adaptive_lanes = tuple(
-        item
-        for item in results.lane_results
-        if item.policy is RecoveryQualificationPolicy.ADAPTIVE
-    )
-    live_vertex = (
-        environment.execution_basis is RecoveryQualificationExecutionBasis.LIVE_VERTEX
-        and bool(adaptive_lanes)
-        and all(item.model_usage.live_vertex_backed for item in adaptive_lanes)
-    )
-    measured = live_vertex and all(
-        item.model_usage.status is RecoveryQualificationModelUsageStatus.MEASURED
-        for item in adaptive_lanes
-    )
+    # No authenticated live-Vertex execution path exists in the v1 runner.
+    # Keep both gates closed rather than treating model fields as provenance.
+    live_vertex = False
+    measured = False
     divergences = (
         results.wrong_hypothesis_decision_divergence_count
         + results.wrong_hypothesis_permit_divergence_count
@@ -1712,6 +1878,7 @@ def verify_recovery_qualification_bundle(
         or index.suite_id != manifest.suite_id
         or index.source_revision != manifest.source_revision
         or index.source_tree_sha256 != manifest.source_tree_sha256
+        or index.created_at != environment.generated_at
     ):
         raise RecoveryQualificationError("qualification bundle binding changed")
     return index

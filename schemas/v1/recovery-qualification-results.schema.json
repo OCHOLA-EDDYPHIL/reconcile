@@ -174,6 +174,10 @@
           "title": "Restart Permit Valid",
           "type": "boolean"
         },
+        "restart_provider_mutations_valid": {
+          "title": "Restart Provider Mutations Valid",
+          "type": "boolean"
+        },
         "restarted_decision_sha256": {
           "anyOf": [
             {
@@ -197,6 +201,16 @@
             }
           ],
           "title": "Restarted Permit Sha256"
+        },
+        "restarted_provider_mutations": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RecoveryQualificationProviderMutations"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "seed": {
           "maximum": 9223372036854775807,
@@ -277,8 +291,10 @@
         "restart_lane_sha256",
         "restarted_decision_sha256",
         "restarted_permit_sha256",
+        "restarted_provider_mutations",
         "restart_decision_valid",
-        "restart_permit_valid"
+        "restart_permit_valid",
+        "restart_provider_mutations_valid"
       ],
       "title": "RecoveryQualificationCaseProof",
       "type": "object"
@@ -411,6 +427,18 @@
           "pattern": "^[0-9a-f]{64}$",
           "title": "Decision Sha256",
           "type": "string"
+        },
+        "demonstrated_evidence_profile": {
+          "description": "Preregistered archetype facts demonstrated by runtime evidence.",
+          "items": {
+            "maxLength": 128,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+            "type": "string"
+          },
+          "maxItems": 32,
+          "title": "Demonstrated Evidence Profile",
+          "type": "array"
         },
         "deterministic_artifact_kind": {
           "$ref": "#/$defs/RecoveryQualificationArtifactKind"
@@ -545,6 +573,7 @@
         "storage_backend",
         "fault_class",
         "admitted_evidence_sha256",
+        "demonstrated_evidence_profile",
         "deterministic_artifact_kind",
         "deterministic_artifact_sha256",
         "decision_sha256",
@@ -868,9 +897,7 @@
       "type": "integer"
     },
     "suite_id": {
-      "maxLength": 128,
-      "minLength": 1,
-      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+      "const": "proof-to-permit-qualification-v1",
       "title": "Suite Id",
       "type": "string"
     },

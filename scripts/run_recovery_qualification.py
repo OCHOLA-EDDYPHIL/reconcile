@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import json
 from datetime import UTC, datetime
 from pathlib import Path
@@ -25,14 +26,12 @@ def _timestamp(value: str) -> datetime:
 
 async def _run(arguments: argparse.Namespace) -> int:
     repository = arguments.repository.resolve()
-    source_revision, source_tree_sha256, clean = (
-        recovery_qualification_source_state(repository)
+    source_revision, source_tree_sha256, clean = recovery_qualification_source_state(
+        repository
     )
     lock_path = repository / "uv.lock"
     if not lock_path.is_file():
         raise RuntimeError("qualification requires the checked-in uv.lock")
-    import hashlib
-
     dependency_lock_sha256 = hashlib.sha256(lock_path.read_bytes()).hexdigest()
     bundle = await build_recovery_qualification_bundle(
         source_revision=source_revision,
@@ -41,6 +40,12 @@ async def _run(arguments: argparse.Namespace) -> int:
         dependency_lock_sha256=dependency_lock_sha256,
         created_at=arguments.created_at,
     )
+    final_source_state = recovery_qualification_source_state(repository)
+    final_lock_sha256 = hashlib.sha256(lock_path.read_bytes()).hexdigest()
+    if final_source_state != (source_revision, source_tree_sha256, clean) or (
+        final_lock_sha256 != dependency_lock_sha256
+    ):
+        raise RuntimeError("qualification source changed while the matrix was running")
     index = export_recovery_qualification_bundle(
         arguments.output,
         bundle,

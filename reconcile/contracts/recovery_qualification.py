@@ -7,6 +7,7 @@ claims without changing any pre-existing qualification semantics.
 
 from __future__ import annotations
 
+import hashlib
 from enum import StrEnum
 from typing import Literal
 
@@ -18,6 +19,7 @@ from reconcile.contracts.base import (
     SanitizedText,
     Sha256Digest,
     StrictModel,
+    canonical_json_value_bytes,
 )
 from reconcile.contracts.codec import canonical_sha256
 from reconcile.contracts.recovery import ActionPermit, ActionPermitState, PermitAction
@@ -39,6 +41,10 @@ RECOVERY_QUALIFICATION_CLAIM_AUTHORIZATION_VERSION = (
     "reconcile/recovery-qualification-claim-authorization/v1"
 )
 RECOVERY_QUALIFICATION_INDEX_VERSION = "reconcile/recovery-qualification-index/v1"
+RECOVERY_QUALIFICATION_RUNNER_VERSION = "recovery-qualification-runner-v1"
+RECOVERY_QUALIFICATION_CONTROLLER_VERSION = "recovery-controller-v1"
+RECOVERY_QUALIFICATION_DECISION_POLICY_VERSION = "recovery-decision-policy-v1"
+RECOVERY_QUALIFICATION_PERMIT_POLICY_VERSION = "recovery-permit-policy-v1"
 
 RECOVERY_QUALIFICATION_SEEDS = (104729, 130363, 155921, 196613, 262147)
 RECOVERY_QUALIFICATION_CASE_COUNT = 100
@@ -48,7 +54,10 @@ RECOVERY_QUALIFICATION_RESTART_COUNT = 20
 RECOVERY_QUALIFICATION_CONTENTION_WIDTH = 32
 RECOVERY_QUALIFICATION_ADAPTIVE_THRESHOLD_BASIS_POINTS = 2500
 RECOVERY_QUALIFICATION_FIXTURE_CATALOG_SHA256 = (
-    "2511e100241cc679765cec514f7d3a616fdf21b197925b3ab59eda611912f8f3"
+    "76e4fe9067534c00ff138b45c83dd449bff97ee7b5aeb7aa8240ea32020ac42c"
+)
+RECOVERY_QUALIFICATION_ARCHETYPE_CATALOG_SHA256 = (
+    "641c9f3cefa6051d60ab7b5f9860e7399fc06bb32bbe8644807ad142d24c5006"
 )
 
 _MAX_SIGNED_64 = 2**63 - 1
@@ -170,13 +179,13 @@ class RecoveryQualificationArchetype(StrictModel):
 class RecoveryQualificationManifest(StrictModel):
     schema_version: Literal[RECOVERY_QUALIFICATION_MANIFEST_VERSION]
     bundle_format: Literal[RECOVERY_QUALIFICATION_BUNDLE_FORMAT]
-    suite_id: Identifier
+    suite_id: Literal[RECOVERY_QUALIFICATION_BUNDLE_FORMAT]
     source_revision: Identifier
     source_tree_sha256: Sha256Digest
     fixture_catalog_sha256: Literal[RECOVERY_QUALIFICATION_FIXTURE_CATALOG_SHA256]
-    controller_version: Identifier
-    decision_policy_version: Identifier
-    permit_policy_version: Identifier
+    controller_version: Literal[RECOVERY_QUALIFICATION_CONTROLLER_VERSION]
+    decision_policy_version: Literal[RECOVERY_QUALIFICATION_DECISION_POLICY_VERSION]
+    permit_policy_version: Literal[RECOVERY_QUALIFICATION_PERMIT_POLICY_VERSION]
     seeds: tuple[int, ...] = Field(min_length=5, max_length=5)
     policies: tuple[RecoveryQualificationPolicy, ...] = Field(
         min_length=4,
@@ -205,6 +214,13 @@ class RecoveryQualificationManifest(StrictModel):
         identifiers = tuple(item.archetype_id for item in self.archetypes)
         if len(identifiers) != len(set(identifiers)):
             raise ValueError("recovery qualification archetypes must be unique")
+        archetype_catalog_sha256 = hashlib.sha256(
+            canonical_json_value_bytes(
+                [item.model_dump(mode="json") for item in self.archetypes]
+            )
+        ).hexdigest()
+        if archetype_catalog_sha256 != RECOVERY_QUALIFICATION_ARCHETYPE_CATALOG_SHA256:
+            raise ValueError("recovery qualification archetype catalog changed")
         if self.case_count != len(self.archetypes) * len(self.seeds):
             raise ValueError("recovery qualification case count changed")
         if self.lane_result_count != self.case_count * len(self.policies):
@@ -232,13 +248,13 @@ class RecoveryQualificationManifest(StrictModel):
 class RecoveryQualificationEnvironment(StrictModel):
     schema_version: Literal[RECOVERY_QUALIFICATION_ENVIRONMENT_VERSION]
     bundle_format: Literal[RECOVERY_QUALIFICATION_BUNDLE_FORMAT]
-    suite_id: Identifier
+    suite_id: Literal[RECOVERY_QUALIFICATION_BUNDLE_FORMAT]
     manifest_sha256: Sha256Digest
     source_revision: Identifier
     source_tree_sha256: Sha256Digest
     repository_clean: bool
     execution_basis: RecoveryQualificationExecutionBasis
-    runner_version: Identifier
+    runner_version: Literal[RECOVERY_QUALIFICATION_RUNNER_VERSION]
     python_version: SanitizedText
     platform: SanitizedText
     dependency_lock_sha256: Sha256Digest
@@ -366,6 +382,10 @@ class RecoveryQualificationLaneResult(StrictModel):
     storage_backend: RecoveryQualificationStorageBackend
     fault_class: RecoveryQualificationFaultClass
     admitted_evidence_sha256: Sha256Digest
+    demonstrated_evidence_profile: tuple[Identifier, ...] = Field(
+        max_length=32,
+        description="Preregistered archetype facts demonstrated by runtime evidence.",
+    )
     deterministic_artifact_kind: RecoveryQualificationArtifactKind
     deterministic_artifact_sha256: Sha256Digest | None
     decision_sha256: Sha256Digest
@@ -393,12 +413,18 @@ class RecoveryQualificationLaneResult(StrictModel):
             raise ValueError("lane seed is outside the frozen schedule")
         if self.unsupported_probe_count > self.probe_count:
             raise ValueError("unsupported probes cannot exceed executed probes")
+        if len(self.demonstrated_evidence_profile) != len(
+            set(self.demonstrated_evidence_profile)
+        ):
+            raise ValueError("demonstrated evidence profile must be unique")
         if (self.probe_count == 0) is not (self.time_to_sufficient_evidence_ms is None):
             raise ValueError("probe timing must be present exactly when probes execute")
         proof_policy = self.policy in {
             RecoveryQualificationPolicy.FIXED,
             RecoveryQualificationPolicy.ADAPTIVE,
         }
+        if proof_policy != bool(self.demonstrated_evidence_profile):
+            raise ValueError("only proof lanes require a demonstrated evidence profile")
         if proof_policy:
             expected_false = (
                 self.issued_permit_action is not self.expected_permit_action
@@ -499,9 +525,7 @@ class RecoveryQualificationHypothesisReplay(StrictModel):
             RecoveryHypothesisDisposition.INVALID_BINDING,
             RecoveryHypothesisDisposition.MALFORMED_MODEL_OUTPUT,
         }:
-            raise ValueError(
-                "wrong-hypothesis replay requires a rejecting disposition"
-            )
+            raise ValueError("wrong-hypothesis replay requires a rejecting disposition")
         return self
 
 
@@ -537,8 +561,10 @@ class RecoveryQualificationCaseProof(StrictModel):
     restart_lane_sha256: Sha256Digest | None
     restarted_decision_sha256: Sha256Digest | None
     restarted_permit_sha256: Sha256Digest | None
+    restarted_provider_mutations: RecoveryQualificationProviderMutations | None
     restart_decision_valid: bool
     restart_permit_valid: bool
+    restart_provider_mutations_valid: bool
 
     @model_validator(mode="after")
     def validate_case_proof(self) -> RecoveryQualificationCaseProof:
@@ -598,8 +624,10 @@ class RecoveryQualificationCaseProof(StrictModel):
         ):
             raise ValueError("witness replay validity must be derived")
         if self.restart_exercised:
-            if self.restart_lane_sha256 is None or (
-                self.restarted_decision_sha256 is None
+            if (
+                self.restart_lane_sha256 is None
+                or (self.restarted_decision_sha256 is None)
+                or self.restarted_provider_mutations is None
             ):
                 raise ValueError("restart cases require reloaded artifact evidence")
             restart_decision_valid = (
@@ -608,6 +636,7 @@ class RecoveryQualificationCaseProof(StrictModel):
             restart_permit_valid = (
                 self.restarted_permit_sha256 == self.fixed_permit_sha256
             )
+            restart_provider_mutations_valid = True
         else:
             if any(
                 value is not None
@@ -615,14 +644,18 @@ class RecoveryQualificationCaseProof(StrictModel):
                     self.restart_lane_sha256,
                     self.restarted_decision_sha256,
                     self.restarted_permit_sha256,
+                    self.restarted_provider_mutations,
                 )
             ):
                 raise ValueError("non-restart cases cannot contain restart evidence")
             restart_decision_valid = True
             restart_permit_valid = True
+            restart_provider_mutations_valid = True
         if (
             self.restart_decision_valid is not restart_decision_valid
             or self.restart_permit_valid is not restart_permit_valid
+            or self.restart_provider_mutations_valid
+            is not restart_provider_mutations_valid
         ):
             raise ValueError("restart replay validity must be derived")
         return self
@@ -646,7 +679,7 @@ class RecoveryQualificationPermitCoverage(StrictModel):
 class RecoveryQualificationResults(StrictModel):
     schema_version: Literal[RECOVERY_QUALIFICATION_RESULTS_VERSION]
     bundle_format: Literal[RECOVERY_QUALIFICATION_BUNDLE_FORMAT]
-    suite_id: Identifier
+    suite_id: Literal[RECOVERY_QUALIFICATION_BUNDLE_FORMAT]
     manifest_sha256: Sha256Digest
     environment_sha256: Sha256Digest
     lane_results: tuple[RecoveryQualificationLaneResult, ...] = Field(
@@ -756,6 +789,10 @@ class RecoveryQualificationResults(StrictModel):
                 or proof.admitted_evidence_sha256 != fixed.admitted_evidence_sha256
                 or proof.deterministic_resolution is not fixed.resolution
                 or proof.deterministic_permit_action is not fixed.issued_permit_action
+                or (
+                    proof.restart_exercised
+                    and proof.restarted_provider_mutations != fixed.provider_mutations
+                )
             ):
                 raise ValueError("fixed/adaptive deterministic replay diverged")
         false_permits = sum(item.false_permit for item in self.lane_results)
@@ -789,7 +826,9 @@ class RecoveryQualificationResults(StrictModel):
         )
         restarts = tuple(item for item in self.case_proofs if item.restart_exercised)
         restart_valid = sum(
-            item.restart_decision_valid and item.restart_permit_valid
+            item.restart_decision_valid
+            and item.restart_permit_valid
+            and item.restart_provider_mutations_valid
             for item in restarts
         )
         expected = (
@@ -912,7 +951,7 @@ class RecoveryQualificationContentionTrial(StrictModel):
 class RecoveryQualificationContention(StrictModel):
     schema_version: Literal[RECOVERY_QUALIFICATION_CONTENTION_VERSION]
     bundle_format: Literal[RECOVERY_QUALIFICATION_BUNDLE_FORMAT]
-    suite_id: Identifier
+    suite_id: Literal[RECOVERY_QUALIFICATION_BUNDLE_FORMAT]
     manifest_sha256: Sha256Digest
     results_sha256: Sha256Digest
     trials: tuple[RecoveryQualificationContentionTrial, ...] = Field(
@@ -978,7 +1017,7 @@ _MEDIAN_FORMULA = (
 class RecoveryQualificationComparison(StrictModel):
     schema_version: Literal[RECOVERY_QUALIFICATION_COMPARISON_VERSION]
     bundle_format: Literal[RECOVERY_QUALIFICATION_BUNDLE_FORMAT]
-    suite_id: Identifier
+    suite_id: Literal[RECOVERY_QUALIFICATION_BUNDLE_FORMAT]
     manifest_sha256: Sha256Digest
     environment_sha256: Sha256Digest
     results_sha256: Sha256Digest
@@ -1022,7 +1061,7 @@ class RecoveryQualificationComparison(StrictModel):
 class RecoveryQualificationClaimAuthorization(StrictModel):
     schema_version: Literal[RECOVERY_QUALIFICATION_CLAIM_AUTHORIZATION_VERSION]
     bundle_format: Literal[RECOVERY_QUALIFICATION_BUNDLE_FORMAT]
-    suite_id: Identifier
+    suite_id: Literal[RECOVERY_QUALIFICATION_BUNDLE_FORMAT]
     manifest_sha256: Sha256Digest
     environment_sha256: Sha256Digest
     results_sha256: Sha256Digest
@@ -1123,7 +1162,7 @@ class RecoveryQualificationArtifactIdentity(StrictModel):
 class RecoveryQualificationIndex(StrictModel):
     schema_version: Literal[RECOVERY_QUALIFICATION_INDEX_VERSION]
     bundle_format: Literal[RECOVERY_QUALIFICATION_BUNDLE_FORMAT]
-    suite_id: Identifier
+    suite_id: Literal[RECOVERY_QUALIFICATION_BUNDLE_FORMAT]
     source_revision: Identifier
     source_tree_sha256: Sha256Digest
     artifacts: tuple[RecoveryQualificationArtifactIdentity, ...] = Field(
@@ -1151,20 +1190,25 @@ class RecoveryQualificationIndex(StrictModel):
 
 __all__ = [
     "RECOVERY_QUALIFICATION_ADAPTIVE_THRESHOLD_BASIS_POINTS",
+    "RECOVERY_QUALIFICATION_ARCHETYPE_CATALOG_SHA256",
     "RECOVERY_QUALIFICATION_BUNDLE_FORMAT",
     "RECOVERY_QUALIFICATION_CASE_COUNT",
     "RECOVERY_QUALIFICATION_CLAIM_AUTHORIZATION_VERSION",
     "RECOVERY_QUALIFICATION_COMPARISON_VERSION",
     "RECOVERY_QUALIFICATION_CONTENTION_VERSION",
     "RECOVERY_QUALIFICATION_CONTENTION_WIDTH",
+    "RECOVERY_QUALIFICATION_CONTROLLER_VERSION",
+    "RECOVERY_QUALIFICATION_DECISION_POLICY_VERSION",
     "RECOVERY_QUALIFICATION_ENVIRONMENT_VERSION",
     "RECOVERY_QUALIFICATION_FIXTURE_CATALOG_SHA256",
     "RECOVERY_QUALIFICATION_INDEX_VERSION",
     "RECOVERY_QUALIFICATION_LANE_COUNT",
     "RECOVERY_QUALIFICATION_MANIFEST_VERSION",
+    "RECOVERY_QUALIFICATION_PERMIT_POLICY_VERSION",
     "RECOVERY_QUALIFICATION_POLICIES",
     "RECOVERY_QUALIFICATION_RESTART_COUNT",
     "RECOVERY_QUALIFICATION_RESULTS_VERSION",
+    "RECOVERY_QUALIFICATION_RUNNER_VERSION",
     "RECOVERY_QUALIFICATION_SEEDS",
     "RECOVERY_QUALIFICATION_WRONG_HYPOTHESIS_COUNT",
     "RecoveryQualificationAggregateMetrics",

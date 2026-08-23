@@ -193,9 +193,7 @@
       "type": "string"
     },
     "suite_id": {
-      "maxLength": 128,
-      "minLength": 1,
-      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+      "const": "proof-to-permit-qualification-v1",
       "title": "Suite Id",
       "type": "string"
     }
