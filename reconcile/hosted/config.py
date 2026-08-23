@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 import re
 from collections.abc import Mapping
@@ -47,6 +49,10 @@ class HostedConfig:
     sandbox_audience: str | None = None
     sandbox_read_caller_email: str | None = None
     sandbox_mutation_caller_email: str | None = None
+    canary_location: str | None = None
+    canary_service: str | None = None
+    canary_baseline_revision: str | None = None
+    canary_audience: str | None = None
     vertex_location: str | None = None
     vertex_model: str | None = None
     vertex_prompt_version: str | None = None
@@ -78,6 +84,10 @@ _SANDBOX_URL = "RECONCILE_SANDBOX_URL"
 _SANDBOX_AUDIENCE = "RECONCILE_SANDBOX_AUDIENCE"
 _SANDBOX_READ_CALLER = "RECONCILE_SANDBOX_READ_CALLER_EMAIL"
 _SANDBOX_MUTATION_CALLER = "RECONCILE_SANDBOX_MUTATION_CALLER_EMAIL"
+_CANARY_LOCATION = "RECONCILE_CANARY_LOCATION"
+_CANARY_SERVICE = "RECONCILE_CANARY_SERVICE"
+_CANARY_BASELINE_REVISION = "RECONCILE_CANARY_BASELINE_REVISION"
+_CANARY_AUDIENCE = "RECONCILE_CANARY_AUDIENCE"
 _VERTEX_LOCATION = "RECONCILE_VERTEX_LOCATION"
 _VERTEX_MODEL = "RECONCILE_VERTEX_MODEL"
 _VERTEX_PROMPT_VERSION = "RECONCILE_VERTEX_PROMPT_VERSION"
@@ -139,6 +149,10 @@ _COMPONENT_NAMES = {
             _TARGET_BUCKET,
             _SANDBOX_URL,
             _SANDBOX_AUDIENCE,
+            _CANARY_LOCATION,
+            _CANARY_SERVICE,
+            _CANARY_BASELINE_REVISION,
+            _CANARY_AUDIENCE,
         }
     ),
     Component.SANDBOX: frozenset(
@@ -197,6 +211,39 @@ _APPROVED_SANDBOX_READ_CALLER = (
 _APPROVED_SANDBOX_MUTATION_CALLER = (
     "rec-p5-fault@reconcile-dev-260813-14fa6d.iam.gserviceaccount.com"
 )
+_APPROVED_CANARY_AUDIENCE = (
+    f"https://reconcile.invalid/phase5/{_APPROVED_PROJECT_ID}/canary"
+)
+_APPROVED_CANARY_SERVICE_ACCOUNT = (
+    "rec-p5-canary@reconcile-dev-260813-14fa6d.iam.gserviceaccount.com"
+)
+
+
+def _expected_canary_baseline_revision(
+    *,
+    project_id: str,
+    image_digest: str,
+    infrastructure_revision: str,
+    semantic_config_sha256: str,
+    source_revision: str,
+) -> str:
+    identity = {
+        "image_digest": image_digest,
+        "infrastructure_revision": infrastructure_revision,
+        "project_id": project_id,
+        "region": "us-central1",
+        "request_timeout_seconds": 60,
+        "semantic_config_sha256": semantic_config_sha256,
+        "service_account_email": _APPROVED_CANARY_SERVICE_ACCOUNT,
+        "source_revision": source_revision,
+    }
+    encoded = json.dumps(
+        identity,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    return f"reconcile-p5-canary-b-{hashlib.sha256(encoded).hexdigest()[:16]}"
 
 
 def _managed_environment(source: Mapping[str, str]) -> dict[str, str]:
@@ -420,6 +467,13 @@ def _load_config(environment: Mapping[str, str]) -> HostedConfig:
             "vertex_thinking_level": _exact(managed, _VERTEX_THINKING_LEVEL, "MINIMAL"),
         }
     elif component is Component.FAULT_PROXY:
+        expected_baseline = _expected_canary_baseline_revision(
+            project_id=str(common["project_id"]),
+            image_digest=str(common["image_digest"]),
+            infrastructure_revision=str(common["infra_revision"]),
+            semantic_config_sha256=str(common["semantic_config_sha256"]),
+            source_revision=str(common["source_revision"]),
+        )
         specific = {
             "runtime_database": _exact(
                 managed, _RUNTIME_DATABASE, _APPROVED_RUNTIME_DATABASE
@@ -431,6 +485,18 @@ def _load_config(environment: Mapping[str, str]) -> HostedConfig:
             "sandbox_url": _https_origin(managed, _SANDBOX_URL),
             "sandbox_audience": _audience(
                 managed, _SANDBOX_AUDIENCE, Component.SANDBOX
+            ),
+            "canary_location": _exact(managed, _CANARY_LOCATION, "us-central1"),
+            "canary_service": _exact(managed, _CANARY_SERVICE, "reconcile-p5-canary"),
+            "canary_baseline_revision": _exact(
+                managed,
+                _CANARY_BASELINE_REVISION,
+                expected_baseline,
+            ),
+            "canary_audience": _exact(
+                managed,
+                _CANARY_AUDIENCE,
+                _APPROVED_CANARY_AUDIENCE,
             ),
         }
     else:

@@ -25,6 +25,11 @@ locals {
       display_name = "RECONCILE Phase 5 API"
       description  = "RECONCILE Phase 5 API runtime identity"
     }
+    canary = {
+      account_id   = "rec-p5-canary"
+      display_name = "RECONCILE Phase 5 Cloud Run canary"
+      description  = "RECONCILE Phase 5 isolated canary runtime identity"
+    }
     controller = {
       account_id   = "rec-p5-controller"
       display_name = "RECONCILE Phase 5 controller"

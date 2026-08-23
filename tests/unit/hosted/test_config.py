@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from collections.abc import Mapping
 
 import pytest
@@ -16,6 +18,21 @@ _INTERNAL_CALLER = f"rec-p5-api@{_PROJECT}.iam.gserviceaccount.com"
 _SANDBOX_READ_CALLER = f"rec-p5-controller@{_PROJECT}.iam.gserviceaccount.com"
 _SANDBOX_MUTATION_CALLER = f"rec-p5-fault@{_PROJECT}.iam.gserviceaccount.com"
 _PROMPT_SHA256 = "a18ac5bbd22570562acc6dfbc49437a82f0db6a265a4de737c1371b6ef2ca2d3"
+
+
+def _canary_baseline() -> str:
+    identity = {
+        "image_digest": f"sha256:{'b' * 64}",
+        "infrastructure_revision": "c" * 64,
+        "project_id": _PROJECT,
+        "region": "us-central1",
+        "request_timeout_seconds": 60,
+        "semantic_config_sha256": "d" * 64,
+        "service_account_email": (f"rec-p5-canary@{_PROJECT}.iam.gserviceaccount.com"),
+        "source_revision": "a" * 40,
+    }
+    encoded = json.dumps(identity, separators=(",", ":"), sort_keys=True).encode()
+    return f"reconcile-p5-canary-b-{hashlib.sha256(encoded).hexdigest()[:16]}"
 
 
 def _audience(component: Component) -> str:
@@ -78,6 +95,12 @@ def _environment(component: Component) -> dict[str, str]:
                 "RECONCILE_TARGET_BUCKET": f"{_PROJECT}-p5-target",
                 "RECONCILE_SANDBOX_URL": "https://sandbox.example.run.app",
                 "RECONCILE_SANDBOX_AUDIENCE": _audience(Component.SANDBOX),
+                "RECONCILE_CANARY_LOCATION": "us-central1",
+                "RECONCILE_CANARY_SERVICE": "reconcile-p5-canary",
+                "RECONCILE_CANARY_BASELINE_REVISION": (_canary_baseline()),
+                "RECONCILE_CANARY_AUDIENCE": (
+                    f"https://reconcile.invalid/phase5/{_PROJECT}/canary"
+                ),
             }
         )
     else:
@@ -141,6 +164,12 @@ def test_every_component_loads_only_its_exact_fields(component: Component) -> No
         assert config.allowed_caller_emails == (_INTERNAL_CALLER,)
         assert config.target_bucket == f"{_PROJECT}-p5-target"
         assert config.runtime_database == "reconcile-p5-runtime"
+        assert config.canary_location == "us-central1"
+        assert config.canary_service == "reconcile-p5-canary"
+        assert config.canary_baseline_revision == _canary_baseline()
+        assert config.canary_audience == (
+            f"https://reconcile.invalid/phase5/{_PROJECT}/canary"
+        )
     else:
         assert config.allowed_caller_emails == (
             _SANDBOX_READ_CALLER,

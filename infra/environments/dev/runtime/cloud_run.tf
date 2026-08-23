@@ -1,3 +1,82 @@
+resource "terraform_data" "canary_baseline" {
+  triggers_replace = local.canary_baseline_identity
+}
+
+resource "google_cloud_run_v2_service" "canary" {
+  project              = var.project_id
+  name                 = "reconcile-p5-canary"
+  location             = var.region
+  ingress              = "INGRESS_TRAFFIC_ALL"
+  invoker_iam_disabled = false
+  deletion_protection  = false
+  deletion_policy      = "DELETE"
+  custom_audiences     = [local.audiences.canary]
+  labels               = merge(local.labels, { component = "canary" })
+
+  template {
+    revision                         = local.canary_baseline_revision
+    service_account                  = var.service_account_emails.canary
+    execution_environment            = "EXECUTION_ENVIRONMENT_GEN2"
+    timeout                          = "${var.request_timeout_seconds.canary}s"
+    max_instance_request_concurrency = 1
+    labels = {
+      "reconcile-release" = "baseline"
+    }
+    annotations = {
+      "reconcile.dev/configuration-sha256" = var.semantic_config_sha256
+    }
+
+    scaling {
+      min_instance_count = 0
+      max_instance_count = 1
+    }
+
+    containers {
+      name    = "canary"
+      image   = local.image_reference
+      command = ["/opt/reconcile/bin/python"]
+      args    = ["-m", "reconcile.hosted.cloud_run_canary"]
+
+      ports {
+        name           = "http1"
+        container_port = 8080
+      }
+
+      resources {
+        limits = {
+          cpu    = "1"
+          memory = "512Mi"
+        }
+        cpu_idle          = true
+        startup_cpu_boost = false
+      }
+
+      dynamic "env" {
+        for_each = merge(local.common_runtime_environment, {
+          RECONCILE_CANARY_CONFIGURATION_SHA256 = var.semantic_config_sha256
+          RECONCILE_CANARY_RELEASE_ID           = "baseline"
+        })
+
+        content {
+          name  = env.key
+          value = env.value
+        }
+      }
+    }
+  }
+
+  traffic {
+    type     = "TRAFFIC_TARGET_ALLOCATION_TYPE_REVISION"
+    revision = local.canary_baseline_revision
+    percent  = 100
+  }
+
+  lifecycle {
+    ignore_changes       = [template, traffic]
+    replace_triggered_by = [terraform_data.canary_baseline]
+  }
+}
+
 resource "google_cloud_run_v2_service" "sandbox" {
   project              = var.project_id
   name                 = "reconcile-p5-sandbox"
@@ -99,14 +178,18 @@ resource "google_cloud_run_v2_service" "fault_proxy" {
 
       dynamic "env" {
         for_each = merge(local.common_runtime_environment, {
-          RECONCILE_ALLOWED_CALLER_EMAILS = local.caller_emails.api
-          RECONCILE_AUTH_AUDIENCE         = local.audiences.fault_proxy
-          RECONCILE_COMPONENT             = "fault-proxy"
-          RECONCILE_RUNTIME_DATABASE      = local.runtime_database_name
-          RECONCILE_SANDBOX_AUDIENCE      = local.audiences.sandbox
-          RECONCILE_SANDBOX_URL           = google_cloud_run_v2_service.sandbox.uri
-          RECONCILE_TARGET_BUCKET         = local.target_bucket_name
-          RECONCILE_TARGET_DATABASE       = local.target_database_name
+          RECONCILE_ALLOWED_CALLER_EMAILS    = local.caller_emails.api
+          RECONCILE_AUTH_AUDIENCE            = local.audiences.fault_proxy
+          RECONCILE_CANARY_AUDIENCE          = local.audiences.canary
+          RECONCILE_CANARY_BASELINE_REVISION = local.canary_baseline_revision
+          RECONCILE_CANARY_LOCATION          = var.region
+          RECONCILE_CANARY_SERVICE           = google_cloud_run_v2_service.canary.name
+          RECONCILE_COMPONENT                = "fault-proxy"
+          RECONCILE_RUNTIME_DATABASE         = local.runtime_database_name
+          RECONCILE_SANDBOX_AUDIENCE         = local.audiences.sandbox
+          RECONCILE_SANDBOX_URL              = google_cloud_run_v2_service.sandbox.uri
+          RECONCILE_TARGET_BUCKET            = local.target_bucket_name
+          RECONCILE_TARGET_DATABASE          = local.target_database_name
         })
 
         content {

@@ -44,7 +44,11 @@ def _resource(address: str, after: dict[str, Any] | None = None) -> dict[str, An
             "after": after or {},
             "after_sensitive": {},
         },
-        "provider_name": plans._PROVIDER,
+        "provider_name": (
+            plans._TERRAFORM_PROVIDER
+            if address.startswith("terraform_data.")
+            else plans._PROVIDER
+        ),
         "type": address.split(".", 1)[0],
     }
 
@@ -61,6 +65,10 @@ def _iam_resources(stack: plans._Stack) -> dict[str, dict[str, Any]]:
         if expression is not None:
             expected["condition"] = [{"expression": expression}]
         resources[address]["change"]["after"] = expected
+    for address in set(resources) & set(plans._CUSTOM_ROLE_EXPECTED):
+        resources[address]["change"]["after"] = deepcopy(
+            plans._CUSTOM_ROLE_EXPECTED[address]
+        )
     return resources
 
 
@@ -132,9 +140,68 @@ def test_expanded_iam_edges_are_closed_world(stack: plans._Stack) -> None:
 
 
 def _runtime_service_resources() -> dict[str, dict[str, Any]]:
-    resources: dict[str, dict[str, Any]] = {}
+    resources: dict[str, dict[str, Any]] = {
+        "terraform_data.canary_baseline": _resource(
+            "terraform_data.canary_baseline",
+            {"triggers_replace": plans._CANARY_BASELINE_IDENTITY},
+        )
+    }
     for component, email in plans._RUNTIME_EMAILS.items():
         address = f"google_cloud_run_v2_service.{component}"
+        container = {
+            "env": [
+                {"name": name, "value": value}
+                for name, value in plans._RUNTIME_ENVIRONMENT[component].items()
+            ],
+            "image": plans._IMAGE_REFERENCE,
+            "name": plans._SERVICE_CONTAINERS[component],
+            "ports": [{"container_port": 8080, "name": "http1"}],
+            "resources": [
+                {
+                    "cpu_idle": True,
+                    "limits": {
+                        "cpu": "1",
+                        "memory": plans._SERVICE_MEMORY[component],
+                    },
+                    "startup_cpu_boost": False,
+                }
+            ],
+        }
+        template = {
+            "containers": [container],
+            "execution_environment": "EXECUTION_ENVIRONMENT_GEN2",
+            "max_instance_request_concurrency": 1,
+            "scaling": [{"max_instance_count": 1, "min_instance_count": 0}],
+            "service_account": email,
+            "timeout": plans._SERVICE_TIMEOUTS[component],
+        }
+        traffic = None
+        if component == "canary":
+            container.update(
+                {
+                    "args": ["-m", "reconcile.hosted.cloud_run_canary"],
+                    "command": ["/opt/reconcile/bin/python"],
+                }
+            )
+            template.update(
+                {
+                    "annotations": {
+                        "reconcile.dev/configuration-sha256": (
+                            plans._SEMANTIC_CONFIG_SHA256
+                        )
+                    },
+                    "labels": {"reconcile-release": "baseline"},
+                    "revision": plans._CANARY_BASELINE_REVISION,
+                }
+            )
+            traffic = [
+                {
+                    "percent": 100,
+                    "revision": plans._CANARY_BASELINE_REVISION,
+                    "tag": None,
+                    "type": "TRAFFIC_TARGET_ALLOCATION_TYPE_REVISION",
+                }
+            ]
         resources[address] = _resource(
             address,
             {
@@ -151,38 +218,8 @@ def _runtime_service_resources() -> dict[str, dict[str, Any]]:
                 "location": plans._REGION,
                 "name": plans._SERVICE_NAMES[component],
                 "project": plans._PROJECT,
-                "template": [
-                    {
-                        "containers": [
-                            {
-                                "env": [
-                                    {"name": name, "value": value}
-                                    for name, value in plans._RUNTIME_ENVIRONMENT[
-                                        component
-                                    ].items()
-                                ],
-                                "image": plans._IMAGE_REFERENCE,
-                                "name": plans._SERVICE_CONTAINERS[component],
-                                "ports": [{"container_port": 8080, "name": "http1"}],
-                                "resources": [
-                                    {
-                                        "cpu_idle": True,
-                                        "limits": {
-                                            "cpu": "1",
-                                            "memory": plans._SERVICE_MEMORY[component],
-                                        },
-                                        "startup_cpu_boost": False,
-                                    }
-                                ],
-                            }
-                        ],
-                        "execution_environment": "EXECUTION_ENVIRONMENT_GEN2",
-                        "max_instance_request_concurrency": 1,
-                        "scaling": [{"max_instance_count": 1, "min_instance_count": 0}],
-                        "service_account": email,
-                        "timeout": plans._SERVICE_TIMEOUTS[component],
-                    }
-                ],
+                "template": [template],
+                "traffic": traffic,
             },
         )
     return resources
@@ -253,6 +290,49 @@ def test_runtime_plan_requires_one_image_audiences_and_exact_environment() -> No
     ]["vpc_access"] = [{"egress": "ALL_TRAFFIC"}]
     with pytest.raises(ValueError, match="unapproved vpc_access"):
         plans._verify_cloud_run(external_network)
+
+    stale_canary = deepcopy(resources)
+    stale_canary["google_cloud_run_v2_service.canary"]["change"]["after"]["traffic"][0][
+        "revision"
+    ] = "reconcile-p5-canary-unverified"
+    with pytest.raises(ValueError, match="baseline canary traffic"):
+        plans._verify_cloud_run(stale_canary)
+
+    stale_trigger = deepcopy(resources)
+    stale_trigger["terraform_data.canary_baseline"]["change"]["after"][
+        "triggers_replace"
+    ] = "f" * 64
+    with pytest.raises(ValueError, match="replacement trigger"):
+        plans._verify_cloud_run(stale_trigger)
+
+
+def test_canary_two_plan_model_stabilizes_drift_and_rotates_new_baseline() -> None:
+    initial = {
+        "image_digest": plans._IMAGE_DIGEST,
+        "infrastructure_revision": plans._INFRASTRUCTURE_REVISION,
+        "semantic_config_sha256": plans._SEMANTIC_CONFIG_SHA256,
+        "source_revision": plans._SOURCE_REVISION,
+        "request_timeout_seconds": 60,
+    }
+    first = plans._canary_baseline_identity(**initial)
+    post_stage_replan = plans._canary_baseline_identity(**initial)
+
+    assert first == post_stage_replan == plans._CANARY_BASELINE_IDENTITY
+    assert plans._CANARY_BASELINE_REVISION.endswith(first[:16])
+
+    replacements = (
+        {"image_digest": f"sha256:{'1' * 64}"},
+        {"infrastructure_revision": "2" * 64},
+        {"semantic_config_sha256": "3" * 64},
+        {"source_revision": "4" * 40},
+        {"request_timeout_seconds": 61},
+    )
+    rotated = {
+        plans._canary_baseline_identity(**(initial | replacement))
+        for replacement in replacements
+    }
+    assert len(rotated) == len(replacements)
+    assert first not in rotated
 
 
 def test_foundation_plan_requires_three_exact_database_boundaries() -> None:

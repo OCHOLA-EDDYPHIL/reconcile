@@ -37,6 +37,12 @@ from reconcile.durable_application import (
 )
 from reconcile.durable_planner import DurableAdvisoryPlanner
 from reconcile.hosted.apps import InternalOperationHandler, create_component_app
+from reconcile.hosted.cloud_run_canary import (
+    CloudRunCanaryActionAdapter,
+    CloudRunCanaryFaultProxy,
+    CloudRunCanaryTarget,
+)
+from reconcile.hosted.cloud_run_fault import ClosedCloudRunCanaryActionAuthorizer
 from reconcile.hosted.config import Component, HostedConfig
 from reconcile.hosted.contracts import (
     INTERNAL_OPERATION_REQUEST_VERSION,
@@ -966,6 +972,21 @@ def create_runtime_component_app(
 
     if config.component is Component.FAULT_PROXY:
         target_bucket = _required(config.target_bucket, "target bucket")
+        canary_location = _required(config.canary_location, "canary location")
+        canary_target = CloudRunCanaryTarget(
+            project=config.project_id,
+            location=canary_location,
+            service=_required(config.canary_service, "canary service"),
+            image_repository=(
+                f"{canary_location}-docker.pkg.dev/{config.project_id}/"
+                "reconcile-p5/reconcile"
+            ),
+            baseline_revision=_required(
+                config.canary_baseline_revision,
+                "canary baseline revision",
+            ),
+            health_audience=_required(config.canary_audience, "canary audience"),
+        )
         storage_mutation = CloudStorageMutationTarget(
             project_id=config.project_id,
             bucket_name=target_bucket,
@@ -999,6 +1020,10 @@ def create_runtime_component_app(
         return create_component_app(
             config,
             transport=selected_transport,
+            cloud_run_canary_fault_proxy=CloudRunCanaryFaultProxy(
+                CloudRunCanaryActionAdapter(target=canary_target)
+            ),
+            cloud_run_canary_action_authorizer=(ClosedCloudRunCanaryActionAuthorizer()),
             internal_operation_handlers=_handlers(
                 (
                     InternalOperation.EXECUTE_FAULT,

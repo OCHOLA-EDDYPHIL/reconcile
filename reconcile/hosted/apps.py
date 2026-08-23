@@ -13,6 +13,12 @@ from fastapi.responses import Response
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from reconcile.contracts.codec import decode_contract
+from reconcile.hosted.cloud_run_canary import CloudRunCanaryFaultProxy
+from reconcile.hosted.cloud_run_fault import (
+    CLOUD_RUN_CANARY_ACTION_PATH,
+    CloudRunCanaryActionAuthorizer,
+    install_cloud_run_canary_fault_route,
+)
 from reconcile.hosted.config import Component, HostedConfig
 from reconcile.hosted.contracts import (
     INTERNAL_OPERATION_RESPONSE_VERSION,
@@ -77,6 +83,7 @@ _INTERNAL_PATHS = {
         {
             ("POST", _FAULT_PATH.encode("ascii")),
             ("POST", _CLEANUP_PATH.encode("ascii")),
+            ("POST", CLOUD_RUN_CANARY_ACTION_PATH.encode("ascii")),
         }
     ),
 }
@@ -455,6 +462,8 @@ def _internal_app(
     *,
     sandbox_evidence_reader: SandboxEvidenceReader | None,
     handlers: Mapping[InternalOperation, InternalOperationHandler],
+    cloud_run_canary_fault_proxy: CloudRunCanaryFaultProxy | None,
+    cloud_run_canary_action_authorizer: CloudRunCanaryActionAuthorizer | None,
 ) -> FastAPI:
     application = FastAPI(
         title=f"RECONCILE {config.component.value}",
@@ -508,6 +517,15 @@ def _internal_app(
                 InternalOperation.CLEANUP,
                 cleanup_handler,
             )
+        if cloud_run_canary_fault_proxy is not None:
+            install_cloud_run_canary_fault_route(
+                application,
+                proxy=cloud_run_canary_fault_proxy,
+                action_authorizer=cloud_run_canary_action_authorizer,
+                expected_caller_email=config.allowed_caller_emails[0],
+                expected_image_digest=config.image_digest,
+                expected_configuration_sha256=config.semantic_config_sha256,
+            )
     elif config.component is Component.SANDBOX:
         if sandbox_evidence_reader is None:
             _install_placeholder(
@@ -554,6 +572,8 @@ def create_component_app(
     investigation_service: object | None = None,
     operator_service: object | None = None,
     sandbox_evidence_reader: SandboxEvidenceReader | None = None,
+    cloud_run_canary_fault_proxy: CloudRunCanaryFaultProxy | None = None,
+    cloud_run_canary_action_authorizer: CloudRunCanaryActionAuthorizer | None = None,
     internal_operation_handlers: Mapping[InternalOperation, InternalOperationHandler]
     | None = None,
 ) -> FastAPI:
@@ -566,6 +586,14 @@ def create_component_app(
         and config.component is not Component.SANDBOX
     ):
         raise ValueError("only the sandbox component accepts an evidence reader")
+    if (cloud_run_canary_fault_proxy is None) != (
+        cloud_run_canary_action_authorizer is None
+    ):
+        raise ValueError("Cloud Run canary proxy and authority must be paired")
+    if cloud_run_canary_fault_proxy is not None and (
+        config.component is not Component.FAULT_PROXY
+    ):
+        raise ValueError("only the fault proxy accepts a Cloud Run canary proxy")
     if internal_operation_handlers is None:
         handlers: dict[InternalOperation, InternalOperationHandler] = {}
     else:
@@ -600,6 +628,8 @@ def create_component_app(
             config,
             sandbox_evidence_reader=sandbox_evidence_reader,
             handlers=handlers,
+            cloud_run_canary_fault_proxy=cloud_run_canary_fault_proxy,
+            cloud_run_canary_action_authorizer=cloud_run_canary_action_authorizer,
         )
     application.state.hosted_config = config
     application.state.hosted_transport = transport or HostedHttpTransport()

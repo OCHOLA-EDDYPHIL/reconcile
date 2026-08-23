@@ -26,6 +26,7 @@ _APPLY_EMAIL = f"rec-p5-apply@{_PROJECT}.iam.gserviceaccount.com"
 _APPLY_MEMBER = f"serviceAccount:{_APPLY_EMAIL}"
 _OPERATOR_MEMBER = _APPLY_MEMBER
 _PROVIDER = "registry.terraform.io/hashicorp/google"
+_TERRAFORM_PROVIDER = "terraform.io/builtin/terraform"
 _OFFLINE_DOCKER_IMAGE = (
     "python:3.12.13-slim-bookworm@"
     "sha256:6e13e65c55e33adf203d77ee371cf8bf5d81bd4902ef07565721f46bf44917af"
@@ -44,30 +45,69 @@ _VERTEX_PROMPT_SHA256 = (
 )
 _RUNTIME_EMAILS = {
     "api": f"rec-p5-api@{_PROJECT}.iam.gserviceaccount.com",
+    "canary": f"rec-p5-canary@{_PROJECT}.iam.gserviceaccount.com",
     "controller": f"rec-p5-controller@{_PROJECT}.iam.gserviceaccount.com",
     "fault_proxy": f"rec-p5-fault@{_PROJECT}.iam.gserviceaccount.com",
     "sandbox": f"rec-p5-sandbox@{_PROJECT}.iam.gserviceaccount.com",
 }
+
+
+def _canary_baseline_identity(
+    *,
+    image_digest: str,
+    infrastructure_revision: str,
+    semantic_config_sha256: str,
+    source_revision: str,
+    request_timeout_seconds: int = 60,
+) -> str:
+    encoded = json.dumps(
+        {
+            "image_digest": image_digest,
+            "infrastructure_revision": infrastructure_revision,
+            "project_id": _PROJECT,
+            "region": _REGION,
+            "request_timeout_seconds": request_timeout_seconds,
+            "semantic_config_sha256": semantic_config_sha256,
+            "service_account_email": _RUNTIME_EMAILS["canary"],
+            "source_revision": source_revision,
+        },
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+_CANARY_BASELINE_IDENTITY = _canary_baseline_identity(
+    image_digest=_IMAGE_DIGEST,
+    infrastructure_revision=_INFRASTRUCTURE_REVISION,
+    semantic_config_sha256=_SEMANTIC_CONFIG_SHA256,
+    source_revision=_SOURCE_REVISION,
+)
+_CANARY_BASELINE_REVISION = f"reconcile-p5-canary-b-{_CANARY_BASELINE_IDENTITY[:16]}"
 _SERVICE_NAMES = {
     "api": "reconcile-p5-api",
+    "canary": "reconcile-p5-canary",
     "controller": "reconcile-p5-controller",
     "fault_proxy": "reconcile-p5-fault-proxy",
     "sandbox": "reconcile-p5-sandbox",
 }
 _SERVICE_CONTAINERS = {
     "api": "api",
+    "canary": "canary",
     "controller": "controller",
     "fault_proxy": "fault-proxy",
     "sandbox": "sandbox",
 }
 _SERVICE_MEMORY = {
     "api": "512Mi",
+    "canary": "512Mi",
     "controller": "1Gi",
     "fault_proxy": "512Mi",
     "sandbox": "512Mi",
 }
 _SERVICE_TIMEOUTS = {
     "api": "300s",
+    "canary": "60s",
     "controller": "300s",
     "fault_proxy": "60s",
     "sandbox": "60s",
@@ -96,6 +136,11 @@ _RUNTIME_ENVIRONMENT = {
         "RECONCILE_RUNTIME_DATABASE": "reconcile-p5-runtime",
         "RECONCILE_TARGET_BUCKET": _TARGET_BUCKET,
     },
+    "canary": _COMMON_RUNTIME_ENVIRONMENT
+    | {
+        "RECONCILE_CANARY_CONFIGURATION_SHA256": _SEMANTIC_CONFIG_SHA256,
+        "RECONCILE_CANARY_RELEASE_ID": "baseline",
+    },
     "controller": _COMMON_RUNTIME_ENVIRONMENT
     | {
         "RECONCILE_ALLOWED_CALLER_EMAILS": _RUNTIME_EMAILS["api"],
@@ -120,6 +165,10 @@ _RUNTIME_ENVIRONMENT = {
     | {
         "RECONCILE_ALLOWED_CALLER_EMAILS": _RUNTIME_EMAILS["api"],
         "RECONCILE_AUTH_AUDIENCE": _AUDIENCES["fault_proxy"],
+        "RECONCILE_CANARY_AUDIENCE": _AUDIENCES["canary"],
+        "RECONCILE_CANARY_BASELINE_REVISION": _CANARY_BASELINE_REVISION,
+        "RECONCILE_CANARY_LOCATION": _REGION,
+        "RECONCILE_CANARY_SERVICE": "reconcile-p5-canary",
         "RECONCILE_COMPONENT": "fault-proxy",
         "RECONCILE_RUNTIME_DATABASE": "reconcile-p5-runtime",
         "RECONCILE_SANDBOX_AUDIENCE": _AUDIENCES["sandbox"],
@@ -184,6 +233,8 @@ def _quoted(address: str, keys: set[str]) -> set[str]:
 _BOOTSTRAP_ADDRESSES = frozenset(
     {
         "google_billing_account_iam_member.phase5_apply",
+        "google_project_iam_custom_role.canary_mutator",
+        "google_project_iam_custom_role.canary_operation_reader",
         "google_service_account.phase5_apply",
         "google_service_account_iam_member.owner_impersonation",
         "google_storage_bucket.terraform_state",
@@ -219,14 +270,22 @@ _FOUNDATION_ADDRESSES = frozenset(
 _RUNTIME_ADDRESSES = frozenset(
     {
         "google_cloud_run_v2_service.api",
+        "google_cloud_run_v2_service.canary",
         "google_cloud_run_v2_service.controller",
         "google_cloud_run_v2_service.fault_proxy",
         "google_cloud_run_v2_service.sandbox",
+        "terraform_data.canary_baseline",
         f'google_cloud_run_v2_service_iam_member.api_operator["{_OPERATOR_MEMBER}"]',
         'google_cloud_run_v2_service_iam_member.internal["api_to_controller"]',
         'google_cloud_run_v2_service_iam_member.internal["api_to_fault_proxy"]',
         'google_cloud_run_v2_service_iam_member.internal["controller_to_sandbox"]',
         'google_cloud_run_v2_service_iam_member.internal["fault_proxy_to_sandbox"]',
+        "google_cloud_run_v2_service_iam_member.canary_invoker",
+        "google_cloud_run_v2_service_iam_member.canary_mutator",
+        "google_cloud_run_v2_service_iam_member.canary_reader",
+        "google_project_iam_member.canary_operation_reader",
+        "google_artifact_registry_repository_iam_member.canary_mutator_image_reader",
+        "google_service_account_iam_member.canary_mutator_act_as",
     }
 )
 _STACKS = (
@@ -291,7 +350,7 @@ _OUTPUT_NAMES = {
         "service_account_emails",
         "target_bucket_name",
     },
-    "runtime": {"api_uri"},
+    "runtime": {"api_uri", "canary_uri"},
 }
 
 
@@ -387,6 +446,46 @@ def _iam_expectations() -> dict[str, dict[str, Any]]:
             "project": _PROJECT,
             "role": "roles/run.invoker",
         },
+        "google_cloud_run_v2_service_iam_member.canary_reader": {
+            "location": _REGION,
+            "member": f"serviceAccount:{_RUNTIME_EMAILS['controller']}",
+            "name": "reconcile-p5-canary",
+            "project": _PROJECT,
+            "role": "roles/run.viewer",
+        },
+        "google_cloud_run_v2_service_iam_member.canary_invoker": {
+            "location": _REGION,
+            "member": f"serviceAccount:{_RUNTIME_EMAILS['controller']}",
+            "name": "reconcile-p5-canary",
+            "project": _PROJECT,
+            "role": "roles/run.invoker",
+        },
+        "google_cloud_run_v2_service_iam_member.canary_mutator": {
+            "location": _REGION,
+            "member": f"serviceAccount:{_RUNTIME_EMAILS['fault_proxy']}",
+            "name": "reconcile-p5-canary",
+            "project": _PROJECT,
+            "role": f"projects/{_PROJECT}/roles/reconcileP5CanaryMutator",
+        },
+        "google_project_iam_member.canary_operation_reader": {
+            "member": f"serviceAccount:{_RUNTIME_EMAILS['controller']}",
+            "project": _PROJECT,
+            "role": (f"projects/{_PROJECT}/roles/reconcileP5CanaryOperationReader"),
+        },
+        "google_artifact_registry_repository_iam_member.canary_mutator_image_reader": {
+            "location": _REGION,
+            "member": f"serviceAccount:{_RUNTIME_EMAILS['fault_proxy']}",
+            "project": _PROJECT,
+            "repository": "reconcile-p5",
+            "role": "roles/artifactregistry.reader",
+        },
+        "google_service_account_iam_member.canary_mutator_act_as": {
+            "member": f"serviceAccount:{_RUNTIME_EMAILS['fault_proxy']}",
+            "role": "roles/iam.serviceAccountUser",
+            "service_account_id": (
+                f"projects/{_PROJECT}/serviceAccounts/{_RUNTIME_EMAILS['canary']}"
+            ),
+        },
     }
     for role in _APPLY_ROLES:
         expected[f'google_project_iam_member.phase5_apply["{role}"]'] = {
@@ -418,6 +517,25 @@ def _iam_expectations() -> dict[str, dict[str, Any]]:
 
 
 _IAM_EXPECTED = _iam_expectations()
+
+_CUSTOM_ROLE_EXPECTED = {
+    "google_project_iam_custom_role.canary_operation_reader": {
+        "permissions": ["run.operations.get"],
+        "project": _PROJECT,
+        "role_id": "reconcileP5CanaryOperationReader",
+        "stage": "GA",
+    },
+    "google_project_iam_custom_role.canary_mutator": {
+        "permissions": [
+            "run.revisions.get",
+            "run.services.get",
+            "run.services.update",
+        ],
+        "project": _PROJECT,
+        "role_id": "reconcileP5CanaryMutator",
+        "stage": "GA",
+    },
+}
 
 
 def _fail(message: str) -> None:
@@ -500,7 +618,12 @@ def _verify_inventory(stack: _Stack, resources: dict[str, dict[str, Any]]) -> No
         actions = resource.get("change", {}).get("actions")
         if actions != ["create"]:
             _fail(f"{address} actions are {actions!r}, not create-only")
-        if resource.get("provider_name") != _PROVIDER:
+        expected_provider = (
+            _TERRAFORM_PROVIDER
+            if resource.get("type") == "terraform_data"
+            else _PROVIDER
+        )
+        if resource.get("provider_name") != expected_provider:
             _fail(f"{address} uses an unapproved provider")
         if resource.get("type") != address.split(".", 1)[0]:
             _fail(f"{address} has an inconsistent resource type")
@@ -534,6 +657,12 @@ def _verify_iam(resources: dict[str, dict[str, Any]]) -> None:
                 actual = after.get(key)
             if actual != value:
                 _fail(f"{address} has an unexpected {key}")
+    for address in set(resources) & set(_CUSTOM_ROLE_EXPECTED):
+        _expect_fields(
+            resources[address]["change"]["after"],
+            _CUSTOM_ROLE_EXPECTED[address],
+            address,
+        )
 
 
 def _verify_project_services(resources: dict[str, dict[str, Any]]) -> None:
@@ -688,6 +817,30 @@ def _verify_cloud_run(
             "RECONCILE_VERTEX_PROMPT_VERSION": variables.get("vertex_prompt_version"),
         }
     )
+    runtime_environment["canary"]["RECONCILE_CANARY_CONFIGURATION_SHA256"] = (
+        variables.get("semantic_config_sha256")
+    )
+    timeout_values = variables.get("request_timeout_seconds")
+    timeout = timeout_values.get("canary") if isinstance(timeout_values, dict) else 60
+    if not isinstance(timeout, int):
+        _fail("canary timeout identity is invalid")
+    baseline_identity = _canary_baseline_identity(
+        image_digest=image_digest,
+        infrastructure_revision=str(variables.get("infrastructure_revision")),
+        semantic_config_sha256=str(variables.get("semantic_config_sha256")),
+        source_revision=str(variables.get("source_revision")),
+        request_timeout_seconds=timeout,
+    )
+    baseline_revision = f"reconcile-p5-canary-b-{baseline_identity[:16]}"
+    trigger = resources.get("terraform_data.canary_baseline")
+    if (
+        trigger is None
+        or trigger["change"]["after"].get("triggers_replace") != baseline_identity
+    ):
+        _fail("canary baseline replacement trigger is not content-addressed")
+    runtime_environment["fault_proxy"]["RECONCILE_CANARY_BASELINE_REVISION"] = (
+        baseline_revision
+    )
     images: set[str] = set()
     for component in _RUNTIME_EMAILS:
         address = f"google_cloud_run_v2_service.{component}"
@@ -735,21 +888,48 @@ def _verify_cloud_run(
             },
             f"{address}.template",
         )
-        _require_disabled_fields(
-            template,
-            (
-                "annotations",
-                "encryption_key",
-                "health_check_disabled",
-                "labels",
-                "node_selector",
-                "revision",
-                "session_affinity",
-                "volumes",
-                "vpc_access",
-            ),
-            f"{address}.template",
-        )
+        if component == "canary":
+            _expect_fields(
+                template,
+                {
+                    "annotations": {
+                        "reconcile.dev/configuration-sha256": variables.get(
+                            "semantic_config_sha256"
+                        )
+                    },
+                    "labels": {"reconcile-release": "baseline"},
+                    "revision": baseline_revision,
+                },
+                f"{address}.template",
+            )
+            _require_disabled_fields(
+                template,
+                (
+                    "encryption_key",
+                    "health_check_disabled",
+                    "node_selector",
+                    "session_affinity",
+                    "volumes",
+                    "vpc_access",
+                ),
+                f"{address}.template",
+            )
+        else:
+            _require_disabled_fields(
+                template,
+                (
+                    "annotations",
+                    "encryption_key",
+                    "health_check_disabled",
+                    "labels",
+                    "node_selector",
+                    "revision",
+                    "session_affinity",
+                    "volumes",
+                    "vpc_access",
+                ),
+                f"{address}.template",
+            )
         scaling = _one_block(template, "scaling", address)
         if (
             scaling.get("min_instance_count") != 0
@@ -769,10 +949,14 @@ def _verify_cloud_run(
         ):
             _fail(f"{address} has a mutable or external image")
         images.add(image)
-        if container.get("args") not in (None, []) or container.get("command") not in (
-            None,
-            [],
-        ):
+        if component == "canary":
+            if container.get("command") != [
+                "/opt/reconcile/bin/python"
+            ] or container.get("args") != ["-m", "reconcile.hosted.cloud_run_canary"]:
+                _fail(f"{address} does not use the sealed canary entrypoint")
+        elif container.get("args") not in (None, []) or container.get(
+            "command"
+        ) not in (None, []):
             _fail(f"{address} overrides its image-owned command")
         _expect_fields(
             container,
@@ -826,6 +1010,19 @@ def _verify_cloud_run(
                 _fail(f"{address} has an unexpected environment value")
             if environment.get("value_source") not in (None, []):
                 _fail(f"{address} has an undeclared environment value source")
+        traffic = after.get("traffic")
+        if component == "canary":
+            if traffic != [
+                {
+                    "percent": 100,
+                    "revision": baseline_revision,
+                    "tag": None,
+                    "type": "TRAFFIC_TARGET_ALLOCATION_TYPE_REVISION",
+                }
+            ]:
+                _fail(f"{address} does not pin baseline canary traffic")
+        elif not _is_disabled(traffic):
+            _fail(f"{address} has an undeclared traffic override")
     if images != {image_reference}:
         _fail("runtime does not use exactly one approved image digest")
 
@@ -1287,10 +1484,32 @@ def _validate_stack_source(stack: _Stack) -> tuple[Path, ...]:
             r'(?m)^\s*(?:action|check|data|ephemeral|module|provisioner)\s+"',
             configuration,
         ) or re.search(
-            r"(?m)^\s*(?:action_trigger|import|lifecycle|moved|postcondition|precondition|removed)\s*\{",
+            r"(?m)^\s*(?:action_trigger|import|moved|postcondition|precondition|removed)\s*\{",
             configuration,
         ):
             _fail(f"{stack.name} contains an undeclared Terraform construct")
+        lifecycle_blocks = tuple(
+            " ".join(item.split())
+            for item in re.findall(r"(?ms)^\s*lifecycle\s*\{([^{}]*)\}", configuration)
+        )
+        if lifecycle_blocks:
+            expected = (
+                {
+                    "ignore_changes = [template, traffic] "
+                    "replace_triggered_by = [terraform_data.canary_baseline]": 1,
+                }
+                if stack.name == "runtime" and source.name == "cloud_run.tf"
+                else {
+                    "replace_triggered_by = [terraform_data.canary_baseline]": 3,
+                }
+                if stack.name == "runtime" and source.name == "invocation_iam.tf"
+                else {}
+            )
+            actual = {
+                value: lifecycle_blocks.count(value) for value in set(lifecycle_blocks)
+            }
+            if actual != expected:
+                _fail(f"{stack.name} contains an unapproved lifecycle block")
         if re.search(
             r"\b(?:file[a-z0-9_]*|fileset|pathexpand|templatefile)\s*\(",
             configuration,
