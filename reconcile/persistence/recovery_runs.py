@@ -41,7 +41,7 @@ from reconcile.contracts import (
     canonical_sha256,
     decode_contract,
 )
-from reconcile.contracts.base import Identifier, StrictModel
+from reconcile.contracts.base import Identifier, StrictModel, canonical_json_value_bytes
 from reconcile.persistence.permits import same_action_permit_authority
 
 RECOVERY_RUN_AGGREGATE_VERSION = "reconcile/recovery-run-aggregate/v1"
@@ -136,6 +136,16 @@ class RecoveryRunAggregate(StrictModel):
         if replayed != self.snapshot:
             raise ValueError("recovery event history does not reproduce its snapshot")
         return self
+
+
+def _canonical_verified_recovery_aggregate_bytes(
+    aggregate: RecoveryRunAggregate,
+) -> bytes:
+    """Serialize an exact aggregate already validated by the store mutation path."""
+
+    if type(aggregate) is not RecoveryRunAggregate:
+        raise TypeError("verified recovery aggregate must be exact")
+    return canonical_json_value_bytes(aggregate.model_dump(mode="json"))
 
 
 @dataclass(frozen=True, slots=True)
@@ -1033,7 +1043,7 @@ class SqliteRecoveryRunStore:
         replacement: RecoveryRunAggregate,
     ) -> bytes:
         event = replacement.events[-1]
-        payload = canonical_json_bytes(replacement)
+        payload = _canonical_verified_recovery_aggregate_bytes(replacement)
         cursor = connection.execute(
             "UPDATE recovery_run_aggregates SET revision = ?, payload = ? WHERE run_id = ? AND revision = ?",
             (

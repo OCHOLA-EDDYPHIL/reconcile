@@ -19,6 +19,7 @@ from reconcile.contracts import (
     RecoveryRunEventType,
     RecoveryRunFailureCategory,
     RecoveryRunLifecycle,
+    canonical_json_bytes,
 )
 from reconcile.persistence import (
     InMemoryRecoveryRunStore,
@@ -30,6 +31,7 @@ from reconcile.persistence import (
 from reconcile.persistence.recovery_runs import (
     RecoveryRunAggregate,
     _append_decoded_recovery_event,
+    _canonical_verified_recovery_aggregate_bytes,
     append_recovery_event,
     create_recovery_run_aggregate,
 )
@@ -55,19 +57,22 @@ def test_decoded_append_matches_full_history_validation() -> None:
         aggregate,
         event_type=RecoveryRunEventType.LIFECYCLE,
         payload=payload,
-        occurred_at=NOW + timedelta(seconds=1),
+        occurred_at=NOW + timedelta(seconds=1, microseconds=123_456),
     )
     actual = _append_decoded_recovery_event(
         aggregate,
         event_type=RecoveryRunEventType.LIFECYCLE,
         payload=payload,
-        occurred_at=NOW + timedelta(seconds=1),
+        occurred_at=NOW + timedelta(seconds=1, microseconds=123_456),
     )
 
     assert actual == expected
     assert (
         RecoveryRunAggregate.model_validate(actual.model_dump(mode="python"))
         == expected
+    )
+    assert _canonical_verified_recovery_aggregate_bytes(actual) == (
+        canonical_json_bytes(expected)
     )
 
 

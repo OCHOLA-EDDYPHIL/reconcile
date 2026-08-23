@@ -18,6 +18,7 @@ from pathlib import Path
 
 from reconcile.adapters.cloud_run import (
     CLOUD_RUN_HEALTH_CAPABILITY,
+    CLOUD_RUN_OPERATION_CAPABILITY,
     CLOUD_RUN_REVISION_CAPABILITY,
     CLOUD_RUN_SERVICE_CAPABILITY,
     CloudRunProbeBinding,
@@ -321,13 +322,23 @@ class _ScriptedPlanner:
         tool_name = envelope.context.invocation.tool_name
         prior_count = len(planner_input.prior_executable_request_hashes)
         if tool_name == "stage-cloud-run-revision":
-            return (
-                "cloud-run-revision-get"
-                if prior_count == 0
-                else "cloud-run-revision-health"
-                if prior_count == 1
-                else None
+            service_observations = sum(
+                item.capability_name == CLOUD_RUN_SERVICE_CAPABILITY
+                for item in planner_input.admitted_evidence
             )
+            sequence = (
+                (
+                    CLOUD_RUN_OPERATION_CAPABILITY,
+                    CLOUD_RUN_REVISION_CAPABILITY,
+                    CLOUD_RUN_HEALTH_CAPABILITY,
+                )
+                if service_observations > 1
+                else (
+                    CLOUD_RUN_REVISION_CAPABILITY,
+                    CLOUD_RUN_HEALTH_CAPABILITY,
+                )
+            )
+            return sequence[prior_count] if prior_count < len(sequence) else None
         if (
             tool_name == "create-firestore-release-record"
             and planner_input.missing_evidence
@@ -510,6 +521,7 @@ class _RecordingEvidenceSource:
         self._round_probe_count_used = 0
         self._round_elapsed_ms = 0
         self.states: list[RecoveryEvidenceState] = []
+        self._measurements_by_report: dict[str, tuple[int, int, int]] = {}
 
     def _record(
         self,
@@ -561,7 +573,25 @@ class _RecordingEvidenceSource:
             self._round_probe_count_used = current_probe_count_used
             self._round_elapsed_ms = current_elapsed_ms
             self.states.append(state)
+            self._measurements_by_report.setdefault(
+                canonical_sha256(state.report),
+                (
+                    self.probe_count,
+                    self.elapsed_ms,
+                    self.unsupported_probe_count,
+                ),
+            )
         return state
+
+    def measurement_for_report(self, report_sha256: str) -> tuple[int, int, int]:
+        """Return cumulative acquisition cost when a proof report first appeared."""
+
+        try:
+            return self._measurements_by_report[report_sha256]
+        except KeyError:
+            raise ValueError(
+                "qualification proof report has no acquisition measurement"
+            ) from None
 
     async def current(
         self,
@@ -2209,6 +2239,9 @@ async def execute_recovery_qualification_proof_lane(
         )
     semantic_decision = _decision_semantic_sha256(decision, artifact, state)
     semantic_permit = _permit_semantic_sha256(artifact)
+    probe_count, elapsed_ms, unsupported_probe_count = source.measurement_for_report(
+        artifact.report_sha256
+    )
     permit_action = (
         artifact.transition.action
         if isinstance(artifact, VerifiedCertificate) and artifact.transition is not None
@@ -2274,9 +2307,9 @@ async def execute_recovery_qualification_proof_lane(
             if isinstance(artifact, AmbiguityWitness)
             else None
         ),
-        probe_count=source.probe_count,
-        time_to_sufficient_evidence_ms=source.elapsed_ms,
-        unsupported_probe_count=source.unsupported_probe_count,
+        probe_count=probe_count,
+        time_to_sufficient_evidence_ms=elapsed_ms,
+        unsupported_probe_count=unsupported_probe_count,
         provider_mutations=provider.counters.provider_mutations(),
         model_usage=(
             _scripted_usage(planner.calls_by_tool.get(target_tool_name, 0))

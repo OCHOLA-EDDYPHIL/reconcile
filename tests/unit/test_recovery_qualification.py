@@ -38,6 +38,7 @@ from reconcile.recovery_qualification import (
 )
 from reconcile.recovery_qualification_execution import (
     _fault,
+    _RecordingEvidenceSource,
     _run_to_qualification_dispatch_boundary,
     execute_recovery_qualification_proof_lane,
 )
@@ -156,6 +157,81 @@ def test_only_explicit_fault_boundaries_use_production_fault_toggles() -> None:
     assert _fault(by_archetype["promote-committed"]) is RecoveryRunFault.NO_FAULT
     assert _fault(by_archetype["stage-unavailable"]) is RecoveryRunFault.NO_FAULT
     assert _fault(by_archetype["record-outcome-unknown"]) is (RecoveryRunFault.NO_FAULT)
+
+
+@pytest.mark.parametrize(
+    ("archetype_id", "policy", "expected_probe_count"),
+    (
+        ("stage-terminal-partial", RecoveryQualificationPolicy.ADAPTIVE, 2),
+        ("stage-conflict", RecoveryQualificationPolicy.ADAPTIVE, 5),
+        ("record-predispatch-retry", RecoveryQualificationPolicy.FIXED, 2),
+        ("record-predispatch-retry", RecoveryQualificationPolicy.ADAPTIVE, 2),
+    ),
+)
+def test_preregistered_probe_metrics_end_at_the_selected_proof(
+    tmp_path,
+    archetype_id: str,
+    policy: RecoveryQualificationPolicy,
+    expected_probe_count: int,
+) -> None:
+    fixture = next(
+        item
+        for item in build_recovery_qualification_fixtures()
+        if item.archetype.archetype_id == archetype_id
+        and item.seed == RECOVERY_QUALIFICATION_SEEDS[0]
+    )
+
+    result = asyncio.run(
+        execute_recovery_qualification_proof_lane(
+            fixture,
+            policy=policy,
+            state_directory=tmp_path / archetype_id,
+            restart=False,
+            _include_safety_replays=False,
+        )
+    )
+
+    assert result.probe_count == expected_probe_count
+    assert result.time_to_sufficient_evidence_ms == expected_probe_count * 8
+    assert result.demonstrated_evidence_profile == fixture.archetype.evidence_profile
+    if archetype_id == "record-predispatch-retry":
+        assert result.provider_mutations.record_calls == 1
+
+
+def test_proof_measurement_lookup_fails_closed_for_an_unknown_report() -> None:
+    source = _RecordingEvidenceSource(
+        object(),  # type: ignore[arg-type]
+        "stage",
+        repeat_target_primary=False,
+        target_replay_state=None,
+    )
+
+    with pytest.raises(ValueError, match="no acquisition measurement"):
+        source.measurement_for_report("a" * 64)
+
+
+def test_record_crash_replay_does_not_claim_unreceipted_provider_contact(
+    tmp_path,
+) -> None:
+    fixture = next(
+        item
+        for item in build_recovery_qualification_fixtures()
+        if item.archetype.archetype_id == "record-outcome-unknown"
+        and item.seed == RECOVERY_QUALIFICATION_SEEDS[0]
+    )
+
+    result = asyncio.run(
+        execute_recovery_qualification_proof_lane(
+            fixture,
+            policy=RecoveryQualificationPolicy.FIXED,
+            state_directory=tmp_path / fixture.case_id,
+            restart=True,
+            _include_safety_replays=False,
+        )
+    )
+
+    assert "record-provider-contacted" not in result.demonstrated_evidence_profile
+    assert result.restarted_snapshot_sha256 is not None
 
 
 @pytest.mark.parametrize(

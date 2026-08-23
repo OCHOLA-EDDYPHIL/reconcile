@@ -15,7 +15,6 @@ from reconcile.contracts import (
     RecoveryRunEventType,
     RecoveryRunRequest,
     RecoveryRunSnapshot,
-    canonical_json_bytes,
     decode_contract,
 )
 from reconcile.hosted.firestore_cas import (
@@ -37,6 +36,7 @@ from reconcile.persistence.recovery_runs import (
     RecoveryRunNotFound,
     RecoveryRunStoreUnavailable,
     _append_decoded_recovery_event,
+    _canonical_verified_recovery_aggregate_bytes,
     _RecoveryRunAggregateCache,
     claim_recovery_launch,
     complete_recovery_launch,
@@ -72,7 +72,7 @@ def _document(aggregate: RecoveryRunAggregate) -> FirestoreCasDocument:
         logical_id=aggregate.snapshot.request.run_id,
         revision=aggregate.snapshot.revision,
         mutation_id=new_firestore_cas_mutation_id(),
-        canonical_payload=canonical_json_bytes(aggregate),
+        canonical_payload=_canonical_verified_recovery_aggregate_bytes(aggregate),
     )
 
 

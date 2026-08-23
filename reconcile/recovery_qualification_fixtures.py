@@ -76,8 +76,9 @@ def _archetype(
 
 # The matrix contains fixed-favored, adaptive-favored, and neutral archetypes.
 # Counts describe every provider probe executed across bounded observation
-# rounds, not merely the first round.  The order is part of the frozen matrix
-# and is retained in every result artifact.
+# rounds through the selected terminal proof. Work performed after that proof,
+# such as a permitted retry, is outside time-to-sufficient-evidence. The order
+# is part of the frozen matrix and is retained in every result artifact.
 RECOVERY_QUALIFICATION_ARCHETYPES = (
     _archetype(
         "stage-drop-committed",
@@ -110,28 +111,27 @@ RECOVERY_QUALIFICATION_ARCHETYPES = (
         "stage-terminal-partial",
         stage=RecoveryQualificationStage.STAGE,
         fault=RecoveryQualificationFaultClass.TERMINAL_PARTIAL,
-        opportunity=RecoveryQualificationOpportunity.NEUTRAL,
+        opportunity=RecoveryQualificationOpportunity.ADAPTIVE_FAVORED,
         evidence=(
             "stage-revision-terminal-failed",
             "stage-revision-exists",
-            "stage-health-unhealthy",
         ),
         resolution=RecoveryQualificationResolution.ESCALATE,
         action=None,
         fixed_probes=3,
-        adaptive_probes=3,
+        adaptive_probes=2,
         witness=False,
     ),
     _archetype(
         "stage-conflict",
         stage=RecoveryQualificationStage.STAGE,
         fault=RecoveryQualificationFaultClass.CONFLICT,
-        opportunity=RecoveryQualificationOpportunity.NEUTRAL,
+        opportunity=RecoveryQualificationOpportunity.FIXED_FAVORED,
         evidence=("stage-service-etag-conflict",),
         resolution=RecoveryQualificationResolution.ESCALATE,
         action=None,
         fixed_probes=4,
-        adaptive_probes=4,
+        adaptive_probes=5,
     ),
     _archetype(
         "stage-absence",
@@ -159,7 +159,7 @@ RECOVERY_QUALIFICATION_ARCHETYPES = (
         "stage-fresh",
         stage=RecoveryQualificationStage.STAGE,
         fault=RecoveryQualificationFaultClass.FRESHNESS,
-        opportunity=RecoveryQualificationOpportunity.ADAPTIVE_FAVORED,
+        opportunity=RecoveryQualificationOpportunity.NEUTRAL,
         evidence=(
             "stage-revision-ready",
             "stage-traffic-unchanged",
@@ -168,7 +168,7 @@ RECOVERY_QUALIFICATION_ARCHETYPES = (
         resolution=RecoveryQualificationResolution.CONTINUE,
         action=PermitAction.CONTINUE,
         fixed_probes=3,
-        adaptive_probes=2,
+        adaptive_probes=3,
     ),
     _archetype(
         "stage-stale",
@@ -208,12 +208,12 @@ RECOVERY_QUALIFICATION_ARCHETYPES = (
         "promote-conflict",
         stage=RecoveryQualificationStage.PROMOTE,
         fault=RecoveryQualificationFaultClass.CONFLICT,
-        opportunity=RecoveryQualificationOpportunity.FIXED_FAVORED,
+        opportunity=RecoveryQualificationOpportunity.NEUTRAL,
         evidence=("promote-service-etag-conflict",),
         resolution=RecoveryQualificationResolution.ESCALATE,
         action=None,
         fixed_probes=2,
-        adaptive_probes=3,
+        adaptive_probes=2,
     ),
     _archetype(
         "promote-stale-precondition",
@@ -253,7 +253,7 @@ RECOVERY_QUALIFICATION_ARCHETYPES = (
         stage=RecoveryQualificationStage.RECORD,
         fault=RecoveryQualificationFaultClass.PROVIDER_UNAVAILABLE,
         opportunity=RecoveryQualificationOpportunity.NEUTRAL,
-        evidence=("record-provider-contacted", "record-state-read-unavailable"),
+        evidence=("record-state-read-unavailable",),
         resolution=RecoveryQualificationResolution.ESCALATE,
         action=None,
         fixed_probes=2,
@@ -264,7 +264,7 @@ RECOVERY_QUALIFICATION_ARCHETYPES = (
         stage=RecoveryQualificationStage.RECORD,
         fault=RecoveryQualificationFaultClass.CONFLICT,
         opportunity=RecoveryQualificationOpportunity.NEUTRAL,
-        evidence=("record-provider-contacted", "record-target-mismatch"),
+        evidence=("record-target-mismatch",),
         resolution=RecoveryQualificationResolution.ESCALATE,
         action=None,
         fixed_probes=2,
@@ -289,7 +289,6 @@ RECOVERY_QUALIFICATION_ARCHETYPES = (
         evidence=(
             "record-absent",
             "record-noncontact-receipt-absent",
-            "record-provider-contacted",
         ),
         resolution=RecoveryQualificationResolution.ESCALATE,
         action=None,
@@ -301,7 +300,7 @@ RECOVERY_QUALIFICATION_ARCHETYPES = (
         stage=RecoveryQualificationStage.RECORD,
         fault=RecoveryQualificationFaultClass.DROP_AFTER_ACCEPT,
         opportunity=RecoveryQualificationOpportunity.NEUTRAL,
-        evidence=("record-provider-contacted", "record-state-read-unavailable"),
+        evidence=("record-state-read-unavailable",),
         resolution=RecoveryQualificationResolution.ESCALATE,
         action=None,
         fixed_probes=2,
@@ -311,7 +310,7 @@ RECOVERY_QUALIFICATION_ARCHETYPES = (
         "cross-provider-adaptive",
         stage=RecoveryQualificationStage.STAGE,
         fault=RecoveryQualificationFaultClass.DROP_AFTER_ACCEPT,
-        opportunity=RecoveryQualificationOpportunity.ADAPTIVE_FAVORED,
+        opportunity=RecoveryQualificationOpportunity.NEUTRAL,
         evidence=(
             "stage-revision-ready",
             "stage-traffic-unchanged",
@@ -319,7 +318,7 @@ RECOVERY_QUALIFICATION_ARCHETYPES = (
         resolution=RecoveryQualificationResolution.CONTINUE,
         action=PermitAction.CONTINUE,
         fixed_probes=3,
-        adaptive_probes=2,
+        adaptive_probes=3,
     ),
 )
 
