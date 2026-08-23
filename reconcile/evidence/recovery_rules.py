@@ -769,6 +769,8 @@ def _validate_observation_binding(
     action: SemanticActionIdentity,
     evidence: NormalizedEvidence,
     observation: ProviderObservation,
+    *,
+    require_expected_stage_revision: bool,
 ) -> None:
     release_id = action.semantic_arguments["release_id"]
     if observation.release_id != release_id:
@@ -776,7 +778,8 @@ def _validate_observation_binding(
             "provider observation release does not match the semantic action"
         )
     if (
-        profile is STAGE_CLOUD_RUN_REVISION_PROFILE
+        require_expected_stage_revision
+        and profile is STAGE_CLOUD_RUN_REVISION_PROFILE
         and isinstance(
             observation,
             (
@@ -860,12 +863,14 @@ def _validate_observation_binding(
         )
 
 
-def validate_recovery_evidence(
+def _validated_recovery_observations(
     profile: RecoveryActionProfile,
     action: SemanticActionIdentity,
     evidence: tuple[NormalizedEvidence, ...],
-) -> None:
-    """Require typed trusted-provider evidence bound to one exact action."""
+    *,
+    require_expected_stage_revision: bool,
+) -> tuple[ProviderObservation, ...]:
+    """Return typed provider observations after action and target validation."""
 
     validate_recovery_action(profile, action)
     if type(evidence) is not tuple or any(
@@ -875,6 +880,7 @@ def validate_recovery_evidence(
     if not evidence:
         raise RecoveryRuleViolation("recovery proof requires provider evidence")
     allowed = {item.key for item in profile.evidence_capabilities}
+    observations: list[ProviderObservation] = []
     for item in evidence:
         if (item.capability_name, item.capability_version) not in allowed:
             raise RecoveryRuleViolation(
@@ -890,7 +896,30 @@ def validate_recovery_evidence(
             )
         observation = _provider_observation(item)
         _validate_evidence_status(item, observation)
-        _validate_observation_binding(profile, action, item, observation)
+        _validate_observation_binding(
+            profile,
+            action,
+            item,
+            observation,
+            require_expected_stage_revision=require_expected_stage_revision,
+        )
+        observations.append(observation)
+    return tuple(observations)
+
+
+def validate_recovery_evidence(
+    profile: RecoveryActionProfile,
+    action: SemanticActionIdentity,
+    evidence: tuple[NormalizedEvidence, ...],
+) -> None:
+    """Require typed trusted-provider evidence bound to one exact action."""
+
+    _validated_recovery_observations(
+        profile,
+        action,
+        evidence,
+        require_expected_stage_revision=True,
+    )
 
 
 def _require_consistent_observations(
@@ -1001,13 +1030,19 @@ def recovery_provider_conflict_pairs(
 ) -> tuple[tuple[str, str], ...]:
     """Return every deterministic two-observation provider contradiction.
 
-    Each observation must first be independently admissible for the sealed
-    action. Pairwise evaluation then exposes conflicts that the generic effect
-    classifier cannot see, such as divergent ETags or an LRO state regression.
+    Each observation must first be structurally admissible and bound to the
+    sealed provider target. Pairwise evaluation then exposes conflicts that the
+    generic effect classifier cannot see, such as divergent ETags, divergent
+    staged revisions, or an LRO state regression. Proof authority separately
+    requires every staging observation to name the intended revision.
     """
 
-    validate_recovery_evidence(profile, action, evidence)
-    observations = tuple(_provider_observation(item) for item in evidence)
+    observations = _validated_recovery_observations(
+        profile,
+        action,
+        evidence,
+        require_expected_stage_revision=False,
+    )
     conflicts: set[tuple[str, str]] = set()
     for left_index, right_index in combinations(range(len(evidence)), 2):
         pair_evidence = (evidence[left_index], evidence[right_index])

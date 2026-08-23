@@ -127,6 +127,23 @@ class _CrossRevisionPartialNormalizer:
         return result
 
 
+class _CrossRevisionUnboundPartialNormalizer(_CrossRevisionPartialNormalizer):
+    def __call__(self, rule_input: RuleInput) -> RuleObservation:
+        result = super().__call__(rule_input)
+        if (
+            _payload_kind(rule_input) == "partial"
+            and rule_input.request.capability_name == "cloud-run-revision-get"
+        ):
+            return _validated_rule_copy(
+                result,
+                source_record=(
+                    "projects/demo-project/locations/us-central1/services/"
+                    f"unrelated-service/revisions/{_REVISION_B}"
+                ),
+            )
+        return result
+
+
 class _FailedOperationNormalizer:
     def __init__(self) -> None:
         self._base = _BASE_NORMALIZER()
@@ -349,6 +366,47 @@ def test_partial_cross_revision_evidence_becomes_exact_conflict_witness(
         "cloud-run-service-get",
         "cloud-run-revision-get",
     }
+
+
+def test_cross_revision_evidence_from_an_unbound_source_is_not_a_conflict_pair(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        fixtures,
+        "_RecoveryNormalizer",
+        _CrossRevisionUnboundPartialNormalizer,
+    )
+    chain, envelopes = fixtures._chain()
+    envelope = envelopes["stage"]
+    run = fixtures._run_pipeline(
+        envelope,
+        (
+            (
+                "cloud-run-service-get",
+                "partial",
+                fixtures.NOW + timedelta(seconds=2),
+                "etag-stage-7",
+            ),
+            (
+                "cloud-run-revision-get",
+                "partial",
+                fixtures.NOW + timedelta(seconds=3),
+                None,
+            ),
+        ),
+    )
+    evaluation, report = run.evaluation_and_report()
+
+    artifact = _verify_stage(
+        chain=chain,
+        envelopes=envelopes,
+        envelope=envelope,
+        evaluation=evaluation,
+        report=report,
+    )
+
+    assert isinstance(artifact, AmbiguityWitness)
+    assert artifact.conflicting_evidence_ids == ()
 
 
 def test_partial_revision_creation_requires_exact_revision_read() -> None:
