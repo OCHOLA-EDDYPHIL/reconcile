@@ -13,11 +13,13 @@ from reconcile.contracts import (
     PermitAction,
     RecoveryHypothesisDisposition,
     RecoveryRunFault,
+    canonical_sha256,
 )
 from reconcile.contracts.recovery_qualification import (
     RECOVERY_QUALIFICATION_SEEDS,
     RecoveryQualificationExecutionBasis,
     RecoveryQualificationFaultClass,
+    RecoveryQualificationHypothesisReplay,
     RecoveryQualificationHypothesisWrongnessKind,
     RecoveryQualificationOpportunity,
     RecoveryQualificationPolicy,
@@ -299,6 +301,48 @@ def test_wrong_hypothesis_replay_uses_certificate_case_clock(tmp_path) -> None:
         replay.permit_sha256 == result.permit_sha256
         for replay in result.wrong_hypotheses
     )
+
+
+@pytest.mark.parametrize("archetype_id", ("stage-pending", "promote-pending"))
+def test_pending_wrong_hypothesis_replay_keeps_first_oracle(
+    tmp_path,
+    archetype_id: str,
+) -> None:
+    fixture = next(
+        item
+        for item in build_recovery_qualification_fixtures()
+        if item.archetype.archetype_id == archetype_id
+        and item.seed == RECOVERY_QUALIFICATION_SEEDS[1]
+    )
+
+    result = asyncio.run(
+        execute_recovery_qualification_proof_lane(
+            fixture,
+            policy=RecoveryQualificationPolicy.FIXED,
+            state_directory=tmp_path / fixture.case_id,
+            restart=False,
+        )
+    )
+
+    assert len(result.wrong_hypotheses) == 3
+    for replay in result.wrong_hypotheses:
+        assert replay.expected_hypothesis.created_at == replay.hypothesis.created_at
+        RecoveryQualificationHypothesisReplay(
+            variant_id=replay.variant_id,
+            wrongness_kind=replay.wrongness_kind,
+            provider_name="gemini",
+            planner_output_sha256=replay.planner_output_sha256,
+            report=replay.report,
+            expected_hypothesis=replay.expected_hypothesis,
+            expected_hypothesis_sha256=canonical_sha256(replay.expected_hypothesis),
+            hypothesis=replay.hypothesis,
+            hypothesis_sha256=replay.hypothesis_sha256,
+            disposition=replay.disposition,
+            observed_decision_sha256=replay.decision_sha256,
+            observed_permit_sha256=replay.permit_sha256,
+            decision_diverged=False,
+            permit_diverged=False,
+        )
 
 
 def test_external_cancellation_is_not_treated_as_a_qualification_boundary() -> None:

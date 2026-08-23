@@ -451,7 +451,13 @@ class _ScriptedPlanner:
 
         if self.variant == "normal" or hypothesis.node_id != self.target_node_id:
             return hypothesis
-        self.expected_hypotheses_by_id[hypothesis.hypothesis_id] = hypothesis
+        # A pending report can be revisited without changing its deterministic
+        # identity.  Preserve the oracle for the first persisted occurrence;
+        # later occurrences have a newer ``created_at`` but the same ID.
+        self.expected_hypotheses_by_id.setdefault(
+            hypothesis.hypothesis_id,
+            hypothesis,
+        )
         update: dict[str, object]
         if self.variant == "wrong-classification":
             update = {
