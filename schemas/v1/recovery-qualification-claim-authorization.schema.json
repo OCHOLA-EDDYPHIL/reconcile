@@ -1,0 +1,162 @@
+{
+  "$defs": {
+    "RecoveryQualificationExecutionBasis": {
+      "enum": [
+        "scripted",
+        "live-vertex"
+      ],
+      "title": "RecoveryQualificationExecutionBasis",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "adaptive_efficiency_claim_authorized": {
+      "title": "Adaptive Efficiency Claim Authorized",
+      "type": "boolean"
+    },
+    "adaptive_efficiency_threshold_basis_points": {
+      "const": 2500,
+      "title": "Adaptive Efficiency Threshold Basis Points",
+      "type": "integer"
+    },
+    "authorized_claims": {
+      "items": {
+        "maxLength": 4096,
+        "minLength": 1,
+        "type": "string"
+      },
+      "maxItems": 2,
+      "title": "Authorized Claims",
+      "type": "array"
+    },
+    "bundle_format": {
+      "const": "proof-to-permit-qualification-v1",
+      "title": "Bundle Format",
+      "type": "string"
+    },
+    "comparison_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Comparison Sha256",
+      "type": "string"
+    },
+    "contention_passed": {
+      "title": "Contention Passed",
+      "type": "boolean"
+    },
+    "contention_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Contention Sha256",
+      "type": "string"
+    },
+    "environment_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Environment Sha256",
+      "type": "string"
+    },
+    "execution_basis": {
+      "$ref": "#/$defs/RecoveryQualificationExecutionBasis"
+    },
+    "false_permit_count": {
+      "maximum": 400,
+      "minimum": 0,
+      "title": "False Permit Count",
+      "type": "integer"
+    },
+    "live_vertex_backed": {
+      "title": "Live Vertex Backed",
+      "type": "boolean"
+    },
+    "manifest_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Manifest Sha256",
+      "type": "string"
+    },
+    "median_probe_reduction_basis_points": {
+      "title": "Median Probe Reduction Basis Points",
+      "type": "integer"
+    },
+    "model_usage_measured": {
+      "title": "Model Usage Measured",
+      "type": "boolean"
+    },
+    "replay_parity_case_count": {
+      "maximum": 100,
+      "minimum": 0,
+      "title": "Replay Parity Case Count",
+      "type": "integer"
+    },
+    "results_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Results Sha256",
+      "type": "string"
+    },
+    "safety_claim_authorized": {
+      "title": "Safety Claim Authorized",
+      "type": "boolean"
+    },
+    "safety_matrix_passed": {
+      "title": "Safety Matrix Passed",
+      "type": "boolean"
+    },
+    "schema_version": {
+      "const": "reconcile/recovery-qualification-claim-authorization/v1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "source_revision_exact": {
+      "title": "Source Revision Exact",
+      "type": "boolean"
+    },
+    "suite_id": {
+      "maxLength": 128,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+      "title": "Suite Id",
+      "type": "string"
+    },
+    "withheld_claims": {
+      "items": {
+        "maxLength": 4096,
+        "minLength": 1,
+        "type": "string"
+      },
+      "maxItems": 2,
+      "title": "Withheld Claims",
+      "type": "array"
+    },
+    "wrong_hypothesis_divergence_count": {
+      "maximum": 600,
+      "minimum": 0,
+      "title": "Wrong Hypothesis Divergence Count",
+      "type": "integer"
+    }
+  },
+  "required": [
+    "schema_version",
+    "bundle_format",
+    "suite_id",
+    "manifest_sha256",
+    "environment_sha256",
+    "results_sha256",
+    "contention_sha256",
+    "comparison_sha256",
+    "safety_matrix_passed",
+    "contention_passed",
+    "source_revision_exact",
+    "false_permit_count",
+    "replay_parity_case_count",
+    "wrong_hypothesis_divergence_count",
+    "execution_basis",
+    "live_vertex_backed",
+    "model_usage_measured",
+    "median_probe_reduction_basis_points",
+    "adaptive_efficiency_threshold_basis_points",
+    "safety_claim_authorized",
+    "adaptive_efficiency_claim_authorized",
+    "authorized_claims",
+    "withheld_claims"
+  ],
+  "title": "RecoveryQualificationClaimAuthorization",
+  "type": "object"
+}

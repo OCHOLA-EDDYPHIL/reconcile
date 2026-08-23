@@ -1,0 +1,845 @@
+{
+  "$defs": {
+    "PermitAction": {
+      "enum": [
+        "CONTINUE",
+        "RETRY"
+      ],
+      "title": "PermitAction",
+      "type": "string"
+    },
+    "RecoveryQualificationCaseProof": {
+      "additionalProperties": false,
+      "properties": {
+        "adaptive_decision_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Adaptive Decision Sha256",
+          "type": "string"
+        },
+        "adaptive_permit_sha256": {
+          "anyOf": [
+            {
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Adaptive Permit Sha256"
+        },
+        "admitted_evidence_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Admitted Evidence Sha256",
+          "type": "string"
+        },
+        "archetype_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Archetype Id",
+          "type": "string"
+        },
+        "case_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Case Id",
+          "type": "string"
+        },
+        "decision_replay_parity": {
+          "title": "Decision Replay Parity",
+          "type": "boolean"
+        },
+        "deterministic_permit_action": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PermitAction"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "deterministic_resolution": {
+          "$ref": "#/$defs/RecoveryQualificationResolution"
+        },
+        "duplicated_witness_sha256": {
+          "anyOf": [
+            {
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Duplicated Witness Sha256"
+        },
+        "fixed_decision_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Fixed Decision Sha256",
+          "type": "string"
+        },
+        "fixed_permit_sha256": {
+          "anyOf": [
+            {
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Fixed Permit Sha256"
+        },
+        "permit_replay_parity": {
+          "title": "Permit Replay Parity",
+          "type": "boolean"
+        },
+        "reordered_witness_sha256": {
+          "anyOf": [
+            {
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Reordered Witness Sha256"
+        },
+        "restart_decision_valid": {
+          "title": "Restart Decision Valid",
+          "type": "boolean"
+        },
+        "restart_exercised": {
+          "title": "Restart Exercised",
+          "type": "boolean"
+        },
+        "restart_lane_sha256": {
+          "anyOf": [
+            {
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Restart Lane Sha256"
+        },
+        "restart_permit_valid": {
+          "title": "Restart Permit Valid",
+          "type": "boolean"
+        },
+        "restarted_decision_sha256": {
+          "anyOf": [
+            {
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Restarted Decision Sha256"
+        },
+        "restarted_permit_sha256": {
+          "anyOf": [
+            {
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Restarted Permit Sha256"
+        },
+        "seed": {
+          "maximum": 9223372036854775807,
+          "minimum": 0,
+          "title": "Seed",
+          "type": "integer"
+        },
+        "sequence": {
+          "maximum": 100,
+          "minimum": 1,
+          "title": "Sequence",
+          "type": "integer"
+        },
+        "storage_backend": {
+          "$ref": "#/$defs/RecoveryQualificationStorageBackend"
+        },
+        "witness_duplication_valid": {
+          "title": "Witness Duplication Valid",
+          "type": "boolean"
+        },
+        "witness_exercised": {
+          "title": "Witness Exercised",
+          "type": "boolean"
+        },
+        "witness_reorder_valid": {
+          "title": "Witness Reorder Valid",
+          "type": "boolean"
+        },
+        "witness_sha256": {
+          "anyOf": [
+            {
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Witness Sha256"
+        },
+        "wrong_hypothesis_replays": {
+          "items": {
+            "$ref": "#/$defs/RecoveryQualificationHypothesisReplay"
+          },
+          "maxItems": 3,
+          "minItems": 3,
+          "title": "Wrong Hypothesis Replays",
+          "type": "array"
+        }
+      },
+      "required": [
+        "sequence",
+        "case_id",
+        "archetype_id",
+        "seed",
+        "storage_backend",
+        "admitted_evidence_sha256",
+        "deterministic_resolution",
+        "deterministic_permit_action",
+        "fixed_decision_sha256",
+        "adaptive_decision_sha256",
+        "fixed_permit_sha256",
+        "adaptive_permit_sha256",
+        "decision_replay_parity",
+        "permit_replay_parity",
+        "wrong_hypothesis_replays",
+        "witness_exercised",
+        "witness_sha256",
+        "reordered_witness_sha256",
+        "duplicated_witness_sha256",
+        "witness_reorder_valid",
+        "witness_duplication_valid",
+        "restart_exercised",
+        "restart_lane_sha256",
+        "restarted_decision_sha256",
+        "restarted_permit_sha256",
+        "restart_decision_valid",
+        "restart_permit_valid"
+      ],
+      "title": "RecoveryQualificationCaseProof",
+      "type": "object"
+    },
+    "RecoveryQualificationFaultClass": {
+      "enum": [
+        "no-fault",
+        "drop-after-accept",
+        "pending",
+        "terminal-partial",
+        "conflict",
+        "absence",
+        "provider-unavailable",
+        "freshness",
+        "suppress-before-dispatch"
+      ],
+      "title": "RecoveryQualificationFaultClass",
+      "type": "string"
+    },
+    "RecoveryQualificationHypothesisReplay": {
+      "additionalProperties": false,
+      "properties": {
+        "decision_diverged": {
+          "title": "Decision Diverged",
+          "type": "boolean"
+        },
+        "observed_decision_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Observed Decision Sha256",
+          "type": "string"
+        },
+        "observed_permit_sha256": {
+          "anyOf": [
+            {
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Observed Permit Sha256"
+        },
+        "permit_diverged": {
+          "title": "Permit Diverged",
+          "type": "boolean"
+        },
+        "proposed_permit_action": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PermitAction"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "proposed_resolution": {
+          "$ref": "#/$defs/RecoveryQualificationResolution"
+        },
+        "provider_name": {
+          "const": "gemini",
+          "title": "Provider Name",
+          "type": "string"
+        },
+        "variant_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Variant Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "variant_id",
+        "provider_name",
+        "proposed_resolution",
+        "proposed_permit_action",
+        "observed_decision_sha256",
+        "observed_permit_sha256",
+        "decision_diverged",
+        "permit_diverged"
+      ],
+      "title": "RecoveryQualificationHypothesisReplay",
+      "type": "object"
+    },
+    "RecoveryQualificationLaneResult": {
+      "additionalProperties": false,
+      "properties": {
+        "admitted_evidence_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Admitted Evidence Sha256",
+          "type": "string"
+        },
+        "ambiguity_witness_sha256": {
+          "anyOf": [
+            {
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Ambiguity Witness Sha256"
+        },
+        "archetype_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Archetype Id",
+          "type": "string"
+        },
+        "case_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Case Id",
+          "type": "string"
+        },
+        "decision_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Decision Sha256",
+          "type": "string"
+        },
+        "expected_permit_action": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PermitAction"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "false_permit": {
+          "title": "False Permit",
+          "type": "boolean"
+        },
+        "fault_class": {
+          "$ref": "#/$defs/RecoveryQualificationFaultClass"
+        },
+        "issued_permit_action": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PermitAction"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "model_usage": {
+          "$ref": "#/$defs/RecoveryQualificationModelUsage"
+        },
+        "permit_sha256": {
+          "anyOf": [
+            {
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Permit Sha256"
+        },
+        "policy": {
+          "$ref": "#/$defs/RecoveryQualificationPolicy"
+        },
+        "probe_count": {
+          "maximum": 16,
+          "minimum": 0,
+          "title": "Probe Count",
+          "type": "integer"
+        },
+        "provider_mutations": {
+          "$ref": "#/$defs/RecoveryQualificationProviderMutations"
+        },
+        "resolution": {
+          "$ref": "#/$defs/RecoveryQualificationResolution"
+        },
+        "resolved": {
+          "title": "Resolved",
+          "type": "boolean"
+        },
+        "seed": {
+          "maximum": 9223372036854775807,
+          "minimum": 0,
+          "title": "Seed",
+          "type": "integer"
+        },
+        "sequence": {
+          "maximum": 400,
+          "minimum": 1,
+          "title": "Sequence",
+          "type": "integer"
+        },
+        "storage_backend": {
+          "$ref": "#/$defs/RecoveryQualificationStorageBackend"
+        },
+        "time_to_sufficient_evidence_ms": {
+          "anyOf": [
+            {
+              "maximum": 9223372036854775807,
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Time To Sufficient Evidence Ms"
+        },
+        "unsupported_probe_count": {
+          "maximum": 16,
+          "minimum": 0,
+          "title": "Unsupported Probe Count",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "sequence",
+        "case_id",
+        "archetype_id",
+        "seed",
+        "policy",
+        "storage_backend",
+        "fault_class",
+        "admitted_evidence_sha256",
+        "decision_sha256",
+        "resolution",
+        "expected_permit_action",
+        "issued_permit_action",
+        "permit_sha256",
+        "false_permit",
+        "probe_count",
+        "unsupported_probe_count",
+        "resolved",
+        "provider_mutations",
+        "model_usage",
+        "ambiguity_witness_sha256"
+      ],
+      "title": "RecoveryQualificationLaneResult",
+      "type": "object"
+    },
+    "RecoveryQualificationModelUsage": {
+      "additionalProperties": false,
+      "properties": {
+        "input_cost_nano_units_per_token": {
+          "maximum": 9223372036854775807,
+          "minimum": 0,
+          "title": "Input Cost Nano Units Per Token",
+          "type": "integer"
+        },
+        "input_token_count": {
+          "maximum": 9223372036854775807,
+          "minimum": 0,
+          "title": "Input Token Count",
+          "type": "integer"
+        },
+        "live_vertex_backed": {
+          "title": "Live Vertex Backed",
+          "type": "boolean"
+        },
+        "model_call_count": {
+          "maximum": 9223372036854775807,
+          "minimum": 0,
+          "title": "Model Call Count",
+          "type": "integer"
+        },
+        "model_cost_nano_units": {
+          "maximum": 9223372036854775807,
+          "minimum": 0,
+          "title": "Model Cost Nano Units",
+          "type": "integer"
+        },
+        "model_name": {
+          "anyOf": [
+            {
+              "maxLength": 128,
+              "minLength": 1,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Model Name"
+        },
+        "output_cost_nano_units_per_token": {
+          "maximum": 9223372036854775807,
+          "minimum": 0,
+          "title": "Output Cost Nano Units Per Token",
+          "type": "integer"
+        },
+        "output_token_count": {
+          "maximum": 9223372036854775807,
+          "minimum": 0,
+          "title": "Output Token Count",
+          "type": "integer"
+        },
+        "provider_name": {
+          "anyOf": [
+            {
+              "maxLength": 128,
+              "minLength": 1,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Provider Name"
+        },
+        "status": {
+          "$ref": "#/$defs/RecoveryQualificationModelUsageStatus"
+        },
+        "total_token_count": {
+          "maximum": 9223372036854775807,
+          "minimum": 0,
+          "title": "Total Token Count",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "status",
+        "model_call_count",
+        "input_token_count",
+        "output_token_count",
+        "total_token_count",
+        "input_cost_nano_units_per_token",
+        "output_cost_nano_units_per_token",
+        "model_cost_nano_units",
+        "live_vertex_backed"
+      ],
+      "title": "RecoveryQualificationModelUsage",
+      "type": "object"
+    },
+    "RecoveryQualificationModelUsageStatus": {
+      "enum": [
+        "NOT_APPLICABLE",
+        "SCRIPTED",
+        "MEASURED",
+        "UNAVAILABLE"
+      ],
+      "title": "RecoveryQualificationModelUsageStatus",
+      "type": "string"
+    },
+    "RecoveryQualificationPermitCoverage": {
+      "additionalProperties": false,
+      "properties": {
+        "continue_case_count": {
+          "maximum": 100,
+          "minimum": 1,
+          "title": "Continue Case Count",
+          "type": "integer"
+        },
+        "no_permit_case_count": {
+          "maximum": 100,
+          "minimum": 1,
+          "title": "No Permit Case Count",
+          "type": "integer"
+        },
+        "retry_case_count": {
+          "maximum": 100,
+          "minimum": 1,
+          "title": "Retry Case Count",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "continue_case_count",
+        "retry_case_count",
+        "no_permit_case_count"
+      ],
+      "title": "RecoveryQualificationPermitCoverage",
+      "type": "object"
+    },
+    "RecoveryQualificationPolicy": {
+      "enum": [
+        "blind-retry",
+        "blind-abort",
+        "fixed",
+        "adaptive"
+      ],
+      "title": "RecoveryQualificationPolicy",
+      "type": "string"
+    },
+    "RecoveryQualificationProviderMutations": {
+      "additionalProperties": false,
+      "properties": {
+        "outbound_call_count": {
+          "maximum": 48,
+          "minimum": 0,
+          "title": "Outbound Call Count",
+          "type": "integer"
+        },
+        "promote_calls": {
+          "maximum": 16,
+          "minimum": 0,
+          "title": "Promote Calls",
+          "type": "integer"
+        },
+        "record_calls": {
+          "maximum": 16,
+          "minimum": 0,
+          "title": "Record Calls",
+          "type": "integer"
+        },
+        "stage_calls": {
+          "maximum": 16,
+          "minimum": 0,
+          "title": "Stage Calls",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "stage_calls",
+        "promote_calls",
+        "record_calls",
+        "outbound_call_count"
+      ],
+      "title": "RecoveryQualificationProviderMutations",
+      "type": "object"
+    },
+    "RecoveryQualificationResolution": {
+      "enum": [
+        "CONTINUE",
+        "RETRY",
+        "COMPLETED",
+        "ESCALATE",
+        "ABORT"
+      ],
+      "title": "RecoveryQualificationResolution",
+      "type": "string"
+    },
+    "RecoveryQualificationStorageBackend": {
+      "enum": [
+        "sqlite",
+        "firestore"
+      ],
+      "title": "RecoveryQualificationStorageBackend",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "bundle_format": {
+      "const": "proof-to-permit-qualification-v1",
+      "title": "Bundle Format",
+      "type": "string"
+    },
+    "case_count": {
+      "const": 100,
+      "title": "Case Count",
+      "type": "integer"
+    },
+    "case_proofs": {
+      "items": {
+        "$ref": "#/$defs/RecoveryQualificationCaseProof"
+      },
+      "maxItems": 100,
+      "minItems": 100,
+      "title": "Case Proofs",
+      "type": "array"
+    },
+    "environment_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Environment Sha256",
+      "type": "string"
+    },
+    "false_permit_count": {
+      "maximum": 400,
+      "minimum": 0,
+      "title": "False Permit Count",
+      "type": "integer"
+    },
+    "firestore_case_count": {
+      "maximum": 100,
+      "minimum": 1,
+      "title": "Firestore Case Count",
+      "type": "integer"
+    },
+    "lane_result_count": {
+      "const": 400,
+      "title": "Lane Result Count",
+      "type": "integer"
+    },
+    "lane_results": {
+      "items": {
+        "$ref": "#/$defs/RecoveryQualificationLaneResult"
+      },
+      "maxItems": 400,
+      "minItems": 400,
+      "title": "Lane Results",
+      "type": "array"
+    },
+    "manifest_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Manifest Sha256",
+      "type": "string"
+    },
+    "permit_coverage": {
+      "$ref": "#/$defs/RecoveryQualificationPermitCoverage"
+    },
+    "replay_parity_case_count": {
+      "maximum": 100,
+      "minimum": 0,
+      "title": "Replay Parity Case Count",
+      "type": "integer"
+    },
+    "restart_case_count": {
+      "maximum": 20,
+      "minimum": 0,
+      "title": "Restart Case Count",
+      "type": "integer"
+    },
+    "restart_valid_count": {
+      "maximum": 20,
+      "minimum": 0,
+      "title": "Restart Valid Count",
+      "type": "integer"
+    },
+    "safety_passed": {
+      "title": "Safety Passed",
+      "type": "boolean"
+    },
+    "schema_version": {
+      "const": "reconcile/recovery-qualification-results/v1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "sqlite_case_count": {
+      "maximum": 100,
+      "minimum": 1,
+      "title": "Sqlite Case Count",
+      "type": "integer"
+    },
+    "suite_id": {
+      "maxLength": 128,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+      "title": "Suite Id",
+      "type": "string"
+    },
+    "witness_case_count": {
+      "maximum": 100,
+      "minimum": 1,
+      "title": "Witness Case Count",
+      "type": "integer"
+    },
+    "witness_replay_valid_count": {
+      "maximum": 100,
+      "minimum": 0,
+      "title": "Witness Replay Valid Count",
+      "type": "integer"
+    },
+    "wrong_hypothesis_decision_divergence_count": {
+      "maximum": 300,
+      "minimum": 0,
+      "title": "Wrong Hypothesis Decision Divergence Count",
+      "type": "integer"
+    },
+    "wrong_hypothesis_permit_divergence_count": {
+      "maximum": 300,
+      "minimum": 0,
+      "title": "Wrong Hypothesis Permit Divergence Count",
+      "type": "integer"
+    },
+    "wrong_hypothesis_replay_count": {
+      "maximum": 300,
+      "minimum": 0,
+      "title": "Wrong Hypothesis Replay Count",
+      "type": "integer"
+    }
+  },
+  "required": [
+    "schema_version",
+    "bundle_format",
+    "suite_id",
+    "manifest_sha256",
+    "environment_sha256",
+    "lane_results",
+    "case_proofs",
+    "case_count",
+    "lane_result_count",
+    "false_permit_count",
+    "replay_parity_case_count",
+    "wrong_hypothesis_replay_count",
+    "wrong_hypothesis_decision_divergence_count",
+    "wrong_hypothesis_permit_divergence_count",
+    "witness_case_count",
+    "witness_replay_valid_count",
+    "restart_case_count",
+    "restart_valid_count",
+    "permit_coverage",
+    "sqlite_case_count",
+    "firestore_case_count",
+    "safety_passed"
+  ],
+  "title": "RecoveryQualificationResults",
+  "type": "object"
+}

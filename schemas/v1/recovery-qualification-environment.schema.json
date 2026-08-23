@@ -1,0 +1,159 @@
+{
+  "$defs": {
+    "RecoveryQualificationExecutionBasis": {
+      "enum": [
+        "scripted",
+        "live-vertex"
+      ],
+      "title": "RecoveryQualificationExecutionBasis",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "bundle_format": {
+      "const": "proof-to-permit-qualification-v1",
+      "title": "Bundle Format",
+      "type": "string"
+    },
+    "dependency_lock_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Dependency Lock Sha256",
+      "type": "string"
+    },
+    "execution_basis": {
+      "$ref": "#/$defs/RecoveryQualificationExecutionBasis"
+    },
+    "generated_at": {
+      "format": "date-time",
+      "title": "Generated At",
+      "type": "string"
+    },
+    "manifest_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Manifest Sha256",
+      "type": "string"
+    },
+    "model_name": {
+      "anyOf": [
+        {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Model Name"
+    },
+    "platform": {
+      "maxLength": 4096,
+      "minLength": 1,
+      "title": "Platform",
+      "type": "string"
+    },
+    "provider_name": {
+      "anyOf": [
+        {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Provider Name"
+    },
+    "python_version": {
+      "maxLength": 4096,
+      "minLength": 1,
+      "title": "Python Version",
+      "type": "string"
+    },
+    "repository_clean": {
+      "title": "Repository Clean",
+      "type": "boolean"
+    },
+    "runner_version": {
+      "maxLength": 128,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+      "title": "Runner Version",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": "reconcile/recovery-qualification-environment/v1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "source_revision": {
+      "maxLength": 128,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+      "title": "Source Revision",
+      "type": "string"
+    },
+    "source_tree_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Source Tree Sha256",
+      "type": "string"
+    },
+    "suite_id": {
+      "maxLength": 128,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+      "title": "Suite Id",
+      "type": "string"
+    },
+    "test_commands": {
+      "items": {
+        "maxLength": 4096,
+        "minLength": 1,
+        "type": "string"
+      },
+      "maxItems": 16,
+      "minItems": 1,
+      "title": "Test Commands",
+      "type": "array"
+    },
+    "vertex_location": {
+      "anyOf": [
+        {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Vertex Location"
+    }
+  },
+  "required": [
+    "schema_version",
+    "bundle_format",
+    "suite_id",
+    "manifest_sha256",
+    "source_revision",
+    "source_tree_sha256",
+    "repository_clean",
+    "execution_basis",
+    "runner_version",
+    "python_version",
+    "platform",
+    "dependency_lock_sha256",
+    "test_commands",
+    "generated_at"
+  ],
+  "title": "RecoveryQualificationEnvironment",
+  "type": "object"
+}

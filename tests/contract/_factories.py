@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 from datetime import UTC, datetime, timedelta
+from functools import lru_cache
 
 from reconcile.contracts import (
     ACTION_GATE_RESULT_VERSION,
@@ -28,6 +29,8 @@ from reconcile.contracts import (
     RECOVERY_LAUNCH_PERMIT_VERSION,
     RECOVERY_POLICY_COMPARISON_VERSION,
     RECOVERY_POLICY_RESULT_VERSION,
+    RECOVERY_QUALIFICATION_CONTENTION_VERSION,
+    RECOVERY_QUALIFICATION_INDEX_VERSION,
     RECOVERY_RESET_RESULT_VERSION,
     RECOVERY_RUN_EVENT_VERSION,
     RECOVERY_RUN_REQUEST_VERSION,
@@ -136,6 +139,16 @@ from reconcile.contracts import (
     RecoveryNodeState,
     RecoveryPolicyComparison,
     RecoveryPolicyResult,
+    RecoveryQualificationArtifactIdentity,
+    RecoveryQualificationClaimAuthorization,
+    RecoveryQualificationComparison,
+    RecoveryQualificationContention,
+    RecoveryQualificationContentionTrial,
+    RecoveryQualificationEnvironment,
+    RecoveryQualificationIndex,
+    RecoveryQualificationManifest,
+    RecoveryQualificationResults,
+    RecoveryQualificationStorageBackend,
     RecoveryReceiptOutcome,
     RecoveryResetResult,
     RecoveryRunEvent,
@@ -178,6 +191,13 @@ from reconcile.qualification import (
     build_result_set,
     derive_disposition,
     summarize_qualification,
+)
+from reconcile.recovery_qualification import (
+    authorize_recovery_qualification_claims,
+    build_recovery_qualification_environment,
+    build_recovery_qualification_manifest,
+    compare_recovery_qualification,
+    run_recovery_qualification,
 )
 
 NOW = datetime(2026, 8, 13, 12, 0, tzinfo=UTC)
@@ -1487,6 +1507,141 @@ def make_recovery_scenario_examples() -> tuple[
     return receipt, comparison
 
 
+@lru_cache(maxsize=1)
+def make_recovery_qualification_examples() -> tuple[
+    RecoveryQualificationManifest,
+    RecoveryQualificationEnvironment,
+    RecoveryQualificationResults,
+    RecoveryQualificationContention,
+    RecoveryQualificationComparison,
+    RecoveryQualificationClaimAuthorization,
+    RecoveryQualificationIndex,
+]:
+    manifest = build_recovery_qualification_manifest(
+        source_revision="d403db32b7507a8e04008d34484e8ba8a51bc657",
+        source_tree_sha256="a" * 64,
+        created_at=NOW,
+    )
+    environment = build_recovery_qualification_environment(
+        manifest,
+        repository_clean=True,
+        dependency_lock_sha256="b" * 64,
+        generated_at=NOW,
+        python_version="3.12.13",
+        platform_name="contract-test",
+    )
+    results = run_recovery_qualification(manifest, environment)
+
+    def claimed_permit(backend, action):
+        suffix = f"{backend.value}-{action.value.lower()}"
+        source = f"source-{suffix}"
+        digest = hashlib.sha256(suffix.encode()).hexdigest()
+        return ActionPermit(
+            schema_version=ACTION_PERMIT_VERSION,
+            permit_id=f"qualification-permit-{suffix}",
+            certificate_id=f"qualification-certificate-{suffix}",
+            certificate_sha256=digest,
+            chain_id="qualification-chain",
+            source_node_id=source,
+            target_node_id=(
+                source if action is PermitAction.RETRY else f"target-{suffix}"
+            ),
+            semantic_action_sha256=digest,
+            action=action,
+            action_profile_version="qualification-action-profile-v1",
+            action_policy_version="recovery-permit-policy-v1",
+            tool_name="qualification-provider-mutation",
+            tool_version="1.0.0",
+            arguments_sha256=digest,
+            target_sha256=digest,
+            precondition_sha256=digest,
+            issued_at=NOW,
+            expires_at=NOW + timedelta(hours=1),
+            max_uses=1,
+            state=ActionPermitState.CLAIMED,
+            revision=1,
+            claim_id="qualification-claim-00",
+            claimed_at=NOW + timedelta(seconds=1),
+        )
+
+    trials = tuple(
+        RecoveryQualificationContentionTrial(
+            backend=backend,
+            permit_action=action,
+            contender_count=32,
+            winner_count=1,
+            denied_count=31,
+            outbound_call_count=1,
+            contender_claim_ids=tuple(
+                f"qualification-claim-{index:02}" for index in range(32)
+            ),
+            winner_claim_id="qualification-claim-00",
+            denied_claim_ids=tuple(
+                f"qualification-claim-{index:02}" for index in range(1, 32)
+            ),
+            provider_call_receipt_ids=(
+                f"provider-call-receipt-{backend.value}-{action.value.lower()}",
+            ),
+            final_permit=claimed_permit(backend, action),
+            final_permit_sha256=canonical_sha256(claimed_permit(backend, action)),
+            passed=True,
+        )
+        for backend, action in (
+            (RecoveryQualificationStorageBackend.SQLITE, PermitAction.CONTINUE),
+            (RecoveryQualificationStorageBackend.SQLITE, PermitAction.RETRY),
+            (RecoveryQualificationStorageBackend.FIRESTORE, PermitAction.CONTINUE),
+            (RecoveryQualificationStorageBackend.FIRESTORE, PermitAction.RETRY),
+        )
+    )
+    contention = RecoveryQualificationContention(
+        schema_version=RECOVERY_QUALIFICATION_CONTENTION_VERSION,
+        bundle_format="proof-to-permit-qualification-v1",
+        suite_id=manifest.suite_id,
+        manifest_sha256=canonical_sha256(manifest),
+        results_sha256=canonical_sha256(results),
+        trials=trials,
+        passed=True,
+    )
+    comparison = compare_recovery_qualification(manifest, environment, results)
+    claims = authorize_recovery_qualification_claims(
+        manifest,
+        environment,
+        results,
+        contention,
+        comparison,
+    )
+    documents = (
+        ("manifest.json", manifest),
+        ("environment.json", environment),
+        ("results.json", results),
+        ("contention.json", contention),
+        ("comparison.json", comparison),
+        ("claim-authorization.json", claims),
+    )
+    identities = tuple(
+        RecoveryQualificationArtifactIdentity(
+            filename=filename,
+            sha256=hashlib.sha256(canonical_json_bytes(document)).hexdigest(),
+            byte_count=len(canonical_json_bytes(document)),
+        )
+        for filename, document in documents
+    )
+    index = RecoveryQualificationIndex(
+        schema_version=RECOVERY_QUALIFICATION_INDEX_VERSION,
+        bundle_format="proof-to-permit-qualification-v1",
+        suite_id=manifest.suite_id,
+        source_revision=manifest.source_revision,
+        source_tree_sha256=manifest.source_tree_sha256,
+        artifacts=identities,
+        safety_claim_authorized=claims.safety_claim_authorized,
+        adaptive_efficiency_claim_authorized=(
+            claims.adaptive_efficiency_claim_authorized
+        ),
+        created_at=NOW,
+    )
+    return manifest, environment, results, contention, comparison, claims, index
+
+
 def public_examples() -> tuple[object, ...]:
     envelope = make_envelope()
     capability = make_capability()
@@ -1516,6 +1671,7 @@ def public_examples() -> tuple[object, ...]:
         *make_recovery_examples(),
         *make_recovery_run_examples(),
         *make_recovery_scenario_examples(),
+        *make_recovery_qualification_examples(),
     )
 
 

@@ -1,0 +1,299 @@
+{
+  "$defs": {
+    "PermitAction": {
+      "enum": [
+        "CONTINUE",
+        "RETRY"
+      ],
+      "title": "PermitAction",
+      "type": "string"
+    },
+    "RecoveryQualificationArchetype": {
+      "additionalProperties": false,
+      "properties": {
+        "adaptive_probe_count": {
+          "maximum": 16,
+          "minimum": 1,
+          "title": "Adaptive Probe Count",
+          "type": "integer"
+        },
+        "adaptive_unsupported_probe_count": {
+          "maximum": 16,
+          "minimum": 0,
+          "title": "Adaptive Unsupported Probe Count",
+          "type": "integer"
+        },
+        "ambiguity_witness_required": {
+          "title": "Ambiguity Witness Required",
+          "type": "boolean"
+        },
+        "archetype_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Archetype Id",
+          "type": "string"
+        },
+        "evidence_profile": {
+          "items": {
+            "maxLength": 128,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+            "type": "string"
+          },
+          "maxItems": 16,
+          "minItems": 1,
+          "title": "Evidence Profile",
+          "type": "array"
+        },
+        "expected_permit_action": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PermitAction"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "expected_resolution": {
+          "$ref": "#/$defs/RecoveryQualificationResolution"
+        },
+        "fault_class": {
+          "$ref": "#/$defs/RecoveryQualificationFaultClass"
+        },
+        "fixed_probe_count": {
+          "maximum": 16,
+          "minimum": 1,
+          "title": "Fixed Probe Count",
+          "type": "integer"
+        },
+        "fixed_unsupported_probe_count": {
+          "maximum": 16,
+          "minimum": 0,
+          "title": "Fixed Unsupported Probe Count",
+          "type": "integer"
+        },
+        "opportunity": {
+          "$ref": "#/$defs/RecoveryQualificationOpportunity"
+        },
+        "stage": {
+          "$ref": "#/$defs/RecoveryQualificationStage"
+        }
+      },
+      "required": [
+        "archetype_id",
+        "stage",
+        "fault_class",
+        "opportunity",
+        "evidence_profile",
+        "expected_resolution",
+        "expected_permit_action",
+        "ambiguity_witness_required",
+        "fixed_probe_count",
+        "adaptive_probe_count",
+        "fixed_unsupported_probe_count",
+        "adaptive_unsupported_probe_count"
+      ],
+      "title": "RecoveryQualificationArchetype",
+      "type": "object"
+    },
+    "RecoveryQualificationFaultClass": {
+      "enum": [
+        "no-fault",
+        "drop-after-accept",
+        "pending",
+        "terminal-partial",
+        "conflict",
+        "absence",
+        "provider-unavailable",
+        "freshness",
+        "suppress-before-dispatch"
+      ],
+      "title": "RecoveryQualificationFaultClass",
+      "type": "string"
+    },
+    "RecoveryQualificationOpportunity": {
+      "enum": [
+        "fixed-favored",
+        "adaptive-favored",
+        "neutral"
+      ],
+      "title": "RecoveryQualificationOpportunity",
+      "type": "string"
+    },
+    "RecoveryQualificationPolicy": {
+      "enum": [
+        "blind-retry",
+        "blind-abort",
+        "fixed",
+        "adaptive"
+      ],
+      "title": "RecoveryQualificationPolicy",
+      "type": "string"
+    },
+    "RecoveryQualificationResolution": {
+      "enum": [
+        "CONTINUE",
+        "RETRY",
+        "COMPLETED",
+        "ESCALATE",
+        "ABORT"
+      ],
+      "title": "RecoveryQualificationResolution",
+      "type": "string"
+    },
+    "RecoveryQualificationStage": {
+      "enum": [
+        "stage",
+        "promote",
+        "record"
+      ],
+      "title": "RecoveryQualificationStage",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "adaptive_efficiency_threshold_basis_points": {
+      "const": 2500,
+      "title": "Adaptive Efficiency Threshold Basis Points",
+      "type": "integer"
+    },
+    "archetypes": {
+      "items": {
+        "$ref": "#/$defs/RecoveryQualificationArchetype"
+      },
+      "maxItems": 20,
+      "minItems": 20,
+      "title": "Archetypes",
+      "type": "array"
+    },
+    "bundle_format": {
+      "const": "proof-to-permit-qualification-v1",
+      "title": "Bundle Format",
+      "type": "string"
+    },
+    "case_count": {
+      "const": 100,
+      "title": "Case Count",
+      "type": "integer"
+    },
+    "contention_width": {
+      "const": 32,
+      "title": "Contention Width",
+      "type": "integer"
+    },
+    "controller_version": {
+      "maxLength": 128,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+      "title": "Controller Version",
+      "type": "string"
+    },
+    "created_at": {
+      "format": "date-time",
+      "title": "Created At",
+      "type": "string"
+    },
+    "decision_policy_version": {
+      "maxLength": 128,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+      "title": "Decision Policy Version",
+      "type": "string"
+    },
+    "fixture_catalog_sha256": {
+      "const": "d327653c2450cdd9fcc471f6f3f6057179c463c1b5ef7d2c5edfdc7af27ca902",
+      "title": "Fixture Catalog Sha256",
+      "type": "string"
+    },
+    "lane_result_count": {
+      "const": 400,
+      "title": "Lane Result Count",
+      "type": "integer"
+    },
+    "permit_policy_version": {
+      "maxLength": 128,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+      "title": "Permit Policy Version",
+      "type": "string"
+    },
+    "policies": {
+      "items": {
+        "$ref": "#/$defs/RecoveryQualificationPolicy"
+      },
+      "maxItems": 4,
+      "minItems": 4,
+      "title": "Policies",
+      "type": "array"
+    },
+    "restart_case_count": {
+      "const": 20,
+      "title": "Restart Case Count",
+      "type": "integer"
+    },
+    "schema_version": {
+      "const": "reconcile/recovery-qualification-manifest/v1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "seeds": {
+      "items": {
+        "type": "integer"
+      },
+      "maxItems": 5,
+      "minItems": 5,
+      "title": "Seeds",
+      "type": "array"
+    },
+    "source_revision": {
+      "maxLength": 128,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+      "title": "Source Revision",
+      "type": "string"
+    },
+    "source_tree_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Source Tree Sha256",
+      "type": "string"
+    },
+    "suite_id": {
+      "maxLength": 128,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+      "title": "Suite Id",
+      "type": "string"
+    },
+    "wrong_hypothesis_variants_per_case": {
+      "const": 3,
+      "title": "Wrong Hypothesis Variants Per Case",
+      "type": "integer"
+    }
+  },
+  "required": [
+    "schema_version",
+    "bundle_format",
+    "suite_id",
+    "source_revision",
+    "source_tree_sha256",
+    "fixture_catalog_sha256",
+    "controller_version",
+    "decision_policy_version",
+    "permit_policy_version",
+    "seeds",
+    "policies",
+    "archetypes",
+    "case_count",
+    "lane_result_count",
+    "wrong_hypothesis_variants_per_case",
+    "restart_case_count",
+    "contention_width",
+    "adaptive_efficiency_threshold_basis_points",
+    "created_at"
+  ],
+  "title": "RecoveryQualificationManifest",
+  "type": "object"
+}
