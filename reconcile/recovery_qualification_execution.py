@@ -295,8 +295,10 @@ class _ScriptedPlanner:
                 if prior_count == 1
                 else None
             )
-        if tool_name == "create-firestore-release-record" and (
-            planner_input.missing_evidence
+        if (
+            tool_name == "create-firestore-release-record"
+            and planner_input.missing_evidence
+            and prior_count == 0
         ):
             return "reconcile-dispatch-receipt-get"
         return None
@@ -2020,7 +2022,16 @@ async def execute_recovery_qualification_proof_lane(
             for event in planner_events
         ):
             raise AssertionError(
-                "scripted adaptive lane emitted an invalid hypothesis or fallback"
+                "scripted adaptive lane emitted an invalid hypothesis or fallback: "
+                + repr(
+                    tuple(
+                        (
+                            event.payload.hypothesis is not None,
+                            event.payload.hypothesis_disposition,
+                        )
+                        for event in planner_events
+                    )
+                )
             )
     decision, artifact = _target_decision(events, target_node_id)
     state = _state_for_artifact(source, artifact)

@@ -105,6 +105,38 @@ def test_scripted_planner_never_cites_rejected_evidence() -> None:
     }
 
 
+def test_scripted_record_planner_stops_after_one_receipt_probe() -> None:
+    planner = _ScriptedPlanner()
+    planner_input = make_planner_input()
+    invocation = planner_input.envelope.context.invocation.model_copy(
+        update={"tool_name": "create-firestore-release-record"}
+    )
+    context = planner_input.envelope.context.model_copy(
+        update={"invocation": invocation}
+    )
+    envelope = planner_input.envelope.model_copy(update={"context": context})
+    first_input = planner_input.model_copy(
+        update={"envelope": envelope, "prior_executable_request_hashes": ()}
+    )
+    second_input = planner_input.model_copy(
+        update={
+            "envelope": envelope,
+            "prior_executable_request_hashes": ("e" * 64,),
+        }
+    )
+
+    first = asyncio.run(planner.plan(first_input))
+    second = asyncio.run(planner.plan(second_input))
+
+    assert first.output is not None
+    assert tuple(item.capability_name for item in first.output.probe_proposals) == (
+        "reconcile-dispatch-receipt-get",
+    )
+    assert second.output is not None
+    assert second.output.probe_proposals == ()
+    assert second.output.stop_advice.recommend_stop is True
+
+
 @pytest.mark.parametrize("mutation", ("missing", "tampered"))
 def test_comparison_rejects_demonstrated_evidence_profile_drift(mutation: str) -> None:
     manifest, environment, results, *_ = make_recovery_qualification_examples()
