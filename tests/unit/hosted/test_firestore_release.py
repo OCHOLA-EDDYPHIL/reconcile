@@ -99,7 +99,12 @@ def test_release_record_is_create_only_strongly_read_and_exactly_reset() -> None
     async def exercise():
         created = await target.create(_record())
         read = await target.read("release-7")
-        deleted = await target.reset(release_id="release-7", payload_sha256="a" * 64)
+        deleted = await target.reset(
+            release_id="release-7",
+            cloud_run_revisions=("reconcile-canary-r-0123456789abcdef",),
+            payload_sha256="a" * 64,
+            semantic_action_sha256="b" * 64,
+        )
         absent = await target.read("release-7")
         return created, read, deleted, absent
 
@@ -121,8 +126,25 @@ def test_release_create_conflict_and_reset_ownership_mismatch_fail_closed() -> N
         with pytest.raises(FirestoreReleaseConflict):
             await target.reset(
                 release_id="release-7",
+                cloud_run_revisions=("reconcile-canary-r-0123456789abcdef",),
                 payload_sha256="c" * 64,
+                semantic_action_sha256="b" * 64,
             )
+
+        for mismatched_identity in (
+            {
+                "cloud_run_revisions": ("reconcile-canary-r-fedcba9876543210",),
+                "payload_sha256": "a" * 64,
+                "semantic_action_sha256": "b" * 64,
+            },
+            {
+                "cloud_run_revisions": ("reconcile-canary-r-0123456789abcdef",),
+                "payload_sha256": "a" * 64,
+                "semantic_action_sha256": "c" * 64,
+            },
+        ):
+            with pytest.raises(FirestoreReleaseConflict):
+                await target.reset(release_id="release-7", **mismatched_identity)
 
     __import__("asyncio").run(exercise())
 

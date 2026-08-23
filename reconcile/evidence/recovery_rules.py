@@ -440,6 +440,19 @@ def _require_text(value: object, *, label: str, pattern: re.Pattern[str]) -> str
     return value
 
 
+def deterministic_stage_revision(*, service: str, release_id: str) -> str:
+    """Return the exact Cloud Run revision named by a staged release action."""
+
+    _require_text(service, label="service", pattern=_CLOUD_RUN_REVISION)
+    _require_text(release_id, label="release_id", pattern=_IDENTIFIER)
+    operation_suffix = hashlib.sha256(f"{release_id}\0stage".encode()).hexdigest()[:24]
+    operation_id = f"release-stage-{operation_suffix}"
+    revision_suffix = hashlib.sha256(operation_id.encode("utf-8")).hexdigest()[:16]
+    revision = f"{service}-r-{revision_suffix}"
+    _require_text(revision, label="revision", pattern=_CLOUD_RUN_REVISION)
+    return revision
+
+
 def _validate_target(
     profile: RecoveryActionProfile,
     action: SemanticActionIdentity,
@@ -762,6 +775,26 @@ def _validate_observation_binding(
         raise RecoveryRuleViolation(
             "provider observation release does not match the semantic action"
         )
+    if (
+        profile is STAGE_CLOUD_RUN_REVISION_PROFILE
+        and isinstance(
+            observation,
+            (
+                _CloudRunServiceObservation,
+                _CloudRunRevisionObservation,
+                _CloudRunOperationObservation,
+                _CloudRunHealthObservation,
+            ),
+        )
+        and observation.revision
+        != deterministic_stage_revision(
+            service=str(action.target.resource["service"]),
+            release_id=str(release_id),
+        )
+    ):
+        raise RecoveryRuleViolation(
+            "Cloud Run observation names a different staged revision"
+        )
     if type(observation) is _CloudRunRevisionObservation:
         if observation.release_label != release_id:
             raise RecoveryRuleViolation(
@@ -1022,19 +1055,26 @@ def _expected_effects_by_scope(
     arguments = action.semantic_arguments
     release_id = arguments["release_id"]
     if profile is STAGE_CLOUD_RUN_REVISION_PROFILE:
+        revision = deterministic_stage_revision(
+            service=str(action.target.resource["service"]),
+            release_id=str(release_id),
+        )
         predicates: dict[str, dict[str, object]] = {
             STAGE_REVISION_EFFECT_SCOPE: {
                 "release_id": release_id,
                 "image_digest": arguments["image_digest"],
                 "configuration_sha256": arguments["configuration_sha256"],
+                "revision": revision,
             },
             STAGE_READINESS_EFFECT_SCOPE: {
                 "release_id": release_id,
                 "ready": True,
+                "revision": revision,
             },
             STAGE_TRAFFIC_EFFECT_SCOPE: {
                 "release_id": release_id,
                 "traffic_percent": 0,
+                "revision": revision,
             },
         }
     elif profile is PROMOTE_CLOUD_RUN_TRAFFIC_PROFILE:
@@ -1496,6 +1536,7 @@ __all__ = [
     "RecoveryCapability",
     "RecoveryPreconditionKind",
     "RecoveryRuleViolation",
+    "deterministic_stage_revision",
     "recovery_precondition_sha256",
     "recovery_provider_conflict_pairs",
     "resolve_recovery_action_profile",

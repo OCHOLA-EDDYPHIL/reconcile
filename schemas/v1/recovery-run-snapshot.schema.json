@@ -1881,7 +1881,7 @@
     },
     "RecoveryDispatchReceipt": {
       "additionalProperties": false,
-      "description": "Durable fact written after authority claim and before target mutation.",
+      "description": "Durable dispatcher fact bound to one claimed-authority attempt.",
       "properties": {
         "action_request_sha256": {
           "pattern": "^[0-9a-f]{64}$",

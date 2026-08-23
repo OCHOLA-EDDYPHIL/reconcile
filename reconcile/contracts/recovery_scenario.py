@@ -94,14 +94,22 @@ class RecoveryCloudRunObservation(StrictModel):
 class RecoveryFirestoreObservation(StrictModel):
     release_id: Identifier
     document_path: SanitizedText
-    payload_sha256: Sha256Digest
+    payload_sha256: Sha256Digest | None = None
+    semantic_action_sha256: Sha256Digest | None = None
     exists: bool
     cloud_run_revision: Identifier | None = None
 
     @model_validator(mode="after")
     def validate_record(self) -> RecoveryFirestoreObservation:
-        if self.exists != (self.cloud_run_revision is not None):
-            raise ValueError("release-record existence and revision disagree")
+        observed_identity = (
+            self.cloud_run_revision,
+            self.payload_sha256,
+            self.semantic_action_sha256,
+        )
+        if self.exists != all(value is not None for value in observed_identity) or (
+            not self.exists and any(value is not None for value in observed_identity)
+        ):
+            raise ValueError("release-record existence and observed identity disagree")
         return self
 
 
@@ -128,8 +136,8 @@ class RecoveryPolicyResult(StrictModel):
     firestore: RecoveryFirestoreObservation
     dispatch_receipts: tuple[RecoveryDispatchReceipt, ...] = Field(max_length=16)
     timeline: tuple[RecoveryTimelineEntry, ...] = Field(min_length=1, max_length=256)
-    certificate_sha256s: tuple[Sha256Digest, ...] = Field(max_length=8)
-    witness_sha256s: tuple[Sha256Digest, ...] = Field(max_length=8)
+    certificate_sha256s: tuple[Sha256Digest, ...] = Field(max_length=32)
+    witness_sha256s: tuple[Sha256Digest, ...] = Field(max_length=32)
 
     @model_validator(mode="after")
     def validate_result(self) -> RecoveryPolicyResult:

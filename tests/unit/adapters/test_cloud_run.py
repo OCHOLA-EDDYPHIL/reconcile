@@ -65,7 +65,7 @@ pytestmark = pytest.mark.unit
 
 NOW = datetime(2026, 8, 22, 12, 0, tzinfo=UTC)
 RELEASE = "release-7"
-REVISION = "reconcile-canary-r-0123456789abcdef"
+REVISION = "reconcile-canary-r-3997240d56d5ff06"
 DIGEST = f"sha256:{'a' * 64}"
 CONFIGURATION = "b" * 64
 OPERATION = "projects/demo-project/locations/us-central1/operations/op-7"
@@ -84,6 +84,7 @@ def _binding() -> CloudRunProbeBinding:
         release_id=RELEASE,
         image_digest=DIGEST,
         configuration_sha256=CONFIGURATION,
+        expected_revision=REVISION,
     )
 
 
@@ -96,17 +97,22 @@ def _effects(stage: bool = True) -> tuple[ExpectedEffect, ...]:
                 "release_id": RELEASE,
                 "image_digest": DIGEST,
                 "configuration_sha256": CONFIGURATION,
+                "revision": REVISION,
             },
         ),
         (
             "revision-ready",
             STAGE_READINESS_EFFECT_SCOPE,
-            {"release_id": RELEASE, "ready": True},
+            {"release_id": RELEASE, "ready": True, "revision": REVISION},
         ),
         (
             "revision-zero-traffic",
             STAGE_TRAFFIC_EFFECT_SCOPE,
-            {"release_id": RELEASE, "traffic_percent": 0},
+            {
+                "release_id": RELEASE,
+                "traffic_percent": 0,
+                "revision": REVISION,
+            },
         ),
     )
     if not stage:

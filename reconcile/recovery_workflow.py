@@ -943,19 +943,26 @@ class ProofToPermitWorkflow:
         run_id = snapshot.request.run_id
         await self._mirror_action_permit(run_id, permit)
         if permit.state in {ActionPermitState.CLAIMED, ActionPermitState.COMPLETED}:
-            await self._node_state(
-                run_id,
-                transition.source_node_id,
-                RecoveryNodeState.DISPATCH_CLAIMED,
-                attempt=max(
-                    1,
-                    next(
-                        item.attempt
-                        for item in (await self._store.get(run_id)).nodes
-                        if item.node_id == transition.source_node_id
-                    ),
-                ),
+            latest = await self._store.get(run_id)
+            progress = next(
+                item
+                for item in latest.nodes
+                if item.node_id == transition.source_node_id
             )
+            if progress.state is not RecoveryNodeState.DISPATCH_CLAIMED:
+                if progress.state not in {
+                    RecoveryNodeState.VERIFIED,
+                    RecoveryNodeState.PERMITTED,
+                }:
+                    raise RecoveryWorkflowError(
+                        "claimed permit disagrees with durable node state"
+                    )
+                await self._node_state(
+                    run_id,
+                    transition.source_node_id,
+                    RecoveryNodeState.DISPATCH_CLAIMED,
+                    attempt=max(1, progress.attempt),
+                )
             return
         if permit.state is not ActionPermitState.ISSUED:
             raise RecoveryWorkflowError(
@@ -1048,12 +1055,26 @@ class ProofToPermitWorkflow:
                 raise RecoveryWorkflowError(
                     "action permit did not establish dispatch authority"
                 ) from None
-            await self._node_state(
-                run_id,
-                transition.source_node_id,
-                RecoveryNodeState.DISPATCH_CLAIMED,
-                attempt=max(1, source_progress.attempt),
+            durable = await self._store.get(run_id)
+            progress = next(
+                item
+                for item in durable.nodes
+                if item.node_id == transition.source_node_id
             )
+            if progress.state is not RecoveryNodeState.DISPATCH_CLAIMED:
+                if progress.state not in {
+                    RecoveryNodeState.VERIFIED,
+                    RecoveryNodeState.PERMITTED,
+                }:
+                    raise RecoveryWorkflowError(
+                        "claimed permit disagrees with durable node state"
+                    ) from None
+                await self._node_state(
+                    run_id,
+                    transition.source_node_id,
+                    RecoveryNodeState.DISPATCH_CLAIMED,
+                    attempt=max(1, progress.attempt),
+                )
             return
         completed = receipt.action_permit
         if (

@@ -60,7 +60,7 @@
     },
     "RecoveryDispatchReceipt": {
       "additionalProperties": false,
-      "description": "Durable fact written after authority claim and before target mutation.",
+      "description": "Durable dispatcher fact bound to one claimed-authority attempt.",
       "properties": {
         "action_request_sha256": {
           "pattern": "^[0-9a-f]{64}$",
@@ -185,9 +185,17 @@
           "type": "boolean"
         },
         "payload_sha256": {
-          "pattern": "^[0-9a-f]{64}$",
-          "title": "Payload Sha256",
-          "type": "string"
+          "anyOf": [
+            {
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Payload Sha256"
         },
         "release_id": {
           "maxLength": 128,
@@ -195,12 +203,24 @@
           "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
           "title": "Release Id",
           "type": "string"
+        },
+        "semantic_action_sha256": {
+          "anyOf": [
+            {
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Semantic Action Sha256"
         }
       },
       "required": [
         "release_id",
         "document_path",
-        "payload_sha256",
         "exists"
       ],
       "title": "RecoveryFirestoreObservation",
@@ -279,7 +299,7 @@
             "pattern": "^[0-9a-f]{64}$",
             "type": "string"
           },
-          "maxItems": 8,
+          "maxItems": 32,
           "title": "Certificate Sha256S",
           "type": "array"
         },
@@ -377,7 +397,7 @@
             "pattern": "^[0-9a-f]{64}$",
             "type": "string"
           },
-          "maxItems": 8,
+          "maxItems": 32,
           "title": "Witness Sha256S",
           "type": "array"
         }

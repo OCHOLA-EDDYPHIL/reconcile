@@ -296,14 +296,23 @@ class GoogleFirestoreReleaseTarget:
         self,
         *,
         release_id: str,
+        cloud_run_revisions: tuple[str, ...],
         payload_sha256: str,
+        semantic_action_sha256: str,
     ) -> bool:
         """Delete only the exact owned release record under an update precondition."""
 
         current = await self.read(release_id)
         if current is None:
             return False
-        if current.record.payload_sha256 != payload_sha256:
+        if (
+            type(cloud_run_revisions) is not tuple
+            or not cloud_run_revisions
+            or len(cloud_run_revisions) != len(set(cloud_run_revisions))
+            or current.record.cloud_run_revision not in cloud_run_revisions
+            or current.record.payload_sha256 != payload_sha256
+            or current.record.semantic_action_sha256 != semantic_action_sha256
+        ):
             raise FirestoreReleaseConflict
         client = await self._client()
         reference = self._reference(client, release_id)

@@ -23,8 +23,10 @@ from reconcile.contracts import (
     RecoveryAuthorityKind,
     RecoveryDispatchOutcome,
     RecoveryLaunchPermitState,
+    RecoveryNodeProgress,
     RecoveryNodeState,
     RecoveryPreparedAction,
+    RecoveryRunEventPayload,
     RecoveryRunEventType,
     RecoveryRunFailureCategory,
     RecoveryRunFault,
@@ -802,6 +804,34 @@ def test_claimed_action_permit_is_reconciled_after_restart_without_redispatch(
     assert interrupted.lifecycle is RecoveryRunLifecycle.RUNNING
     assert interrupted.nodes[0].state.value == "PERMITTED"
     assert interrupted.action_permits[0].state is ActionPermitState.ISSUED
+
+    async def persist_post_claim_crash_boundary():
+        claimed = await authority.get_permit(interrupted.action_permits[0].permit_id)
+        snapshot = await store.get(request.run_id)
+        snapshot = await store.append(
+            request.run_id,
+            expected_revision=snapshot.revision,
+            event_type=RecoveryRunEventType.ACTION_PERMIT,
+            payload=RecoveryRunEventPayload(action_permit=claimed),
+            occurred_at=NOW + timedelta(seconds=8),
+        )
+        return await store.append(
+            request.run_id,
+            expected_revision=snapshot.revision,
+            event_type=RecoveryRunEventType.NODE,
+            payload=RecoveryRunEventPayload(
+                node=RecoveryNodeProgress(
+                    node_id=definition.chain.nodes[0].node_id,
+                    state=RecoveryNodeState.DISPATCH_CLAIMED,
+                    attempt=interrupted.nodes[0].attempt,
+                )
+            ),
+            occurred_at=NOW + timedelta(seconds=8),
+        )
+
+    projected = asyncio.run(persist_post_claim_crash_boundary())
+    assert projected.nodes[0].state is RecoveryNodeState.DISPATCH_CLAIMED
+    assert projected.action_permits[0].state is ActionPermitState.CLAIMED
 
     resumed_gateway = _Gateway(store, authority, definition)
     resumed_worker = ProofToPermitWorkflow(

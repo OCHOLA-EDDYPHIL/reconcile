@@ -230,6 +230,7 @@ class CloudRunProbeBinding:
     revision: str | None = None
     image_digest: str | None = None
     configuration_sha256: str | None = None
+    expected_revision: str | None = None
     operation_name: str | None = None
     operation_revision: str | None = None
 
@@ -247,6 +248,7 @@ class CloudRunProbeBinding:
                 and (
                     self.image_digest is not None
                     or self.configuration_sha256 is not None
+                    or self.expected_revision is not None
                 )
             )
             or (
@@ -270,6 +272,10 @@ class CloudRunProbeBinding:
                 and _REVISION_NAME.fullmatch(self.revision) is None
             )
             or (
+                self.expected_revision is not None
+                and _REVISION_NAME.fullmatch(self.expected_revision) is None
+            )
+            or (
                 self.operation_revision is not None
                 and _REVISION_NAME.fullmatch(self.operation_revision) is None
             )
@@ -291,6 +297,7 @@ class CloudRunProbeBinding:
         release_id: str,
         image_digest: str,
         configuration_sha256: str,
+        expected_revision: str | None = None,
         operation_name: str | None = None,
         operation_revision: str | None = None,
     ) -> CloudRunProbeBinding:
@@ -298,6 +305,7 @@ class CloudRunProbeBinding:
             release_id=release_id,
             image_digest=image_digest,
             configuration_sha256=configuration_sha256,
+            expected_revision=expected_revision,
             operation_name=operation_name,
             operation_revision=operation_revision,
         )
@@ -426,11 +434,18 @@ class _CloudRunReadHandler:
         if self.binding.revision is not None:
             return self.binding.revision
         try:
-            return self.reader.discover_revision(
+            revision = self.reader.discover_revision(
                 release_id=self.binding.release_id,
                 image_digest=self.binding.image_digest or "",
                 configuration_sha256=self.binding.configuration_sha256 or "",
             )
+            if (
+                revision is not None
+                and self.binding.expected_revision is not None
+                and revision != self.binding.expected_revision
+            ):
+                raise CapabilityUnavailable
+            return revision
         except CloudRunRevisionAmbiguous:
             raise CapabilityUnavailable from None
 
@@ -591,19 +606,23 @@ def _validate_expected_effects(
 ) -> None:
     expected: dict[str, dict[str, object]]
     if binding.is_stage:
+        revision = binding.expected_revision or binding.operation_revision
         expected = {
             STAGE_REVISION_EFFECT_SCOPE: {
                 "release_id": binding.release_id,
                 "image_digest": binding.image_digest,
                 "configuration_sha256": binding.configuration_sha256,
+                **({"revision": revision} if revision is not None else {}),
             },
             STAGE_READINESS_EFFECT_SCOPE: {
                 "release_id": binding.release_id,
                 "ready": True,
+                **({"revision": revision} if revision is not None else {}),
             },
             STAGE_TRAFFIC_EFFECT_SCOPE: {
                 "release_id": binding.release_id,
                 "traffic_percent": 0,
+                **({"revision": revision} if revision is not None else {}),
             },
         }
     else:
@@ -752,6 +771,11 @@ class CloudRunObservationNormalizer:
         if observation.release_id != self.binding.release_id:
             raise RuleRejected(EvidenceReason.EXPECTED_EFFECT_MISMATCH)
         revision = getattr(observation, "revision", None)
+        if (
+            self.binding.expected_revision is not None
+            and revision != self.binding.expected_revision
+        ):
+            raise RuleRejected(EvidenceReason.EXPECTED_EFFECT_MISMATCH)
         if self.binding.revision is not None and revision != self.binding.revision:
             raise RuleRejected(EvidenceReason.EXPECTED_EFFECT_MISMATCH)
         if type(observation) is _RevisionObservation and self.binding.is_stage:

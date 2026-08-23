@@ -63,7 +63,7 @@ pytestmark = pytest.mark.unit
 
 NOW = datetime(2026, 8, 22, 12, 0, tzinfo=UTC)
 RELEASE_ID = "release-7"
-REVISION = "reconcile-canary-r7-a1"
+REVISION = "reconcile-canary-r-3997240d56d5ff06"
 IMAGE_DIGEST = f"sha256:{'a' * 64}"
 CONFIGURATION_SHA256 = "b" * 64
 PAYLOAD_SHA256 = "c" * 64
@@ -93,17 +93,22 @@ def _effects(profile_version: str) -> tuple[ExpectedEffect, ...]:
                     "release_id": RELEASE_ID,
                     "image_digest": IMAGE_DIGEST,
                     "configuration_sha256": CONFIGURATION_SHA256,
+                    "revision": REVISION,
                 },
             ),
             (
                 "revision-ready",
                 STAGE_READINESS_EFFECT_SCOPE,
-                {"release_id": RELEASE_ID, "ready": True},
+                {"release_id": RELEASE_ID, "ready": True, "revision": REVISION},
             ),
             (
                 "revision-zero-traffic",
                 STAGE_TRAFFIC_EFFECT_SCOPE,
-                {"release_id": RELEASE_ID, "traffic_percent": 0},
+                {
+                    "release_id": RELEASE_ID,
+                    "traffic_percent": 0,
+                    "revision": REVISION,
+                },
             ),
         )
     elif profile_version == PROMOTE_CLOUD_RUN_TRAFFIC_PROFILE_VERSION:
@@ -475,6 +480,31 @@ def test_stage_commit_requires_collective_exact_provider_proof() -> None:
         Classification.COMMITTED,
         evidence,
     )
+
+
+def test_stage_commit_rejects_a_consistent_but_different_revision() -> None:
+    action, effects, evidence = _stage_proof()
+    foreign_revision = "reconcile-canary-r-deadbeefdeadbeef"
+    changed = tuple(
+        _evidence(
+            action,
+            evidence_id=f"{item.evidence_id}-foreign",
+            capability=item.capability_name,
+            correlation={**item.correlation, "revision": foreign_revision},
+            assertions=item.effect_assertions,
+            operation_status=item.operation_status,
+        )
+        for item in evidence
+    )
+
+    with pytest.raises(RecoveryRuleViolation, match="different staged revision"):
+        validate_recovery_proof(
+            STAGE_CLOUD_RUN_REVISION_PROFILE,
+            action,
+            effects,
+            Classification.COMMITTED,
+            changed,
+        )
 
 
 def test_stage_proof_is_invariant_to_order_and_exact_duplicates() -> None:

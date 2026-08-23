@@ -12,6 +12,7 @@ import asyncio
 import hashlib
 import inspect
 import os
+import tempfile
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -113,6 +114,7 @@ from reconcile.evidence.recovery_rules import (
     STAGE_READINESS_EFFECT_SCOPE,
     STAGE_REVISION_EFFECT_SCOPE,
     STAGE_TRAFFIC_EFFECT_SCOPE,
+    deterministic_stage_revision,
 )
 from reconcile.evidence.recovery_verification import RECOVERY_CHAIN_PROFILE_VERSION
 from reconcile.hosted.cloud_run_canary import (
@@ -137,6 +139,7 @@ from reconcile.hosted.firestore_release import (
 )
 from reconcile.persistence.recovery_runs import (
     RecoveryRunEventSnapshot,
+    RecoveryRunNotFound,
     RecoveryRunStore,
 )
 from reconcile.recovery_agents import RecoveryDispatchReceipt
@@ -208,7 +211,10 @@ class ReleaseChainSettings:
 
     @property
     def staged_revision(self) -> str:
-        return self.revision_for_operation(self.stage_operation_id)
+        return deterministic_stage_revision(
+            service=self.service,
+            release_id=self.release_id,
+        )
 
 
 def _require_cloud_target(
@@ -275,19 +281,27 @@ def _envelope(
                 node_id,
                 "revision",
                 STAGE_REVISION_EFFECT_SCOPE,
-                dict(arguments),
+                {**arguments, "revision": settings.staged_revision},
             ),
             _effect(
                 node_id,
                 "readiness",
                 STAGE_READINESS_EFFECT_SCOPE,
-                {"release_id": settings.release_id, "ready": True},
+                {
+                    "release_id": settings.release_id,
+                    "ready": True,
+                    "revision": settings.staged_revision,
+                },
             ),
             _effect(
                 node_id,
                 "traffic",
                 STAGE_TRAFFIC_EFFECT_SCOPE,
-                {"release_id": settings.release_id, "traffic_percent": 0},
+                {
+                    "release_id": settings.release_id,
+                    "traffic_percent": 0,
+                    "revision": settings.staged_revision,
+                },
             ),
         )
         capability_names = (
@@ -773,6 +787,7 @@ class ReleaseChainEvidenceSource:
                     release_id=self._settings.release_id,
                     image_digest=self._settings.image_digest,
                     configuration_sha256=self._settings.configuration_sha256,
+                    expected_revision=self._settings.staged_revision,
                 )
                 if node.node_id == "stage"
                 else CloudRunProbeBinding.for_promotion(
@@ -1131,6 +1146,19 @@ class ReleaseChainDispatchGateway:
             or prepared.arguments.get("release_id") != self._settings.release_id
         ):
             raise PermissionError("release dispatch provider target changed")
+        stage_mode = (
+            CloudRunFaultMode(str(prepared.request_payload["fault_mode"]))
+            if prepared.target_node_id == "stage"
+            else CloudRunFaultMode.PASS_THROUGH
+        )
+        if (
+            prepared.target_node_id == "stage"
+            and stage_mode is CloudRunFaultMode.DROP_AFTER_ACCEPT
+            and type(self._cloud_run) is CloudRunCanaryActionAdapter
+        ):
+            raise ReleaseChainError(
+                "drop-after-accept requires the explicit Cloud Run fault proxy"
+            )
         claimed = await self._claim(prepared, scope)
         suppress = (
             prepared.target_node_id == "record"
@@ -1150,25 +1178,31 @@ class ReleaseChainDispatchGateway:
         else:
             try:
                 if prepared.target_node_id == "stage":
-                    await _invoke_provider(
-                        self._cloud_run.stage_revision,
-                        mode=CloudRunFaultMode(
-                            str(prepared.request_payload["fault_mode"])
-                        ),
-                        operation_id=str(prepared.request_payload["operation_id"]),
-                        release_id=str(prepared.request_payload["release_id"]),
-                        image_digest=str(prepared.request_payload["image_digest"]),
-                        configuration_sha256=str(
+                    kwargs = {
+                        "operation_id": str(prepared.request_payload["operation_id"]),
+                        "release_id": str(prepared.request_payload["release_id"]),
+                        "image_digest": str(prepared.request_payload["image_digest"]),
+                        "configuration_sha256": str(
                             prepared.request_payload["configuration_sha256"]
                         ),
+                    }
+                    if type(self._cloud_run) is not CloudRunCanaryActionAdapter:
+                        kwargs["mode"] = stage_mode
+                    await _invoke_provider(
+                        self._cloud_run.stage_revision,
+                        **kwargs,
                     )
                 elif prepared.target_node_id == "promote":
+                    kwargs = {
+                        "release_id": str(prepared.request_payload["release_id"]),
+                        "revision": str(prepared.request_payload["revision"]),
+                        "service_etag": str(prepared.request_payload["service_etag"]),
+                    }
+                    if type(self._cloud_run) is not CloudRunCanaryActionAdapter:
+                        kwargs["mode"] = CloudRunFaultMode.PASS_THROUGH
                     await _invoke_provider(
                         self._cloud_run.promote_revision,
-                        mode=CloudRunFaultMode.PASS_THROUGH,
-                        release_id=str(prepared.request_payload["release_id"]),
-                        revision=str(prepared.request_payload["revision"]),
-                        service_etag=str(prepared.request_payload["service_etag"]),
+                        **kwargs,
                     )
                 elif prepared.target_node_id == "record":
                     await self._firestore.create(
@@ -1210,8 +1244,6 @@ class ReleaseChainDispatchGateway:
                 )
             except asyncio.CancelledError:
                 raise
-            except Exception:
-                outcome = RecoveryDispatchOutcome.OUTCOME_UNKNOWN
             await self._record_receipt(
                 prepared,
                 scope,
@@ -1291,17 +1323,28 @@ class ReleaseChainBlindMutator:
 
     async def stage(self, *, operation_id: str, drop_after_accept: bool) -> None:
         self._revision = self._settings.revision_for_operation(operation_id)
-        await _invoke_provider(
-            self._cloud_action.stage_revision,
-            mode=(
+        if (
+            drop_after_accept
+            and type(self._cloud_action) is CloudRunCanaryActionAdapter
+        ):
+            raise ReleaseChainError(
+                "drop-after-accept requires the explicit Cloud Run fault proxy"
+            )
+        kwargs: dict[str, object] = {
+            "operation_id": operation_id,
+            "release_id": self._settings.release_id,
+            "image_digest": self._settings.image_digest,
+            "configuration_sha256": self._settings.configuration_sha256,
+        }
+        if type(self._cloud_action) is not CloudRunCanaryActionAdapter:
+            kwargs["mode"] = (
                 CloudRunFaultMode.DROP_AFTER_ACCEPT
                 if drop_after_accept
                 else CloudRunFaultMode.PASS_THROUGH
-            ),
-            operation_id=operation_id,
-            release_id=self._settings.release_id,
-            image_digest=self._settings.image_digest,
-            configuration_sha256=self._settings.configuration_sha256,
+            )
+        await _invoke_provider(
+            self._cloud_action.stage_revision,
+            **kwargs,
         )
 
     async def promote(self) -> None:
@@ -1310,13 +1353,14 @@ class ReleaseChainBlindMutator:
             release_id=self._settings.release_id,
             revision=self._revision,
         )
-        await _invoke_provider(
-            self._cloud_action.promote_revision,
-            mode=CloudRunFaultMode.PASS_THROUGH,
-            release_id=self._settings.release_id,
-            revision=self._revision,
-            service_etag=service.service_etag,
-        )
+        kwargs = {
+            "release_id": self._settings.release_id,
+            "revision": self._revision,
+            "service_etag": service.service_etag,
+        }
+        if type(self._cloud_action) is not CloudRunCanaryActionAdapter:
+            kwargs["mode"] = CloudRunFaultMode.PASS_THROUGH
+        await _invoke_provider(self._cloud_action.promote_revision, **kwargs)
 
     async def create_record(self, *, suppress_before_dispatch: bool) -> None:
         if suppress_before_dispatch:
@@ -1648,9 +1692,9 @@ class RecoveryPolicyResultRecorder:
             revision=self._baseline_revision,
         )
         record = await self._firestore.read(self._settings.release_id)
-        if service.revision_traffic_percent != 100 or record is not None:
+        if service.revision_traffic_percent != 100 or record is not None or revisions:
             raise ReleaseChainError("policy lane did not start from the safe baseline")
-        return RecoveryLaneBaseline(release_revisions=revisions)
+        return RecoveryLaneBaseline(release_revisions=())
 
     @staticmethod
     def _validate_binding(
@@ -1711,7 +1755,10 @@ class RecoveryPolicyResultRecorder:
         firestore = RecoveryFirestoreObservation(
             release_id=self._settings.release_id,
             document_path=firestore_release_document_path(self._settings.release_id),
-            payload_sha256=self._settings.payload_sha256,
+            payload_sha256=(None if record is None else record.record.payload_sha256),
+            semantic_action_sha256=(
+                None if record is None else record.record.semantic_action_sha256
+            ),
             exists=record is not None,
             cloud_run_revision=(
                 None if record is None else record.record.cloud_run_revision
@@ -2038,12 +2085,12 @@ class ReleaseChainPolicyLaneExecutor:
             cloud_reader=resources.cloud_reader,
             firestore=resources.firestore,
         )
-        baseline = await recorder.capture_baseline()
         run_id = self._run_id(selected_policy, fault, binding)
         if selected_policy in {
             RecoveryRunPolicy.BLIND_RETRY,
             RecoveryRunPolicy.BLIND_ABORT,
         }:
+            baseline = await recorder.capture_baseline()
             mutator = ReleaseChainBlindMutator(
                 settings=self._settings,
                 cloud_action=resources.cloud_action,
@@ -2092,13 +2139,33 @@ class ReleaseChainPolicyLaneExecutor:
             clock=self._clock,
         )
         definition = await workflow.definition(request)
-        _snapshot, created = await resources.store.create(
-            request,
-            definition.chain,
-            created_at=self._invoked_at,
-        )
-        if not created:
-            raise ReleaseChainError("policy lane run identity was already used")
+        try:
+            await resources.store.get(run_id)
+        except RecoveryRunNotFound:
+            baseline = await recorder.capture_baseline()
+            _snapshot, created = await resources.store.create(
+                request,
+                definition.chain,
+                created_at=self._invoked_at,
+            )
+            if not created:
+                raise ReleaseChainError(
+                    "policy lane was created concurrently"
+                ) from None
+        else:
+            existing, created = await resources.store.create(
+                request,
+                definition.chain,
+                created_at=self._invoked_at,
+            )
+            if created:
+                raise ReleaseChainError("policy lane recovery state changed")
+            if existing.lifecycle in {
+                RecoveryRunLifecycle.CANCELLED,
+                RecoveryRunLifecycle.ESCALATED,
+            }:
+                raise ReleaseChainError("terminal policy lane cannot be resumed")
+            baseline = RecoveryLaneBaseline(release_revisions=())
         snapshot = await workflow.run(run_id)
         events = await resources.store.events(run_id)
         return await recorder.record_proof(
@@ -2320,9 +2387,19 @@ class ReleaseChainResetter:
         if type(operation_name) is not str or not operation_name:
             raise ReleaseChainError("Cloud Run reset acceptance is invalid")
         service = await self._wait_for_baseline()
+        record_action = (
+            build_release_chain_definition(
+                self._settings,
+                invoked_at=datetime(2000, 1, 1, tzinfo=UTC),
+            )
+            .chain.nodes[-1]
+            .semantic_action
+        )
         await self._firestore.reset(
             release_id=self._settings.release_id,
+            cloud_run_revisions=before,
             payload_sha256=self._settings.payload_sha256,
+            semantic_action_sha256=record_action.semantic_action_sha256,
         )
         after = await asyncio.to_thread(
             self._cloud_reader.list_release_revisions,
@@ -2364,23 +2441,50 @@ def export_recovery_comparison(path: str | Path, comparison: object) -> str:
     reject_sensitive_keys(public_value)
     reject_sensitive_values(public_value)
     payload = canonical_json_value_bytes(public_value)
-    descriptor = os.open(
-        target,
-        os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
-        0o600,
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{target.name}.",
+        suffix=".tmp",
+        dir=target.parent,
     )
+    temporary = Path(temporary_name)
+    owned_identity: tuple[int, int] | None = None
+    linked = False
     try:
-        with os.fdopen(descriptor, "wb", closefd=False) as output:
+        os.fchmod(descriptor, 0o600)
+        with os.fdopen(descriptor, "wb") as output:
+            descriptor = -1
             output.write(payload)
             output.flush()
             os.fsync(output.fileno())
+        temporary_stat = temporary.stat(follow_symlinks=False)
+        owned_identity = (temporary_stat.st_dev, temporary_stat.st_ino)
+        os.link(temporary, target, follow_symlinks=False)
+        linked = True
+        directory = os.open(target.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory)
+            temporary.unlink()
+            temporary = None
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+    except BaseException:
+        if linked:
+            try:
+                target_stat = target.stat(follow_symlinks=False)
+                if owned_identity == (target_stat.st_dev, target_stat.st_ino):
+                    target.unlink()
+            except (FileNotFoundError, OSError):
+                pass
+        raise
     finally:
-        os.close(descriptor)
-    directory = os.open(target.parent, os.O_RDONLY)
-    try:
-        os.fsync(directory)
-    finally:
-        os.close(directory)
+        if descriptor >= 0:
+            os.close(descriptor)
+        if temporary is not None:
+            try:
+                temporary.unlink()
+            except FileNotFoundError:
+                pass
     return hashlib.sha256(payload).hexdigest()
 
 

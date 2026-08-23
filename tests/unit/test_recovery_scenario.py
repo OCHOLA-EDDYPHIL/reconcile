@@ -350,6 +350,33 @@ def test_canonical_comparison_export_is_private_and_never_overwrites(tmp_path) -
         export_recovery_comparison(path, comparison)
 
 
+def test_interrupted_comparison_export_leaves_destination_retryable(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    _receipt, comparison = make_recovery_scenario_examples()
+    path = tmp_path / "comparison.json"
+    real_fsync = os.fsync
+    calls = 0
+
+    def fail_first_fsync(descriptor: int) -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise OSError("simulated interrupted write")
+        real_fsync(descriptor)
+
+    monkeypatch.setattr(os, "fsync", fail_first_fsync)
+    with pytest.raises(OSError, match="interrupted write"):
+        export_recovery_comparison(path, comparison)
+
+    assert not path.exists()
+    assert tuple(tmp_path.iterdir()) == ()
+    monkeypatch.setattr(os, "fsync", real_fsync)
+    export_recovery_comparison(path, comparison)
+    assert path.read_bytes() == canonical_json_bytes(comparison)
+
+
 class _ComparisonLanes:
     def __init__(self) -> None:
         self.calls = []
