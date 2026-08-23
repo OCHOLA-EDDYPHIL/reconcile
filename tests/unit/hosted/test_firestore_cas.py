@@ -259,7 +259,7 @@ def test_wrapper_paths_and_payload_bounds_are_exact() -> None:
     assert document.payload_sha256 == hashlib.sha256(_payload()).hexdigest()
     assert mutation_id.startswith("mutation-")
     assert len(mutation_id) == 41
-    assert len({item.value for item in FirestoreCasCollection}) == 5
+    assert len({item.value for item in FirestoreCasCollection}) == 6
     assert firestore_cas_document_key(
         FirestoreCasCollection.RUNTIME,
         _LOGICAL_ID,

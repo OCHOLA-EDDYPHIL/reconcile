@@ -1,0 +1,135 @@
+{
+  "$defs": {
+    "PermitAction": {
+      "enum": [
+        "CONTINUE",
+        "RETRY"
+      ],
+      "title": "PermitAction",
+      "type": "string"
+    },
+    "RecoveryAuthorityKind": {
+      "enum": [
+        "LAUNCH_PERMIT",
+        "ACTION_PERMIT"
+      ],
+      "title": "RecoveryAuthorityKind",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "description": "Recovery-specific dispatch identity carried to the mutation boundary.",
+  "properties": {
+    "action_request_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Action Request Sha256",
+      "type": "string"
+    },
+    "authority_id": {
+      "maxLength": 128,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+      "title": "Authority Id",
+      "type": "string"
+    },
+    "authority_kind": {
+      "$ref": "#/$defs/RecoveryAuthorityKind"
+    },
+    "authority_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Authority Sha256",
+      "type": "string"
+    },
+    "certificate_id": {
+      "anyOf": [
+        {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Certificate Id"
+    },
+    "certificate_sha256": {
+      "anyOf": [
+        {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Certificate Sha256"
+    },
+    "claim_id": {
+      "maxLength": 128,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+      "title": "Claim Id",
+      "type": "string"
+    },
+    "permit_action": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/PermitAction"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "run_id": {
+      "maxLength": 128,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+      "title": "Run Id",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": "reconcile/recovery-action-scope/v2",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "semantic_action_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Semantic Action Sha256",
+      "type": "string"
+    },
+    "source_node_id": {
+      "maxLength": 128,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+      "title": "Source Node Id",
+      "type": "string"
+    },
+    "target_node_id": {
+      "maxLength": 128,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+      "title": "Target Node Id",
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema_version",
+    "authority_kind",
+    "run_id",
+    "source_node_id",
+    "target_node_id",
+    "semantic_action_sha256",
+    "action_request_sha256",
+    "authority_id",
+    "authority_sha256",
+    "claim_id"
+  ],
+  "title": "RecoveryActionScope",
+  "type": "object"
+}

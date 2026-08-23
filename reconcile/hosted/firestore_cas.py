@@ -51,6 +51,7 @@ class FirestoreCasCollection(StrEnum):
     SCENARIO_INDEX = "reconcile-p5-scenario-index-v1"
     PROVIDER_CANDIDATE = "reconcile-p5-provider-candidates-v1"
     ACTION_PERMIT = "reconcile-action-permits-v1"
+    RECOVERY_RUN = "reconcile-recovery-runs-v1"
 
 
 class FirestoreCasErrorCode(StrEnum):

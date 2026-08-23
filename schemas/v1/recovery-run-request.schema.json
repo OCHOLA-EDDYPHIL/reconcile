@@ -1,0 +1,57 @@
+{
+  "$defs": {
+    "RecoveryRunFault": {
+      "enum": [
+        "drop-after-accept",
+        "suppress-before-dispatch"
+      ],
+      "title": "RecoveryRunFault",
+      "type": "string"
+    },
+    "RecoveryRunPolicy": {
+      "enum": [
+        "blind-retry",
+        "blind-abort",
+        "fixed",
+        "adaptive"
+      ],
+      "title": "RecoveryRunPolicy",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "fault": {
+      "$ref": "#/$defs/RecoveryRunFault"
+    },
+    "policy": {
+      "$ref": "#/$defs/RecoveryRunPolicy"
+    },
+    "run_id": {
+      "maxLength": 128,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+      "title": "Run Id",
+      "type": "string"
+    },
+    "scenario": {
+      "const": "cloud-run-rollout",
+      "default": "cloud-run-rollout",
+      "title": "Scenario",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": "reconcile/recovery-run-request/v1",
+      "title": "Schema Version",
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema_version",
+    "run_id",
+    "policy",
+    "fault"
+  ],
+  "title": "RecoveryRunRequest",
+  "type": "object"
+}

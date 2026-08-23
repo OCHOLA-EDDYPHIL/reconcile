@@ -52,6 +52,12 @@ _CLEANUP_PATH = "/internal/v1/cleanup"
 
 _IDENTIFIER_PATH = rb"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}"
 _API_PATHS = (
+    ("POST", re.compile(rb"/api/v1/recovery-runs")),
+    ("GET", re.compile(rb"/api/v1/recovery-runs/" + _IDENTIFIER_PATH)),
+    (
+        "GET",
+        re.compile(rb"/api/v1/recovery-runs/" + _IDENTIFIER_PATH + rb"/events"),
+    ),
     ("POST", re.compile(rb"/api/v1/scenario-runs")),
     ("GET", re.compile(rb"/api/v1/scenario-runs/" + _IDENTIFIER_PATH)),
     (
@@ -571,6 +577,7 @@ def create_component_app(
     transport: HostedHttpTransport | None = None,
     investigation_service: object | None = None,
     operator_service: object | None = None,
+    recovery_service: object | None = None,
     sandbox_evidence_reader: SandboxEvidenceReader | None = None,
     cloud_run_canary_fault_proxy: CloudRunCanaryFaultProxy | None = None,
     cloud_run_canary_action_authorizer: CloudRunCanaryActionAuthorizer | None = None,
@@ -619,10 +626,18 @@ def create_component_app(
         application = create_app(
             investigation_service,  # type: ignore[arg-type]
             operator_service=operator_service,  # type: ignore[arg-type]
+            recovery_service=recovery_service,  # type: ignore[arg-type]
             hosted=True,
         )
     else:
-        if investigation_service is not None or operator_service is not None:
+        if any(
+            service is not None
+            for service in (
+                investigation_service,
+                operator_service,
+                recovery_service,
+            )
+        ):
             raise ValueError("internal components cannot receive API services")
         application = _internal_app(
             config,

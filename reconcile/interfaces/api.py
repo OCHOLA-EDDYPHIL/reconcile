@@ -21,6 +21,7 @@ from reconcile import __version__
 from reconcile.contracts import (
     ERROR_VERSION,
     MAX_INVESTIGATION_EVENTS,
+    MAX_RECOVERY_RUN_EVENTS,
     MAX_SCENARIO_RUN_EVENTS,
     ApiError,
     ApiErrorCode,
@@ -30,6 +31,11 @@ from reconcile.contracts import (
     InvestigationEvent,
     InvestigationReport,
     InvestigationStatus,
+    RecoveryRunEvent,
+    RecoveryRunEventType,
+    RecoveryRunLifecycle,
+    RecoveryRunRequest,
+    RecoveryRunSnapshot,
     ScenarioLaunchName,
     ScenarioLaunchRequest,
     ScenarioLifecycleEventPayload,
@@ -72,6 +78,11 @@ from reconcile.persistence import (
     InvalidCursor,
     InvestigationNotFound,
     JournalNotFound,
+    RecoveryRunConflict,
+    RecoveryRunEventSnapshot,
+    RecoveryRunNotFound,
+    RecoveryRunStoreError,
+    RecoveryRunStoreUnavailable,
     RepositoryError,
     WriteOutcomeUnknown,
 )
@@ -160,6 +171,34 @@ class _OperatorService(Protocol):
         after: int = 0,
         cancellation_event: asyncio.Event | None = None,
     ) -> ScenarioRunEventSnapshot: ...
+
+    async def aclose(self) -> None: ...
+
+
+class _RecoveryLaunchResult(Protocol):
+    snapshot: RecoveryRunSnapshot
+    created: bool
+
+
+class _RecoveryRunService(Protocol):
+    async def launch(self, request: RecoveryRunRequest) -> _RecoveryLaunchResult: ...
+
+    async def get(self, run_id: str) -> RecoveryRunSnapshot: ...
+
+    async def snapshot(
+        self,
+        run_id: str,
+        *,
+        after: int = 0,
+    ) -> RecoveryRunEventSnapshot: ...
+
+    async def wait_for_events(
+        self,
+        run_id: str,
+        *,
+        after: int = 0,
+        cancellation_event: asyncio.Event | None = None,
+    ) -> RecoveryRunEventSnapshot: ...
 
     async def aclose(self) -> None: ...
 
@@ -267,6 +306,36 @@ class _UnavailableOperatorService:
         after: int = 0,
         cancellation_event: asyncio.Event | None = None,
     ) -> ScenarioRunEventSnapshot:
+        del after, cancellation_event
+        raise _DependencyUnavailable
+
+    async def aclose(self) -> None:
+        return None
+
+
+class _UnavailableRecoveryRunService:
+    async def launch(self, _request: RecoveryRunRequest) -> _RecoveryLaunchResult:
+        raise _DependencyUnavailable
+
+    async def get(self, _run_id: str) -> RecoveryRunSnapshot:
+        raise _DependencyUnavailable
+
+    async def snapshot(
+        self,
+        _run_id: str,
+        *,
+        after: int = 0,
+    ) -> RecoveryRunEventSnapshot:
+        del after
+        raise _DependencyUnavailable
+
+    async def wait_for_events(
+        self,
+        _run_id: str,
+        *,
+        after: int = 0,
+        cancellation_event: asyncio.Event | None = None,
+    ) -> RecoveryRunEventSnapshot:
         del after, cancellation_event
         raise _DependencyUnavailable
 
@@ -525,6 +594,13 @@ def _install_error_handlers(application: FastAPI) -> None:
     )
     _register_error_handler(
         application,
+        RecoveryRunNotFound,
+        code=ApiErrorCode.INVESTIGATION_NOT_FOUND,
+        status_code=HTTPStatus.NOT_FOUND,
+        message="The recovery run was not found.",
+    )
+    _register_error_handler(
+        application,
         DuplicateInvestigationId,
         code=ApiErrorCode.DUPLICATE_INVESTIGATION_ID,
         status_code=HTTPStatus.CONFLICT,
@@ -546,6 +622,13 @@ def _install_error_handlers(application: FastAPI) -> None:
     )
     _register_error_handler(
         application,
+        RecoveryRunConflict,
+        code=ApiErrorCode.DUPLICATE_INVESTIGATION_ID,
+        status_code=HTTPStatus.CONFLICT,
+        message="The recovery run identity conflicts with an existing run.",
+    )
+    _register_error_handler(
+        application,
         WriteOutcomeUnknown,
         code=ApiErrorCode.DEPENDENCY_UNAVAILABLE,
         status_code=HTTPStatus.SERVICE_UNAVAILABLE,
@@ -563,6 +646,7 @@ def _install_error_handlers(application: FastAPI) -> None:
         DurableEscalationRequired,
         DurableRuntimeError,
         DurableServiceUnavailable,
+        RecoveryRunStoreUnavailable,
     ):
         _register_error_handler(
             application,
@@ -591,6 +675,7 @@ def _install_error_handlers(application: FastAPI) -> None:
         ScenarioEventJournalFull,
         ScenarioEventJournalTerminal,
         OperatorServiceError,
+        RecoveryRunStoreError,
     ):
         _register_error_handler(
             application,
@@ -637,6 +722,15 @@ def _decode_envelope(payload: bytes) -> ExecutionEnvelope:
 def _decode_scenario_launch(payload: bytes) -> ScenarioLaunchRequest:
     try:
         return decode_contract(payload, ScenarioLaunchRequest)
+    except ContractError as error:
+        if error.code == "unsupported_contract_version":
+            raise _IncompatibleContract from error
+        raise _InvalidApiRequest from error
+
+
+def _decode_recovery_launch(payload: bytes) -> RecoveryRunRequest:
+    try:
+        return decode_contract(payload, RecoveryRunRequest)
     except ContractError as error:
         if error.code == "unsupported_contract_version":
             raise _IncompatibleContract from error
@@ -702,6 +796,13 @@ def _operator_service(application: FastAPI) -> _OperatorService:
     return cast(_OperatorService, service)
 
 
+def _recovery_service(application: FastAPI) -> _RecoveryRunService:
+    service = application.state.recovery_service
+    if service is None:
+        raise _DependencyUnavailable
+    return cast(_RecoveryRunService, service)
+
+
 async def _call_service[Result](operation: Awaitable[Result]) -> Result:
     try:
         return await operation
@@ -712,6 +813,7 @@ async def _call_service[Result](operation: Awaitable[Result]) -> Result:
         RepositoryError,
         EventJournalError,
         OperatorServiceError,
+        RecoveryRunStoreError,
     ):
         raise
     except Exception as error:
@@ -878,6 +980,87 @@ def _validated_scenario_event_snapshot(
     return value
 
 
+def _validated_recovery_snapshot(
+    value: object,
+    *,
+    run_id: str,
+) -> RecoveryRunSnapshot:
+    if type(value) is not RecoveryRunSnapshot or value.request.run_id != run_id:
+        raise _InternalApiFailure
+    try:
+        canonical_json_bytes(value)
+    except (TypeError, ValueError) as error:
+        raise _InternalApiFailure from error
+    return value
+
+
+def _validated_recovery_event_snapshot(
+    value: object,
+    *,
+    run_id: str,
+    after: int,
+) -> RecoveryRunEventSnapshot:
+    if type(value) is not RecoveryRunEventSnapshot:
+        raise _InternalApiFailure
+    if (
+        value.run_id != run_id
+        or type(value.events) is not tuple
+        or type(value.terminal) is not bool
+        or type(value.cursor) is not int
+        or not after <= value.cursor <= MAX_RECOVERY_RUN_EVENTS
+        or tuple(event.cursor for event in value.events)
+        != tuple(range(after + 1, value.cursor + 1))
+        or any(type(event) is not RecoveryRunEvent for event in value.events)
+        or any(event.run_id != run_id for event in value.events)
+    ):
+        raise _InternalApiFailure
+    terminal_positions = tuple(
+        index
+        for index, event in enumerate(value.events)
+        if event.type is RecoveryRunEventType.LIFECYCLE
+        and event.payload.lifecycle in _TERMINAL_RECOVERY_LIFECYCLES
+    )
+    if after == 0:
+        if not value.events:
+            raise _InternalApiFailure
+        first = value.events[0]
+        if (
+            first.type is not RecoveryRunEventType.LIFECYCLE
+            or first.payload.lifecycle is not RecoveryRunLifecycle.ACCEPTED
+        ):
+            raise _InternalApiFailure
+    if value.terminal:
+        if len(terminal_positions) > 1 or (after == 0 and len(terminal_positions) != 1):
+            raise _InternalApiFailure
+        if terminal_positions:
+            if any(
+                event.type
+                not in {
+                    RecoveryRunEventType.LAUNCH_PERMIT,
+                    RecoveryRunEventType.ACTION_PERMIT,
+                }
+                for event in value.events[terminal_positions[0] + 1 :]
+            ):
+                raise _InternalApiFailure
+        elif any(
+            event.type
+            not in {
+                RecoveryRunEventType.LAUNCH_PERMIT,
+                RecoveryRunEventType.ACTION_PERMIT,
+            }
+            for event in value.events
+        ):
+            raise _InternalApiFailure
+    elif terminal_positions:
+        raise _InternalApiFailure
+    for event in value.events:
+        try:
+            canonical_json_bytes(event)
+        except (TypeError, ValueError) as error:
+            raise _InternalApiFailure from error
+    return value
+
+
 def _sse_event(event: InvestigationEvent) -> bytes:
     return (
         f"id: {event.sequence}\nevent: {event.type.value}\ndata: ".encode()
@@ -894,11 +1077,28 @@ def _scenario_sse_event(event: ScenarioRunEvent) -> bytes:
     )
 
 
+def _recovery_sse_event(event: RecoveryRunEvent) -> bytes:
+    return (
+        f"id: {event.cursor}\nevent: {event.type.value}\ndata: ".encode()
+        + canonical_json_bytes(event)
+        + b"\n\n"
+    )
+
+
 _TERMINAL_SCENARIO_LIFECYCLES = frozenset(
     {
         ScenarioRunLifecycle.COMPLETED,
         ScenarioRunLifecycle.FAILED,
         ScenarioRunLifecycle.CANCELLED,
+    }
+)
+
+_TERMINAL_RECOVERY_LIFECYCLES = frozenset(
+    {
+        RecoveryRunLifecycle.COMPLETED,
+        RecoveryRunLifecycle.ESCALATED,
+        RecoveryRunLifecycle.FAILED,
+        RecoveryRunLifecycle.CANCELLED,
     }
 )
 
@@ -952,6 +1152,7 @@ def create_app(
     service: _InvestigationService | None = None,
     *,
     operator_service: _OperatorService | None = None,
+    recovery_service: _RecoveryRunService | None = None,
     hosted: bool = False,
 ) -> FastAPI:
     """Create the isolated single-process API and own its service lifetime."""
@@ -973,6 +1174,8 @@ def create_app(
                 if hosted
                 else _build_default_operator_service()
             )
+        if application.state.recovery_service is None:
+            application.state.recovery_service = _UnavailableRecoveryRunService()
         if not hosted:
             starter = getattr(application.state.investigation_service, "start", None)
             if callable(starter):
@@ -989,8 +1192,13 @@ def create_app(
         finally:
             active_operator_service = application.state.operator_service
             try:
-                if active_operator_service is not None:
-                    await active_operator_service.aclose()
+                active_recovery_service = application.state.recovery_service
+                try:
+                    if active_recovery_service is not None:
+                        await active_recovery_service.aclose()
+                finally:
+                    if active_operator_service is not None:
+                        await active_operator_service.aclose()
             finally:
                 active_service = application.state.investigation_service
                 if active_service is not None:
@@ -1015,6 +1223,7 @@ def create_app(
     )
     application.state.investigation_service = service
     application.state.operator_service = operator_service
+    application.state.recovery_service = recovery_service
     _install_error_handlers(application)
 
     @application.get("/health", response_model=None)
@@ -1022,6 +1231,114 @@ def create_app(
         return Response(
             content=b'{"status":"ok"}',
             media_type="application/json",
+        )
+
+    @application.post(
+        "/api/v1/recovery-runs",
+        response_model=None,
+        responses={
+            HTTPStatus.OK: {"description": "Existing identical recovery run"},
+            HTTPStatus.ACCEPTED: {"description": "Recovery run accepted"},
+        },
+    )
+    async def launch_recovery_run(request: Request) -> Response:
+        _reject_query_parameters(request, allowed=set())
+        launch = _decode_recovery_launch(await _read_contract_body(request))
+        request.state.investigation_id = launch.run_id
+        result = await _call_service(_recovery_service(application).launch(launch))
+        try:
+            created = result.created
+            snapshot = _validated_recovery_snapshot(
+                result.snapshot,
+                run_id=launch.run_id,
+            )
+        except Exception as error:
+            raise _InternalApiFailure from error
+        if type(created) is not bool:
+            raise _InternalApiFailure
+        return Response(
+            content=canonical_json_bytes(snapshot),
+            status_code=HTTPStatus.ACCEPTED if created else HTTPStatus.OK,
+            media_type="application/json",
+        )
+
+    @application.get(
+        "/api/v1/recovery-runs/{run_id}",
+        response_model=None,
+    )
+    async def get_recovery_run(run_id: str, request: Request) -> Response:
+        _reject_query_parameters(request, allowed=set())
+        validated_id = _validated_investigation_id(run_id)
+        if validated_id is None:
+            raise _InvalidApiRequest
+        request.state.investigation_id = validated_id
+        snapshot = _validated_recovery_snapshot(
+            await _call_service(_recovery_service(application).get(validated_id)),
+            run_id=validated_id,
+        )
+        return Response(
+            content=canonical_json_bytes(snapshot),
+            media_type="application/json",
+        )
+
+    @application.get(
+        "/api/v1/recovery-runs/{run_id}/events",
+        response_model=None,
+    )
+    async def stream_recovery_events(
+        run_id: str,
+        request: Request,
+    ) -> StreamingResponse:
+        validated_id = _validated_investigation_id(run_id)
+        if validated_id is None:
+            raise _InvalidApiRequest
+        request.state.investigation_id = validated_id
+        after = _resume_cursor(request, maximum=MAX_RECOVERY_RUN_EVENTS)
+        service = _recovery_service(application)
+        initial = _validated_recovery_event_snapshot(
+            await _call_service(service.snapshot(validated_id, after=after)),
+            run_id=validated_id,
+            after=after,
+        )
+
+        async def recovery_events() -> AsyncIterator[bytes]:
+            cancellation_event = asyncio.Event()
+            cursor = after
+            current = initial
+            try:
+                while True:
+                    for event in current.events:
+                        yield _recovery_sse_event(event)
+                    cursor = current.cursor
+                    # A terminal lifecycle closes this response. If an authority
+                    # claim races with cancellation, its permitted audit-only
+                    # event is available through the same resumable cursor.
+                    if current.terminal or await request.is_disconnected():
+                        return
+                    current = _validated_recovery_event_snapshot(
+                        await _call_service(
+                            service.wait_for_events(
+                                validated_id,
+                                after=cursor,
+                                cancellation_event=cancellation_event,
+                            )
+                        ),
+                        run_id=validated_id,
+                        after=cursor,
+                    )
+                    if not current.events and not current.terminal:
+                        raise _InternalApiFailure
+            finally:
+                cancellation_event.set()
+
+        return StreamingResponse(
+            recovery_events(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "X-Accel-Buffering": "no",
+                "X-Content-Type-Options": "nosniff",
+            },
         )
 
     @application.post(

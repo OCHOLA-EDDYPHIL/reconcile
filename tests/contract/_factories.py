@@ -22,7 +22,12 @@ from reconcile.contracts import (
     NORMALIZED_EVIDENCE_VERSION,
     OBSERVATION_CAPABILITY_VERSION,
     PROBE_REQUEST_VERSION,
+    RECOVERY_ACTION_SCOPE_VERSION,
     RECOVERY_CHAIN_VERSION,
+    RECOVERY_LAUNCH_PERMIT_VERSION,
+    RECOVERY_RUN_EVENT_VERSION,
+    RECOVERY_RUN_REQUEST_VERSION,
+    RECOVERY_RUN_SNAPSHOT_VERSION,
     SCENARIO_CLEANUP_REQUEST_VERSION,
     SCENARIO_CLEANUP_RESULT_VERSION,
     SCENARIO_FAULT_TRACE_VERSION,
@@ -113,8 +118,22 @@ from reconcile.contracts import (
     QualificationSummary,
     RawObservationReference,
     RecoveryActionNode,
+    RecoveryActionScope,
+    RecoveryAuthorityKind,
     RecoveryChain,
     RecoveryEvidenceBinding,
+    RecoveryLaunchPermit,
+    RecoveryLaunchPermitState,
+    RecoveryNodeProgress,
+    RecoveryNodeState,
+    RecoveryRunEvent,
+    RecoveryRunEventPayload,
+    RecoveryRunEventType,
+    RecoveryRunFault,
+    RecoveryRunLifecycle,
+    RecoveryRunPolicy,
+    RecoveryRunRequest,
+    RecoveryRunSnapshot,
     RequestedAction,
     ScenarioCallerObservation,
     ScenarioCleanupDisposition,
@@ -1252,6 +1271,79 @@ def make_qualification_examples() -> tuple[
     return manifest, result, result_set, summary, disposition
 
 
+def make_recovery_run_examples() -> tuple[
+    RecoveryRunRequest,
+    RecoveryRunEvent,
+    RecoveryLaunchPermit,
+    RecoveryRunSnapshot,
+    RecoveryActionScope,
+]:
+    chain, _hypothesis, certificate, _witness, permit = make_recovery_examples()
+    request = RecoveryRunRequest(
+        schema_version=RECOVERY_RUN_REQUEST_VERSION,
+        run_id="recovery-run-7",
+        scenario="cloud-run-rollout",
+        policy=RecoveryRunPolicy.ADAPTIVE,
+        fault=RecoveryRunFault.DROP_AFTER_ACCEPT,
+    )
+    event = RecoveryRunEvent(
+        schema_version=RECOVERY_RUN_EVENT_VERSION,
+        run_id=request.run_id,
+        cursor=1,
+        type=RecoveryRunEventType.LIFECYCLE,
+        occurred_at=NOW,
+        payload=RecoveryRunEventPayload(lifecycle=RecoveryRunLifecycle.ACCEPTED),
+    )
+    first_node = chain.nodes[0]
+    launch = RecoveryLaunchPermit(
+        schema_version=RECOVERY_LAUNCH_PERMIT_VERSION,
+        launch_permit_id="launch-permit-7",
+        run_id=request.run_id,
+        node_id=first_node.node_id,
+        semantic_action_sha256=first_node.semantic_action.semantic_action_sha256,
+        action_request_sha256="d" * 64,
+        issued_at=NOW,
+        state=RecoveryLaunchPermitState.ISSUED,
+        revision=0,
+    )
+    snapshot = RecoveryRunSnapshot(
+        schema_version=RECOVERY_RUN_SNAPSHOT_VERSION,
+        request=request,
+        request_sha256=canonical_sha256(request),
+        lifecycle=RecoveryRunLifecycle.ACCEPTED,
+        event_cursor=2,
+        revision=1,
+        chain=chain,
+        chain_sha256=canonical_sha256(chain),
+        nodes=tuple(
+            RecoveryNodeProgress(
+                node_id=node.node_id,
+                state=RecoveryNodeState.WAITING,
+                attempt=0,
+            )
+            for node in chain.nodes
+        ),
+        created_at=NOW,
+        updated_at=NOW,
+    )
+    scope = RecoveryActionScope(
+        schema_version=RECOVERY_ACTION_SCOPE_VERSION,
+        authority_kind=RecoveryAuthorityKind.ACTION_PERMIT,
+        run_id=request.run_id,
+        source_node_id=permit.source_node_id,
+        target_node_id=permit.target_node_id,
+        semantic_action_sha256=permit.semantic_action_sha256,
+        action_request_sha256="e" * 64,
+        authority_id=permit.permit_id,
+        authority_sha256=canonical_sha256(permit),
+        claim_id="claim-7",
+        permit_action=permit.action,
+        certificate_id=certificate.certificate_id,
+        certificate_sha256=canonical_sha256(certificate),
+    )
+    return request, event, launch, snapshot, scope
+
+
 def public_examples() -> tuple[object, ...]:
     envelope = make_envelope()
     capability = make_capability()
@@ -1279,6 +1371,7 @@ def public_examples() -> tuple[object, ...]:
         make_investigation_event(),
         *qualification,
         *make_recovery_examples(),
+        *make_recovery_run_examples(),
     )
 
 

@@ -196,6 +196,14 @@ class PermitAuthority:
             raise PermitAuthorityError("permit store returned another authority")
         return stored
 
+    async def get_permit(self, permit_id: str) -> ActionPermit:
+        """Read the controller-owned permit lifecycle for restart reconciliation."""
+
+        permit = await self._store.get_permit(permit_id)
+        if type(permit) is not ActionPermit or permit.permit_id != permit_id:
+            raise PermitAuthorityError("permit store returned an invalid permit")
+        return permit
+
     async def claim_for_dispatch(
         self,
         *,
@@ -207,6 +215,7 @@ class PermitAuthority:
         arguments: Mapping[str, JsonValue],
         target: TargetBinding,
         precondition: Mapping[str, JsonValue],
+        claim_id: str | None = None,
     ) -> ActionPermit:
         trusted = _certificate(certificate)
         expected = action_permit_from_certificate(trusted)
@@ -253,7 +262,7 @@ class PermitAuthority:
             raise PermitAuthorityError(
                 "dispatch does not match the certified transition"
             )
-        claim_id = self._claim_id_factory()
+        claim_id = self._claim_id_factory() if claim_id is None else claim_id
         requested_at = self._now()
         request = PermitClaimRequest(
             schema_version=PERMIT_CLAIM_REQUEST_VERSION,

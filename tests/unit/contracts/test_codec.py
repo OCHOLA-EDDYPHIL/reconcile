@@ -9,9 +9,11 @@ from pydantic import BaseModel, ValidationError
 
 from reconcile.contracts import (
     EXECUTION_ENVELOPE_VERSION,
+    RECOVERY_ACTION_SCOPE_VERSION,
     Classification,
     ContractError,
     ExecutionEnvelope,
+    RecoveryActionScope,
     canonical_json_bytes,
     decode_contract,
 )
@@ -29,7 +31,11 @@ def test_every_public_payload_round_trips_canonically(model: BaseModel) -> None:
     assert decoded == model
     assert canonical_json_bytes(decoded) == encoded
     assert b"\n" not in encoded
-    assert json.loads(encoded)["schema_version"].endswith("/v1")
+    schema_version = json.loads(encoded)["schema_version"]
+    if type(model) is RecoveryActionScope:
+        assert schema_version == RECOVERY_ACTION_SCOPE_VERSION
+    else:
+        assert schema_version.endswith("/v1")
 
 
 @pytest.mark.parametrize("classification", tuple(Classification))

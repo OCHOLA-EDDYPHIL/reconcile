@@ -1,0 +1,141 @@
+{
+  "$defs": {
+    "RecoveryDispatchOutcome": {
+      "enum": [
+        "SUCCEEDED",
+        "REJECTED",
+        "OUTCOME_UNKNOWN"
+      ],
+      "title": "RecoveryDispatchOutcome",
+      "type": "string"
+    },
+    "RecoveryLaunchPermitState": {
+      "enum": [
+        "ISSUED",
+        "CLAIMED",
+        "COMPLETED"
+      ],
+      "title": "RecoveryLaunchPermitState",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "description": "One-shot authority for the first mutation, before a certificate exists.",
+  "properties": {
+    "action_request_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Action Request Sha256",
+      "type": "string"
+    },
+    "claim_id": {
+      "anyOf": [
+        {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Claim Id"
+    },
+    "claimed_at": {
+      "anyOf": [
+        {
+          "format": "date-time",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Claimed At"
+    },
+    "completed_at": {
+      "anyOf": [
+        {
+          "format": "date-time",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Completed At"
+    },
+    "issued_at": {
+      "format": "date-time",
+      "title": "Issued At",
+      "type": "string"
+    },
+    "launch_permit_id": {
+      "maxLength": 128,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+      "title": "Launch Permit Id",
+      "type": "string"
+    },
+    "node_id": {
+      "maxLength": 128,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+      "title": "Node Id",
+      "type": "string"
+    },
+    "outcome": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/RecoveryDispatchOutcome"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "revision": {
+      "maximum": 2,
+      "minimum": 0,
+      "title": "Revision",
+      "type": "integer"
+    },
+    "run_id": {
+      "maxLength": 128,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+      "title": "Run Id",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": "reconcile/recovery-launch-permit/v1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "semantic_action_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Semantic Action Sha256",
+      "type": "string"
+    },
+    "state": {
+      "$ref": "#/$defs/RecoveryLaunchPermitState"
+    }
+  },
+  "required": [
+    "schema_version",
+    "launch_permit_id",
+    "run_id",
+    "node_id",
+    "semantic_action_sha256",
+    "action_request_sha256",
+    "issued_at",
+    "state",
+    "revision"
+  ],
+  "title": "RecoveryLaunchPermit",
+  "type": "object"
+}

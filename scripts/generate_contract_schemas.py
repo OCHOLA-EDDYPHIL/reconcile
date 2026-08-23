@@ -30,7 +30,12 @@ from reconcile.contracts import (
     QualificationResultSet,
     QualificationSuiteManifest,
     QualificationSummary,
+    RecoveryActionScope,
     RecoveryChain,
+    RecoveryLaunchPermit,
+    RecoveryRunEvent,
+    RecoveryRunRequest,
+    RecoveryRunSnapshot,
     ScenarioCleanupRequest,
     ScenarioCleanupResult,
     ScenarioFaultTrace,
@@ -65,6 +70,10 @@ PUBLIC_SCHEMAS: dict[str, type[BaseModel]] = {
     "qualification-suite-manifest": QualificationSuiteManifest,
     "qualification-summary": QualificationSummary,
     "recovery-chain": RecoveryChain,
+    "recovery-launch-permit": RecoveryLaunchPermit,
+    "recovery-run-event": RecoveryRunEvent,
+    "recovery-run-request": RecoveryRunRequest,
+    "recovery-run-snapshot": RecoveryRunSnapshot,
     "scenario-cleanup-request": ScenarioCleanupRequest,
     "scenario-cleanup-result": ScenarioCleanupResult,
     "scenario-fault-trace": ScenarioFaultTrace,
@@ -73,6 +82,7 @@ PUBLIC_SCHEMAS: dict[str, type[BaseModel]] = {
     "verified-certificate": VerifiedCertificate,
 }
 V2_PUBLIC_SCHEMAS: dict[str, type[BaseModel]] = {
+    "recovery-action-scope": RecoveryActionScope,
     "scenario-operational-status": ScenarioOperationalStatus,
 }
 

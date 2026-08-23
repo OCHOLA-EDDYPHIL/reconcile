@@ -1,0 +1,2638 @@
+{
+  "$defs": {
+    "ActionGateReason": {
+      "enum": [
+        "all_effects_established",
+        "operation_not_committed",
+        "duplicate_effect_risk",
+        "compensation_out_of_scope_v1",
+        "explicit_retry_policy_required",
+        "operator_review_available",
+        "incomplete_effect_set",
+        "operator_intervention_required",
+        "operation_active",
+        "read_only_follow_up",
+        "insufficient_authoritative_evidence",
+        "ambiguous_duplicate_risk"
+      ],
+      "title": "ActionGateReason",
+      "type": "string"
+    },
+    "ActionGateResult": {
+      "additionalProperties": false,
+      "properties": {
+        "action_policy_version": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Action Policy Version",
+          "type": "string"
+        },
+        "allowed": {
+          "title": "Allowed",
+          "type": "boolean"
+        },
+        "classification": {
+          "$ref": "#/$defs/Classification"
+        },
+        "classification_policy_version": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Classification Policy Version",
+          "type": "string"
+        },
+        "escalation_required": {
+          "title": "Escalation Required",
+          "type": "boolean"
+        },
+        "reason": {
+          "$ref": "#/$defs/ActionGateReason"
+        },
+        "requested_action": {
+          "$ref": "#/$defs/RequestedAction"
+        },
+        "schema_version": {
+          "const": "reconcile/action-gate-result/v1",
+          "title": "Schema Version",
+          "type": "string"
+        }
+      },
+      "required": [
+        "schema_version",
+        "requested_action",
+        "allowed",
+        "reason",
+        "classification",
+        "classification_policy_version",
+        "action_policy_version",
+        "escalation_required"
+      ],
+      "title": "ActionGateResult",
+      "type": "object"
+    },
+    "ActionPermit": {
+      "additionalProperties": false,
+      "properties": {
+        "action": {
+          "$ref": "#/$defs/PermitAction"
+        },
+        "action_policy_version": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Action Policy Version",
+          "type": "string"
+        },
+        "action_profile_version": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Action Profile Version",
+          "type": "string"
+        },
+        "arguments_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Arguments Sha256",
+          "type": "string"
+        },
+        "certificate_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Certificate Id",
+          "type": "string"
+        },
+        "certificate_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Certificate Sha256",
+          "type": "string"
+        },
+        "chain_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Chain Id",
+          "type": "string"
+        },
+        "claim_id": {
+          "anyOf": [
+            {
+              "maxLength": 128,
+              "minLength": 1,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Claim Id"
+        },
+        "claimed_at": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Claimed At"
+        },
+        "completed_at": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Completed At"
+        },
+        "completion_outcome": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PermitCompletionOutcome"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "expired_at": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Expired At"
+        },
+        "expires_at": {
+          "format": "date-time",
+          "title": "Expires At",
+          "type": "string"
+        },
+        "issued_at": {
+          "format": "date-time",
+          "title": "Issued At",
+          "type": "string"
+        },
+        "max_uses": {
+          "const": 1,
+          "title": "Max Uses",
+          "type": "integer"
+        },
+        "permit_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Permit Id",
+          "type": "string"
+        },
+        "precondition_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Precondition Sha256",
+          "type": "string"
+        },
+        "revision": {
+          "maximum": 9223372036854775807,
+          "minimum": 0,
+          "title": "Revision",
+          "type": "integer"
+        },
+        "schema_version": {
+          "const": "reconcile/action-permit/v1",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "semantic_action_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Semantic Action Sha256",
+          "type": "string"
+        },
+        "source_node_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Source Node Id",
+          "type": "string"
+        },
+        "state": {
+          "$ref": "#/$defs/ActionPermitState"
+        },
+        "target_node_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Target Node Id",
+          "type": "string"
+        },
+        "target_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Target Sha256",
+          "type": "string"
+        },
+        "tool_name": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Tool Name",
+          "type": "string"
+        },
+        "tool_version": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Tool Version",
+          "type": "string"
+        }
+      },
+      "required": [
+        "schema_version",
+        "permit_id",
+        "certificate_id",
+        "certificate_sha256",
+        "chain_id",
+        "source_node_id",
+        "target_node_id",
+        "semantic_action_sha256",
+        "action",
+        "action_profile_version",
+        "action_policy_version",
+        "tool_name",
+        "tool_version",
+        "arguments_sha256",
+        "target_sha256",
+        "precondition_sha256",
+        "issued_at",
+        "expires_at",
+        "max_uses",
+        "state",
+        "revision"
+      ],
+      "title": "ActionPermit",
+      "type": "object"
+    },
+    "ActionPermitState": {
+      "enum": [
+        "ISSUED",
+        "CLAIMED",
+        "COMPLETED",
+        "EXPIRED"
+      ],
+      "title": "ActionPermitState",
+      "type": "string"
+    },
+    "AdvisoryExplanation": {
+      "additionalProperties": false,
+      "properties": {
+        "cited_evidence_ids": {
+          "items": {
+            "maxLength": 128,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+            "type": "string"
+          },
+          "maxItems": 64,
+          "minItems": 1,
+          "title": "Cited Evidence Ids",
+          "type": "array"
+        },
+        "text": {
+          "maxLength": 4096,
+          "minLength": 1,
+          "title": "Text",
+          "type": "string"
+        }
+      },
+      "required": [
+        "text",
+        "cited_evidence_ids"
+      ],
+      "title": "AdvisoryExplanation",
+      "type": "object"
+    },
+    "AmbiguityWitness": {
+      "additionalProperties": false,
+      "properties": {
+        "chain_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Chain Id",
+          "type": "string"
+        },
+        "chain_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Chain Sha256",
+          "type": "string"
+        },
+        "conflicting_evidence_ids": {
+          "items": {
+            "maxLength": 128,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+            "type": "string"
+          },
+          "maxItems": 64,
+          "title": "Conflicting Evidence Ids",
+          "type": "array"
+        },
+        "created_at": {
+          "format": "date-time",
+          "title": "Created At",
+          "type": "string"
+        },
+        "discriminating_observations": {
+          "items": {
+            "$ref": "#/$defs/DiscriminatingObservation"
+          },
+          "maxItems": 8,
+          "minItems": 1,
+          "title": "Discriminating Observations",
+          "type": "array"
+        },
+        "envelope_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Envelope Sha256",
+          "type": "string"
+        },
+        "evidence": {
+          "items": {
+            "$ref": "#/$defs/RecoveryEvidenceBinding"
+          },
+          "maxItems": 64,
+          "title": "Evidence",
+          "type": "array"
+        },
+        "node_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Node Id",
+          "type": "string"
+        },
+        "node_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Node Sha256",
+          "type": "string"
+        },
+        "possible_histories": {
+          "items": {
+            "$ref": "#/$defs/PossibleHistory"
+          },
+          "maxItems": 8,
+          "minItems": 2,
+          "title": "Possible Histories",
+          "type": "array"
+        },
+        "proof_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Proof Sha256",
+          "type": "string"
+        },
+        "report_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Report Sha256",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": "reconcile/ambiguity-witness/v1",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "semantic_action_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Semantic Action Sha256",
+          "type": "string"
+        },
+        "target": {
+          "$ref": "#/$defs/TargetBinding"
+        },
+        "target_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Target Sha256",
+          "type": "string"
+        },
+        "verifier_version": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Verifier Version",
+          "type": "string"
+        },
+        "witness_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Witness Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "schema_version",
+        "witness_id",
+        "chain_id",
+        "node_id",
+        "semantic_action_sha256",
+        "chain_sha256",
+        "node_sha256",
+        "envelope_sha256",
+        "report_sha256",
+        "proof_sha256",
+        "target",
+        "target_sha256",
+        "possible_histories",
+        "discriminating_observations",
+        "verifier_version",
+        "created_at"
+      ],
+      "title": "AmbiguityWitness",
+      "type": "object"
+    },
+    "ArgumentsObject": {
+      "additionalProperties": {
+        "$ref": "#/$defs/JsonValue"
+      },
+      "maxProperties": 64,
+      "type": "object"
+    },
+    "CertifiedTransition": {
+      "additionalProperties": false,
+      "properties": {
+        "action": {
+          "$ref": "#/$defs/PermitAction"
+        },
+        "arguments_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Arguments Sha256",
+          "type": "string"
+        },
+        "precondition_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Precondition Sha256",
+          "type": "string"
+        },
+        "semantic_action_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Semantic Action Sha256",
+          "type": "string"
+        },
+        "source_node_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Source Node Id",
+          "type": "string"
+        },
+        "target_node_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Target Node Id",
+          "type": "string"
+        },
+        "target_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Target Sha256",
+          "type": "string"
+        },
+        "tool_name": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Tool Name",
+          "type": "string"
+        },
+        "tool_version": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Tool Version",
+          "type": "string"
+        }
+      },
+      "required": [
+        "action",
+        "source_node_id",
+        "target_node_id",
+        "semantic_action_sha256",
+        "tool_name",
+        "tool_version",
+        "arguments_sha256",
+        "target_sha256",
+        "precondition_sha256"
+      ],
+      "title": "CertifiedTransition",
+      "type": "object"
+    },
+    "Classification": {
+      "enum": [
+        "COMMITTED",
+        "NOT_COMMITTED",
+        "PARTIAL",
+        "PENDING",
+        "UNKNOWN"
+      ],
+      "title": "Classification",
+      "type": "string"
+    },
+    "DeterministicProof": {
+      "additionalProperties": false,
+      "properties": {
+        "admitted_evidence_ids": {
+          "items": {
+            "maxLength": 128,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+            "type": "string"
+          },
+          "maxItems": 64,
+          "title": "Admitted Evidence Ids",
+          "type": "array"
+        },
+        "conflicting_authority": {
+          "default": false,
+          "title": "Conflicting Authority",
+          "type": "boolean"
+        },
+        "effect_findings": {
+          "items": {
+            "$ref": "#/$defs/EffectFinding"
+          },
+          "maxItems": 64,
+          "minItems": 1,
+          "title": "Effect Findings",
+          "type": "array"
+        },
+        "operation_status": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/OperationStatus"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "effect_findings"
+      ],
+      "title": "DeterministicProof",
+      "type": "object"
+    },
+    "DiscriminatingObservation": {
+      "additionalProperties": false,
+      "properties": {
+        "capability_name": {
+          "anyOf": [
+            {
+              "maxLength": 128,
+              "minLength": 1,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Capability Name"
+        },
+        "capability_version": {
+          "anyOf": [
+            {
+              "maxLength": 128,
+              "minLength": 1,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Capability Version"
+        },
+        "description": {
+          "maxLength": 4096,
+          "minLength": 1,
+          "title": "Description",
+          "type": "string"
+        },
+        "distinguishes_history_ids": {
+          "items": {
+            "maxLength": 128,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+            "type": "string"
+          },
+          "maxItems": 8,
+          "minItems": 2,
+          "title": "Distinguishes History Ids",
+          "type": "array"
+        },
+        "observation_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Observation Id",
+          "type": "string"
+        },
+        "relevant_effect_ids": {
+          "items": {
+            "maxLength": 128,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+            "type": "string"
+          },
+          "maxItems": 64,
+          "title": "Relevant Effect Ids",
+          "type": "array"
+        }
+      },
+      "required": [
+        "observation_id",
+        "description",
+        "distinguishes_history_ids"
+      ],
+      "title": "DiscriminatingObservation",
+      "type": "object"
+    },
+    "EffectAssertion": {
+      "additionalProperties": false,
+      "properties": {
+        "effect_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Effect Id",
+          "type": "string"
+        },
+        "state": {
+          "$ref": "#/$defs/EffectAssertionState"
+        }
+      },
+      "required": [
+        "effect_id",
+        "state"
+      ],
+      "title": "EffectAssertion",
+      "type": "object"
+    },
+    "EffectAssertionState": {
+      "enum": [
+        "ESTABLISHED",
+        "NOT_ESTABLISHED",
+        "UNVERIFIED"
+      ],
+      "title": "EffectAssertionState",
+      "type": "string"
+    },
+    "EffectFinding": {
+      "additionalProperties": false,
+      "properties": {
+        "commit_scope": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Commit Scope",
+          "type": "string"
+        },
+        "effect_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Effect Id",
+          "type": "string"
+        },
+        "evidence_ids": {
+          "items": {
+            "maxLength": 128,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+            "type": "string"
+          },
+          "maxItems": 64,
+          "title": "Evidence Ids",
+          "type": "array"
+        },
+        "state": {
+          "$ref": "#/$defs/EffectAssertionState"
+        }
+      },
+      "required": [
+        "effect_id",
+        "commit_scope",
+        "state"
+      ],
+      "title": "EffectFinding",
+      "type": "object"
+    },
+    "EvidenceAuthority": {
+      "enum": [
+        "TARGET_STATE",
+        "SUPPLEMENTARY",
+        "WEAK"
+      ],
+      "title": "EvidenceAuthority",
+      "type": "string"
+    },
+    "EvidenceDecision": {
+      "additionalProperties": false,
+      "properties": {
+        "disposition": {
+          "$ref": "#/$defs/EvidenceDisposition"
+        },
+        "evidence_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Evidence Id",
+          "type": "string"
+        },
+        "reason": {
+          "$ref": "#/$defs/EvidenceReason"
+        },
+        "schema_version": {
+          "const": "reconcile/evidence-decision/v1",
+          "title": "Schema Version",
+          "type": "string"
+        }
+      },
+      "required": [
+        "schema_version",
+        "evidence_id",
+        "disposition",
+        "reason"
+      ],
+      "title": "EvidenceDecision",
+      "type": "object"
+    },
+    "EvidenceDisposition": {
+      "enum": [
+        "ADMITTED",
+        "WEAK",
+        "REJECTED"
+      ],
+      "title": "EvidenceDisposition",
+      "type": "string"
+    },
+    "EvidenceProvenance": {
+      "additionalProperties": false,
+      "properties": {
+        "adapter_version": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Adapter Version",
+          "type": "string"
+        },
+        "retrieved_at": {
+          "format": "date-time",
+          "title": "Retrieved At",
+          "type": "string"
+        },
+        "source": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Source",
+          "type": "string"
+        },
+        "source_record": {
+          "maxLength": 4096,
+          "minLength": 1,
+          "title": "Source Record",
+          "type": "string"
+        }
+      },
+      "required": [
+        "source",
+        "source_record",
+        "adapter_version",
+        "retrieved_at"
+      ],
+      "title": "EvidenceProvenance",
+      "type": "object"
+    },
+    "EvidenceReason": {
+      "enum": [
+        "authoritative_exact_correlation",
+        "authoritative_affirmative_non_execution",
+        "authoritative_active_status",
+        "non_authoritative_log_only",
+        "not_found_absence_only",
+        "stale_observation",
+        "correlation_mismatch",
+        "scope_mismatch",
+        "unsupported_capability",
+        "malformed_observation",
+        "unverifiable_authority",
+        "conflicting_authority",
+        "budget_exhausted",
+        "probe_timeout",
+        "result_too_large",
+        "duplicate_candidates",
+        "clock_ambiguity",
+        "expected_effect_mismatch"
+      ],
+      "title": "EvidenceReason",
+      "type": "string"
+    },
+    "ExecutionEnvelopeReference": {
+      "additionalProperties": false,
+      "properties": {
+        "envelope_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Envelope Sha256",
+          "type": "string"
+        },
+        "investigation_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Investigation Id",
+          "type": "string"
+        },
+        "operation_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Operation Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "investigation_id",
+        "operation_id",
+        "envelope_sha256"
+      ],
+      "title": "ExecutionEnvelopeReference",
+      "type": "object"
+    },
+    "FreshnessWindow": {
+      "additionalProperties": false,
+      "properties": {
+        "valid_from": {
+          "format": "date-time",
+          "title": "Valid From",
+          "type": "string"
+        },
+        "valid_until": {
+          "format": "date-time",
+          "title": "Valid Until",
+          "type": "string"
+        }
+      },
+      "required": [
+        "valid_from",
+        "valid_until"
+      ],
+      "title": "FreshnessWindow",
+      "type": "object"
+    },
+    "GeminiHypothesis": {
+      "additionalProperties": false,
+      "properties": {
+        "alternative_histories": {
+          "items": {
+            "$ref": "#/$defs/PossibleHistory"
+          },
+          "maxItems": 8,
+          "title": "Alternative Histories",
+          "type": "array"
+        },
+        "chain_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Chain Id",
+          "type": "string"
+        },
+        "cited_evidence_ids": {
+          "items": {
+            "maxLength": 128,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+            "type": "string"
+          },
+          "maxItems": 64,
+          "title": "Cited Evidence Ids",
+          "type": "array"
+        },
+        "confidence_basis_points": {
+          "maximum": 10000,
+          "minimum": 0,
+          "title": "Confidence Basis Points",
+          "type": "integer"
+        },
+        "created_at": {
+          "format": "date-time",
+          "title": "Created At",
+          "type": "string"
+        },
+        "effect_hypotheses": {
+          "items": {
+            "$ref": "#/$defs/HypothesizedEffect"
+          },
+          "maxItems": 64,
+          "minItems": 1,
+          "title": "Effect Hypotheses",
+          "type": "array"
+        },
+        "explanation": {
+          "maxLength": 4096,
+          "minLength": 1,
+          "title": "Explanation",
+          "type": "string"
+        },
+        "hypothesis_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Hypothesis Id",
+          "type": "string"
+        },
+        "missing_evidence": {
+          "items": {
+            "$ref": "#/$defs/HypothesisMissingEvidence"
+          },
+          "maxItems": 64,
+          "title": "Missing Evidence",
+          "type": "array"
+        },
+        "node_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Node Id",
+          "type": "string"
+        },
+        "proposed_classification": {
+          "$ref": "#/$defs/Classification"
+        },
+        "proposed_probe": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProbeRequest"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "proposed_transition": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProposedTransition"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "report_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Report Sha256",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": "reconcile/gemini-hypothesis/v1",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "semantic_action_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Semantic Action Sha256",
+          "type": "string"
+        }
+      },
+      "required": [
+        "schema_version",
+        "hypothesis_id",
+        "chain_id",
+        "node_id",
+        "semantic_action_sha256",
+        "report_sha256",
+        "proposed_classification",
+        "effect_hypotheses",
+        "confidence_basis_points",
+        "explanation",
+        "created_at"
+      ],
+      "title": "GeminiHypothesis",
+      "type": "object"
+    },
+    "HypothesisMissingEvidence": {
+      "additionalProperties": false,
+      "properties": {
+        "effect_ids": {
+          "items": {
+            "maxLength": 128,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+            "type": "string"
+          },
+          "maxItems": 64,
+          "minItems": 1,
+          "title": "Effect Ids",
+          "type": "array"
+        },
+        "reason": {
+          "maxLength": 4096,
+          "minLength": 1,
+          "title": "Reason",
+          "type": "string"
+        }
+      },
+      "required": [
+        "effect_ids",
+        "reason"
+      ],
+      "title": "HypothesisMissingEvidence",
+      "type": "object"
+    },
+    "HypothesizedEffect": {
+      "additionalProperties": false,
+      "properties": {
+        "cited_evidence_ids": {
+          "items": {
+            "maxLength": 128,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+            "type": "string"
+          },
+          "maxItems": 64,
+          "title": "Cited Evidence Ids",
+          "type": "array"
+        },
+        "effect_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Effect Id",
+          "type": "string"
+        },
+        "state": {
+          "$ref": "#/$defs/EffectAssertionState"
+        }
+      },
+      "required": [
+        "effect_id",
+        "state"
+      ],
+      "title": "HypothesizedEffect",
+      "type": "object"
+    },
+    "InvestigationReport": {
+      "additionalProperties": false,
+      "properties": {
+        "action_gate": {
+          "anyOf": [
+            {
+              "items": {
+                "$ref": "#/$defs/ActionGateResult"
+              },
+              "maxItems": 0,
+              "type": "array"
+            },
+            {
+              "items": {
+                "$ref": "#/$defs/ActionGateResult"
+              },
+              "maxItems": 5,
+              "minItems": 5,
+              "type": "array"
+            }
+          ],
+          "title": "Action Gate"
+        },
+        "advisory_explanation": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AdvisoryExplanation"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "classification": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Classification"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "created_at": {
+          "format": "date-time",
+          "title": "Created At",
+          "type": "string"
+        },
+        "envelope_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Envelope Sha256",
+          "type": "string"
+        },
+        "evidence": {
+          "items": {
+            "$ref": "#/$defs/NormalizedEvidence"
+          },
+          "maxItems": 64,
+          "title": "Evidence",
+          "type": "array"
+        },
+        "evidence_decisions": {
+          "items": {
+            "$ref": "#/$defs/EvidenceDecision"
+          },
+          "maxItems": 64,
+          "title": "Evidence Decisions",
+          "type": "array"
+        },
+        "investigation_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Investigation Id",
+          "type": "string"
+        },
+        "limitations": {
+          "items": {
+            "maxLength": 4096,
+            "minLength": 1,
+            "type": "string"
+          },
+          "maxItems": 64,
+          "title": "Limitations",
+          "type": "array"
+        },
+        "missing_evidence": {
+          "items": {
+            "$ref": "#/$defs/MissingEvidence"
+          },
+          "maxItems": 64,
+          "title": "Missing Evidence",
+          "type": "array"
+        },
+        "probe_audit": {
+          "items": {
+            "$ref": "#/$defs/ProbeAuditRecord"
+          },
+          "maxItems": 64,
+          "title": "Probe Audit",
+          "type": "array"
+        },
+        "proof": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DeterministicProof"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "revision": {
+          "maximum": 9223372036854775807,
+          "minimum": 0,
+          "title": "Revision",
+          "type": "integer"
+        },
+        "schema_version": {
+          "const": "reconcile/investigation-report/v1",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "status": {
+          "$ref": "#/$defs/InvestigationStatus"
+        },
+        "updated_at": {
+          "format": "date-time",
+          "title": "Updated At",
+          "type": "string"
+        }
+      },
+      "required": [
+        "schema_version",
+        "investigation_id",
+        "envelope_sha256",
+        "status",
+        "created_at",
+        "updated_at",
+        "revision"
+      ],
+      "title": "InvestigationReport",
+      "type": "object"
+    },
+    "InvestigationStatus": {
+      "enum": [
+        "CREATED",
+        "INVESTIGATING",
+        "COMPLETED"
+      ],
+      "title": "InvestigationStatus",
+      "type": "string"
+    },
+    "JsonValue": {},
+    "MissingEvidence": {
+      "additionalProperties": false,
+      "properties": {
+        "effect_ids": {
+          "items": {
+            "maxLength": 128,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+            "type": "string"
+          },
+          "maxItems": 64,
+          "title": "Effect Ids",
+          "type": "array"
+        },
+        "reason": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Reason",
+          "type": "string"
+        }
+      },
+      "required": [
+        "reason"
+      ],
+      "title": "MissingEvidence",
+      "type": "object"
+    },
+    "NonEmptySmallJsonObject": {
+      "additionalProperties": {
+        "$ref": "#/$defs/JsonValue"
+      },
+      "maxProperties": 32,
+      "minProperties": 1,
+      "type": "object"
+    },
+    "NormalizedEvidence": {
+      "additionalProperties": false,
+      "properties": {
+        "authority": {
+          "$ref": "#/$defs/EvidenceAuthority"
+        },
+        "authority_policy_version": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Authority Policy Version",
+          "type": "string"
+        },
+        "capability_name": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Capability Name",
+          "type": "string"
+        },
+        "capability_version": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Capability Version",
+          "type": "string"
+        },
+        "correlation": {
+          "maxProperties": 32,
+          "patternProperties": {
+            "^[A-Za-z0-9][A-Za-z0-9._:-]*$": {
+              "maxLength": 4096,
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          "propertyNames": {
+            "maxLength": 128,
+            "minLength": 1
+          },
+          "title": "Correlation",
+          "type": "object"
+        },
+        "effect_assertions": {
+          "items": {
+            "$ref": "#/$defs/EffectAssertion"
+          },
+          "maxItems": 64,
+          "title": "Effect Assertions",
+          "type": "array"
+        },
+        "evidence_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Evidence Id",
+          "type": "string"
+        },
+        "freshness": {
+          "$ref": "#/$defs/FreshnessWindow"
+        },
+        "observed_at": {
+          "format": "date-time",
+          "title": "Observed At",
+          "type": "string"
+        },
+        "operation_status": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/OperationStatus"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "provenance": {
+          "$ref": "#/$defs/EvidenceProvenance"
+        },
+        "raw_observation": {
+          "$ref": "#/$defs/RawObservationReference"
+        },
+        "schema_version": {
+          "const": "reconcile/normalized-evidence/v1",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "target": {
+          "$ref": "#/$defs/TargetBinding"
+        }
+      },
+      "required": [
+        "schema_version",
+        "evidence_id",
+        "capability_name",
+        "capability_version",
+        "target",
+        "provenance",
+        "observed_at",
+        "freshness",
+        "authority",
+        "authority_policy_version",
+        "raw_observation"
+      ],
+      "title": "NormalizedEvidence",
+      "type": "object"
+    },
+    "OperationStatus": {
+      "enum": [
+        "ACTIVE",
+        "UNRESOLVED",
+        "TERMINAL_COMMITTED",
+        "TERMINAL_NOT_COMMITTED"
+      ],
+      "title": "OperationStatus",
+      "type": "string"
+    },
+    "PermitAction": {
+      "enum": [
+        "CONTINUE",
+        "RETRY"
+      ],
+      "title": "PermitAction",
+      "type": "string"
+    },
+    "PermitCompletionOutcome": {
+      "enum": [
+        "SUCCEEDED",
+        "REJECTED",
+        "OUTCOME_UNKNOWN"
+      ],
+      "title": "PermitCompletionOutcome",
+      "type": "string"
+    },
+    "PossibleHistory": {
+      "additionalProperties": false,
+      "properties": {
+        "classification": {
+          "$ref": "#/$defs/Classification"
+        },
+        "compatible_evidence_ids": {
+          "items": {
+            "maxLength": 128,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+            "type": "string"
+          },
+          "maxItems": 64,
+          "title": "Compatible Evidence Ids",
+          "type": "array"
+        },
+        "effect_states": {
+          "items": {
+            "$ref": "#/$defs/HypothesizedEffect"
+          },
+          "maxItems": 64,
+          "minItems": 1,
+          "title": "Effect States",
+          "type": "array"
+        },
+        "history_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "History Id",
+          "type": "string"
+        },
+        "summary": {
+          "maxLength": 4096,
+          "minLength": 1,
+          "title": "Summary",
+          "type": "string"
+        }
+      },
+      "required": [
+        "history_id",
+        "classification",
+        "effect_states",
+        "summary"
+      ],
+      "title": "PossibleHistory",
+      "type": "object"
+    },
+    "ProbeAuditRecord": {
+      "additionalProperties": false,
+      "properties": {
+        "capability_name": {
+          "anyOf": [
+            {
+              "maxLength": 128,
+              "minLength": 1,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Capability Name"
+        },
+        "capability_version": {
+          "anyOf": [
+            {
+              "maxLength": 128,
+              "minLength": 1,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Capability Version"
+        },
+        "completed_at": {
+          "format": "date-time",
+          "title": "Completed At",
+          "type": "string"
+        },
+        "cost_units_used": {
+          "maximum": 9223372036854775807,
+          "minimum": 0,
+          "title": "Cost Units Used",
+          "type": "integer"
+        },
+        "evidence_ids": {
+          "items": {
+            "maxLength": 128,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+            "type": "string"
+          },
+          "maxItems": 1,
+          "minItems": 1,
+          "title": "Evidence Ids",
+          "type": "array"
+        },
+        "outcome": {
+          "$ref": "#/$defs/ProbeOutcome"
+        },
+        "probe_count_used": {
+          "maximum": 9223372036854775807,
+          "minimum": 0,
+          "title": "Probe Count Used",
+          "type": "integer"
+        },
+        "probe_sequence": {
+          "maximum": 9223372036854775807,
+          "minimum": 1,
+          "title": "Probe Sequence",
+          "type": "integer"
+        },
+        "request_sha256": {
+          "anyOf": [
+            {
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Request Sha256"
+        },
+        "result_byte_count": {
+          "anyOf": [
+            {
+              "maximum": 9223372036854775807,
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Result Byte Count"
+        },
+        "result_bytes_acquired": {
+          "maximum": 9223372036854775807,
+          "minimum": 0,
+          "title": "Result Bytes Acquired",
+          "type": "integer"
+        },
+        "result_sha256": {
+          "anyOf": [
+            {
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Result Sha256"
+        },
+        "session_elapsed_ms": {
+          "maximum": 9223372036854775807,
+          "minimum": 0,
+          "title": "Session Elapsed Ms",
+          "type": "integer"
+        },
+        "started_at": {
+          "format": "date-time",
+          "title": "Started At",
+          "type": "string"
+        },
+        "stop_reason": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Stop Reason",
+          "type": "string"
+        },
+        "target_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Target Sha256",
+          "type": "string"
+        }
+      },
+      "required": [
+        "probe_sequence",
+        "target_sha256",
+        "outcome",
+        "stop_reason",
+        "started_at",
+        "completed_at",
+        "session_elapsed_ms",
+        "probe_count_used",
+        "cost_units_used",
+        "result_bytes_acquired",
+        "evidence_ids"
+      ],
+      "title": "ProbeAuditRecord",
+      "type": "object"
+    },
+    "ProbeOutcome": {
+      "enum": [
+        "COMPLETED",
+        "REJECTED",
+        "TIMED_OUT",
+        "UNAVAILABLE",
+        "CANCELLED",
+        "MALFORMED",
+        "BUDGET_EXHAUSTED"
+      ],
+      "title": "ProbeOutcome",
+      "type": "string"
+    },
+    "ProbeRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "arguments": {
+          "$ref": "#/$defs/ArgumentsObject"
+        },
+        "capability_name": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Capability Name",
+          "type": "string"
+        },
+        "capability_version": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Capability Version",
+          "type": "string"
+        },
+        "rationale": {
+          "maxLength": 4096,
+          "minLength": 1,
+          "title": "Rationale",
+          "type": "string"
+        },
+        "relevant_effect_ids": {
+          "items": {
+            "maxLength": 128,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+            "type": "string"
+          },
+          "maxItems": 64,
+          "minItems": 1,
+          "title": "Relevant Effect Ids",
+          "type": "array"
+        },
+        "schema_version": {
+          "const": "reconcile/probe-request/v1",
+          "title": "Schema Version",
+          "type": "string"
+        }
+      },
+      "required": [
+        "schema_version",
+        "capability_name",
+        "capability_version",
+        "relevant_effect_ids",
+        "rationale"
+      ],
+      "title": "ProbeRequest",
+      "type": "object"
+    },
+    "ProposedTransition": {
+      "additionalProperties": false,
+      "properties": {
+        "action": {
+          "$ref": "#/$defs/PermitAction"
+        },
+        "rationale": {
+          "maxLength": 4096,
+          "minLength": 1,
+          "title": "Rationale",
+          "type": "string"
+        },
+        "source_node_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Source Node Id",
+          "type": "string"
+        },
+        "target_node_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Target Node Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "action",
+        "source_node_id",
+        "target_node_id",
+        "rationale"
+      ],
+      "title": "ProposedTransition",
+      "type": "object"
+    },
+    "RawObservationReference": {
+      "additionalProperties": false,
+      "properties": {
+        "byte_count": {
+          "maximum": 9223372036854775807,
+          "minimum": 0,
+          "title": "Byte Count",
+          "type": "integer"
+        },
+        "reference": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Reference",
+          "type": "string"
+        },
+        "sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Sha256",
+          "type": "string"
+        }
+      },
+      "required": [
+        "sha256",
+        "reference",
+        "byte_count"
+      ],
+      "title": "RawObservationReference",
+      "type": "object"
+    },
+    "RecoveryActionNode": {
+      "additionalProperties": false,
+      "properties": {
+        "chain_profile_version": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Chain Profile Version",
+          "type": "string"
+        },
+        "depends_on": {
+          "items": {
+            "maxLength": 128,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+            "type": "string"
+          },
+          "maxItems": 32,
+          "title": "Depends On",
+          "type": "array"
+        },
+        "envelope": {
+          "$ref": "#/$defs/ExecutionEnvelopeReference"
+        },
+        "node_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Node Id",
+          "type": "string"
+        },
+        "semantic_action": {
+          "$ref": "#/$defs/SemanticActionIdentity"
+        }
+      },
+      "required": [
+        "node_id",
+        "chain_profile_version",
+        "semantic_action",
+        "envelope"
+      ],
+      "title": "RecoveryActionNode",
+      "type": "object"
+    },
+    "RecoveryChain": {
+      "additionalProperties": false,
+      "properties": {
+        "chain_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Chain Id",
+          "type": "string"
+        },
+        "chain_profile_version": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Chain Profile Version",
+          "type": "string"
+        },
+        "created_at": {
+          "format": "date-time",
+          "title": "Created At",
+          "type": "string"
+        },
+        "nodes": {
+          "items": {
+            "$ref": "#/$defs/RecoveryActionNode"
+          },
+          "maxItems": 32,
+          "minItems": 1,
+          "title": "Nodes",
+          "type": "array"
+        },
+        "schema_version": {
+          "const": "reconcile/recovery-chain/v1",
+          "title": "Schema Version",
+          "type": "string"
+        }
+      },
+      "required": [
+        "schema_version",
+        "chain_id",
+        "chain_profile_version",
+        "nodes",
+        "created_at"
+      ],
+      "title": "RecoveryChain",
+      "type": "object"
+    },
+    "RecoveryDecision": {
+      "enum": [
+        "CONTINUE",
+        "RETRY",
+        "OBSERVE",
+        "ESCALATE"
+      ],
+      "title": "RecoveryDecision",
+      "type": "string"
+    },
+    "RecoveryDispatchOutcome": {
+      "enum": [
+        "SUCCEEDED",
+        "REJECTED",
+        "OUTCOME_UNKNOWN"
+      ],
+      "title": "RecoveryDispatchOutcome",
+      "type": "string"
+    },
+    "RecoveryEvidenceBinding": {
+      "additionalProperties": false,
+      "properties": {
+        "evidence_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Evidence Id",
+          "type": "string"
+        },
+        "evidence_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Evidence Sha256",
+          "type": "string"
+        },
+        "raw_observation_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Raw Observation Sha256",
+          "type": "string"
+        },
+        "valid_until": {
+          "format": "date-time",
+          "title": "Valid Until",
+          "type": "string"
+        }
+      },
+      "required": [
+        "evidence_id",
+        "evidence_sha256",
+        "raw_observation_sha256",
+        "valid_until"
+      ],
+      "title": "RecoveryEvidenceBinding",
+      "type": "object"
+    },
+    "RecoveryHypothesisDisposition": {
+      "enum": [
+        "SELECTED",
+        "NO_PROBE",
+        "DUPLICATE_PROBE",
+        "BUDGET_EXHAUSTED",
+        "UNSUPPORTED_PROBE",
+        "UNSUPPORTED_ACTION",
+        "INVALID_BINDING",
+        "MODEL_UNAVAILABLE",
+        "MODEL_TIMEOUT",
+        "MALFORMED_MODEL_OUTPUT",
+        "FIXED_FALLBACK"
+      ],
+      "title": "RecoveryHypothesisDisposition",
+      "type": "string"
+    },
+    "RecoveryLaunchPermit": {
+      "additionalProperties": false,
+      "description": "One-shot authority for the first mutation, before a certificate exists.",
+      "properties": {
+        "action_request_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Action Request Sha256",
+          "type": "string"
+        },
+        "claim_id": {
+          "anyOf": [
+            {
+              "maxLength": 128,
+              "minLength": 1,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Claim Id"
+        },
+        "claimed_at": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Claimed At"
+        },
+        "completed_at": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Completed At"
+        },
+        "issued_at": {
+          "format": "date-time",
+          "title": "Issued At",
+          "type": "string"
+        },
+        "launch_permit_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Launch Permit Id",
+          "type": "string"
+        },
+        "node_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Node Id",
+          "type": "string"
+        },
+        "outcome": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RecoveryDispatchOutcome"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "revision": {
+          "maximum": 2,
+          "minimum": 0,
+          "title": "Revision",
+          "type": "integer"
+        },
+        "run_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Run Id",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": "reconcile/recovery-launch-permit/v1",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "semantic_action_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Semantic Action Sha256",
+          "type": "string"
+        },
+        "state": {
+          "$ref": "#/$defs/RecoveryLaunchPermitState"
+        }
+      },
+      "required": [
+        "schema_version",
+        "launch_permit_id",
+        "run_id",
+        "node_id",
+        "semantic_action_sha256",
+        "action_request_sha256",
+        "issued_at",
+        "state",
+        "revision"
+      ],
+      "title": "RecoveryLaunchPermit",
+      "type": "object"
+    },
+    "RecoveryLaunchPermitState": {
+      "enum": [
+        "ISSUED",
+        "CLAIMED",
+        "COMPLETED"
+      ],
+      "title": "RecoveryLaunchPermitState",
+      "type": "string"
+    },
+    "RecoveryNodeProgress": {
+      "additionalProperties": false,
+      "properties": {
+        "attempt": {
+          "maximum": 2,
+          "minimum": 0,
+          "title": "Attempt",
+          "type": "integer"
+        },
+        "node_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Node Id",
+          "type": "string"
+        },
+        "state": {
+          "$ref": "#/$defs/RecoveryNodeState"
+        }
+      },
+      "required": [
+        "node_id",
+        "state",
+        "attempt"
+      ],
+      "title": "RecoveryNodeProgress",
+      "type": "object"
+    },
+    "RecoveryNodeState": {
+      "enum": [
+        "WAITING",
+        "DISPATCH_PENDING",
+        "DISPATCH_CLAIMED",
+        "RECONCILING",
+        "VERIFIED",
+        "PERMITTED",
+        "COMPLETED",
+        "ESCALATED"
+      ],
+      "title": "RecoveryNodeState",
+      "type": "string"
+    },
+    "RecoveryRunEventPayload": {
+      "additionalProperties": false,
+      "properties": {
+        "action_permit": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ActionPermit"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "certificate": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/VerifiedCertificate"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "chain": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RecoveryChain"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "decision": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RecoveryDecision"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "failure_category": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RecoveryRunFailureCategory"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "hypothesis": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/GeminiHypothesis"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "hypothesis_disposition": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RecoveryHypothesisDisposition"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "launch_permit": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RecoveryLaunchPermit"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "lifecycle": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RecoveryRunLifecycle"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "node": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RecoveryNodeProgress"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "note": {
+          "anyOf": [
+            {
+              "maxLength": 4096,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Note"
+        },
+        "report": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/InvestigationReport"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "witness": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AmbiguityWitness"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "title": "RecoveryRunEventPayload",
+      "type": "object"
+    },
+    "RecoveryRunEventType": {
+      "enum": [
+        "LIFECYCLE",
+        "CHAIN",
+        "NODE",
+        "HYPOTHESIS",
+        "EVIDENCE",
+        "DECISION",
+        "LAUNCH_PERMIT",
+        "ACTION_PERMIT"
+      ],
+      "title": "RecoveryRunEventType",
+      "type": "string"
+    },
+    "RecoveryRunFailureCategory": {
+      "enum": [
+        "cancelled",
+        "invalid_definition",
+        "model_unavailable",
+        "evidence_unavailable",
+        "dispatch_unavailable",
+        "durable_state_unavailable",
+        "internal_failure"
+      ],
+      "title": "RecoveryRunFailureCategory",
+      "type": "string"
+    },
+    "RecoveryRunLifecycle": {
+      "enum": [
+        "ACCEPTED",
+        "RUNNING",
+        "COMPLETED",
+        "ESCALATED",
+        "FAILED",
+        "CANCELLED"
+      ],
+      "title": "RecoveryRunLifecycle",
+      "type": "string"
+    },
+    "RequestedAction": {
+      "enum": [
+        "CONTINUE",
+        "RETRY",
+        "COMPENSATE",
+        "ESCALATE",
+        "OBSERVE"
+      ],
+      "title": "RequestedAction",
+      "type": "string"
+    },
+    "SemanticActionIdentity": {
+      "additionalProperties": false,
+      "properties": {
+        "action_profile_version": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Action Profile Version",
+          "type": "string"
+        },
+        "expected_effect_sha256s": {
+          "items": {
+            "pattern": "^[0-9a-f]{64}$",
+            "type": "string"
+          },
+          "maxItems": 64,
+          "minItems": 1,
+          "title": "Expected Effect Sha256S",
+          "type": "array"
+        },
+        "key_version": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Key Version",
+          "type": "string"
+        },
+        "semantic_action_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Semantic Action Sha256",
+          "type": "string"
+        },
+        "semantic_arguments": {
+          "$ref": "#/$defs/ArgumentsObject"
+        },
+        "target": {
+          "$ref": "#/$defs/TargetBinding"
+        },
+        "tool_name": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Tool Name",
+          "type": "string"
+        },
+        "tool_version": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Tool Version",
+          "type": "string"
+        }
+      },
+      "required": [
+        "key_version",
+        "tool_name",
+        "tool_version",
+        "target",
+        "expected_effect_sha256s",
+        "action_profile_version",
+        "semantic_action_sha256"
+      ],
+      "title": "SemanticActionIdentity",
+      "type": "object"
+    },
+    "TargetBinding": {
+      "additionalProperties": false,
+      "properties": {
+        "resource": {
+          "$ref": "#/$defs/NonEmptySmallJsonObject"
+        },
+        "scope": {
+          "$ref": "#/$defs/NonEmptySmallJsonObject"
+        },
+        "target_kind": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Target Kind",
+          "type": "string"
+        }
+      },
+      "required": [
+        "target_kind",
+        "scope",
+        "resource"
+      ],
+      "title": "TargetBinding",
+      "type": "object"
+    },
+    "VerifiedCertificate": {
+      "additionalProperties": false,
+      "properties": {
+        "action_policy_version": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Action Policy Version",
+          "type": "string"
+        },
+        "action_profile_version": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Action Profile Version",
+          "type": "string"
+        },
+        "authority_policy_version": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Authority Policy Version",
+          "type": "string"
+        },
+        "authority_satisfied": {
+          "const": true,
+          "title": "Authority Satisfied",
+          "type": "boolean"
+        },
+        "certificate_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Certificate Id",
+          "type": "string"
+        },
+        "chain_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Chain Id",
+          "type": "string"
+        },
+        "chain_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Chain Sha256",
+          "type": "string"
+        },
+        "classification": {
+          "$ref": "#/$defs/Classification"
+        },
+        "classification_policy_version": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Classification Policy Version",
+          "type": "string"
+        },
+        "correlation_policy_version": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Correlation Policy Version",
+          "type": "string"
+        },
+        "correlation_satisfied": {
+          "const": true,
+          "title": "Correlation Satisfied",
+          "type": "boolean"
+        },
+        "envelope_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Envelope Sha256",
+          "type": "string"
+        },
+        "evidence": {
+          "items": {
+            "$ref": "#/$defs/RecoveryEvidenceBinding"
+          },
+          "maxItems": 64,
+          "minItems": 1,
+          "title": "Evidence",
+          "type": "array"
+        },
+        "expires_at": {
+          "format": "date-time",
+          "title": "Expires At",
+          "type": "string"
+        },
+        "freshness_policy_version": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Freshness Policy Version",
+          "type": "string"
+        },
+        "freshness_satisfied": {
+          "const": true,
+          "title": "Freshness Satisfied",
+          "type": "boolean"
+        },
+        "issued_at": {
+          "format": "date-time",
+          "title": "Issued At",
+          "type": "string"
+        },
+        "node_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Node Id",
+          "type": "string"
+        },
+        "node_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Node Sha256",
+          "type": "string"
+        },
+        "proof_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Proof Sha256",
+          "type": "string"
+        },
+        "report_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Report Sha256",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": "reconcile/verified-certificate/v1",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "semantic_action_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Semantic Action Sha256",
+          "type": "string"
+        },
+        "target": {
+          "$ref": "#/$defs/TargetBinding"
+        },
+        "target_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Target Sha256",
+          "type": "string"
+        },
+        "transition": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CertifiedTransition"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "verifier_version": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Verifier Version",
+          "type": "string"
+        }
+      },
+      "required": [
+        "schema_version",
+        "certificate_id",
+        "chain_id",
+        "node_id",
+        "semantic_action_sha256",
+        "chain_sha256",
+        "node_sha256",
+        "envelope_sha256",
+        "report_sha256",
+        "proof_sha256",
+        "target",
+        "target_sha256",
+        "evidence",
+        "authority_satisfied",
+        "correlation_satisfied",
+        "freshness_satisfied",
+        "authority_policy_version",
+        "correlation_policy_version",
+        "freshness_policy_version",
+        "classification_policy_version",
+        "action_policy_version",
+        "action_profile_version",
+        "verifier_version",
+        "classification",
+        "transition",
+        "issued_at",
+        "expires_at"
+      ],
+      "title": "VerifiedCertificate",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "cursor": {
+      "maximum": 512,
+      "minimum": 1,
+      "title": "Cursor",
+      "type": "integer"
+    },
+    "occurred_at": {
+      "format": "date-time",
+      "title": "Occurred At",
+      "type": "string"
+    },
+    "payload": {
+      "$ref": "#/$defs/RecoveryRunEventPayload"
+    },
+    "run_id": {
+      "maxLength": 128,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+      "title": "Run Id",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": "reconcile/recovery-run-event/v1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "type": {
+      "$ref": "#/$defs/RecoveryRunEventType"
+    }
+  },
+  "required": [
+    "schema_version",
+    "run_id",
+    "cursor",
+    "type",
+    "occurred_at",
+    "payload"
+  ],
+  "title": "RecoveryRunEvent",
+  "type": "object"
+}

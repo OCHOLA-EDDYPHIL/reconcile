@@ -7,6 +7,7 @@ import os
 import sys
 from enum import StrEnum
 from typing import Annotated
+from uuid import uuid4
 
 import typer
 
@@ -26,12 +27,20 @@ from reconcile.cli_core import (
 )
 from reconcile.contracts import (
     MAX_SCENARIO_RUN_EVENTS,
+    RECOVERY_RUN_REQUEST_VERSION,
     SCENARIO_LAUNCH_REQUEST_VERSION,
     Classification,
     ContractError,
     ExecutionEnvelope,
     InvestigationComparisonRecord,
     InvestigationReport,
+    RecoveryRunEvent,
+    RecoveryRunEventType,
+    RecoveryRunFault,
+    RecoveryRunLifecycle,
+    RecoveryRunPolicy,
+    RecoveryRunRequest,
+    RecoveryRunSnapshot,
     RequestedAction,
     ScenarioLaunchName,
     ScenarioLaunchRequest,
@@ -86,6 +95,10 @@ class EventOutput(StrEnum):
     JSONL = "jsonl"
 
 
+class RecoveryScenario(StrEnum):
+    CLOUD_RUN_ROLLOUT = "cloud-run-rollout"
+
+
 app = typer.Typer(
     name="reconcile",
     add_completion=False,
@@ -103,7 +116,14 @@ scenario_app = typer.Typer(
     no_args_is_help=True,
     help="Operate canonical scenarios locally or through the API.",
 )
+recovery_app = typer.Typer(
+    add_completion=False,
+    invoke_without_command=True,
+    no_args_is_help=True,
+    help="Run and observe the focused proof-to-permit recovery workflow.",
+)
 app.add_typer(scenario_app, name="scenario")
+app.add_typer(recovery_app, name="recovery")
 
 
 @app.callback()
@@ -314,6 +334,133 @@ def _write_scenario_event(event: ScenarioRunEvent, output: EventOutput) -> None:
             f"Occurred: {event.occurred_at.isoformat()}\n"
         ).encode()
     )
+
+
+def _write_recovery_event(event: RecoveryRunEvent, output: EventOutput) -> None:
+    if type(event) is not RecoveryRunEvent:
+        _fail(FailureCategory.INTERNAL_FAILURE)
+    if output is EventOutput.JSONL:
+        _emit(canonical_json_output(event))
+        return
+    payload = event.payload
+    detail = ""
+    if event.type is RecoveryRunEventType.LIFECYCLE:
+        detail = f"Lifecycle: {payload.lifecycle.value}"  # type: ignore[union-attr]
+    elif event.type is RecoveryRunEventType.CHAIN:
+        chain = payload.chain
+        detail = "Chain: " + ", ".join(  # type: ignore[union-attr]
+            node.node_id
+            for node in chain.nodes  # type: ignore[union-attr]
+        )
+    elif event.type is RecoveryRunEventType.NODE:
+        node = payload.node
+        detail = (  # type: ignore[union-attr]
+            f"Node: {node.node_id} {node.state.value} attempt={node.attempt}"
+        )
+    elif event.type is RecoveryRunEventType.HYPOTHESIS:
+        hypothesis = payload.hypothesis
+        detail = f"Hypothesis: {payload.hypothesis_disposition.value}"  # type: ignore[union-attr]
+        if hypothesis is not None:
+            probe = (
+                "none"
+                if hypothesis.proposed_probe is None
+                else hypothesis.proposed_probe.capability_name
+            )
+            detail += (
+                f" id={hypothesis.hypothesis_id}"
+                f" confidence={hypothesis.confidence_basis_points}"
+                f" citations={','.join(hypothesis.cited_evidence_ids) or 'none'}"
+                f" alternatives={len(hypothesis.alternative_histories)}"
+                f" missing={len(hypothesis.missing_evidence)} probe={probe}"
+            )
+    elif event.type is RecoveryRunEventType.EVIDENCE:
+        report = payload.report
+        detail = (  # type: ignore[union-attr]
+            f"Evidence: classification={report.classification.value} "
+            f"items={','.join(item.evidence_id for item in report.evidence) or 'none'}"
+        )
+    elif event.type is RecoveryRunEventType.DECISION:
+        artifact = payload.certificate or payload.witness
+        artifact_id = (
+            artifact.certificate_id
+            if payload.certificate is not None
+            else artifact.witness_id  # type: ignore[union-attr]
+        )
+        detail = f"Decision: {payload.decision.value} proof={artifact_id}"  # type: ignore[union-attr]
+    elif event.type is RecoveryRunEventType.LAUNCH_PERMIT:
+        permit = payload.launch_permit
+        detail = (  # type: ignore[union-attr]
+            f"Launch permit: {permit.launch_permit_id} {permit.state.value}"
+        )
+    else:
+        permit = payload.action_permit
+        detail = f"Action permit: {permit.permit_id} {permit.state.value}"  # type: ignore[union-attr]
+    _emit(
+        (
+            f"Cursor: {event.cursor}\n"
+            f"Type: {event.type.value}\n"
+            f"{detail}\n"
+            f"Occurred: {event.occurred_at.isoformat()}\n"
+        ).encode()
+    )
+
+
+def _write_recovery_snapshot(snapshot: RecoveryRunSnapshot) -> None:
+    if type(snapshot) is not RecoveryRunSnapshot:
+        _fail(FailureCategory.INTERNAL_FAILURE)
+    lines = [
+        f"Recovery run: {snapshot.request.run_id}",
+        f"Scenario: {snapshot.request.scenario}",
+        f"Policy: {snapshot.request.policy.value}",
+        f"Fault: {snapshot.request.fault.value}",
+        f"Lifecycle: {snapshot.lifecycle.value}",
+        f"Decision: {snapshot.decision.value if snapshot.decision else 'none'}",
+        f"Cursor: {snapshot.event_cursor}",
+        "Nodes: "
+        + ", ".join(
+            f"{node.node_id}={node.state.value}@{node.attempt}"
+            for node in snapshot.nodes
+        ),
+        f"Hypotheses: {len(snapshot.hypotheses)}",
+        f"Evidence reports: {len(snapshot.reports)}",
+        "Certificates: "
+        + (", ".join(item.certificate_id for item in snapshot.certificates) or "none"),
+        "Witnesses: "
+        + (", ".join(item.witness_id for item in snapshot.witnesses) or "none"),
+        "Launch permit: "
+        + (
+            "none"
+            if snapshot.launch_permit is None
+            else (
+                f"{snapshot.launch_permit.launch_permit_id} "
+                f"{snapshot.launch_permit.state.value}"
+            )
+        ),
+        "Action permits: "
+        + (
+            ", ".join(
+                f"{permit.permit_id}={permit.state.value}"
+                for permit in snapshot.action_permits
+            )
+            or "none"
+        ),
+    ]
+    if snapshot.failure_category is not None:
+        lines.append(f"Failure: {snapshot.failure_category.value}")
+    _emit(("\n".join(lines) + "\n").encode())
+
+
+def _recovery_terminal_exit_code(snapshot: RecoveryRunSnapshot) -> ExitCode:
+    if snapshot.lifecycle is RecoveryRunLifecycle.COMPLETED:
+        return ExitCode.SUCCESS
+    if snapshot.lifecycle is RecoveryRunLifecycle.ESCALATED:
+        return ExitCode.UNRESOLVED
+    if snapshot.lifecycle in {
+        RecoveryRunLifecycle.FAILED,
+        RecoveryRunLifecycle.CANCELLED,
+    }:
+        return ExitCode.SERVICE_UNAVAILABLE
+    raise RemoteProtocolError() from None
 
 
 def _validate_scenario_views(
@@ -603,6 +750,60 @@ def _operator_client(api_url: str) -> OperatorApiClient:
         identity_token_supplier=supplier,
         identity_audience=audience,
     )
+
+
+async def _remote_recovery_run(
+    *,
+    api_url: str,
+    request: RecoveryRunRequest,
+    output: EventOutput,
+) -> RecoveryRunSnapshot:
+    async with _operator_client(api_url) as client:
+        await client.launch_recovery(request)
+        async for event in client.recovery_events(request.run_id):
+            _write_recovery_event(event, output)
+        return await client.get_recovery_snapshot(request.run_id)
+
+
+@recovery_app.command("run")
+def recovery_run(
+    scenario: RecoveryScenario,
+    policy: Annotated[RecoveryRunPolicy, typer.Option("--policy")],
+    fault: Annotated[RecoveryRunFault, typer.Option("--fault")],
+    output: Annotated[EventOutput, typer.Option("--output")] = EventOutput.HUMAN,
+    run_id: Annotated[str | None, typer.Option("--run-id")] = None,
+    api_url: Annotated[str, _API_URL_OPTION] = _DEFAULT_API_URL,
+) -> None:
+    """Run the durable two-agent Cloud Run recovery timeline."""
+
+    try:
+        request = RecoveryRunRequest(
+            schema_version=RECOVERY_RUN_REQUEST_VERSION,
+            run_id=run_id or f"recovery-{uuid4().hex}",
+            scenario=scenario.value,
+            policy=policy,
+            fault=fault,
+        )
+        snapshot = asyncio.run(
+            _remote_recovery_run(
+                api_url=api_url,
+                request=request,
+                output=output,
+            )
+        )
+        if output is EventOutput.JSONL:
+            _emit(canonical_json_output(snapshot))
+        else:
+            _write_recovery_snapshot(snapshot)
+        raise typer.Exit(code=_recovery_terminal_exit_code(snapshot))
+    except typer.Exit:
+        raise
+    except KeyboardInterrupt:
+        raise typer.Exit(code=ExitCode.INTERRUPTED) from None
+    except (ContractError, TypeError, ValueError):
+        _fail(FailureCategory.INVALID_INPUT)
+    except Exception as error:
+        _client_failure(error)
 
 
 async def _remote_scenario_launch(
