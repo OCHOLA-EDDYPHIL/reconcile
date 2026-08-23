@@ -19,6 +19,7 @@ from reconcile.contracts import (
     RECOVERY_RUN_SNAPSHOT_VERSION,
     ActionPermit,
     ActionPermitState,
+    PermitAction,
     RecoveryChain,
     RecoveryDecision,
     RecoveryDispatchOutcome,
@@ -472,10 +473,18 @@ def apply_recovery_event(
             and permit.claimed_at is not None
             and receipt.recorded_at >= permit.claimed_at
         )
+        retry_dispatch = bool(
+            len(action_matches) == 1 and action_matches[0].action is PermitAction.RETRY
+        )
+        expected_attempt = (
+            None
+            if target_progress is None
+            else max(1, target_progress.attempt + int(retry_dispatch))
+        )
         if (
             snapshot.lifecycle is not RecoveryRunLifecycle.RUNNING
             or target_progress is None
-            or receipt.attempt != max(1, target_progress.attempt)
+            or receipt.attempt != expected_attempt
             or int(launch_match) + len(action_matches) != 1
             or any(
                 existing.receipt_id == receipt.receipt_id

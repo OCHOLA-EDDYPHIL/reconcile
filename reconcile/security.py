@@ -46,6 +46,14 @@ _JWT_SECRET = re.compile(
     r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b"
 )
 _GOOGLE_API_KEY = re.compile(r"\bAIza[0-9A-Za-z_-]{20,}\b")
+_GITHUB_TOKEN = re.compile(
+    r"\b(?:"
+    r"github_pat_[A-Za-z0-9_]{20,}"
+    r"|gh[opru]_[A-Za-z0-9]{36,}"
+    r"|ghs_(?:[A-Za-z0-9]{36,}|[0-9]+_eyJ[A-Za-z0-9_-]+"
+    r"\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+)"
+    r")\b"
+)
 _PEM_PRIVATE_KEY = re.compile(
     r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----.*?"
     r"-----END [A-Z0-9 ]*PRIVATE KEY-----",
@@ -90,6 +98,7 @@ def redact_untrusted_text(value: str) -> str:
     sanitized = _AUTHORIZATION_SECRET.sub(REDACTED, sanitized)
     sanitized = _JWT_SECRET.sub(REDACTED, sanitized)
     sanitized = _GOOGLE_API_KEY.sub(REDACTED, sanitized)
+    sanitized = _GITHUB_TOKEN.sub(REDACTED, sanitized)
     sanitized = _ASSIGNMENT_SECRET.sub(
         lambda match: f"{match.group(1)}{match.group(2)}{REDACTED}",
         sanitized,
@@ -113,6 +122,7 @@ def contains_sensitive_material(value: object) -> bool:
             _AUTHORIZATION_SECRET,
             _JWT_SECRET,
             _GOOGLE_API_KEY,
+            _GITHUB_TOKEN,
             _ASSIGNMENT_SECRET,
         )
     )

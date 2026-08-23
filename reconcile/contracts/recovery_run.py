@@ -52,6 +52,7 @@ class RecoveryRunPolicy(StrEnum):
 
 
 class RecoveryRunFault(StrEnum):
+    NO_FAULT = "no-fault"
     DROP_AFTER_ACCEPT = "drop-after-accept"
     SUPPRESS_BEFORE_DISPATCH = "suppress-before-dispatch"
 
@@ -578,8 +579,13 @@ class RecoveryRunSnapshot(StrictModel):
             progress = next(
                 node for node in self.nodes if node.node_id == receipt.node_id
             )
+            retry_dispatch = bool(
+                len(action_matches) == 1
+                and action_matches[0].action is PermitAction.RETRY
+            )
             if int(launch_match) + len(action_matches) != 1 or receipt.attempt > max(
-                1, progress.attempt
+                1,
+                progress.attempt + int(retry_dispatch),
             ):
                 raise ValueError("dispatch receipt lacks matching claimed authority")
         report_sha256s = {canonical_sha256(report) for report in self.reports}

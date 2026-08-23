@@ -12,6 +12,7 @@ import asyncio
 import hashlib
 import inspect
 import os
+import secrets
 import tempfile
 import time
 from collections.abc import Awaitable, Callable
@@ -73,6 +74,7 @@ from reconcile.contracts import (
     RecoveryCloudRunObservation,
     RecoveryDispatchOutcome,
     RecoveryFirestoreObservation,
+    RecoveryLaunchPermitState,
     RecoveryMutationCounters,
     RecoveryPolicyComparison,
     RecoveryPolicyResult,
@@ -1080,7 +1082,10 @@ class ReleaseChainDispatchGateway:
             action_request_sha256=scope.action_request_sha256,
             authority_id=scope.authority_id,
             claim_id=scope.claim_id,
-            attempt=max(1, node.attempt),
+            attempt=max(
+                1,
+                node.attempt + int(scope.permit_action is PermitAction.RETRY),
+            ),
             provider_contact=provider_contact,
             outcome=(
                 RecoveryReceiptOutcome.PROVIDER_CONTACTED
@@ -1617,7 +1622,11 @@ def recovery_experiment_binding(
         "point": (
             "cloud-run-stage-after-provider-accept"
             if fault is RecoveryRunFault.DROP_AFTER_ACCEPT
-            else "firestore-record-after-authority-claim-before-provider-contact"
+            else (
+                "firestore-record-after-authority-claim-before-provider-contact"
+                if fault is RecoveryRunFault.SUPPRESS_BEFORE_DISPATCH
+                else "no-injected-fault"
+            )
         ),
         "version": "recovery-fault-boundary-v1",
     }
@@ -1692,8 +1701,12 @@ class RecoveryPolicyResultRecorder:
             revision=self._baseline_revision,
         )
         record = await self._firestore.read(self._settings.release_id)
-        if service.revision_traffic_percent != 100 or record is not None or revisions:
+        if service.revision_traffic_percent != 100 or record is not None:
             raise ReleaseChainError("policy lane did not start from the safe baseline")
+        if revisions:
+            raise ReleaseChainError(
+                "policy lane requires a freshly reprovisioned Cloud Run target"
+            )
         return RecoveryLaneBaseline(release_revisions=())
 
     @staticmethod
@@ -1777,6 +1790,120 @@ class RecoveryPolicyResultRecorder:
         return cloud, firestore, created_revisions, promotion_count, record_count
 
     @staticmethod
+    def _accepted_action_mutation(
+        snapshot: RecoveryRunSnapshot,
+        *,
+        target_node_id: str,
+        observed_effect: bool,
+    ) -> int:
+        """Count an accepted mutation from durable authority, not ambient state."""
+
+        permits = tuple(
+            permit
+            for permit in snapshot.action_permits
+            if permit.target_node_id == target_node_id
+        )
+
+        def provider_contact_recorded(permit_id: str, claim_id: str | None) -> bool:
+            return any(
+                receipt.authority_id == permit_id
+                and receipt.claim_id == claim_id
+                and receipt.provider_contact
+                for receipt in snapshot.dispatch_receipts
+            )
+
+        return int(
+            any(
+                (
+                    permit.state is ActionPermitState.COMPLETED
+                    and (
+                        permit.completion_outcome is PermitCompletionOutcome.SUCCEEDED
+                        or (
+                            permit.completion_outcome
+                            is PermitCompletionOutcome.OUTCOME_UNKNOWN
+                            and observed_effect
+                            and provider_contact_recorded(
+                                permit.permit_id,
+                                permit.claim_id,
+                            )
+                        )
+                    )
+                )
+                or (
+                    permit.state is ActionPermitState.CLAIMED
+                    and observed_effect
+                    and provider_contact_recorded(
+                        permit.permit_id,
+                        permit.claim_id,
+                    )
+                )
+                for permit in permits
+            )
+        )
+
+    @classmethod
+    def _proof_mutation_counters(
+        cls,
+        snapshot: RecoveryRunSnapshot,
+        cloud: RecoveryCloudRunObservation,
+        firestore: RecoveryFirestoreObservation,
+    ) -> tuple[int, int, int]:
+        staged = cloud.intended_revision in cloud.release_revisions
+        launch = snapshot.launch_permit
+        launch_contacted = bool(
+            launch is not None
+            and any(
+                receipt.authority_id == launch.launch_permit_id
+                and receipt.claim_id == launch.claim_id
+                and receipt.provider_contact
+                for receipt in snapshot.dispatch_receipts
+            )
+        )
+        revisions_created = int(
+            launch is not None
+            and (
+                (
+                    launch.state is RecoveryLaunchPermitState.COMPLETED
+                    and (
+                        launch.outcome is RecoveryDispatchOutcome.SUCCEEDED
+                        or (
+                            launch.outcome is RecoveryDispatchOutcome.OUTCOME_UNKNOWN
+                            and staged
+                            and launch_contacted
+                        )
+                    )
+                )
+                or (
+                    launch.state is RecoveryLaunchPermitState.CLAIMED
+                    and staged
+                    and launch_contacted
+                )
+            )
+        )
+        promoted = (
+            cloud.serving_percent == 100
+            and cloud.serving_revision == cloud.intended_revision
+        )
+        exact_record = (
+            firestore.exists
+            and firestore.cloud_run_revision == cloud.intended_revision
+            and firestore.payload_sha256 == firestore.expected_payload_sha256
+            and firestore.semantic_action_sha256
+            == firestore.expected_semantic_action_sha256
+        )
+        promotions_accepted = cls._accepted_action_mutation(
+            snapshot,
+            target_node_id="promote",
+            observed_effect=promoted,
+        )
+        release_records_created = cls._accepted_action_mutation(
+            snapshot,
+            target_node_id="record",
+            observed_effect=exact_record,
+        )
+        return revisions_created, promotions_accepted, release_records_created
+
+    @staticmethod
     def _event_node(event: RecoveryRunEvent) -> str:
         payload = event.payload
         for value in (
@@ -1834,6 +1961,15 @@ class RecoveryPolicyResultRecorder:
         cloud, firestore, revisions, promotions, records = await self._observe_provider(
             baseline
         )
+        chain_completed = outcome.chain_completed and (
+            cloud.serving_percent == 100
+            and cloud.serving_revision in cloud.release_revisions
+            and firestore.exists
+            and firestore.cloud_run_revision == cloud.serving_revision
+            and firestore.payload_sha256 == firestore.expected_payload_sha256
+            and firestore.semantic_action_sha256
+            == firestore.expected_semantic_action_sha256
+        )
         return RecoveryPolicyResult(
             schema_version=RECOVERY_POLICY_RESULT_VERSION,
             run_id=run_id,
@@ -1843,10 +1979,8 @@ class RecoveryPolicyResultRecorder:
             input_intent_sha256=binding.input_intent_sha256,
             fault_boundary_sha256=binding.fault_boundary_sha256,
             observation_catalog_sha256=binding.observation_catalog_sha256,
-            chain_completed=outcome.chain_completed,
-            terminal_disposition=(
-                "COMPLETED" if outcome.chain_completed else "ABORTED"
-            ),
+            chain_completed=chain_completed,
+            terminal_disposition=("COMPLETED" if chain_completed else "ABORTED"),
             counters=RecoveryMutationCounters(
                 revisions_created=revisions,
                 promotions_accepted=promotions,
@@ -1886,20 +2020,31 @@ class RecoveryPolicyResultRecorder:
             raise TypeError("proof result requires one terminal durable recovery run")
         fault = snapshot.request.fault
         self._validate_binding(self._settings, fault, binding)
-        cloud, firestore, revisions, promotions, records = await self._observe_provider(
-            baseline
+        (
+            cloud,
+            firestore,
+            _revisions,
+            _promotions,
+            _records,
+        ) = await self._observe_provider(baseline)
+        revisions, promotions, records = self._proof_mutation_counters(
+            snapshot,
+            cloud,
+            firestore,
         )
         permits = snapshot.action_permits
         retry_permits = tuple(
             permit for permit in permits if permit.action is PermitAction.RETRY
         )
         consumed = tuple(
-            permit for permit in permits if permit.state is ActionPermitState.COMPLETED
+            permit
+            for permit in permits
+            if permit.state in {ActionPermitState.CLAIMED, ActionPermitState.COMPLETED}
         )
         retry_consumed = tuple(
             permit
             for permit in retry_permits
-            if permit.state is ActionPermitState.COMPLETED
+            if permit.state in {ActionPermitState.CLAIMED, ActionPermitState.COMPLETED}
         )
         return RecoveryPolicyResult(
             schema_version=RECOVERY_POLICY_RESULT_VERSION,
@@ -1970,8 +2115,10 @@ class ReleaseChainPolicyLaneExecutor:
     """Execute real baseline or Proof-to-Permit lanes on fresh isolated state.
 
     Cloud Run revisions are immutable. A factory boundary is therefore mandatory:
-    every lane receives fresh physical state while the constructor and recorder
-    reject any drift in the logical target, input, fault, or observation catalog.
+    every lane receives an externally reprovisioned same-name canary while the
+    constructor and recorder reject any drift in the logical target, input, fault,
+    or observation catalog. Reset restores mutable effects and honestly retains
+    immutable revision residue; automated reprovisioning belongs to issue #173.
     """
 
     def __init__(
@@ -2016,13 +2163,21 @@ class ReleaseChainPolicyLaneExecutor:
         policy: RecoveryRunPolicy,
         fault: RecoveryRunFault,
         binding: RecoveryExperimentBinding,
+        *,
+        execution_id: str | None = None,
     ) -> str:
+        if execution_id is not None and (
+            type(execution_id) is not str or not 1 <= len(execution_id) <= 128
+        ):
+            raise ValueError("policy lane execution identity is invalid")
         digest = hashlib.sha256(
             canonical_json_value_bytes(
                 {
+                    "execution_id": execution_id or self._invoked_at.isoformat(),
                     "fault": fault.value,
                     "input_intent_sha256": binding.input_intent_sha256,
                     "policy": policy.value,
+                    "target_sha256": binding.target_sha256,
                 }
             )
         ).hexdigest()[:24]
@@ -2034,6 +2189,7 @@ class ReleaseChainPolicyLaneExecutor:
         policy: str,
         fault: RecoveryRunFault,
         binding: RecoveryExperimentBinding,
+        execution_id: str | None = None,
     ) -> RecoveryPolicyResult:
         if self._pending_resetter is not None:
             raise ReleaseChainError("previous policy lane has not been reset")
@@ -2095,7 +2251,12 @@ class ReleaseChainPolicyLaneExecutor:
             cloud_reader=resources.cloud_reader,
             firestore=resources.firestore,
         )
-        run_id = self._run_id(selected_policy, fault, binding)
+        run_id = self._run_id(
+            selected_policy,
+            fault,
+            binding,
+            execution_id=execution_id,
+        )
         if selected_policy in {
             RecoveryRunPolicy.BLIND_RETRY,
             RecoveryRunPolicy.BLIND_ABORT,
@@ -2170,7 +2331,12 @@ class ReleaseChainPolicyLaneExecutor:
             )
             if created:
                 raise ReleaseChainError("policy lane recovery state changed")
-            if existing.lifecycle is RecoveryRunLifecycle.CANCELLED:
+            if existing.lifecycle in {
+                RecoveryRunLifecycle.COMPLETED,
+                RecoveryRunLifecycle.ESCALATED,
+                RecoveryRunLifecycle.FAILED,
+                RecoveryRunLifecycle.CANCELLED,
+            }:
                 raise ReleaseChainError("terminal policy lane cannot be resumed")
             baseline = RecoveryLaneBaseline(release_revisions=())
         snapshot = await workflow.run(run_id)
@@ -2198,6 +2364,7 @@ class RecoveryPolicyLaneExecutor(Protocol):
         policy: str,
         fault: RecoveryRunFault,
         binding: RecoveryExperimentBinding,
+        execution_id: str | None = None,
     ) -> RecoveryPolicyResult: ...
 
 
@@ -2227,7 +2394,16 @@ class RecoveryPolicyComparisonRunner:
         self._resetter = resetter
         self._clock = clock or (lambda: datetime.now(UTC))
 
-    async def run(self, fault: RecoveryRunFault) -> RecoveryPolicyComparison:
+    async def run(
+        self,
+        fault: RecoveryRunFault,
+        *,
+        execution_id: str | None = None,
+    ) -> RecoveryPolicyComparison:
+        if execution_id is None:
+            execution_id = f"execution-{secrets.token_hex(16)}"
+        elif type(execution_id) is not str or not 1 <= len(execution_id) <= 128:
+            raise ValueError("comparison execution identity is invalid")
         binding = recovery_experiment_binding(self._settings, fault)
         lanes: list[RecoveryPolicyResult] = []
         resets: list[RecoveryResetResult] = []
@@ -2237,6 +2413,7 @@ class RecoveryPolicyComparisonRunner:
                     policy=policy,
                     fault=fault,
                     binding=binding,
+                    execution_id=execution_id,
                 )
                 if type(result) is not RecoveryPolicyResult or (
                     result.policy,
@@ -2270,7 +2447,10 @@ class RecoveryPolicyComparisonRunner:
                     {
                         "fault": fault.value,
                         "input_intent_sha256": binding.input_intent_sha256,
+                        "execution_id": execution_id,
                         "release_id": self._settings.release_id,
+                        "run_ids": [lane.run_id for lane in lanes],
+                        "target_sha256": binding.target_sha256,
                     }
                 )
             ).hexdigest()[:32]
@@ -2359,7 +2539,12 @@ class ReleaseChainResetter:
             **({"mode": CloudRunFaultMode.PASS_THROUGH} if accepts_mode else {}),
         )
 
-    async def _wait_for_baseline(self):
+    async def _wait_for_baseline(
+        self,
+        *,
+        previous_service_etag: str,
+        accepted_at: datetime,
+    ):
         latest = None
         for observation in range(self._max_observations):
             try:
@@ -2376,6 +2561,8 @@ class ReleaseChainResetter:
                 and latest.revision_traffic_percent == 100
                 and not latest.reconciling
                 and latest.terminal_condition == "SUCCEEDED"
+                and latest.service_etag != previous_service_etag
+                and latest.observed_at >= accepted_at
             ):
                 return latest
             if observation + 1 < self._max_observations:
@@ -2391,9 +2578,24 @@ class ReleaseChainResetter:
         )
         accepted = await self._reset_cloud_run()
         operation_name = getattr(accepted, "operation_name", None)
-        if type(operation_name) is not str or not operation_name:
+        accepted_revision = getattr(accepted, "revision", None)
+        previous_service_etag = getattr(accepted, "service_etag", None)
+        accepted_at = getattr(accepted, "accepted_at", None)
+        if (
+            type(operation_name) is not str
+            or not operation_name
+            or accepted_revision != self._baseline
+            or type(previous_service_etag) is not str
+            or not previous_service_etag
+            or type(accepted_at) is not datetime
+            or accepted_at.tzinfo is None
+            or accepted_at.utcoffset() is None
+        ):
             raise ReleaseChainError("Cloud Run reset acceptance is invalid")
-        service = await self._wait_for_baseline()
+        service = await self._wait_for_baseline(
+            previous_service_etag=previous_service_etag,
+            accepted_at=accepted_at.astimezone(UTC),
+        )
         record_action = (
             build_release_chain_definition(
                 self._settings,

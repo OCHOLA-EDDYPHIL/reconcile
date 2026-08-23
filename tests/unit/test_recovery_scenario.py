@@ -337,6 +337,31 @@ def test_blind_baselines_apply_the_same_pre_dispatch_fault_boundary() -> None:
     assert abort_mutator.records == 0
 
 
+def test_blind_baselines_support_a_no_fault_control_lane() -> None:
+    retry_mutator = _BlindMutator()
+    abort_mutator = _BlindMutator()
+
+    retry = asyncio.run(
+        BlindPolicyExecutor(retry_mutator).blind_retry(
+            operation_id="stage-release-7",
+            fault=RecoveryRunFault.NO_FAULT,
+        )
+    )
+    abort = asyncio.run(
+        BlindPolicyExecutor(abort_mutator).blind_abort(
+            operation_id="stage-release-7",
+            fault=RecoveryRunFault.NO_FAULT,
+        )
+    )
+
+    assert retry.chain_completed is True
+    assert abort.chain_completed is True
+    assert retry.provider_contacts == abort.provider_contacts == 3
+    assert retry_mutator.revisions == abort_mutator.revisions == ["stage-release-7"]
+    assert (retry_mutator.promotions, retry_mutator.records) == (1, 1)
+    assert (abort_mutator.promotions, abort_mutator.records) == (1, 1)
+
+
 def test_canonical_comparison_export_is_private_and_never_overwrites(tmp_path) -> None:
     _receipt, comparison = make_recovery_scenario_examples()
     path = tmp_path / "comparison.json"
@@ -348,6 +373,16 @@ def test_canonical_comparison_export_is_private_and_never_overwrites(tmp_path) -
     assert os.stat(path).st_mode & 0o777 == 0o600
     with pytest.raises(FileExistsError):
         export_recovery_comparison(path, comparison)
+
+
+def test_comparison_export_rejects_token_shaped_release_identity(tmp_path) -> None:
+    _receipt, comparison = make_recovery_scenario_examples()
+    tainted = comparison.model_copy(
+        update={"release_id": "ghp_" + "a" * 36},
+    )
+
+    with pytest.raises(ValueError, match="secret-bearing values"):
+        export_recovery_comparison(tmp_path / "comparison.json", tainted)
 
 
 def test_interrupted_comparison_export_leaves_destination_retryable(
@@ -384,13 +419,13 @@ class _ComparisonLanes:
             lane.policy: lane for lane in make_recovery_scenario_examples()[1].lanes
         }
 
-    async def execute(self, *, policy, fault, binding):
+    async def execute(self, *, policy, fault, binding, execution_id=None):
         self.calls.append((policy, fault))
         payload = self.templates[policy].model_dump(mode="python")
         payload.update(
             {
                 "schema_version": RECOVERY_POLICY_RESULT_VERSION,
-                "run_id": f"{policy}-{fault.value}-run",
+                "run_id": f"{policy}-{fault.value}-{execution_id or 'direct'}",
                 "fault": fault.value,
                 "target_sha256": binding.target_sha256,
                 "input_intent_sha256": binding.input_intent_sha256,
@@ -432,6 +467,26 @@ def test_comparison_runner_binds_four_isolated_lanes_and_resets_each() -> None:
     assert len({lane.run_id for lane in comparison.lanes}) == 4
     assert all(lane.fault == comparison.fault for lane in comparison.lanes)
     assert resetter.calls == 4
+
+
+def test_comparison_runner_uses_fresh_execution_and_run_identities() -> None:
+    lanes = _ComparisonLanes()
+    resetter = _ComparisonResetter()
+    runner = RecoveryPolicyComparisonRunner(
+        settings=_settings(),
+        lane_executor=lanes,
+        resetter=resetter,
+        clock=lambda: NOW,
+    )
+
+    first = asyncio.run(runner.run(RecoveryRunFault.DROP_AFTER_ACCEPT))
+    second = asyncio.run(runner.run(RecoveryRunFault.DROP_AFTER_ACCEPT))
+
+    assert first.comparison_id != second.comparison_id
+    assert {lane.run_id for lane in first.lanes}.isdisjoint(
+        lane.run_id for lane in second.lanes
+    )
+    assert resetter.calls == 8
 
 
 def test_comparison_runner_resets_a_failed_lane_before_propagating() -> None:

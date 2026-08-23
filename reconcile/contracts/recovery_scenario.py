@@ -126,7 +126,7 @@ class RecoveryPolicyResult(StrictModel):
     schema_version: Literal[RECOVERY_POLICY_RESULT_VERSION]
     run_id: Identifier
     policy: Literal["blind-retry", "blind-abort", "fixed", "adaptive"]
-    fault: Literal["drop-after-accept", "suppress-before-dispatch"]
+    fault: Literal["no-fault", "drop-after-accept", "suppress-before-dispatch"]
     target_sha256: Sha256Digest
     input_intent_sha256: Sha256Digest
     fault_boundary_sha256: Sha256Digest
@@ -158,7 +158,10 @@ class RecoveryPolicyResult(StrictModel):
         if self.chain_completed != (self.terminal_disposition == "COMPLETED"):
             raise ValueError("chain completion and terminal disposition disagree")
         if self.chain_completed and not (
-            self.cloud_run.serving_percent == 100 and self.firestore.exists
+            self.cloud_run.serving_percent == 100
+            and self.cloud_run.serving_revision in self.cloud_run.release_revisions
+            and self.firestore.exists
+            and self.firestore.cloud_run_revision == self.cloud_run.serving_revision
         ):
             raise ValueError("completed release chain lacks its terminal effects")
         if self.chain_completed and (
@@ -235,7 +238,7 @@ class RecoveryPolicyComparison(StrictModel):
     schema_version: Literal[RECOVERY_POLICY_COMPARISON_VERSION]
     comparison_id: Identifier
     release_id: Identifier
-    fault: Literal["drop-after-accept", "suppress-before-dispatch"]
+    fault: Literal["no-fault", "drop-after-accept", "suppress-before-dispatch"]
     target_sha256: Sha256Digest
     input_intent_sha256: Sha256Digest
     fault_boundary_sha256: Sha256Digest

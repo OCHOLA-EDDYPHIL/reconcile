@@ -335,6 +335,7 @@
         },
         "fault": {
           "enum": [
+            "no-fault",
             "drop-after-accept",
             "suppress-before-dispatch"
           ],
@@ -589,6 +590,7 @@
     },
     "fault": {
       "enum": [
+        "no-fault",
         "drop-after-accept",
         "suppress-before-dispatch"
       ],

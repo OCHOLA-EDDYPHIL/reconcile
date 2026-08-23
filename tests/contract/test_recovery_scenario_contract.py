@@ -59,6 +59,18 @@ def test_suppressed_proof_lane_requires_one_issued_and_consumed_retry() -> None:
         RecoveryPolicyResult.model_validate_json(json.dumps(payload))
 
 
+def test_comparison_contract_accepts_the_no_fault_control() -> None:
+    _receipt, comparison = make_recovery_scenario_examples()
+    payload = _payload(comparison)
+    payload["fault"] = "no-fault"
+    for lane in payload["lanes"]:
+        lane["fault"] = "no-fault"
+
+    decoded = RecoveryPolicyComparison.model_validate_json(json.dumps(payload))
+
+    assert decoded.fault == "no-fault"
+
+
 def test_proof_lane_requires_a_certificate_or_ambiguity_witness() -> None:
     _receipt, comparison = make_recovery_scenario_examples()
     payload = _payload(comparison.lanes[-2])

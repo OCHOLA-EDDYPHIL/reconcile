@@ -4,10 +4,21 @@ import pytest
 
 from reconcile.security import (
     REDACTED,
+    contains_sensitive_material,
     is_sensitive_key,
     redact_boundary_value,
     redact_untrusted_text,
     terminal_safe_text,
+)
+
+GITHUB_TOKEN_SHAPES = (
+    "ghp_" + "a" * 36,
+    "gho_" + "b" * 36,
+    "ghu_" + "c" * 36,
+    "ghs_" + "d" * 36,
+    "ghr_" + "e" * 76,
+    "github_pat_" + "f" * 22 + "_" + "g" * 59,
+    "ghs_123456_eyJabcdefghijk.abcdefghijklmnop.abcdefghijklmnop",
 )
 
 
@@ -72,6 +83,20 @@ def test_text_redaction_removes_assignment_authorization_jwt_and_pem_forms() -> 
     assert jwt not in sanitized
     assert "material" not in sanitized
     assert sanitized.count(REDACTED) == 4
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("token", GITHUB_TOKEN_SHAPES)
+def test_sensitive_material_detection_recognizes_github_tokens(token: str) -> None:
+    assert contains_sensitive_material(token)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("token", GITHUB_TOKEN_SHAPES)
+def test_text_redaction_removes_github_tokens(token: str) -> None:
+    assert redact_untrusted_text(f"before {token} after") == (
+        f"before {REDACTED} after"
+    )
 
 
 @pytest.mark.unit

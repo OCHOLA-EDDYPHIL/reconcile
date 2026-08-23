@@ -23,6 +23,7 @@ from reconcile.contracts import (
     PlannerExplanation,
     PlannerStopAdvice,
     ProbeRequest,
+    RecoveryAuthorityKind,
     RecoveryDecision,
     RecoveryReceiptOutcome,
     RecoveryRunFault,
@@ -54,6 +55,7 @@ from reconcile.recovery_scenario import (
     RecoveryPolicyComparisonRunner,
     RecoveryPolicyResultRecorder,
     ReleaseChainBlindMutator,
+    ReleaseChainDispatchGateway,
     ReleaseChainError,
     ReleaseChainEvidenceSource,
     ReleaseChainLaneResources,
@@ -693,7 +695,11 @@ def test_missing_or_conflicting_evidence_witnesses_without_an_extra_mutation(
 
 @pytest.mark.parametrize(
     "fault",
-    [RecoveryRunFault.DROP_AFTER_ACCEPT, RecoveryRunFault.SUPPRESS_BEFORE_DISPATCH],
+    [
+        RecoveryRunFault.NO_FAULT,
+        RecoveryRunFault.DROP_AFTER_ACCEPT,
+        RecoveryRunFault.SUPPRESS_BEFORE_DISPATCH,
+    ],
 )
 @pytest.mark.parametrize(
     "policy",
@@ -820,6 +826,11 @@ def test_proof_to_permit_completes_once_and_suppression_retries_once(
     assert tuple(receipt.outcome for receipt in snapshot.dispatch_receipts).count(
         RecoveryReceiptOutcome.SUPPRESSED_BEFORE_DISPATCH
     ) == (1 if fault is RecoveryRunFault.SUPPRESS_BEFORE_DISPATCH else 0)
+    assert tuple(
+        receipt.attempt
+        for receipt in snapshot.dispatch_receipts
+        if receipt.node_id == "record"
+    ) == ((1, 2) if fault is RecoveryRunFault.SUPPRESS_BEFORE_DISPATCH else (1,))
     retries = tuple(
         permit
         for permit in snapshot.action_permits
@@ -831,13 +842,115 @@ def test_proof_to_permit_completes_once_and_suppression_retries_once(
     assert bool(snapshot.hypotheses) is (policy is RecoveryRunPolicy.ADAPTIVE)
 
 
+def test_claimed_suppression_permit_is_counted_after_restart(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    class _ProcessCrash(BaseException):
+        pass
+
+    settings = _settings()
+    _state, adapter, _action, reader, firestore, _client = _provider(settings)
+    store = InMemoryRecoveryRunStore()
+    authority = PermitAuthority(
+        SqliteDurableRuntimeStore(tmp_path / "claimed-restart.sqlite3"),
+        clock=lambda: NOW + timedelta(seconds=2),
+    )
+    workflow = build_release_chain_workflow(
+        settings=settings,
+        invoked_at=NOW,
+        store=store,
+        permit_authority=authority,
+        recovery_agent=RecoveryAgent(_Planner(output=_output(probe_count=0))),
+        cloud_action=adapter,
+        cloud_reader=reader,
+        firestore=firestore,
+        clock=lambda: NOW + timedelta(seconds=2),
+    )
+    request = RecoveryRunRequest(
+        schema_version=RECOVERY_RUN_REQUEST_VERSION,
+        run_id="fixed-suppression-claimed-restart",
+        scenario="cloud-run-rollout",
+        policy=RecoveryRunPolicy.FIXED,
+        fault=RecoveryRunFault.SUPPRESS_BEFORE_DISPATCH,
+    )
+    recorder = RecoveryPolicyResultRecorder(
+        settings=settings,
+        baseline_revision=BASELINE,
+        cloud_reader=reader,
+        firestore=firestore,
+    )
+    real_complete = ReleaseChainDispatchGateway._complete
+    crashed = False
+
+    async def crash_after_suppression(self, claimed, scope, outcome):
+        nonlocal crashed
+        if (
+            not crashed
+            and scope.authority_kind is RecoveryAuthorityKind.ACTION_PERMIT
+            and scope.target_node_id == "record"
+            and scope.permit_action is PermitAction.CONTINUE
+        ):
+            crashed = True
+            raise _ProcessCrash
+        return await real_complete(self, claimed, scope, outcome)
+
+    monkeypatch.setattr(
+        ReleaseChainDispatchGateway, "_complete", crash_after_suppression
+    )
+
+    async def exercise():
+        baseline = await recorder.capture_baseline()
+        definition = await workflow.definition(request)
+        await store.create(request, definition.chain, created_at=NOW)
+        with pytest.raises(_ProcessCrash):
+            await workflow.run(request.run_id)
+        interrupted = await store.get(request.run_id)
+        completed = await workflow.run(request.run_id)
+        events = await store.events(request.run_id)
+        result = await recorder.record_proof(
+            snapshot=completed,
+            events=events,
+            binding=recovery_experiment_binding(settings, request.fault),
+            baseline=baseline,
+        )
+        return interrupted, completed, result
+
+    interrupted, completed, result = asyncio.run(exercise())
+
+    claimed = tuple(
+        permit
+        for permit in interrupted.action_permits
+        if permit.target_node_id == "record"
+    )
+    assert len(claimed) == 1
+    assert claimed[0].state is ActionPermitState.CLAIMED
+    assert completed.lifecycle is RecoveryRunLifecycle.COMPLETED
+    assert tuple(
+        receipt.attempt
+        for receipt in completed.dispatch_receipts
+        if receipt.node_id == "record"
+    ) == (1, 2)
+    assert result.chain_completed is True
+    assert result.counters.action_permits_consumed == 3
+    assert result.counters.retry_permits_consumed == 1
+
+
 @pytest.mark.parametrize("mismatch", ["wrong-revision", "wrong-semantic-action"])
-def test_wrong_release_record_binding_yields_ambiguity_without_retry(
+@pytest.mark.parametrize(
+    "fault",
+    [RecoveryRunFault.DROP_AFTER_ACCEPT, RecoveryRunFault.SUPPRESS_BEFORE_DISPATCH],
+)
+def test_wrong_release_record_binding_does_not_count_the_ambient_record(
     tmp_path,
     mismatch: str,
+    fault: RecoveryRunFault,
 ) -> None:
     settings = _settings()
-    state, _adapter, action, reader, firestore, firestore_client = _provider(settings)
+    state, adapter, action, reader, firestore, firestore_client = _provider(settings)
+    cloud_action = (
+        adapter if fault is RecoveryRunFault.SUPPRESS_BEFORE_DISPATCH else action
+    )
     definition = build_release_chain_definition(settings, invoked_at=NOW)
     record_action = definition.chain.nodes[-1].semantic_action
     reference = firestore_client.document("releases", settings.release_id)
@@ -860,7 +973,7 @@ def test_wrong_release_record_binding_yields_ambiguity_without_retry(
     reference.update_time = NOW
     store = InMemoryRecoveryRunStore()
     authority = PermitAuthority(
-        SqliteDurableRuntimeStore(tmp_path / f"{mismatch}.sqlite3"),
+        SqliteDurableRuntimeStore(tmp_path / f"{fault.value}-{mismatch}.sqlite3"),
         clock=lambda: NOW + timedelta(seconds=2),
     )
     agent = RecoveryAgent(_Planner(output=_output(probe_count=0)))
@@ -870,32 +983,21 @@ def test_wrong_release_record_binding_yields_ambiguity_without_retry(
         store=store,
         permit_authority=authority,
         recovery_agent=agent,
-        cloud_action=action,
+        cloud_action=cloud_action,
         cloud_reader=reader,
         firestore=firestore,
         clock=lambda: NOW + timedelta(seconds=2),
     )
-    resources = ReleaseChainLaneResources(
-        store=store,
-        permit_authority=authority,
-        recovery_agent=agent,
-        cloud_action=action,
-        cloud_reader=reader,
-        firestore=firestore,
-        baseline_revision=BASELINE,
-    )
-    executor = ReleaseChainPolicyLaneExecutor(
+    recorder = RecoveryPolicyResultRecorder(
         settings=settings,
-        invoked_at=NOW,
-        lane_factory=lambda **_kwargs: resources,
-        clock=lambda: NOW + timedelta(seconds=2),
-        reset_poll_interval_seconds=0,
+        baseline_revision=BASELINE,
+        cloud_reader=reader,
+        firestore=firestore,
     )
-    fault = RecoveryRunFault.DROP_AFTER_ACCEPT
     binding = recovery_experiment_binding(settings, fault)
     request = RecoveryRunRequest(
         schema_version=RECOVERY_RUN_REQUEST_VERSION,
-        run_id=executor._run_id(RecoveryRunPolicy.FIXED, fault, binding),
+        run_id=f"fixed-ambient-{fault.value}-{mismatch}",
         scenario="cloud-run-rollout",
         policy=RecoveryRunPolicy.FIXED,
         fault=fault,
@@ -904,10 +1006,12 @@ def test_wrong_release_record_binding_yields_ambiguity_without_retry(
     async def exercise():
         await store.create(request, definition.chain, created_at=NOW)
         snapshot = await workflow.run(request.run_id)
-        result = await executor.execute(
-            policy="fixed",
-            fault=fault,
+        events = await store.events(request.run_id)
+        result = await recorder.record_proof(
+            snapshot=snapshot,
+            events=events,
             binding=binding,
+            baseline=RecoveryLaneBaseline(release_revisions=()),
         )
         return snapshot, result
 
@@ -930,12 +1034,13 @@ def test_wrong_release_record_binding_yields_ambiguity_without_retry(
         else settings.staged_revision
     )
     assert len(snapshot.witnesses) == 1
-    assert all(
-        permit.action is PermitAction.CONTINUE for permit in snapshot.action_permits
-    )
+    assert sum(
+        permit.action is PermitAction.RETRY for permit in snapshot.action_permits
+    ) == int(fault is RecoveryRunFault.SUPPRESS_BEFORE_DISPATCH)
     assert state.update_count == 2
     assert reference.create_attempt_count == 1
     assert reference.create_count == 0
+    assert result.counters.release_records_created == 0
 
 
 def test_policy_observation_preserves_a_drifted_firestore_identity() -> None:
@@ -1025,6 +1130,14 @@ def test_reset_waits_for_settled_baseline_and_supports_the_fault_proxy() -> None
     assert result.serving_percent == 100
     assert result.release_record_absent is True
     assert state.pending_reset_traffic is None
+    recorder = RecoveryPolicyResultRecorder(
+        settings=settings,
+        baseline_revision=BASELINE,
+        cloud_reader=reader,
+        firestore=firestore,
+    )
+    with pytest.raises(ReleaseChainError, match="freshly reprovisioned"):
+        asyncio.run(recorder.capture_baseline())
 
 
 def test_reset_fails_closed_when_cloud_run_never_settles() -> None:
@@ -1065,6 +1178,33 @@ def test_reset_fails_closed_when_cloud_run_never_settles() -> None:
         return await firestore.read(settings.release_id)
 
     assert asyncio.run(exercise()) is not None
+
+
+def test_reset_rejects_a_stale_pre_acceptance_baseline_snapshot(monkeypatch) -> None:
+    settings = _settings()
+    state, _adapter, action, reader, firestore, _client = _provider(settings)
+
+    def accept_without_advancing_service(_request):
+        return _Accepted(
+            f"projects/{PROJECT}/locations/{LOCATION}/operations/stale-reset"
+        )
+
+    monkeypatch.setattr(state, "update", accept_without_advancing_service)
+    resetter = ReleaseChainResetter(
+        settings=settings,
+        cloud_action=action,
+        cloud_reader=reader,
+        firestore=firestore,
+        baseline_revision=BASELINE,
+        clock=lambda: NOW + timedelta(seconds=3),
+        max_observations=1,
+        poll_interval_seconds=0,
+    )
+
+    with pytest.raises(ReleaseChainError, match="safe baseline"):
+        asyncio.run(resetter.reset())
+
+    assert state.service.etag == "etag-1"
 
 
 def test_provider_backed_blind_baselines_expose_duplicate_and_incomplete_release() -> (
@@ -1176,6 +1316,67 @@ def test_provider_backed_blind_baselines_expose_duplicate_and_incomplete_release
     )
 
 
+def test_accepted_but_not_visible_promotion_is_not_a_completed_chain(
+    monkeypatch,
+) -> None:
+    settings = _settings()
+    state, adapter, _action, reader, firestore, _client = _provider(settings)
+    original_update = state.update
+
+    def keep_pre_promotion_traffic(request):
+        previous = tuple(
+            run_v2.TrafficTargetStatus(status)
+            for status in state.service.traffic_statuses
+        )
+        accepted = original_update(request)
+        if tuple(request.update_mask.paths) == ("traffic",) and any(
+            target.revision != BASELINE for target in request.service.traffic
+        ):
+            state.service.traffic_statuses = previous
+        return accepted
+
+    monkeypatch.setattr(state, "update", keep_pre_promotion_traffic)
+    recorder = RecoveryPolicyResultRecorder(
+        settings=settings,
+        baseline_revision=BASELINE,
+        cloud_reader=reader,
+        firestore=firestore,
+    )
+    mutator = ReleaseChainBlindMutator(
+        settings=settings,
+        cloud_action=adapter,
+        cloud_reader=reader,
+        firestore=firestore,
+        invoked_at=NOW,
+        clock=lambda: NOW + timedelta(seconds=2),
+    )
+
+    async def exercise():
+        baseline = await recorder.capture_baseline()
+        outcome = await BlindPolicyExecutor(mutator).blind_retry(
+            operation_id=settings.stage_operation_id,
+            fault=RecoveryRunFault.NO_FAULT,
+        )
+        result = await recorder.record_blind(
+            run_id="blind-accepted-promotion-not-visible",
+            policy=RecoveryRunPolicy.BLIND_RETRY,
+            fault=RecoveryRunFault.NO_FAULT,
+            binding=recovery_experiment_binding(settings, RecoveryRunFault.NO_FAULT),
+            baseline=baseline,
+            outcome=outcome,
+        )
+        return outcome, result
+
+    outcome, result = asyncio.run(exercise())
+
+    assert outcome.chain_completed is True
+    assert state.update_count == 2
+    assert result.chain_completed is False
+    assert result.terminal_disposition == "ABORTED"
+    assert result.cloud_run.serving_revision == BASELINE
+    assert result.firestore.cloud_run_revision == settings.staged_revision
+
+
 def test_concrete_policy_harness_runs_four_isolated_provider_backed_lanes(
     tmp_path,
 ) -> None:
@@ -1247,7 +1448,54 @@ def test_concrete_policy_harness_runs_four_isolated_provider_backed_lanes(
     assert all(reset.release_record_absent for reset in comparison.reset_results)
 
 
-def test_policy_lane_resumes_an_existing_durable_run(tmp_path) -> None:
+def test_lane_run_identity_includes_target_and_execution_identity() -> None:
+    settings = _settings()
+    binding = recovery_experiment_binding(settings, RecoveryRunFault.NO_FAULT)
+    executor = ReleaseChainPolicyLaneExecutor(
+        settings=settings,
+        invoked_at=NOW,
+        lane_factory=lambda **_kwargs: None,
+    )
+    other_target = ReleaseChainSettings(
+        project="other-project",
+        location=settings.location,
+        service=settings.service,
+        release_id=settings.release_id,
+        image_digest=settings.image_digest,
+        configuration_sha256=settings.configuration_sha256,
+        payload_sha256=settings.payload_sha256,
+        database=settings.database,
+    )
+    other_binding = recovery_experiment_binding(
+        other_target,
+        RecoveryRunFault.NO_FAULT,
+    )
+
+    first = executor._run_id(
+        RecoveryRunPolicy.FIXED,
+        RecoveryRunFault.NO_FAULT,
+        binding,
+        execution_id="execution-one",
+    )
+    second = executor._run_id(
+        RecoveryRunPolicy.FIXED,
+        RecoveryRunFault.NO_FAULT,
+        binding,
+        execution_id="execution-two",
+    )
+    other = executor._run_id(
+        RecoveryRunPolicy.FIXED,
+        RecoveryRunFault.NO_FAULT,
+        other_binding,
+        execution_id="execution-one",
+    )
+
+    assert len({first, second, other}) == 3
+
+
+def test_policy_lane_resumes_running_state_but_rejects_terminal_reuse_after_reset(
+    tmp_path,
+) -> None:
     settings = _settings()
     state, adapter, _fault_proxy, reader, firestore, _client = _provider(settings)
     store = InMemoryRecoveryRunStore()
@@ -1286,9 +1534,24 @@ def test_policy_lane_resumes_an_existing_durable_run(tmp_path) -> None:
     definition = build_release_chain_definition(settings, invoked_at=NOW)
     asyncio.run(store.create(request, definition.chain, created_at=NOW))
 
-    result = asyncio.run(executor.execute(policy="fixed", fault=fault, binding=binding))
+    async def exercise():
+        result = await executor.execute(policy="fixed", fault=fault, binding=binding)
+        reset = await executor.reset()
+        replay = ReleaseChainPolicyLaneExecutor(
+            settings=settings,
+            invoked_at=NOW,
+            lane_factory=lambda **_kwargs: resources,
+            clock=lambda: NOW + timedelta(seconds=2),
+            reset_poll_interval_seconds=0,
+        )
+        with pytest.raises(ReleaseChainError, match="terminal policy lane"):
+            await replay.execute(policy="fixed", fault=fault, binding=binding)
+        return result, reset
+
+    result, reset = asyncio.run(exercise())
 
     assert result.chain_completed is True
     assert result.counters.revisions_created == 1
     assert result.counters.release_records_created == 1
-    assert state.update_count == 2
+    assert reset.release_revisions_after == (settings.staged_revision,)
+    assert state.update_count == 3
