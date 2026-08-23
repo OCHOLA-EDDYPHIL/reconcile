@@ -39,6 +39,7 @@ from reconcile.contracts import (
     PlannerCitationRefs,
     PlannerExplanation,
     PlannerStopAdvice,
+    ProbeOutcome,
     ProbeRequest,
     RequestedAction,
     ScenarioFaultAction,
@@ -887,9 +888,20 @@ def test_durable_hosted_provider_timeout_completes_unknown_without_replay(
     asyncio.run(exercise())
 
 
+@pytest.mark.parametrize(
+    ("max_elapsed_ms", "advance_seconds", "establish_delay", "past_deadline"),
+    (
+        pytest.param(5_000, 4.2, 0.0, False, id="provider-window"),
+        pytest.param(500, 0.7, 0.75, True, id="terminalization-grace"),
+    ),
+)
 def test_durable_hosted_late_provider_window_completes_predispatch_unknown(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    max_elapsed_ms: int,
+    advance_seconds: float,
+    establish_delay: float,
+    past_deadline: bool,
 ) -> None:
     local_envelope, _, _ = _prepared_sandbox(
         tmp_path,
@@ -904,7 +916,7 @@ def test_durable_hosted_late_provider_window_completes_predispatch_unknown(
                         update={
                             "evidence_budget": (
                                 hosted_envelope.context.evidence_budget.model_copy(
-                                    update={"max_elapsed_ms": 500}
+                                    update={"max_elapsed_ms": max_elapsed_ms}
                                 )
                             )
                         }
@@ -917,13 +929,13 @@ def test_durable_hosted_late_provider_window_completes_predispatch_unknown(
     planner = _Planner(SANDBOX_ORDER_FIXED_PROBE_PLAN.steps[1].request)
     observations: list[str] = []
     clock = _MutableClock(datetime.now(UTC))
+    controller_clock = _MutableClock(clock.now())
 
     def handler(request: httpx.Request) -> httpx.Response:
         internal = decode_contract(request.content, InternalOperationRequest)
         observation = internal.payload["observation"]
         assert observation == "ingress"
         observations.append(observation)
-        clock.advance(4.2)
         response = InternalOperationResponse(
             schema_version=INTERNAL_OPERATION_RESPONSE_VERSION,
             request_id=internal.request_id,
@@ -936,6 +948,7 @@ def test_durable_hosted_late_provider_window_completes_predispatch_unknown(
                 }
             },
         )
+        clock.advance(advance_seconds)
         return httpx.Response(200, content=canonical_internal_json_bytes(response))
 
     async def exercise() -> None:
@@ -952,18 +965,24 @@ def test_durable_hosted_late_provider_window_completes_predispatch_unknown(
                 transport=transport,
             )
             store = SqliteDurableRuntimeStore(tmp_path / "late-window-runtime.sqlite3")
-            establish_report = store.establish_report
+            if establish_delay:
+                establish_report = store.establish_report
 
-            async def delayed_establish_report(*args, **kwargs):
-                await asyncio.sleep(0.75)
-                return await establish_report(*args, **kwargs)
+                async def delayed_establish_report(*args, **kwargs):
+                    await asyncio.sleep(establish_delay)
+                    return await establish_report(*args, **kwargs)
 
-            monkeypatch.setattr(store, "establish_report", delayed_establish_report)
+                monkeypatch.setattr(
+                    store,
+                    "establish_report",
+                    delayed_establish_report,
+                )
             service = DurableInvestigationApplicationService(
                 store,
                 HostedHybridExecutor(
                     fixed=fixed,
                     planner_factory=lambda: planner,
+                    clock=controller_clock,
                 ),
                 strategy=DurableExecutionStrategy.ADAPTIVE,
                 owner_id="hosted-late-window-regression",
@@ -982,8 +1001,12 @@ def test_durable_hosted_late_provider_window_completes_predispatch_unknown(
 
         assert result.report.classification is Classification.UNKNOWN
         assert run.state is DurableRunState.TERMINAL
+        assert (run.updated_at > run.limits.deadline_at) is past_deadline
         assert receipts == ()
         assert observations == ["ingress"]
+        assert len(result.report.probe_audit) == 1
+        assert result.report.probe_audit[0].outcome is ProbeOutcome.COMPLETED
+        assert result.report.probe_audit[0].stop_reason == "probe_completed"
         assert planner.inputs == []
         assert is_bounded_hybrid_explicit_unknown(result.report)
         assert not is_bounded_hybrid_fixed_fallback(result.report)
