@@ -22,6 +22,7 @@ from reconcile.contracts import (
     ACTION_PERMIT_VERSION,
     ActionPermit,
     ActionPermitState,
+    CertifiedTransition,
     PermitAction,
     canonical_json_bytes,
     canonical_sha256,
@@ -71,6 +72,7 @@ from reconcile.persistence.permits import (
     PERMIT_CLAIM_REQUEST_VERSION,
     PermitClaimDenied,
     PermitClaimRequest,
+    action_permit_id,
 )
 from reconcile.persistence.sqlite_runtime import SqliteDurableRuntimeStore
 from reconcile.recovery_qualification_execution import (
@@ -1105,10 +1107,22 @@ def _contention_permit(
     source = f"source-{suffix}"
     target = source if action is PermitAction.RETRY else f"target-{suffix}"
     digest = hashlib.sha256(suffix.encode()).hexdigest()
+    certificate_id = f"qualification-certificate-{suffix}"
+    transition = CertifiedTransition(
+        action=action,
+        source_node_id=source,
+        target_node_id=target,
+        semantic_action_sha256=digest,
+        tool_name="qualification-provider-mutation",
+        tool_version="1.0.0",
+        arguments_sha256=digest,
+        target_sha256=digest,
+        precondition_sha256=digest,
+    )
     return ActionPermit(
         schema_version=ACTION_PERMIT_VERSION,
-        permit_id=f"qualification-permit-{suffix}",
-        certificate_id=f"qualification-certificate-{suffix}",
+        permit_id=action_permit_id(certificate_id, transition),
+        certificate_id=certificate_id,
         certificate_sha256=digest,
         chain_id="qualification-chain",
         source_node_id=source,

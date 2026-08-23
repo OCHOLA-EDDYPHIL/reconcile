@@ -88,6 +88,7 @@ from reconcile.recovery_scenario import (
     ReleaseChainActionPreparer,
     ReleaseChainBlindMutator,
     ReleaseChainDispatchGateway,
+    ReleaseChainError,
     ReleaseChainEvidenceSource,
     build_release_chain_definition,
 )
@@ -1329,11 +1330,15 @@ async def execute_recovery_qualification_blind_lane(
             and fixture.archetype.fault_class.value == "suppress-before-dispatch"
         )
         if suppress_record:
+            try:
+                await mutator.create_record(suppress_before_dispatch=True)
+            except ReleaseChainError as error:
+                if str(error) != "blind release-record dispatch was suppressed":
+                    raise
+            else:  # pragma: no cover - guarded by the production mutator
+                raise AssertionError("blind suppression boundary was not exercised")
             if retries:
-                await _blind_attempt(
-                    lambda: mutator.create_record(suppress_before_dispatch=False),
-                    retry=None,
-                )
+                await mutator.create_record(suppress_before_dispatch=False)
         else:
             await _blind_attempt(
                 lambda: mutator.create_record(suppress_before_dispatch=False),
