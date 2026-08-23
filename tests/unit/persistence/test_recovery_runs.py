@@ -9,6 +9,7 @@ import pytest
 
 from reconcile.contracts import (
     RecoveryDispatchOutcome,
+    RecoveryDispatchReceipt,
     RecoveryLaunchPermitState,
     RecoveryNodeProgress,
     RecoveryNodeState,
@@ -23,7 +24,11 @@ from reconcile.persistence import (
     RecoveryRunConflict,
     SqliteRecoveryRunStore,
 )
-from tests.contract._factories import NOW, make_recovery_run_examples
+from tests.contract._factories import (
+    NOW,
+    make_recovery_run_examples,
+    make_recovery_scenario_examples,
+)
 
 pytestmark = pytest.mark.unit
 
@@ -257,6 +262,124 @@ def test_recovery_node_state_cannot_skip_the_controller_transition() -> None:
                         attempt=1,
                     )
                 ),
+                occurred_at=NOW,
+            )
+
+    asyncio.run(exercise())
+
+
+@pytest.mark.parametrize("store_kind", ["memory", "sqlite"])
+def test_dispatch_receipt_is_append_only_and_survives_restart(
+    tmp_path,
+    store_kind: str,
+) -> None:
+    request, _event, launch, snapshot, _scope = make_recovery_run_examples()
+    example, _comparison = make_recovery_scenario_examples()
+    database = tmp_path / "receipt.sqlite3"
+
+    async def exercise() -> None:
+        store = (
+            InMemoryRecoveryRunStore()
+            if store_kind == "memory"
+            else SqliteRecoveryRunStore(database)
+        )
+        current, _created = await store.create(request, snapshot.chain, created_at=NOW)
+        current = await store.append(
+            request.run_id,
+            expected_revision=current.revision,
+            event_type=RecoveryRunEventType.LIFECYCLE,
+            payload=RecoveryRunEventPayload(lifecycle=RecoveryRunLifecycle.RUNNING),
+            occurred_at=NOW,
+        )
+        current = await store.append(
+            request.run_id,
+            expected_revision=current.revision,
+            event_type=RecoveryRunEventType.LAUNCH_PERMIT,
+            payload=RecoveryRunEventPayload(launch_permit=launch),
+            occurred_at=NOW,
+        )
+        claimed = await store.claim_launch(
+            request.run_id,
+            launch_permit_id=launch.launch_permit_id,
+            claim_id="claim-receipt-7",
+            action_request_sha256=launch.action_request_sha256,
+            claimed_at=NOW,
+        )
+        receipt = RecoveryDispatchReceipt.model_validate(
+            example.model_copy(
+                update={
+                    "run_id": request.run_id,
+                    "release_id": snapshot.chain.nodes[
+                        0
+                    ].semantic_action.semantic_arguments["release_id"],
+                    "node_id": snapshot.chain.nodes[0].node_id,
+                    "semantic_action_sha256": snapshot.chain.nodes[
+                        0
+                    ].semantic_action.semantic_action_sha256,
+                    "action_request_sha256": launch.action_request_sha256,
+                    "authority_id": launch.launch_permit_id,
+                    "claim_id": claimed.claim_id,
+                }
+            )
+        )
+        current = await store.get(request.run_id)
+        current = await store.append(
+            request.run_id,
+            expected_revision=current.revision,
+            event_type=RecoveryRunEventType.DISPATCH_RECEIPT,
+            payload=RecoveryRunEventPayload(dispatch_receipt=receipt),
+            occurred_at=NOW,
+        )
+        assert current.dispatch_receipts == (receipt,)
+        with pytest.raises(RecoveryRunConflict):
+            await store.append(
+                request.run_id,
+                expected_revision=current.revision,
+                event_type=RecoveryRunEventType.DISPATCH_RECEIPT,
+                payload=RecoveryRunEventPayload(dispatch_receipt=receipt),
+                occurred_at=NOW,
+            )
+        if store_kind == "sqlite":
+            reopened = SqliteRecoveryRunStore(database)
+            assert (await reopened.get(request.run_id)).dispatch_receipts == (receipt,)
+
+    asyncio.run(exercise())
+
+
+def test_dispatch_receipt_without_claimed_authority_is_rejected() -> None:
+    request, _event, _launch, snapshot, _scope = make_recovery_run_examples()
+    example, _comparison = make_recovery_scenario_examples()
+    receipt = RecoveryDispatchReceipt.model_validate(
+        example.model_copy(
+            update={
+                "run_id": request.run_id,
+                "release_id": snapshot.chain.nodes[
+                    0
+                ].semantic_action.semantic_arguments["release_id"],
+                "node_id": snapshot.chain.nodes[0].node_id,
+                "semantic_action_sha256": snapshot.chain.nodes[
+                    0
+                ].semantic_action.semantic_action_sha256,
+            }
+        )
+    )
+    store = InMemoryRecoveryRunStore()
+
+    async def exercise() -> None:
+        current, _created = await store.create(request, snapshot.chain, created_at=NOW)
+        current = await store.append(
+            request.run_id,
+            expected_revision=current.revision,
+            event_type=RecoveryRunEventType.LIFECYCLE,
+            payload=RecoveryRunEventPayload(lifecycle=RecoveryRunLifecycle.RUNNING),
+            occurred_at=NOW,
+        )
+        with pytest.raises(RecoveryRunConflict):
+            await store.append(
+                request.run_id,
+                expected_revision=current.revision,
+                event_type=RecoveryRunEventType.DISPATCH_RECEIPT,
+                payload=RecoveryRunEventPayload(dispatch_receipt=receipt),
                 occurred_at=NOW,
             )
 

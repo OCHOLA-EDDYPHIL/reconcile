@@ -33,6 +33,7 @@ from reconcile.contracts import (
     ExecutionEnvelope,
     ExpectedEffect,
     FreshnessPolicy,
+    OperationStatus,
     OriginalInvocation,
     PolicyReferences,
     ProbeRequest,
@@ -64,7 +65,7 @@ pytestmark = pytest.mark.unit
 
 NOW = datetime(2026, 8, 22, 12, 0, tzinfo=UTC)
 RELEASE = "release-7"
-REVISION = "reconcile-canary-r-0123456789abcdef"
+REVISION = "reconcile-canary-r-3997240d56d5ff06"
 DIGEST = f"sha256:{'a' * 64}"
 CONFIGURATION = "b" * 64
 OPERATION = "projects/demo-project/locations/us-central1/operations/op-7"
@@ -83,6 +84,7 @@ def _binding() -> CloudRunProbeBinding:
         release_id=RELEASE,
         image_digest=DIGEST,
         configuration_sha256=CONFIGURATION,
+        expected_revision=REVISION,
     )
 
 
@@ -95,17 +97,22 @@ def _effects(stage: bool = True) -> tuple[ExpectedEffect, ...]:
                 "release_id": RELEASE,
                 "image_digest": DIGEST,
                 "configuration_sha256": CONFIGURATION,
+                "revision": REVISION,
             },
         ),
         (
             "revision-ready",
             STAGE_READINESS_EFFECT_SCOPE,
-            {"release_id": RELEASE, "ready": True},
+            {"release_id": RELEASE, "ready": True, "revision": REVISION},
         ),
         (
             "revision-zero-traffic",
             STAGE_TRAFFIC_EFFECT_SCOPE,
-            {"release_id": RELEASE, "traffic_percent": 0},
+            {
+                "release_id": RELEASE,
+                "traffic_percent": 0,
+                "revision": REVISION,
+            },
         ),
     )
     if not stage:
@@ -320,6 +327,49 @@ def test_revision_failure_is_mixed_effect_evidence_not_non_execution() -> None:
     }
     assert result.operation_status is None
     assert result.verdict is RuleVerdict.AUTHORITATIVE_EFFECTS
+
+
+def test_reconciling_revision_is_authoritative_pending_without_operation_name() -> None:
+    envelope = _envelope()
+    effect_ids = tuple(
+        effect.effect_id
+        for effect in envelope.expected_effects
+        if effect.commit_scope
+        in {STAGE_REVISION_EFFECT_SCOPE, STAGE_READINESS_EFFECT_SCOPE}
+    )
+
+    result = build_cloud_run_rule_registration(
+        capability_name=CLOUD_RUN_REVISION_CAPABILITY,
+        binding=_binding(),
+    ).normalizer(
+        _rule_input(
+            capability=CLOUD_RUN_REVISION_CAPABILITY,
+            relevant_effect_ids=effect_ids,
+            payload={
+                "observation": {
+                    "observation_schema": CLOUD_RUN_REVISION_OBSERVATION_VERSION,
+                    "release_id": RELEASE,
+                    "release_label": RELEASE,
+                    "revision": REVISION,
+                    "image_digest": DIGEST,
+                    "configuration_sha256": CONFIGURATION,
+                    "generation": "1",
+                    "observed_generation": "0",
+                    "reconciling": "true",
+                    "terminal_condition": "NONE",
+                    "readiness": "UNKNOWN",
+                }
+            },
+            envelope=envelope,
+        )
+    )
+
+    assert result.verdict is RuleVerdict.AUTHORITATIVE_PENDING
+    assert result.operation_status is OperationStatus.ACTIVE
+    assert tuple(item.state for item in result.effect_assertions) == (
+        EffectAssertionState.ESTABLISHED,
+        EffectAssertionState.UNVERIFIED,
+    )
 
 
 def test_failed_operation_stays_unresolved_and_never_proves_non_execution() -> None:

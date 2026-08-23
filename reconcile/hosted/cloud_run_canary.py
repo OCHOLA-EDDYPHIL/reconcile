@@ -819,6 +819,8 @@ class CloudRunCanaryFaultProxy:
 
     @property
     def target(self) -> CloudRunCanaryTarget:
+        """Expose the immutable target so callers can reject wiring drift."""
+
         return self._adapter.target
 
     @staticmethod
@@ -891,14 +893,14 @@ class CloudRunCanaryReader(_ClientBoundary):
         )
         self._health_client = health_client or _GoogleRevisionHealthClient()
 
-    def discover_revision(
+    def list_release_revisions(
         self,
         *,
         release_id: str,
         image_digest: str,
         configuration_sha256: str,
-    ) -> str | None:
-        """Return the sole exact release-labelled revision, never a best match."""
+    ) -> tuple[str, ...]:
+        """Return the exact immutable inventory matching one release intent."""
 
         release = _release(release_id)
         digest = _digest(image_digest)
@@ -940,7 +942,22 @@ class CloudRunCanaryReader(_ClientBoundary):
             raise
         except Exception as error:
             raise _map_provider_error(error) from None
-        unique = sorted(set(matches))
+        return tuple(sorted(set(matches)))
+
+    def discover_revision(
+        self,
+        *,
+        release_id: str,
+        image_digest: str,
+        configuration_sha256: str,
+    ) -> str | None:
+        """Return the sole exact release-labelled revision, never a best match."""
+
+        unique = self.list_release_revisions(
+            release_id=release_id,
+            image_digest=image_digest,
+            configuration_sha256=configuration_sha256,
+        )
         if not unique:
             return None
         if len(unique) != 1:

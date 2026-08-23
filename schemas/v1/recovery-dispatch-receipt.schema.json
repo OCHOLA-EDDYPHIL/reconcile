@@ -1,0 +1,110 @@
+{
+  "$defs": {
+    "RecoveryReceiptOutcome": {
+      "description": "What the trusted dispatcher knew before or after provider contact.",
+      "enum": [
+        "PROVIDER_CONTACTED",
+        "SUPPRESSED_BEFORE_DISPATCH",
+        "REJECTED_BEFORE_PROVIDER_CONTACT"
+      ],
+      "title": "RecoveryReceiptOutcome",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "description": "Durable dispatcher fact bound to one claimed-authority attempt.",
+  "properties": {
+    "action_request_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Action Request Sha256",
+      "type": "string"
+    },
+    "attempt": {
+      "maximum": 2,
+      "minimum": 1,
+      "title": "Attempt",
+      "type": "integer"
+    },
+    "authority_id": {
+      "maxLength": 128,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+      "title": "Authority Id",
+      "type": "string"
+    },
+    "claim_id": {
+      "maxLength": 128,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+      "title": "Claim Id",
+      "type": "string"
+    },
+    "node_id": {
+      "maxLength": 128,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+      "title": "Node Id",
+      "type": "string"
+    },
+    "outcome": {
+      "$ref": "#/$defs/RecoveryReceiptOutcome"
+    },
+    "provider_contact": {
+      "title": "Provider Contact",
+      "type": "boolean"
+    },
+    "receipt_id": {
+      "maxLength": 128,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+      "title": "Receipt Id",
+      "type": "string"
+    },
+    "recorded_at": {
+      "format": "date-time",
+      "title": "Recorded At",
+      "type": "string"
+    },
+    "release_id": {
+      "maxLength": 128,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+      "title": "Release Id",
+      "type": "string"
+    },
+    "run_id": {
+      "maxLength": 128,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+      "title": "Run Id",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": "reconcile/recovery-dispatch-receipt/v1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "semantic_action_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Semantic Action Sha256",
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema_version",
+    "receipt_id",
+    "run_id",
+    "release_id",
+    "node_id",
+    "semantic_action_sha256",
+    "action_request_sha256",
+    "authority_id",
+    "claim_id",
+    "attempt",
+    "provider_contact",
+    "outcome",
+    "recorded_at"
+  ],
+  "title": "RecoveryDispatchReceipt",
+  "type": "object"
+}

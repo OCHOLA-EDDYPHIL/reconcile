@@ -114,7 +114,7 @@ _FIRESTORE_CAPABILITIES = (
 )
 
 RELEASE_ID = "release-7"
-REVISION = "reconcile-canary-release-7"
+REVISION = "reconcile-canary-r-3997240d56d5ff06"
 IMAGE_DIGEST = "sha256:" + "a" * 64
 CONFIGURATION_SHA256 = "b" * 64
 PAYLOAD_SHA256 = "c" * 64
@@ -451,17 +451,22 @@ def _envelope(
                     "release_id": RELEASE_ID,
                     "image_digest": IMAGE_DIGEST,
                     "configuration_sha256": CONFIGURATION_SHA256,
+                    "revision": REVISION,
                 },
             ),
             (
                 "readiness",
                 STAGE_READINESS_EFFECT_SCOPE,
-                {"release_id": RELEASE_ID, "ready": True},
+                {"release_id": RELEASE_ID, "ready": True, "revision": REVISION},
             ),
             (
                 "traffic",
                 STAGE_TRAFFIC_EFFECT_SCOPE,
-                {"release_id": RELEASE_ID, "traffic_percent": 0},
+                {
+                    "release_id": RELEASE_ID,
+                    "traffic_percent": 0,
+                    "revision": REVISION,
+                },
             ),
         )
     elif profile_version == PROMOTE_CLOUD_RUN_TRAFFIC_PROFILE_VERSION:

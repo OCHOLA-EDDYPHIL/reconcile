@@ -176,8 +176,18 @@ class _CloudRunHealthObservation(StrictModel):
 class _FirestoreDocumentObservation(StrictModel):
     observation_schema: Literal[FIRESTORE_DOCUMENT_OBSERVATION_VERSION]
     release_id: Identifier
+    cloud_run_revision: Identifier | None = None
     payload_sha256: Sha256Digest
+    semantic_action_sha256: Sha256Digest | None = None
     exists: Literal["true", "false"]
+
+    @model_validator(mode="after")
+    def validate_release_binding(self) -> _FirestoreDocumentObservation:
+        if (self.cloud_run_revision is None) is not (
+            self.semantic_action_sha256 is None
+        ):
+            raise ValueError("Firestore release binding must be complete")
+        return self
 
 
 class _DispatchReceiptObservation(StrictModel):
@@ -428,6 +438,19 @@ def _require_text(value: object, *, label: str, pattern: re.Pattern[str]) -> str
     if type(value) is not str or pattern.fullmatch(value) is None:
         raise RecoveryRuleViolation(f"{label} does not match the profile")
     return value
+
+
+def deterministic_stage_revision(*, service: str, release_id: str) -> str:
+    """Return the exact Cloud Run revision named by a staged release action."""
+
+    _require_text(service, label="service", pattern=_CLOUD_RUN_REVISION)
+    _require_text(release_id, label="release_id", pattern=_IDENTIFIER)
+    operation_suffix = hashlib.sha256(f"{release_id}\0stage".encode()).hexdigest()[:24]
+    operation_id = f"release-stage-{operation_suffix}"
+    revision_suffix = hashlib.sha256(operation_id.encode("utf-8")).hexdigest()[:16]
+    revision = f"{service}-r-{revision_suffix}"
+    _require_text(revision, label="revision", pattern=_CLOUD_RUN_REVISION)
+    return revision
 
 
 def _validate_target(
@@ -713,9 +736,23 @@ def _validate_evidence_status(
                 "dispatch receipt must positively prove pre-provider non-execution"
             )
         return
-    if evidence.operation_status is not None:
+    if (
+        type(observation)
+        in {
+            _CloudRunServiceObservation,
+            _CloudRunRevisionObservation,
+        }
+        and observation.reconciling == "true"
+    ):
+        if evidence.operation_status not in {None, OperationStatus.ACTIVE} or any(
+            state is EffectAssertionState.NOT_ESTABLISHED for state in assertions
+        ):
+            raise RecoveryRuleViolation(
+                "reconciling Cloud Run state must remain authoritative pending"
+            )
+    elif evidence.operation_status is not None:
         raise RecoveryRuleViolation(
-            "provider state reads cannot assert an operation outcome"
+            "settled provider state reads cannot assert an operation outcome"
         )
     if (
         type(observation) is _FirestoreDocumentObservation
@@ -732,11 +769,34 @@ def _validate_observation_binding(
     action: SemanticActionIdentity,
     evidence: NormalizedEvidence,
     observation: ProviderObservation,
+    *,
+    require_expected_stage_revision: bool,
 ) -> None:
     release_id = action.semantic_arguments["release_id"]
     if observation.release_id != release_id:
         raise RecoveryRuleViolation(
             "provider observation release does not match the semantic action"
+        )
+    if (
+        require_expected_stage_revision
+        and profile is STAGE_CLOUD_RUN_REVISION_PROFILE
+        and isinstance(
+            observation,
+            (
+                _CloudRunServiceObservation,
+                _CloudRunRevisionObservation,
+                _CloudRunOperationObservation,
+                _CloudRunHealthObservation,
+            ),
+        )
+        and observation.revision
+        != deterministic_stage_revision(
+            service=str(action.target.resource["service"]),
+            release_id=str(release_id),
+        )
+    ):
+        raise RecoveryRuleViolation(
+            "Cloud Run observation names a different staged revision"
         )
     if type(observation) is _CloudRunRevisionObservation:
         if observation.release_label != release_id:
@@ -772,9 +832,14 @@ def _validate_observation_binding(
         ):
             raise RecoveryRuleViolation("Cloud Run health names another revision")
     elif type(observation) is _FirestoreDocumentObservation:
-        if observation.payload_sha256 != action.semantic_arguments["payload_sha256"]:
+        if observation.payload_sha256 != action.semantic_arguments[
+            "payload_sha256"
+        ] or (
+            observation.semantic_action_sha256 is not None
+            and observation.semantic_action_sha256 != action.semantic_action_sha256
+        ):
             raise RecoveryRuleViolation(
-                "Firestore record payload differs from the semantic action"
+                "Firestore record identity differs from the semantic action"
             )
     elif type(observation) is _DispatchReceiptObservation:
         if observation.semantic_action_sha256 != action.semantic_action_sha256:
@@ -798,12 +863,14 @@ def _validate_observation_binding(
         )
 
 
-def validate_recovery_evidence(
+def _validated_recovery_observations(
     profile: RecoveryActionProfile,
     action: SemanticActionIdentity,
     evidence: tuple[NormalizedEvidence, ...],
-) -> None:
-    """Require typed trusted-provider evidence bound to one exact action."""
+    *,
+    require_expected_stage_revision: bool,
+) -> tuple[ProviderObservation, ...]:
+    """Return typed provider observations after action and target validation."""
 
     validate_recovery_action(profile, action)
     if type(evidence) is not tuple or any(
@@ -813,6 +880,7 @@ def validate_recovery_evidence(
     if not evidence:
         raise RecoveryRuleViolation("recovery proof requires provider evidence")
     allowed = {item.key for item in profile.evidence_capabilities}
+    observations: list[ProviderObservation] = []
     for item in evidence:
         if (item.capability_name, item.capability_version) not in allowed:
             raise RecoveryRuleViolation(
@@ -828,7 +896,30 @@ def validate_recovery_evidence(
             )
         observation = _provider_observation(item)
         _validate_evidence_status(item, observation)
-        _validate_observation_binding(profile, action, item, observation)
+        _validate_observation_binding(
+            profile,
+            action,
+            item,
+            observation,
+            require_expected_stage_revision=require_expected_stage_revision,
+        )
+        observations.append(observation)
+    return tuple(observations)
+
+
+def validate_recovery_evidence(
+    profile: RecoveryActionProfile,
+    action: SemanticActionIdentity,
+    evidence: tuple[NormalizedEvidence, ...],
+) -> None:
+    """Require typed trusted-provider evidence bound to one exact action."""
+
+    _validated_recovery_observations(
+        profile,
+        action,
+        evidence,
+        require_expected_stage_revision=True,
+    )
 
 
 def _require_consistent_observations(
@@ -939,13 +1030,19 @@ def recovery_provider_conflict_pairs(
 ) -> tuple[tuple[str, str], ...]:
     """Return every deterministic two-observation provider contradiction.
 
-    Each observation must first be independently admissible for the sealed
-    action. Pairwise evaluation then exposes conflicts that the generic effect
-    classifier cannot see, such as divergent ETags or an LRO state regression.
+    Each observation must first be structurally admissible and bound to the
+    sealed provider target. Pairwise evaluation then exposes conflicts that the
+    generic effect classifier cannot see, such as divergent ETags, divergent
+    staged revisions, or an LRO state regression. Proof authority separately
+    requires every staging observation to name the intended revision.
     """
 
-    validate_recovery_evidence(profile, action, evidence)
-    observations = tuple(_provider_observation(item) for item in evidence)
+    observations = _validated_recovery_observations(
+        profile,
+        action,
+        evidence,
+        require_expected_stage_revision=False,
+    )
     conflicts: set[tuple[str, str]] = set()
     for left_index, right_index in combinations(range(len(evidence)), 2):
         pair_evidence = (evidence[left_index], evidence[right_index])
@@ -993,19 +1090,26 @@ def _expected_effects_by_scope(
     arguments = action.semantic_arguments
     release_id = arguments["release_id"]
     if profile is STAGE_CLOUD_RUN_REVISION_PROFILE:
+        revision = deterministic_stage_revision(
+            service=str(action.target.resource["service"]),
+            release_id=str(release_id),
+        )
         predicates: dict[str, dict[str, object]] = {
             STAGE_REVISION_EFFECT_SCOPE: {
                 "release_id": release_id,
                 "image_digest": arguments["image_digest"],
                 "configuration_sha256": arguments["configuration_sha256"],
+                "revision": revision,
             },
             STAGE_READINESS_EFFECT_SCOPE: {
                 "release_id": release_id,
                 "ready": True,
+                "revision": revision,
             },
             STAGE_TRAFFIC_EFFECT_SCOPE: {
                 "release_id": release_id,
                 "traffic_percent": 0,
+                "revision": revision,
             },
         }
     elif profile is PROMOTE_CLOUD_RUN_TRAFFIC_PROFILE:
@@ -1017,12 +1121,29 @@ def _expected_effects_by_scope(
             }
         }
     elif profile is CREATE_FIRESTORE_RELEASE_RECORD_PROFILE:
-        predicates = {
-            FIRESTORE_RECORD_EFFECT_SCOPE: {
-                "release_id": release_id,
-                "payload_sha256": arguments["payload_sha256"],
-            }
+        base_predicate: dict[str, object] = {
+            "release_id": release_id,
+            "payload_sha256": arguments["payload_sha256"],
         }
+        record_effect = effects.get(FIRESTORE_RECORD_EFFECT_SCOPE)
+        record_predicate = (
+            {} if record_effect is None else dict(record_effect.predicate)
+        )
+        if record_predicate != base_predicate:
+            enhanced_fields = {*base_predicate, "cloud_run_revision"}
+            if set(record_predicate) != enhanced_fields or any(
+                record_predicate[field] != value
+                for field, value in base_predicate.items()
+            ):
+                raise RecoveryRuleViolation(
+                    "expected-effect predicates do not match the sealed action profile"
+                )
+            _require_text(
+                record_predicate["cloud_run_revision"],
+                label="cloud_run_revision",
+                pattern=_CLOUD_RUN_REVISION,
+            )
+        predicates = {FIRESTORE_RECORD_EFFECT_SCOPE: record_predicate}
     else:  # pragma: no cover - the sealed inventory is exhaustive
         raise RecoveryRuleViolation("recovery effect profile is unsupported")
 
@@ -1221,6 +1342,8 @@ def _require_promotion_commit(
 
 
 def _require_firestore_commit(
+    action: SemanticActionIdentity,
+    effects: dict[str, ExpectedEffect],
     observations: tuple[ProviderObservation, ...],
 ) -> None:
     documents = tuple(
@@ -1229,6 +1352,17 @@ def _require_firestore_commit(
     if not documents or any(item.exists != "true" for item in documents):
         raise RecoveryRuleViolation(
             "Firestore commit requires the exact release record to exist"
+        )
+    expected_revision = effects[FIRESTORE_RECORD_EFFECT_SCOPE].predicate.get(
+        "cloud_run_revision"
+    )
+    if expected_revision is not None and any(
+        item.cloud_run_revision != expected_revision
+        or item.semantic_action_sha256 != action.semantic_action_sha256
+        for item in documents
+    ):
+        raise RecoveryRuleViolation(
+            "Firestore commit is not bound to the intended Cloud Run revision"
         )
 
 
@@ -1285,7 +1419,7 @@ def validate_recovery_proof(
         elif profile is PROMOTE_CLOUD_RUN_TRAFFIC_PROFILE:
             _require_promotion_commit(action, observations)
         else:
-            _require_firestore_commit(observations)
+            _require_firestore_commit(action, effects, observations)
         return
     if classification is Classification.NOT_COMMITTED:
         receipts = tuple(
@@ -1306,12 +1440,19 @@ def validate_recovery_proof(
         return
     if classification is Classification.PENDING:
         if not any(
-            type(item) is _CloudRunOperationObservation
-            and item.operation_state in {"RUNNING", "FAILED"}
+            (
+                type(item) is _CloudRunOperationObservation
+                and item.operation_state in {"RUNNING", "FAILED"}
+            )
+            or (
+                type(item)
+                in {_CloudRunServiceObservation, _CloudRunRevisionObservation}
+                and item.reconciling == "true"
+            )
             for item in observations
         ):
             raise RecoveryRuleViolation(
-                "pending proof requires a typed unresolved Cloud Run operation"
+                "pending proof requires typed unresolved Cloud Run state"
             )
         return
     if classification is Classification.PARTIAL:
@@ -1430,6 +1571,7 @@ __all__ = [
     "RecoveryCapability",
     "RecoveryPreconditionKind",
     "RecoveryRuleViolation",
+    "deterministic_stage_revision",
     "recovery_precondition_sha256",
     "recovery_provider_conflict_pairs",
     "resolve_recovery_action_profile",

@@ -19,6 +19,7 @@ from reconcile.contracts import (
     RECOVERY_RUN_SNAPSHOT_VERSION,
     ActionPermit,
     ActionPermitState,
+    PermitAction,
     RecoveryChain,
     RecoveryDecision,
     RecoveryDispatchOutcome,
@@ -433,13 +434,61 @@ def apply_recovery_event(
         ):
             raise RecoveryRunConflict(snapshot.request.run_id)
         updates["launch_permit"] = payload.launch_permit
-    else:
+    elif event.type is RecoveryRunEventType.ACTION_PERMIT:
         assert payload.action_permit is not None
         updates["action_permits"] = _upsert_permit(
             snapshot.request.run_id,
             snapshot.action_permits,
             payload.action_permit,
         )
+    else:
+        assert event.type is RecoveryRunEventType.DISPATCH_RECEIPT
+        receipt = payload.dispatch_receipt
+        assert receipt is not None
+        target_progress = next(
+            (node for node in snapshot.nodes if node.node_id == receipt.node_id),
+            None,
+        )
+        launch = snapshot.launch_permit
+        launch_match = bool(
+            launch is not None
+            and launch.state
+            in {RecoveryLaunchPermitState.CLAIMED, RecoveryLaunchPermitState.COMPLETED}
+            and launch.launch_permit_id == receipt.authority_id
+            and launch.claim_id == receipt.claim_id
+            and launch.node_id == receipt.node_id
+            and launch.semantic_action_sha256 == receipt.semantic_action_sha256
+            and launch.action_request_sha256 == receipt.action_request_sha256
+            and launch.claimed_at is not None
+            and receipt.recorded_at >= launch.claimed_at
+        )
+        action_matches = tuple(
+            permit
+            for permit in snapshot.action_permits
+            if permit.state in {ActionPermitState.CLAIMED, ActionPermitState.COMPLETED}
+            and permit.permit_id == receipt.authority_id
+            and permit.claim_id == receipt.claim_id
+            and permit.target_node_id == receipt.node_id
+            and permit.semantic_action_sha256 == receipt.semantic_action_sha256
+            and permit.claimed_at is not None
+            and receipt.recorded_at >= permit.claimed_at
+        )
+        retry_dispatch = bool(
+            len(action_matches) == 1 and action_matches[0].action is PermitAction.RETRY
+        )
+        expected_attempt = 2 if retry_dispatch else 1
+        if (
+            snapshot.lifecycle is not RecoveryRunLifecycle.RUNNING
+            or target_progress is None
+            or receipt.attempt != expected_attempt
+            or int(launch_match) + len(action_matches) != 1
+            or any(
+                existing.receipt_id == receipt.receipt_id
+                for existing in snapshot.dispatch_receipts
+            )
+        ):
+            raise RecoveryRunConflict(snapshot.request.run_id)
+        updates["dispatch_receipts"] = (*snapshot.dispatch_receipts, receipt)
     try:
         return RecoveryRunSnapshot.model_validate(snapshot.model_copy(update=updates))
     except Exception as error:
