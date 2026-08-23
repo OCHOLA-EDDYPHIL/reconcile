@@ -51,6 +51,7 @@ def _archetype(
     adaptive_probes: int,
     fixed_unsupported: int = 0,
     adaptive_unsupported: int = 0,
+    witness: bool | None = None,
 ) -> RecoveryQualificationArchetype:
     return RecoveryQualificationArchetype(
         archetype_id=archetype_id,
@@ -62,6 +63,8 @@ def _archetype(
         expected_permit_action=action,
         ambiguity_witness_required=(
             resolution is RecoveryQualificationResolution.ESCALATE
+            if witness is None
+            else witness
         ),
         fixed_probe_count=fixed_probes,
         adaptive_probe_count=adaptive_probes,
@@ -99,6 +102,7 @@ RECOVERY_QUALIFICATION_ARCHETYPES = (
         action=None,
         fixed_probes=3,
         adaptive_probes=1,
+        witness=False,
     ),
     _archetype(
         "stage-terminal-partial",
@@ -114,6 +118,7 @@ RECOVERY_QUALIFICATION_ARCHETYPES = (
         action=None,
         fixed_probes=3,
         adaptive_probes=1,
+        witness=False,
     ),
     _archetype(
         "stage-conflict",
@@ -132,8 +137,8 @@ RECOVERY_QUALIFICATION_ARCHETYPES = (
         fault=RecoveryQualificationFaultClass.ABSENCE,
         opportunity=RecoveryQualificationOpportunity.FIXED_FAVORED,
         evidence=("stage-revision-absent", "stage-inventory-fresh"),
-        resolution=RecoveryQualificationResolution.RETRY,
-        action=PermitAction.RETRY,
+        resolution=RecoveryQualificationResolution.ESCALATE,
+        action=None,
         fixed_probes=1,
         adaptive_probes=2,
     ),
@@ -147,7 +152,6 @@ RECOVERY_QUALIFICATION_ARCHETYPES = (
         action=None,
         fixed_probes=3,
         adaptive_probes=1,
-        fixed_unsupported=1,
         adaptive_unsupported=1,
     ),
     _archetype(
@@ -201,6 +205,7 @@ RECOVERY_QUALIFICATION_ARCHETYPES = (
         action=None,
         fixed_probes=3,
         adaptive_probes=1,
+        witness=False,
     ),
     _archetype(
         "promote-conflict",
@@ -234,7 +239,6 @@ RECOVERY_QUALIFICATION_ARCHETYPES = (
         action=None,
         fixed_probes=3,
         adaptive_probes=1,
-        fixed_unsupported=1,
         adaptive_unsupported=1,
     ),
     _archetype(
@@ -258,7 +262,6 @@ RECOVERY_QUALIFICATION_ARCHETYPES = (
         action=None,
         fixed_probes=2,
         adaptive_probes=2,
-        fixed_unsupported=1,
         adaptive_unsupported=1,
     ),
     _archetype(
@@ -295,11 +298,11 @@ RECOVERY_QUALIFICATION_ARCHETYPES = (
         adaptive_probes=2,
     ),
     _archetype(
-        "record-pending",
+        "record-outcome-unknown",
         stage=RecoveryQualificationStage.RECORD,
-        fault=RecoveryQualificationFaultClass.PENDING,
+        fault=RecoveryQualificationFaultClass.DROP_AFTER_ACCEPT,
         opportunity=RecoveryQualificationOpportunity.NEUTRAL,
-        evidence=("record-write-pending", "record-read-absent"),
+        evidence=("record-provider-contacted", "record-state-unknown"),
         resolution=RecoveryQualificationResolution.ESCALATE,
         action=None,
         fixed_probes=2,
@@ -320,7 +323,6 @@ RECOVERY_QUALIFICATION_ARCHETYPES = (
         action=PermitAction.CONTINUE,
         fixed_probes=3,
         adaptive_probes=1,
-        fixed_unsupported=1,
     ),
 )
 

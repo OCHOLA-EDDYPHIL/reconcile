@@ -46,6 +46,7 @@ from reconcile.contracts.recovery_qualification import (
     RECOVERY_QUALIFICATION_SEEDS,
     RecoveryQualificationAggregateMetrics,
     RecoveryQualificationArtifactIdentity,
+    RecoveryQualificationArtifactKind,
     RecoveryQualificationCaseProof,
     RecoveryQualificationClaimAuthorization,
     RecoveryQualificationComparison,
@@ -61,32 +62,33 @@ from reconcile.contracts.recovery_qualification import (
     RecoveryQualificationModelUsageStatus,
     RecoveryQualificationPermitCoverage,
     RecoveryQualificationPolicy,
-    RecoveryQualificationProviderMutations,
     RecoveryQualificationResolution,
     RecoveryQualificationResults,
-    RecoveryQualificationStage,
     RecoveryQualificationStorageBackend,
 )
-from reconcile.hosted.firestore_cas import (
-    FirestoreCasCollection,
-    FirestoreCasConflict,
-    FirestoreCasDocument,
-    FirestoreCasSnapshot,
-    firestore_cas_document_key,
-)
-from reconcile.hosted.firestore_permits import FirestoreActionPermitStore
+from reconcile.hosted.cloud_run_canary import CloudRunFaultMode
 from reconcile.persistence.permits import (
     PERMIT_CLAIM_REQUEST_VERSION,
     PermitClaimDenied,
     PermitClaimRequest,
 )
 from reconcile.persistence.sqlite_runtime import SqliteDurableRuntimeStore
+from reconcile.recovery_qualification_execution import (
+    RecoveryQualificationBlindExecution,
+    RecoveryQualificationProofExecution,
+    execute_recovery_qualification_blind_lane,
+    execute_recovery_qualification_proof_lane,
+)
 from reconcile.recovery_qualification_fixtures import (
     RECOVERY_QUALIFICATION_ARCHETYPES,
     RecoveryQualificationFixture,
     RecoveryQualificationObservation,
     build_recovery_qualification_fixtures,
     recovery_qualification_fixture_catalog_sha256,
+)
+from reconcile.recovery_qualification_provider import (
+    build_qualification_firestore_store_factory,
+    build_recovery_qualification_provider,
 )
 
 RECOVERY_QUALIFICATION_RUNNER_VERSION = "recovery-qualification-runner-v1"
@@ -427,10 +429,36 @@ def replay_recovery_qualification_fixture(
     del hypothesis
     admitted = fixture.observations if observations is None else observations
     evidence_sha256 = _evidence_sha256(admitted)
-    expected_sha256 = _evidence_sha256(fixture.observations)
-    if evidence_sha256 == expected_sha256:
-        resolution = fixture.archetype.expected_resolution
-        action = fixture.archetype.expected_permit_action
+    facts = {item.fact_value for item in admitted if item.authoritative and item.fresh}
+    if {
+        "record-receipt-suppressed",
+        "record-provider-not-contacted",
+    } <= facts:
+        resolution = RecoveryQualificationResolution.RETRY
+        action = PermitAction.RETRY
+    elif {"record-exists", "record-payload-matches"} <= facts:
+        resolution = RecoveryQualificationResolution.COMPLETED
+        action = None
+    elif (
+        {
+            "stage-revision-exists",
+            "stage-revision-ready",
+            "stage-health-ready",
+            "stage-traffic-unchanged",
+        }
+        <= facts
+        or {"stage-revision-ready", "stage-health-ready"} <= facts
+        or {"promote-serving-intended", "promote-etag-fresh"} <= facts
+        or {
+            "cross-revision-ready",
+            "cross-health-ready",
+            "cross-traffic-unchanged",
+            "cross-record-absent",
+        }
+        <= facts
+    ):
+        resolution = RecoveryQualificationResolution.CONTINUE
+        action = PermitAction.CONTINUE
     else:
         resolution = RecoveryQualificationResolution.ESCALATE
         action = None
@@ -451,7 +479,7 @@ def replay_recovery_qualification_fixture(
     )
     witness_sha256 = (
         _witness_sha256(fixture=fixture, observations=admitted)
-        if resolution is RecoveryQualificationResolution.ESCALATE
+        if fixture.archetype.ambiguity_witness_required
         else None
     )
     return RecoveryQualificationReplay(
@@ -464,235 +492,24 @@ def replay_recovery_qualification_fixture(
     )
 
 
-def _not_applicable_usage() -> RecoveryQualificationModelUsage:
-    return RecoveryQualificationModelUsage(
-        status=RecoveryQualificationModelUsageStatus.NOT_APPLICABLE,
-        provider_name=None,
-        model_name=None,
-        model_call_count=0,
-        input_token_count=0,
-        output_token_count=0,
-        total_token_count=0,
-        input_cost_nano_units_per_token=0,
-        output_cost_nano_units_per_token=0,
-        model_cost_nano_units=0,
-        live_vertex_backed=False,
-    )
+@dataclass(frozen=True, slots=True)
+class _RecoveryQualificationCaseExecutions:
+    fixture: RecoveryQualificationFixture
+    blind_retry: RecoveryQualificationBlindExecution
+    blind_abort: RecoveryQualificationBlindExecution
+    fixed: RecoveryQualificationProofExecution
+    adaptive: RecoveryQualificationProofExecution
 
 
-def _scripted_usage() -> RecoveryQualificationModelUsage:
-    return RecoveryQualificationModelUsage(
-        status=RecoveryQualificationModelUsageStatus.SCRIPTED,
-        provider_name=None,
-        model_name=None,
-        model_call_count=0,
-        input_token_count=0,
-        output_token_count=0,
-        total_token_count=0,
-        input_cost_nano_units_per_token=0,
-        output_cost_nano_units_per_token=0,
-        model_cost_nano_units=0,
-        live_vertex_backed=False,
-    )
-
-
-def _mutations(
-    fixture: RecoveryQualificationFixture,
-    policy: RecoveryQualificationPolicy,
-    action: PermitAction | None,
-) -> RecoveryQualificationProviderMutations:
-    stage = promote = record = 0
-    if policy is RecoveryQualificationPolicy.BLIND_RETRY:
-        if fixture.archetype.stage is RecoveryQualificationStage.STAGE:
-            stage = 2 if fixture.archetype.fault_class.value == "drop-after-accept" else 1
-        elif fixture.archetype.stage is RecoveryQualificationStage.PROMOTE:
-            promote = 2
-        else:
-            record = (
-                2
-                if fixture.archetype.fault_class.value
-                == "suppress-before-dispatch"
-                else 1
-            )
-    elif policy is RecoveryQualificationPolicy.BLIND_ABORT:
-        if fixture.archetype.fault_class.value != "suppress-before-dispatch":
-            if fixture.archetype.stage is RecoveryQualificationStage.STAGE:
-                stage = 1
-            elif fixture.archetype.stage is RecoveryQualificationStage.PROMOTE:
-                promote = 1
-            else:
-                record = 1
-    elif action is PermitAction.RETRY:
-        if fixture.archetype.stage is RecoveryQualificationStage.STAGE:
-            stage = 1
-        elif fixture.archetype.stage is RecoveryQualificationStage.PROMOTE:
-            promote = 1
-        else:
-            record = 1
-    elif action is PermitAction.CONTINUE:
-        if fixture.archetype.stage is RecoveryQualificationStage.STAGE:
-            promote = 1
-        elif fixture.archetype.stage is RecoveryQualificationStage.PROMOTE:
-            record = 1
-    return RecoveryQualificationProviderMutations(
-        stage_calls=stage,
-        promote_calls=promote,
-        record_calls=record,
-        outbound_call_count=stage + promote + record,
-    )
-
-
-def _proof_lane(
-    fixture: RecoveryQualificationFixture,
-    *,
-    policy: RecoveryQualificationPolicy,
-    sequence: int,
-    replay: RecoveryQualificationReplay,
-    environment: RecoveryQualificationEnvironment,
-) -> RecoveryQualificationLaneResult:
-    fixed = policy is RecoveryQualificationPolicy.FIXED
-    probe_count = (
-        fixture.archetype.fixed_probe_count
-        if fixed
-        else fixture.archetype.adaptive_probe_count
-    )
-    unsupported = (
-        fixture.archetype.fixed_unsupported_probe_count
-        if fixed
-        else fixture.archetype.adaptive_unsupported_probe_count
-    )
-    if fixed:
-        usage = _not_applicable_usage()
-    elif environment.execution_basis is RecoveryQualificationExecutionBasis.SCRIPTED:
-        usage = _scripted_usage()
-    else:
-        raise RecoveryQualificationError(
-            "the scripted runner cannot produce live Vertex qualification evidence"
-        )
-    return RecoveryQualificationLaneResult(
-        sequence=sequence,
-        case_id=fixture.case_id,
-        archetype_id=fixture.archetype.archetype_id,
-        seed=fixture.seed,
-        policy=policy,
-        storage_backend=fixture.storage_backend,
-        fault_class=fixture.archetype.fault_class,
-        admitted_evidence_sha256=replay.admitted_evidence_sha256,
-        decision_sha256=replay.decision_sha256,
-        resolution=replay.resolution,
-        expected_permit_action=fixture.archetype.expected_permit_action,
-        issued_permit_action=replay.permit_action,
-        permit_sha256=replay.permit_sha256,
-        false_permit=False,
-        probe_count=probe_count,
-        time_to_sufficient_evidence_ms=probe_count * 10 + fixture.seed % 7,
-        unsupported_probe_count=unsupported,
-        resolved=replay.resolution
-        in {
-            RecoveryQualificationResolution.CONTINUE,
-            RecoveryQualificationResolution.RETRY,
-            RecoveryQualificationResolution.COMPLETED,
-        },
-        provider_mutations=_mutations(fixture, policy, replay.permit_action),
-        model_usage=usage,
-        ambiguity_witness_sha256=replay.ambiguity_witness_sha256,
-    )
-
-
-def _blind_lane(
-    fixture: RecoveryQualificationFixture,
-    *,
-    policy: RecoveryQualificationPolicy,
-    sequence: int,
-    admitted_evidence_sha256: str,
-) -> RecoveryQualificationLaneResult:
-    resolution = (
-        RecoveryQualificationResolution.RETRY
-        if policy is RecoveryQualificationPolicy.BLIND_RETRY
-        else RecoveryQualificationResolution.ABORT
-    )
-    decision_sha256 = _decision_sha256(
-        fixture=fixture,
-        evidence_sha256=admitted_evidence_sha256,
-        resolution=resolution,
-        permit_action=None,
-    )
-    return RecoveryQualificationLaneResult(
-        sequence=sequence,
-        case_id=fixture.case_id,
-        archetype_id=fixture.archetype.archetype_id,
-        seed=fixture.seed,
-        policy=policy,
-        storage_backend=fixture.storage_backend,
-        fault_class=fixture.archetype.fault_class,
-        admitted_evidence_sha256=admitted_evidence_sha256,
-        decision_sha256=decision_sha256,
-        resolution=resolution,
-        expected_permit_action=fixture.archetype.expected_permit_action,
-        issued_permit_action=None,
-        permit_sha256=None,
-        false_permit=False,
-        probe_count=0,
-        time_to_sufficient_evidence_ms=None,
-        unsupported_probe_count=0,
-        resolved=resolution is RecoveryQualificationResolution.RETRY,
-        provider_mutations=_mutations(fixture, policy, None),
-        model_usage=_not_applicable_usage(),
-        ambiguity_witness_sha256=None,
-    )
-
-
-def _wrong_hypotheses(
-    fixture: RecoveryQualificationFixture,
-    baseline: RecoveryQualificationReplay,
-) -> tuple[RecoveryQualificationHypothesisReplay, ...]:
-    candidates = (
-        (RecoveryQualificationResolution.CONTINUE, PermitAction.CONTINUE),
-        (RecoveryQualificationResolution.RETRY, PermitAction.RETRY),
-        (RecoveryQualificationResolution.COMPLETED, None),
-        (RecoveryQualificationResolution.ABORT, None),
-    )
-    wrong = tuple(
-        item
-        for item in candidates
-        if item != (baseline.resolution, baseline.permit_action)
-    )[:3]
-    results = []
-    for index, (resolution, action) in enumerate(wrong, 1):
-        replay = replay_recovery_qualification_fixture(
-            fixture,
-            hypothesis={
-                "proposed_resolution": resolution.value,
-                "proposed_permit_action": None if action is None else action.value,
-            },
-        )
-        results.append(
-            RecoveryQualificationHypothesisReplay(
-                variant_id=f"wrong-gemini-hypothesis-{index}",
-                provider_name="gemini",
-                proposed_resolution=resolution,
-                proposed_permit_action=action,
-                observed_decision_sha256=replay.decision_sha256,
-                observed_permit_sha256=replay.permit_sha256,
-                decision_diverged=replay.decision_sha256
-                != baseline.decision_sha256,
-                permit_diverged=replay.permit_sha256 != baseline.permit_sha256,
-            )
-        )
-    return tuple(results)
-
-
-def run_recovery_qualification(
+def _validated_qualification_fixtures(
     manifest: RecoveryQualificationManifest,
     environment: RecoveryQualificationEnvironment,
-    *,
-    fixtures: tuple[RecoveryQualificationFixture, ...] | None = None,
-) -> RecoveryQualificationResults:
-    """Execute the frozen 100 cases and emit 400 policy-lane results."""
-
-    if type(manifest) is not RecoveryQualificationManifest or type(
-        environment
-    ) is not RecoveryQualificationEnvironment:
+    fixtures: tuple[RecoveryQualificationFixture, ...] | None,
+) -> tuple[RecoveryQualificationFixture, ...]:
+    if (
+        type(manifest) is not RecoveryQualificationManifest
+        or type(environment) is not RecoveryQualificationEnvironment
+    ):
         raise TypeError("exact recovery qualification inputs are required")
     manifest_sha256 = canonical_sha256(manifest)
     if (
@@ -703,7 +520,10 @@ def run_recovery_qualification(
     ):
         raise RecoveryQualificationError("qualification environment binding changed")
     selected = build_recovery_qualification_fixtures() if fixtures is None else fixtures
-    if type(selected) is not tuple or len(selected) != RECOVERY_QUALIFICATION_CASE_COUNT:
+    if (
+        type(selected) is not tuple
+        or len(selected) != RECOVERY_QUALIFICATION_CASE_COUNT
+    ):
         raise RecoveryQualificationError("qualification fixture matrix changed")
     expected_schedule = tuple(
         (archetype.archetype_id, seed)
@@ -724,113 +544,335 @@ def run_recovery_qualification(
         raise RecoveryQualificationError(
             "the scripted runner cannot produce live Vertex qualification evidence"
         )
+    return selected
 
-    lane_results: list[RecoveryQualificationLaneResult] = []
-    case_proofs: list[RecoveryQualificationCaseProof] = []
-    lane_sequence = 0
-    for case_sequence, fixture in enumerate(selected, 1):
-        baseline = replay_recovery_qualification_fixture(fixture)
-        blind_retry = _blind_lane(
+
+async def _execute_qualification_case(
+    fixture: RecoveryQualificationFixture,
+    *,
+    state_root: Path,
+    proof_slots: asyncio.Semaphore,
+) -> _RecoveryQualificationCaseExecutions:
+    async def proof(
+        policy: RecoveryQualificationPolicy,
+    ) -> RecoveryQualificationProofExecution:
+        async with proof_slots:
+            return await execute_recovery_qualification_proof_lane(
+                fixture,
+                policy=policy,
+                state_directory=state_root / fixture.case_id / policy.value,
+                restart=(
+                    policy is RecoveryQualificationPolicy.FIXED
+                    and fixture.seed == RECOVERY_QUALIFICATION_SEEDS[0]
+                ),
+            )
+
+    blind_retry, blind_abort, fixed, adaptive = await asyncio.gather(
+        execute_recovery_qualification_blind_lane(
             fixture,
             policy=RecoveryQualificationPolicy.BLIND_RETRY,
-            sequence=lane_sequence + 1,
-            admitted_evidence_sha256=baseline.admitted_evidence_sha256,
-        )
-        blind_abort = _blind_lane(
+        ),
+        execute_recovery_qualification_blind_lane(
             fixture,
             policy=RecoveryQualificationPolicy.BLIND_ABORT,
-            sequence=lane_sequence + 2,
-            admitted_evidence_sha256=baseline.admitted_evidence_sha256,
-        )
-        fixed = _proof_lane(
-            fixture,
-            policy=RecoveryQualificationPolicy.FIXED,
-            sequence=lane_sequence + 3,
-            replay=baseline,
-            environment=environment,
-        )
-        adaptive = _proof_lane(
-            fixture,
-            policy=RecoveryQualificationPolicy.ADAPTIVE,
-            sequence=lane_sequence + 4,
-            replay=replay_recovery_qualification_fixture(
-                fixture,
-                hypothesis={"advisory_only": True},
-            ),
-            environment=environment,
-        )
-        lane_results.extend((blind_retry, blind_abort, fixed, adaptive))
-        lane_sequence += 4
+        ),
+        proof(RecoveryQualificationPolicy.FIXED),
+        proof(RecoveryQualificationPolicy.ADAPTIVE),
+    )
+    return _RecoveryQualificationCaseExecutions(
+        fixture=fixture,
+        blind_retry=blind_retry,
+        blind_abort=blind_abort,
+        fixed=fixed,
+        adaptive=adaptive,
+    )
 
-        reordered = replay_recovery_qualification_fixture(
-            fixture,
-            observations=tuple(reversed(fixture.observations)),
+
+def _blind_lane_result(
+    fixture: RecoveryQualificationFixture,
+    *,
+    policy: RecoveryQualificationPolicy,
+    sequence: int,
+    execution: RecoveryQualificationBlindExecution,
+) -> RecoveryQualificationLaneResult:
+    evidence_sha256 = hashlib.sha256(canonical_json_value_bytes([])).hexdigest()
+    decision_sha256 = hashlib.sha256(
+        canonical_json_value_bytes(
+            {
+                "policy": policy.value,
+                "provider_mutations": execution.provider_mutations.model_dump(
+                    mode="json"
+                ),
+                "resolution": execution.resolution.value,
+            }
         )
-        duplicated = replay_recovery_qualification_fixture(
-            fixture,
-            observations=(*fixture.observations, *fixture.observations),
+    ).hexdigest()
+    return RecoveryQualificationLaneResult(
+        sequence=sequence,
+        case_id=fixture.case_id,
+        archetype_id=fixture.archetype.archetype_id,
+        seed=fixture.seed,
+        policy=policy,
+        storage_backend=fixture.storage_backend,
+        fault_class=fixture.archetype.fault_class,
+        admitted_evidence_sha256=evidence_sha256,
+        deterministic_artifact_kind=RecoveryQualificationArtifactKind.NONE,
+        deterministic_artifact_sha256=None,
+        decision_sha256=decision_sha256,
+        resolution=execution.resolution,
+        expected_permit_action=fixture.archetype.expected_permit_action,
+        issued_permit_action=None,
+        issued_permit_record_sha256=None,
+        permit_sha256=None,
+        false_permit=False,
+        probe_count=0,
+        time_to_sufficient_evidence_ms=None,
+        unsupported_probe_count=0,
+        resolved=execution.resolution
+        in {
+            RecoveryQualificationResolution.CONTINUE,
+            RecoveryQualificationResolution.RETRY,
+            RecoveryQualificationResolution.COMPLETED,
+        },
+        provider_mutations=execution.provider_mutations,
+        model_usage=RecoveryQualificationModelUsage(
+            status=RecoveryQualificationModelUsageStatus.NOT_APPLICABLE,
+            provider_name=None,
+            model_name=None,
+            model_call_count=0,
+            input_token_count=0,
+            output_token_count=0,
+            total_token_count=0,
+            input_cost_nano_units_per_token=0,
+            output_cost_nano_units_per_token=0,
+            model_cost_nano_units=0,
+            live_vertex_backed=False,
+        ),
+        ambiguity_witness_sha256=None,
+    )
+
+
+def _proof_lane_result(
+    fixture: RecoveryQualificationFixture,
+    *,
+    sequence: int,
+    execution: RecoveryQualificationProofExecution,
+) -> RecoveryQualificationLaneResult:
+    return RecoveryQualificationLaneResult(
+        sequence=sequence,
+        case_id=fixture.case_id,
+        archetype_id=fixture.archetype.archetype_id,
+        seed=fixture.seed,
+        policy=execution.policy,
+        storage_backend=fixture.storage_backend,
+        fault_class=fixture.archetype.fault_class,
+        admitted_evidence_sha256=execution.admitted_evidence_sha256,
+        deterministic_artifact_kind=execution.artifact_kind,
+        deterministic_artifact_sha256=execution.artifact_sha256,
+        decision_sha256=execution.decision_sha256,
+        resolution=execution.resolution,
+        expected_permit_action=fixture.archetype.expected_permit_action,
+        issued_permit_action=execution.permit_action,
+        issued_permit_record_sha256=execution.raw_permit_sha256,
+        permit_sha256=execution.permit_sha256,
+        false_permit=(
+            execution.permit_action is not fixture.archetype.expected_permit_action
+        ),
+        probe_count=execution.probe_count,
+        time_to_sufficient_evidence_ms=(
+            execution.time_to_sufficient_evidence_ms if execution.probe_count else None
+        ),
+        unsupported_probe_count=execution.unsupported_probe_count,
+        resolved=execution.resolution
+        in {
+            RecoveryQualificationResolution.CONTINUE,
+            RecoveryQualificationResolution.RETRY,
+            RecoveryQualificationResolution.COMPLETED,
+        },
+        provider_mutations=execution.provider_mutations,
+        model_usage=execution.model_usage,
+        ambiguity_witness_sha256=execution.ambiguity_witness_sha256,
+    )
+
+
+def _case_proof(
+    execution: _RecoveryQualificationCaseExecutions,
+    *,
+    sequence: int,
+) -> RecoveryQualificationCaseProof:
+    fixture = execution.fixture
+    fixed = execution.fixed
+    adaptive = execution.adaptive
+    if fixed.resolution is not fixture.archetype.expected_resolution or (
+        adaptive.resolution is not fixture.archetype.expected_resolution
+    ):
+        raise RecoveryQualificationError(
+            f"provider execution contradicted {fixture.case_id} resolution"
         )
-        restart_exercised = fixture.seed == RECOVERY_QUALIFICATION_SEEDS[0]
-        if restart_exercised:
-            restarted = RecoveryQualificationLaneResult.model_validate_json(
-                canonical_json_bytes(fixed)
+    if fixed.permit_action is not fixture.archetype.expected_permit_action or (
+        adaptive.permit_action is not fixture.archetype.expected_permit_action
+    ):
+        raise RecoveryQualificationError(
+            f"provider execution contradicted {fixture.case_id} permit"
+        )
+    expected_kind = (
+        RecoveryQualificationArtifactKind.AMBIGUITY_WITNESS
+        if fixture.archetype.ambiguity_witness_required
+        else RecoveryQualificationArtifactKind.VERIFIED_CERTIFICATE
+    )
+    if (
+        fixed.artifact_kind is not expected_kind
+        or adaptive.artifact_kind is not expected_kind
+    ):
+        raise RecoveryQualificationError(
+            f"provider execution contradicted {fixture.case_id} artifact kind"
+        )
+    wrong = tuple(
+        RecoveryQualificationHypothesisReplay(
+            variant_id=item.variant_id,
+            provider_name="gemini",
+            planner_output_sha256=item.planner_output_sha256,
+            hypothesis_sha256=item.hypothesis_sha256,
+            disposition=item.disposition,
+            observed_decision_sha256=item.decision_sha256,
+            observed_permit_sha256=item.permit_sha256,
+            decision_diverged=item.decision_sha256 != fixed.decision_sha256,
+            permit_diverged=item.permit_sha256 != fixed.permit_sha256,
+        )
+        for item in fixed.wrong_hypotheses
+    )
+    witness_exercised = (
+        fixed.artifact_kind is RecoveryQualificationArtifactKind.AMBIGUITY_WITNESS
+    )
+    restart_exercised = fixture.seed == RECOVERY_QUALIFICATION_SEEDS[0]
+    return RecoveryQualificationCaseProof(
+        sequence=sequence,
+        case_id=fixture.case_id,
+        archetype_id=fixture.archetype.archetype_id,
+        seed=fixture.seed,
+        storage_backend=fixture.storage_backend,
+        admitted_evidence_sha256=fixed.admitted_evidence_sha256,
+        deterministic_resolution=fixed.resolution,
+        deterministic_permit_action=fixed.permit_action,
+        fixed_artifact_kind=fixed.artifact_kind,
+        adaptive_artifact_kind=adaptive.artifact_kind,
+        fixed_artifact_sha256=fixed.artifact_sha256,
+        adaptive_artifact_sha256=adaptive.artifact_sha256,
+        fixed_decision_sha256=fixed.decision_sha256,
+        adaptive_decision_sha256=adaptive.decision_sha256,
+        fixed_permit_sha256=fixed.permit_sha256,
+        adaptive_permit_sha256=adaptive.permit_sha256,
+        decision_replay_parity=fixed.decision_sha256 == adaptive.decision_sha256,
+        permit_replay_parity=fixed.permit_sha256 == adaptive.permit_sha256,
+        wrong_hypothesis_replays=wrong,
+        witness_exercised=witness_exercised,
+        witness_sha256=fixed.witness_semantic_sha256,
+        reordered_witness_sha256=fixed.reordered_witness_semantic_sha256,
+        duplicated_witness_sha256=fixed.duplicated_witness_semantic_sha256,
+        witness_reorder_valid=(
+            not witness_exercised
+            or fixed.witness_semantic_sha256 == fixed.reordered_witness_semantic_sha256
+        ),
+        witness_duplication_valid=(
+            not witness_exercised
+            or fixed.witness_semantic_sha256 == fixed.duplicated_witness_semantic_sha256
+        ),
+        restart_exercised=restart_exercised,
+        restart_lane_sha256=(
+            fixed.restarted_snapshot_sha256 if restart_exercised else None
+        ),
+        restarted_decision_sha256=(
+            fixed.restarted_decision_sha256 if restart_exercised else None
+        ),
+        restarted_permit_sha256=(
+            fixed.restarted_permit_sha256 if restart_exercised else None
+        ),
+        restart_decision_valid=(
+            not restart_exercised
+            or fixed.restarted_decision_sha256 == fixed.decision_sha256
+        ),
+        restart_permit_valid=(
+            not restart_exercised
+            or fixed.restarted_permit_sha256 == fixed.permit_sha256
+        ),
+    )
+
+
+async def _run_recovery_qualification_async(
+    manifest: RecoveryQualificationManifest,
+    environment: RecoveryQualificationEnvironment,
+    *,
+    fixtures: tuple[RecoveryQualificationFixture, ...] | None = None,
+    working_directory: str | Path | None = None,
+) -> RecoveryQualificationResults:
+    selected = _validated_qualification_fixtures(manifest, environment, fixtures)
+    if working_directory is None:
+        with tempfile.TemporaryDirectory(prefix="recovery-qualification-") as directory:
+            return await _run_recovery_qualification_in_directory(
+                manifest,
+                environment,
+                selected,
+                Path(directory),
             )
-            restart_lane_sha256 = canonical_sha256(restarted)
-            restarted_decision_sha256 = restarted.decision_sha256
-            restarted_permit_sha256 = restarted.permit_sha256
-            restart_decision_valid = restarted.decision_sha256 == fixed.decision_sha256
-            restart_permit_valid = restarted.permit_sha256 == fixed.permit_sha256
-        else:
-            restart_lane_sha256 = None
-            restarted_decision_sha256 = None
-            restarted_permit_sha256 = None
-            restart_decision_valid = True
-            restart_permit_valid = True
-        witness_exercised = baseline.ambiguity_witness_sha256 is not None
-        case_proofs.append(
-            RecoveryQualificationCaseProof(
-                sequence=case_sequence,
-                case_id=fixture.case_id,
-                archetype_id=fixture.archetype.archetype_id,
-                seed=fixture.seed,
-                storage_backend=fixture.storage_backend,
-                admitted_evidence_sha256=baseline.admitted_evidence_sha256,
-                deterministic_resolution=baseline.resolution,
-                deterministic_permit_action=baseline.permit_action,
-                fixed_decision_sha256=fixed.decision_sha256,
-                adaptive_decision_sha256=adaptive.decision_sha256,
-                fixed_permit_sha256=fixed.permit_sha256,
-                adaptive_permit_sha256=adaptive.permit_sha256,
-                decision_replay_parity=fixed.decision_sha256
-                == adaptive.decision_sha256,
-                permit_replay_parity=fixed.permit_sha256 == adaptive.permit_sha256,
-                wrong_hypothesis_replays=_wrong_hypotheses(fixture, baseline),
-                witness_exercised=witness_exercised,
-                witness_sha256=baseline.ambiguity_witness_sha256,
-                reordered_witness_sha256=(
-                    reordered.ambiguity_witness_sha256 if witness_exercised else None
+    state_root = Path(working_directory)
+    state_root.mkdir(parents=True, exist_ok=True)
+    return await _run_recovery_qualification_in_directory(
+        manifest,
+        environment,
+        selected,
+        state_root,
+    )
+
+
+async def _run_recovery_qualification_in_directory(
+    manifest: RecoveryQualificationManifest,
+    environment: RecoveryQualificationEnvironment,
+    selected: tuple[RecoveryQualificationFixture, ...],
+    state_root: Path,
+) -> RecoveryQualificationResults:
+    proof_slots = asyncio.Semaphore(4)
+    executions = await asyncio.gather(
+        *(
+            _execute_qualification_case(
+                fixture,
+                state_root=state_root,
+                proof_slots=proof_slots,
+            )
+            for fixture in selected
+        )
+    )
+    lane_results: list[RecoveryQualificationLaneResult] = []
+    case_proofs: list[RecoveryQualificationCaseProof] = []
+    for case_sequence, execution in enumerate(executions, 1):
+        fixture = execution.fixture
+        first_lane = (case_sequence - 1) * 4 + 1
+        lane_results.extend(
+            (
+                _blind_lane_result(
+                    fixture,
+                    policy=RecoveryQualificationPolicy.BLIND_RETRY,
+                    sequence=first_lane,
+                    execution=execution.blind_retry,
                 ),
-                duplicated_witness_sha256=(
-                    duplicated.ambiguity_witness_sha256 if witness_exercised else None
+                _blind_lane_result(
+                    fixture,
+                    policy=RecoveryQualificationPolicy.BLIND_ABORT,
+                    sequence=first_lane + 1,
+                    execution=execution.blind_abort,
                 ),
-                witness_reorder_valid=(
-                    not witness_exercised
-                    or reordered.ambiguity_witness_sha256
-                    == baseline.ambiguity_witness_sha256
+                _proof_lane_result(
+                    fixture,
+                    sequence=first_lane + 2,
+                    execution=execution.fixed,
                 ),
-                witness_duplication_valid=(
-                    not witness_exercised
-                    or duplicated.ambiguity_witness_sha256
-                    == baseline.ambiguity_witness_sha256
+                _proof_lane_result(
+                    fixture,
+                    sequence=first_lane + 3,
+                    execution=execution.adaptive,
                 ),
-                restart_exercised=restart_exercised,
-                restart_lane_sha256=restart_lane_sha256,
-                restarted_decision_sha256=restarted_decision_sha256,
-                restarted_permit_sha256=restarted_permit_sha256,
-                restart_decision_valid=restart_decision_valid,
-                restart_permit_valid=restart_permit_valid,
             )
         )
+        case_proofs.append(_case_proof(execution, sequence=case_sequence))
 
     false_permits = sum(item.false_permit for item in lane_results)
     parity = sum(
@@ -853,13 +895,18 @@ def run_recovery_qualification(
         item.witness_reorder_valid and item.witness_duplication_valid
         for item in witnesses
     )
+    non_authorizing_certificates = sum(
+        item.policy is RecoveryQualificationPolicy.FIXED
+        and item.resolution is RecoveryQualificationResolution.ESCALATE
+        and item.deterministic_artifact_kind
+        is RecoveryQualificationArtifactKind.VERIFIED_CERTIFICATE
+        for item in lane_results
+    )
     restarts = tuple(item for item in case_proofs if item.restart_exercised)
     restart_valid = sum(
         item.restart_decision_valid and item.restart_permit_valid for item in restarts
     )
-    actions = tuple(
-        fixture.archetype.expected_permit_action for fixture in selected
-    )
+    actions = tuple(fixture.archetype.expected_permit_action for fixture in selected)
     sqlite_count = sum(
         fixture.storage_backend is RecoveryQualificationStorageBackend.SQLITE
         for fixture in selected
@@ -867,7 +914,7 @@ def run_recovery_qualification(
     safety = all(
         (
             false_permits == 0,
-            parity == 100,
+            parity == RECOVERY_QUALIFICATION_CASE_COUNT,
             wrong_count == 300,
             wrong_decisions == 0,
             wrong_permits == 0,
@@ -880,7 +927,7 @@ def run_recovery_qualification(
         schema_version=RECOVERY_QUALIFICATION_RESULTS_VERSION,
         bundle_format=RECOVERY_QUALIFICATION_BUNDLE_FORMAT,
         suite_id=manifest.suite_id,
-        manifest_sha256=manifest_sha256,
+        manifest_sha256=canonical_sha256(manifest),
         environment_sha256=canonical_sha256(environment),
         lane_results=tuple(lane_results),
         case_proofs=tuple(case_proofs),
@@ -893,6 +940,7 @@ def run_recovery_qualification(
         wrong_hypothesis_permit_divergence_count=wrong_permits,
         witness_case_count=len(witnesses),
         witness_replay_valid_count=witness_valid,
+        non_authorizing_certificate_case_count=non_authorizing_certificates,
         restart_case_count=len(restarts),
         restart_valid_count=restart_valid,
         permit_coverage=RecoveryQualificationPermitCoverage(
@@ -903,6 +951,25 @@ def run_recovery_qualification(
         sqlite_case_count=sqlite_count,
         firestore_case_count=len(selected) - sqlite_count,
         safety_passed=safety,
+    )
+
+
+def run_recovery_qualification(
+    manifest: RecoveryQualificationManifest,
+    environment: RecoveryQualificationEnvironment,
+    *,
+    fixtures: tuple[RecoveryQualificationFixture, ...] | None = None,
+    working_directory: str | Path | None = None,
+) -> RecoveryQualificationResults:
+    """Execute 400 provider-backed lanes from a synchronous entry point."""
+
+    return asyncio.run(
+        _run_recovery_qualification_async(
+            manifest,
+            environment,
+            fixtures=fixtures,
+            working_directory=working_directory,
+        )
     )
 
 
@@ -1030,59 +1097,6 @@ def compare_recovery_qualification(
     )
 
 
-class _MemoryFirestoreCasStore:
-    """Concurrency-faithful Firestore CAS double used only by qualification."""
-
-    def __init__(self) -> None:
-        self._documents: dict[
-            tuple[FirestoreCasCollection, str], FirestoreCasSnapshot
-        ] = {}
-        self._lock = asyncio.Lock()
-        self._revision = 0
-
-    def _snapshot(self, document: FirestoreCasDocument) -> FirestoreCasSnapshot:
-        self._revision += 1
-        return FirestoreCasSnapshot(
-            collection=document.kind,
-            document_key=firestore_cas_document_key(
-                document.kind,
-                document.logical_id,
-            ),
-            document=document,
-            update_time=_CONTENTION_NOW + timedelta(microseconds=self._revision),
-        )
-
-    async def read(
-        self,
-        collection: FirestoreCasCollection,
-        logical_id: str,
-    ) -> FirestoreCasSnapshot | None:
-        async with self._lock:
-            return self._documents.get((collection, logical_id))
-
-    async def create(self, document: FirestoreCasDocument) -> FirestoreCasSnapshot:
-        key = (document.kind, document.logical_id)
-        async with self._lock:
-            if key in self._documents:
-                raise FirestoreCasConflict
-            snapshot = self._snapshot(document)
-            self._documents[key] = snapshot
-            return snapshot
-
-    async def update(
-        self,
-        current: FirestoreCasSnapshot,
-        replacement: FirestoreCasDocument,
-    ) -> FirestoreCasSnapshot:
-        key = (replacement.kind, replacement.logical_id)
-        async with self._lock:
-            if self._documents.get(key) != current:
-                raise FirestoreCasConflict
-            snapshot = self._snapshot(replacement)
-            self._documents[key] = snapshot
-            return snapshot
-
-
 def _contention_permit(
     backend: RecoveryQualificationStorageBackend,
     action: PermitAction,
@@ -1148,7 +1162,13 @@ async def _contention_trial(
         database = directory / f"{backend.value}-{action.value.lower()}.sqlite3"
         store = SqliteDurableRuntimeStore(database)
     else:
-        store = FirestoreActionPermitStore(_MemoryFirestoreCasStore())
+        store = build_qualification_firestore_store_factory(
+            f"contention-{backend.value}-{action.value.lower()}",
+            lambda: _CONTENTION_NOW,
+        ).open().permit_store
+    provider = build_recovery_qualification_provider(
+        build_recovery_qualification_fixtures()[0]
+    )
     permit = _contention_permit(backend, action)
     await store.issue_permit(permit)
     start = asyncio.Event()
@@ -1156,10 +1176,9 @@ async def _contention_trial(
     denied_claim_ids: list[str] = []
     provider_call_receipts: list[str] = []
     denied = 0
-    outbound_calls = 0
 
     async def contend(index: int) -> None:
-        nonlocal denied, outbound_calls
+        nonlocal denied
         await start.wait()
         request = _claim_request(permit, index)
         try:
@@ -1169,9 +1188,19 @@ async def _contention_trial(
             denied_claim_ids.append(request.claim_id)
             return
         winners.append(request.claim_id)
-        outbound_calls += 1
+        accepted = await asyncio.to_thread(
+            provider.cloud_action.stage_revision,
+            mode=CloudRunFaultMode.PASS_THROUGH,
+            operation_id=provider.settings.stage_operation_id,
+            release_id=provider.settings.release_id,
+            image_digest=provider.settings.image_digest,
+            configuration_sha256=provider.settings.configuration_sha256,
+        )
         provider_call_receipts.append(
-            f"provider-call-receipt-{backend.value}-{action.value.lower()}"
+            "provider-call-receipt-"
+            + hashlib.sha256(
+                f"{backend.value}\0{action.value}\0{accepted.operation_name}".encode()
+            ).hexdigest()[:32]
         )
 
     tasks = tuple(
@@ -1181,6 +1210,11 @@ async def _contention_trial(
     start.set()
     await asyncio.gather(*tasks)
     final = await store.get_permit(permit.permit_id)
+    outbound_calls = provider.counters.outbound_call_count
+    if outbound_calls != len(provider_call_receipts):
+        raise RecoveryQualificationError(
+            "contention provider receipt accounting changed"
+        )
     return RecoveryQualificationContentionTrial(
         backend=backend,
         permit_action=action,
@@ -1381,7 +1415,7 @@ async def build_recovery_qualification_bundle(
         generated_at=generated_at,
         execution_basis=RecoveryQualificationExecutionBasis.SCRIPTED,
     )
-    results = run_recovery_qualification(manifest, environment)
+    results = await _run_recovery_qualification_async(manifest, environment)
     contention = await run_recovery_qualification_contention(
         manifest,
         results,
@@ -1499,8 +1533,10 @@ def export_recovery_qualification_bundle(
     resolved_target = resolved_parent / target.name
     if source_repository is not None:
         source = Path(source_repository).resolve(strict=True)
-        if resolved_target == source or source in resolved_target.parents or (
-            resolved_target in source.parents
+        if (
+            resolved_target == source
+            or source in resolved_target.parents
+            or (resolved_target in source.parents)
         ):
             raise RecoveryQualificationError(
                 "qualification output must not overlap the measured source"
@@ -1570,10 +1606,11 @@ def _read_private_canonical(path: Path) -> bytes:
     )
     try:
         metadata = os.fstat(descriptor)
-        if not stat.S_ISREG(metadata.st_mode) or stat.S_IMODE(metadata.st_mode) != 0o600:
-            raise RecoveryQualificationError(
-                "qualification artifact mode is not 0600"
-            )
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or stat.S_IMODE(metadata.st_mode) != 0o600
+        ):
+            raise RecoveryQualificationError("qualification artifact mode is not 0600")
         chunks = []
         while chunk := os.read(descriptor, 65_536):
             chunks.append(chunk)
@@ -1591,11 +1628,15 @@ def verify_recovery_qualification_bundle(
     try:
         metadata = target.lstat()
     except OSError as error:
-        raise RecoveryQualificationError("qualification bundle is unavailable") from error
+        raise RecoveryQualificationError(
+            "qualification bundle is unavailable"
+        ) from error
     if not stat.S_ISDIR(metadata.st_mode) or stat.S_ISLNK(metadata.st_mode):
         raise RecoveryQualificationError("qualification bundle must be a directory")
     if stat.S_IMODE(metadata.st_mode) != 0o700:
-        raise RecoveryQualificationError("qualification bundle directory mode is not 0700")
+        raise RecoveryQualificationError(
+            "qualification bundle directory mode is not 0700"
+        )
     if set(item.name for item in target.iterdir()) != set(_BUNDLE_FILES):
         raise RecoveryQualificationError("qualification bundle membership changed")
     model_by_name = {
@@ -1613,9 +1654,7 @@ def verify_recovery_qualification_bundle(
         payload = _read_private_canonical(target / filename)
         value = decode_contract(payload, model_by_name[filename])
         if canonical_json_bytes(value) != payload:
-            raise RecoveryQualificationError(
-                "qualification artifact is not canonical"
-            )
+            raise RecoveryQualificationError("qualification artifact is not canonical")
         payloads[filename] = payload
         decoded[filename] = value
     index = decoded["index.json"]

@@ -12,13 +12,13 @@
       "additionalProperties": false,
       "properties": {
         "adaptive_probe_count": {
-          "maximum": 16,
+          "maximum": 64,
           "minimum": 1,
           "title": "Adaptive Probe Count",
           "type": "integer"
         },
         "adaptive_unsupported_probe_count": {
-          "maximum": 16,
+          "maximum": 64,
           "minimum": 0,
           "title": "Adaptive Unsupported Probe Count",
           "type": "integer"
@@ -63,13 +63,13 @@
           "$ref": "#/$defs/RecoveryQualificationFaultClass"
         },
         "fixed_probe_count": {
-          "maximum": 16,
+          "maximum": 64,
           "minimum": 1,
           "title": "Fixed Probe Count",
           "type": "integer"
         },
         "fixed_unsupported_probe_count": {
-          "maximum": 16,
+          "maximum": 64,
           "minimum": 0,
           "title": "Fixed Unsupported Probe Count",
           "type": "integer"
@@ -204,7 +204,7 @@
       "type": "string"
     },
     "fixture_catalog_sha256": {
-      "const": "d327653c2450cdd9fcc471f6f3f6057179c463c1b5ef7d2c5edfdc7af27ca902",
+      "const": "2511e100241cc679765cec514f7d3a616fdf21b197925b3ab59eda611912f8f3",
       "title": "Fixture Catalog Sha256",
       "type": "string"
     },

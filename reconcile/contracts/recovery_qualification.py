@@ -21,17 +21,14 @@ from reconcile.contracts.base import (
 )
 from reconcile.contracts.codec import canonical_sha256
 from reconcile.contracts.recovery import ActionPermit, ActionPermitState, PermitAction
+from reconcile.contracts.recovery_run import RecoveryHypothesisDisposition
 
 RECOVERY_QUALIFICATION_BUNDLE_FORMAT = "proof-to-permit-qualification-v1"
-RECOVERY_QUALIFICATION_MANIFEST_VERSION = (
-    "reconcile/recovery-qualification-manifest/v1"
-)
+RECOVERY_QUALIFICATION_MANIFEST_VERSION = "reconcile/recovery-qualification-manifest/v1"
 RECOVERY_QUALIFICATION_ENVIRONMENT_VERSION = (
     "reconcile/recovery-qualification-environment/v1"
 )
-RECOVERY_QUALIFICATION_RESULTS_VERSION = (
-    "reconcile/recovery-qualification-results/v1"
-)
+RECOVERY_QUALIFICATION_RESULTS_VERSION = "reconcile/recovery-qualification-results/v1"
 RECOVERY_QUALIFICATION_CONTENTION_VERSION = (
     "reconcile/recovery-qualification-contention/v1"
 )
@@ -41,9 +38,7 @@ RECOVERY_QUALIFICATION_COMPARISON_VERSION = (
 RECOVERY_QUALIFICATION_CLAIM_AUTHORIZATION_VERSION = (
     "reconcile/recovery-qualification-claim-authorization/v1"
 )
-RECOVERY_QUALIFICATION_INDEX_VERSION = (
-    "reconcile/recovery-qualification-index/v1"
-)
+RECOVERY_QUALIFICATION_INDEX_VERSION = "reconcile/recovery-qualification-index/v1"
 
 RECOVERY_QUALIFICATION_SEEDS = (104729, 130363, 155921, 196613, 262147)
 RECOVERY_QUALIFICATION_CASE_COUNT = 100
@@ -53,7 +48,7 @@ RECOVERY_QUALIFICATION_RESTART_COUNT = 20
 RECOVERY_QUALIFICATION_CONTENTION_WIDTH = 32
 RECOVERY_QUALIFICATION_ADAPTIVE_THRESHOLD_BASIS_POINTS = 2500
 RECOVERY_QUALIFICATION_FIXTURE_CATALOG_SHA256 = (
-    "d327653c2450cdd9fcc471f6f3f6057179c463c1b5ef7d2c5edfdc7af27ca902"
+    "2511e100241cc679765cec514f7d3a616fdf21b197925b3ab59eda611912f8f3"
 )
 
 _MAX_SIGNED_64 = 2**63 - 1
@@ -118,6 +113,12 @@ class RecoveryQualificationModelUsageStatus(StrEnum):
     UNAVAILABLE = "UNAVAILABLE"
 
 
+class RecoveryQualificationArtifactKind(StrEnum):
+    NONE = "NONE"
+    VERIFIED_CERTIFICATE = "VERIFIED_CERTIFICATE"
+    AMBIGUITY_WITNESS = "AMBIGUITY_WITNESS"
+
+
 class RecoveryQualificationArchetype(StrictModel):
     archetype_id: Identifier
     stage: RecoveryQualificationStage
@@ -127,10 +128,10 @@ class RecoveryQualificationArchetype(StrictModel):
     expected_resolution: RecoveryQualificationResolution
     expected_permit_action: PermitAction | None
     ambiguity_witness_required: bool
-    fixed_probe_count: int = Field(ge=1, le=16)
-    adaptive_probe_count: int = Field(ge=1, le=16)
-    fixed_unsupported_probe_count: int = Field(ge=0, le=16)
-    adaptive_unsupported_probe_count: int = Field(ge=0, le=16)
+    fixed_probe_count: int = Field(ge=1, le=64)
+    adaptive_probe_count: int = Field(ge=1, le=64)
+    fixed_unsupported_probe_count: int = Field(ge=0, le=64)
+    adaptive_unsupported_probe_count: int = Field(ge=0, le=64)
 
     @model_validator(mode="after")
     def validate_archetype(self) -> RecoveryQualificationArchetype:
@@ -142,10 +143,10 @@ class RecoveryQualificationArchetype(StrictModel):
         }.get(self.expected_resolution)
         if self.expected_permit_action is not expected_action:
             raise ValueError("qualification resolution and expected permit disagree")
-        if self.ambiguity_witness_required is not (
-            self.expected_resolution is RecoveryQualificationResolution.ESCALATE
+        if self.ambiguity_witness_required and (
+            self.expected_resolution is not RecoveryQualificationResolution.ESCALATE
         ):
-            raise ValueError("qualification ambiguity witness requirement is derived")
+            raise ValueError("only escalation archetypes may require a witness")
         if self.fixed_unsupported_probe_count > self.fixed_probe_count or (
             self.adaptive_unsupported_probe_count > self.adaptive_probe_count
         ):
@@ -208,9 +209,7 @@ class RecoveryQualificationManifest(StrictModel):
             raise ValueError("recovery qualification case count changed")
         if self.lane_result_count != self.case_count * len(self.policies):
             raise ValueError("recovery qualification lane count changed")
-        if {item.stage for item in self.archetypes} != set(
-            RecoveryQualificationStage
-        ):
+        if {item.stage for item in self.archetypes} != set(RecoveryQualificationStage):
             raise ValueError("recovery qualification omits a chain stage")
         if {item.fault_class for item in self.archetypes} != set(
             RecoveryQualificationFaultClass
@@ -304,12 +303,20 @@ class RecoveryQualificationModelUsage(StrictModel):
                 self.model_cost_nano_units,
             )
         )
-        if self.status in {
-            RecoveryQualificationModelUsageStatus.NOT_APPLICABLE,
-            RecoveryQualificationModelUsageStatus.SCRIPTED,
-        }:
+        if self.status is RecoveryQualificationModelUsageStatus.NOT_APPLICABLE:
             valid = (
                 zero_usage
+                and self.provider_name is None
+                and not self.live_vertex_backed
+            )
+        elif self.status is RecoveryQualificationModelUsageStatus.SCRIPTED:
+            valid = (
+                self.input_token_count == 0
+                and self.output_token_count == 0
+                and self.total_token_count == 0
+                and self.input_cost_nano_units_per_token == 0
+                and self.output_cost_nano_units_per_token == 0
+                and self.model_cost_nano_units == 0
                 and self.provider_name is None
                 and not self.live_vertex_backed
             )
@@ -359,19 +366,22 @@ class RecoveryQualificationLaneResult(StrictModel):
     storage_backend: RecoveryQualificationStorageBackend
     fault_class: RecoveryQualificationFaultClass
     admitted_evidence_sha256: Sha256Digest
+    deterministic_artifact_kind: RecoveryQualificationArtifactKind
+    deterministic_artifact_sha256: Sha256Digest | None
     decision_sha256: Sha256Digest
     resolution: RecoveryQualificationResolution
     expected_permit_action: PermitAction | None
     issued_permit_action: PermitAction | None
+    issued_permit_record_sha256: Sha256Digest | None
     permit_sha256: Sha256Digest | None
     false_permit: bool
-    probe_count: int = Field(ge=0, le=16)
+    probe_count: int = Field(ge=0, le=64)
     time_to_sufficient_evidence_ms: int | None = Field(
         default=None,
         ge=0,
         le=_MAX_SIGNED_64,
     )
-    unsupported_probe_count: int = Field(ge=0, le=16)
+    unsupported_probe_count: int = Field(ge=0, le=64)
     resolved: bool
     provider_mutations: RecoveryQualificationProviderMutations
     model_usage: RecoveryQualificationModelUsage
@@ -383,22 +393,28 @@ class RecoveryQualificationLaneResult(StrictModel):
             raise ValueError("lane seed is outside the frozen schedule")
         if self.unsupported_probe_count > self.probe_count:
             raise ValueError("unsupported probes cannot exceed executed probes")
-        if (self.probe_count == 0) is not (
-            self.time_to_sufficient_evidence_ms is None
-        ):
+        if (self.probe_count == 0) is not (self.time_to_sufficient_evidence_ms is None):
             raise ValueError("probe timing must be present exactly when probes execute")
         proof_policy = self.policy in {
             RecoveryQualificationPolicy.FIXED,
             RecoveryQualificationPolicy.ADAPTIVE,
         }
         if proof_policy:
-            expected_false = self.issued_permit_action is not self.expected_permit_action
+            expected_false = (
+                self.issued_permit_action is not self.expected_permit_action
+            )
         else:
             expected_false = self.issued_permit_action is not None
         if self.false_permit is not expected_false:
             raise ValueError("false-permit status must be derived")
         if (self.issued_permit_action is None) is not (self.permit_sha256 is None):
             raise ValueError("permit action and digest must be present together")
+        if (self.issued_permit_action is None) is not (
+            self.issued_permit_record_sha256 is None
+        ):
+            raise ValueError(
+                "permit action and raw permit identity must be present together"
+            )
         expected_resolved = self.resolution in {
             RecoveryQualificationResolution.CONTINUE,
             RecoveryQualificationResolution.RETRY,
@@ -406,9 +422,47 @@ class RecoveryQualificationLaneResult(StrictModel):
         }
         if self.resolved is not expected_resolved:
             raise ValueError("resolution status must be derived")
-        witness_required = self.resolution is RecoveryQualificationResolution.ESCALATE
-        if (self.ambiguity_witness_sha256 is not None) is not witness_required:
-            raise ValueError("escalation must retain exactly one ambiguity witness")
+        proof_policy = self.policy in {
+            RecoveryQualificationPolicy.FIXED,
+            RecoveryQualificationPolicy.ADAPTIVE,
+        }
+        if proof_policy is (
+            self.deterministic_artifact_kind is RecoveryQualificationArtifactKind.NONE
+        ):
+            raise ValueError("proof lanes require a deterministic terminal artifact")
+        if (self.deterministic_artifact_sha256 is None) is (
+            self.deterministic_artifact_kind
+            is not RecoveryQualificationArtifactKind.NONE
+        ):
+            raise ValueError("deterministic artifact identity is incomplete")
+        witness = (
+            self.deterministic_artifact_kind
+            is RecoveryQualificationArtifactKind.AMBIGUITY_WITNESS
+        )
+        if (self.ambiguity_witness_sha256 is not None) is not witness:
+            raise ValueError("only ambiguity witnesses populate the witness digest")
+        if witness and (
+            self.ambiguity_witness_sha256 != self.deterministic_artifact_sha256
+        ):
+            raise ValueError("witness and deterministic artifact digests differ")
+        if witness and (
+            self.resolution is not RecoveryQualificationResolution.ESCALATE
+            or self.issued_permit_action is not None
+        ):
+            raise ValueError("ambiguity witnesses cannot authorize a transition")
+        if proof_policy and not witness:
+            expected_action = {
+                RecoveryQualificationResolution.CONTINUE: PermitAction.CONTINUE,
+                RecoveryQualificationResolution.RETRY: PermitAction.RETRY,
+                RecoveryQualificationResolution.COMPLETED: None,
+                RecoveryQualificationResolution.ESCALATE: None,
+            }.get(self.resolution)
+            if self.resolution is RecoveryQualificationResolution.ABORT or (
+                self.issued_permit_action is not expected_action
+            ):
+                raise ValueError(
+                    "certificate resolution and issued transition disagree"
+                )
         if self.policy is RecoveryQualificationPolicy.ADAPTIVE:
             if self.model_usage.status not in {
                 RecoveryQualificationModelUsageStatus.SCRIPTED,
@@ -427,21 +481,27 @@ class RecoveryQualificationLaneResult(StrictModel):
 class RecoveryQualificationHypothesisReplay(StrictModel):
     variant_id: Identifier
     provider_name: Literal["gemini"]
-    proposed_resolution: RecoveryQualificationResolution
-    proposed_permit_action: PermitAction | None
+    planner_output_sha256: Sha256Digest
+    hypothesis_sha256: Sha256Digest | None
+    disposition: RecoveryHypothesisDisposition
     observed_decision_sha256: Sha256Digest
     observed_permit_sha256: Sha256Digest | None
     decision_diverged: bool
     permit_diverged: bool
 
     @model_validator(mode="after")
-    def validate_proposal(self) -> RecoveryQualificationHypothesisReplay:
-        expected_action = {
-            RecoveryQualificationResolution.CONTINUE: PermitAction.CONTINUE,
-            RecoveryQualificationResolution.RETRY: PermitAction.RETRY,
-        }.get(self.proposed_resolution)
-        if self.proposed_permit_action is not expected_action:
-            raise ValueError("hypothesis resolution and proposed permit disagree")
+    def validate_rejected_hypothesis(
+        self,
+    ) -> RecoveryQualificationHypothesisReplay:
+        if self.disposition not in {
+            RecoveryHypothesisDisposition.UNSUPPORTED_ACTION,
+            RecoveryHypothesisDisposition.UNSUPPORTED_PROBE,
+            RecoveryHypothesisDisposition.INVALID_BINDING,
+            RecoveryHypothesisDisposition.MALFORMED_MODEL_OUTPUT,
+        }:
+            raise ValueError(
+                "wrong-hypothesis replay requires a rejecting disposition"
+            )
         return self
 
 
@@ -454,14 +514,18 @@ class RecoveryQualificationCaseProof(StrictModel):
     admitted_evidence_sha256: Sha256Digest
     deterministic_resolution: RecoveryQualificationResolution
     deterministic_permit_action: PermitAction | None
+    fixed_artifact_kind: RecoveryQualificationArtifactKind
+    adaptive_artifact_kind: RecoveryQualificationArtifactKind
+    fixed_artifact_sha256: Sha256Digest
+    adaptive_artifact_sha256: Sha256Digest
     fixed_decision_sha256: Sha256Digest
     adaptive_decision_sha256: Sha256Digest
     fixed_permit_sha256: Sha256Digest | None
     adaptive_permit_sha256: Sha256Digest | None
     decision_replay_parity: bool
     permit_replay_parity: bool
-    wrong_hypothesis_replays: tuple[RecoveryQualificationHypothesisReplay, ...] = (
-        Field(min_length=3, max_length=3)
+    wrong_hypothesis_replays: tuple[RecoveryQualificationHypothesisReplay, ...] = Field(
+        min_length=3, max_length=3
     )
     witness_exercised: bool
     witness_sha256: Sha256Digest | None
@@ -483,16 +547,11 @@ class RecoveryQualificationCaseProof(StrictModel):
         identifiers = tuple(item.variant_id for item in self.wrong_hypothesis_replays)
         if len(identifiers) != len(set(identifiers)):
             raise ValueError("wrong-hypothesis variants must be unique")
-        proposals = tuple(
-            (item.proposed_resolution, item.proposed_permit_action)
-            for item in self.wrong_hypothesis_replays
+        outputs = tuple(
+            item.planner_output_sha256 for item in self.wrong_hypothesis_replays
         )
-        if len(proposals) != len(set(proposals)) or any(
-            proposal
-            == (self.deterministic_resolution, self.deterministic_permit_action)
-            for proposal in proposals
-        ):
-            raise ValueError("hypothesis variants must be distinct and deliberately wrong")
+        if len(outputs) != len(set(outputs)):
+            raise ValueError("wrong-hypothesis planner outputs must be distinct")
         decision_parity = self.fixed_decision_sha256 == self.adaptive_decision_sha256
         permit_parity = self.fixed_permit_sha256 == self.adaptive_permit_sha256
         if (
@@ -500,6 +559,14 @@ class RecoveryQualificationCaseProof(StrictModel):
             or self.permit_replay_parity is not permit_parity
         ):
             raise ValueError("fixed/adaptive replay parity must be derived")
+        if self.fixed_artifact_kind is not self.adaptive_artifact_kind:
+            raise ValueError("fixed/adaptive terminal artifact kinds diverged")
+        expected_witness = (
+            self.fixed_artifact_kind
+            is RecoveryQualificationArtifactKind.AMBIGUITY_WITNESS
+        )
+        if self.witness_exercised is not expected_witness:
+            raise ValueError("witness replay flag must match the terminal artifact")
         for replay in self.wrong_hypothesis_replays:
             decision_diverged = (
                 replay.observed_decision_sha256 != self.fixed_decision_sha256
@@ -569,9 +636,7 @@ class RecoveryQualificationPermitCoverage(StrictModel):
     @model_validator(mode="after")
     def validate_partition(self) -> RecoveryQualificationPermitCoverage:
         if (
-            self.continue_case_count
-            + self.retry_case_count
-            + self.no_permit_case_count
+            self.continue_case_count + self.retry_case_count + self.no_permit_case_count
             != RECOVERY_QUALIFICATION_CASE_COUNT
         ):
             raise ValueError("permit coverage must partition the frozen cases")
@@ -616,6 +681,10 @@ class RecoveryQualificationResults(StrictModel):
         ge=0,
         le=RECOVERY_QUALIFICATION_CASE_COUNT,
     )
+    non_authorizing_certificate_case_count: int = Field(
+        ge=1,
+        le=RECOVERY_QUALIFICATION_CASE_COUNT,
+    )
     restart_case_count: int = Field(ge=0, le=RECOVERY_QUALIFICATION_RESTART_COUNT)
     restart_valid_count: int = Field(ge=0, le=RECOVERY_QUALIFICATION_RESTART_COUNT)
     permit_coverage: RecoveryQualificationPermitCoverage
@@ -642,7 +711,9 @@ class RecoveryQualificationResults(StrictModel):
         if set(proofs) != set(grouped):
             raise ValueError("case proofs do not match lane results")
         expected_case_order = tuple(item.case_id for item in self.case_proofs)
-        observed_case_order = tuple(dict.fromkeys(item.case_id for item in self.lane_results))
+        observed_case_order = tuple(
+            dict.fromkeys(item.case_id for item in self.lane_results)
+        )
         if observed_case_order != expected_case_order:
             raise ValueError("case proof and lane order changed")
         for case_id, lanes in grouped.items():
@@ -654,7 +725,6 @@ class RecoveryQualificationResults(StrictModel):
                     item.seed,
                     item.storage_backend,
                     item.fault_class,
-                    item.admitted_evidence_sha256,
                     item.expected_permit_action,
                 )
                 for item in lanes
@@ -665,18 +735,27 @@ class RecoveryQualificationResults(StrictModel):
             adaptive = lanes[3]
             proof = proofs[case_id]
             if (
-                fixed.decision_sha256 != adaptive.decision_sha256
+                proof.archetype_id != fixed.archetype_id
+                or proof.seed != fixed.seed
+                or proof.storage_backend is not fixed.storage_backend
+                or adaptive.resolution is not fixed.resolution
+                or fixed.decision_sha256 != adaptive.decision_sha256
                 or fixed.issued_permit_action is not adaptive.issued_permit_action
                 or fixed.permit_sha256 != adaptive.permit_sha256
+                or proof.fixed_artifact_kind is not fixed.deterministic_artifact_kind
+                or proof.adaptive_artifact_kind
+                is not adaptive.deterministic_artifact_kind
+                or proof.fixed_artifact_sha256 != fixed.deterministic_artifact_sha256
+                or proof.adaptive_artifact_sha256
+                != adaptive.deterministic_artifact_sha256
                 or proof.fixed_decision_sha256 != fixed.decision_sha256
                 or proof.adaptive_decision_sha256 != adaptive.decision_sha256
                 or proof.fixed_permit_sha256 != fixed.permit_sha256
                 or proof.adaptive_permit_sha256 != adaptive.permit_sha256
-                or proof.admitted_evidence_sha256
-                != fixed.admitted_evidence_sha256
+                or fixed.admitted_evidence_sha256 != adaptive.admitted_evidence_sha256
+                or proof.admitted_evidence_sha256 != fixed.admitted_evidence_sha256
                 or proof.deterministic_resolution is not fixed.resolution
-                or proof.deterministic_permit_action
-                is not fixed.issued_permit_action
+                or proof.deterministic_permit_action is not fixed.issued_permit_action
             ):
                 raise ValueError("fixed/adaptive deterministic replay diverged")
         false_permits = sum(item.false_permit for item in self.lane_results)
@@ -696,6 +775,14 @@ class RecoveryQualificationResults(StrictModel):
             for replay in item.wrong_hypothesis_replays
         )
         witnesses = tuple(item for item in self.case_proofs if item.witness_exercised)
+        non_authorizing_certificates = tuple(
+            item
+            for item in self.lane_results
+            if item.policy is RecoveryQualificationPolicy.FIXED
+            and item.resolution is RecoveryQualificationResolution.ESCALATE
+            and item.deterministic_artifact_kind
+            is RecoveryQualificationArtifactKind.VERIFIED_CERTIFICATE
+        )
         witness_valid = sum(
             item.witness_reorder_valid and item.witness_duplication_valid
             for item in witnesses
@@ -713,6 +800,7 @@ class RecoveryQualificationResults(StrictModel):
             wrong_permits,
             len(witnesses),
             witness_valid,
+            len(non_authorizing_certificates),
             len(restarts),
             restart_valid,
         )
@@ -724,6 +812,7 @@ class RecoveryQualificationResults(StrictModel):
             self.wrong_hypothesis_permit_divergence_count,
             self.witness_case_count,
             self.witness_replay_valid_count,
+            self.non_authorizing_certificate_case_count,
             self.restart_case_count,
             self.restart_valid_count,
         )
@@ -802,8 +891,7 @@ class RecoveryQualificationContentionTrial(StrictModel):
             len(self.denied_claim_ids) != self.denied_count
             or len(self.denied_claim_ids) != len(set(self.denied_claim_ids))
             or set(winners).intersection(self.denied_claim_ids)
-            or set((*winners, *self.denied_claim_ids))
-            != set(self.contender_claim_ids)
+            or set((*winners, *self.denied_claim_ids)) != set(self.contender_claim_ids)
         ):
             raise ValueError("contention identities must partition contenders")
         if self.outbound_call_count != len(self.provider_call_receipt_ids):
@@ -841,7 +929,10 @@ class RecoveryQualificationContention(StrictModel):
             (RecoveryQualificationStorageBackend.FIRESTORE, PermitAction.CONTINUE),
             (RecoveryQualificationStorageBackend.FIRESTORE, PermitAction.RETRY),
         )
-        if tuple((item.backend, item.permit_action) for item in self.trials) != expected:
+        if (
+            tuple((item.backend, item.permit_action) for item in self.trials)
+            != expected
+        ):
             raise ValueError("contention coverage or order changed")
         passed = all(item.passed for item in self.trials)
         if self.passed is not passed:
@@ -915,7 +1006,9 @@ class RecoveryQualificationComparison(StrictModel):
         adaptive = self.lanes[3].median_probe_count_x2
         reduction = 0 if fixed == 0 else (fixed - adaptive) * 10_000 // fixed
         if self.median_probe_reduction_basis_points != reduction:
-            raise ValueError("median probe reduction must use the exact integer formula")
+            raise ValueError(
+                "median probe reduction must use the exact integer formula"
+            )
         met = reduction >= RECOVERY_QUALIFICATION_ADAPTIVE_THRESHOLD_BASIS_POINTS
         if self.adaptive_efficiency_threshold_met is not met:
             raise ValueError("adaptive efficiency threshold outcome must be derived")
@@ -967,16 +1060,14 @@ class RecoveryQualificationClaimAuthorization(StrictModel):
                 self.contention_passed,
                 self.source_revision_exact,
                 self.false_permit_count == 0,
-                self.replay_parity_case_count
-                == RECOVERY_QUALIFICATION_CASE_COUNT,
+                self.replay_parity_case_count == RECOVERY_QUALIFICATION_CASE_COUNT,
                 self.wrong_hypothesis_divergence_count == 0,
             )
         )
         efficiency = all(
             (
                 safety,
-                self.execution_basis
-                is RecoveryQualificationExecutionBasis.LIVE_VERTEX,
+                self.execution_basis is RecoveryQualificationExecutionBasis.LIVE_VERTEX,
                 self.live_vertex_backed,
                 self.model_usage_measured,
                 self.median_probe_reduction_basis_points
@@ -1079,6 +1170,7 @@ __all__ = [
     "RecoveryQualificationAggregateMetrics",
     "RecoveryQualificationArchetype",
     "RecoveryQualificationArtifactIdentity",
+    "RecoveryQualificationArtifactKind",
     "RecoveryQualificationCaseProof",
     "RecoveryQualificationClaimAuthorization",
     "RecoveryQualificationComparison",

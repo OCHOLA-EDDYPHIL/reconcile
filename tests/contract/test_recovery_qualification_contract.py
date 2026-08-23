@@ -8,7 +8,7 @@ import pytest
 from jsonschema import Draft202012Validator
 from pydantic import ValidationError
 
-from reconcile.contracts import canonical_json_bytes
+from reconcile.contracts import RecoveryHypothesisDisposition, canonical_json_bytes
 from scripts.generate_contract_schemas import PUBLIC_SCHEMAS, generated_artifacts
 from tests.contract._factories import make_recovery_qualification_examples
 
@@ -62,6 +62,16 @@ def test_results_reject_false_permit_accounting_drift() -> None:
     payload["false_permit_count"] = 1
 
     with pytest.raises(ValidationError, match="aggregate counts"):
+        type(results).model_validate(payload)
+
+
+def test_results_reject_a_non_rejecting_wrong_hypothesis_disposition() -> None:
+    results = make_recovery_qualification_examples()[2]
+    payload = results.model_dump(mode="python")
+    replay = payload["case_proofs"][0]["wrong_hypothesis_replays"][0]
+    replay["disposition"] = RecoveryHypothesisDisposition.SELECTED
+
+    with pytest.raises(ValidationError, match="rejecting disposition"):
         type(results).model_validate(payload)
 
 
