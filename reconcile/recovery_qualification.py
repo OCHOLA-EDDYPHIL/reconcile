@@ -14,16 +14,14 @@ import sys
 import tempfile
 from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
 
 from reconcile.contracts import (
-    ACTION_PERMIT_VERSION,
-    ActionPermit,
     ActionPermitState,
-    CertifiedTransition,
     PermitAction,
+    RecoveryDispatchOutcome,
     canonical_json_bytes,
     canonical_sha256,
     decode_contract,
@@ -70,20 +68,19 @@ from reconcile.contracts.recovery_qualification import (
     RecoveryQualificationResolution,
     RecoveryQualificationResults,
     RecoveryQualificationStorageBackend,
+    RecoveryQualificationWitnessReplayKind,
 )
-from reconcile.hosted.cloud_run_canary import CloudRunFaultMode
-from reconcile.persistence.permits import (
-    PERMIT_CLAIM_REQUEST_VERSION,
-    PermitClaimDenied,
-    PermitClaimRequest,
-    action_permit_id,
+from reconcile.hosted.firestore_cas import (
+    FirestoreCasCollection,
+    firestore_cas_document_path,
 )
-from reconcile.persistence.sqlite_runtime import SqliteDurableRuntimeStore
+from reconcile.persistence.permits import PermitClaimDenied
 from reconcile.recovery_qualification_execution import (
     RecoveryQualificationBlindExecution,
     RecoveryQualificationProofExecution,
     execute_recovery_qualification_blind_lane,
     execute_recovery_qualification_proof_lane,
+    prepare_recovery_qualification_contention_dispatch,
 )
 from reconcile.recovery_qualification_fixtures import (
     RECOVERY_QUALIFICATION_ARCHETYPES,
@@ -91,10 +88,6 @@ from reconcile.recovery_qualification_fixtures import (
     RecoveryQualificationObservation,
     build_recovery_qualification_fixtures,
     recovery_qualification_fixture_catalog_sha256,
-)
-from reconcile.recovery_qualification_provider import (
-    build_qualification_firestore_store_factory,
-    build_recovery_qualification_provider,
 )
 
 RECOVERY_QUALIFICATION_MEDIAN_FORMULA = (
@@ -238,6 +231,16 @@ def _require_contention_matches_protocol(
     results: RecoveryQualificationResults,
     contention: RecoveryQualificationContention,
 ) -> None:
+    try:
+        trusted_contention = RecoveryQualificationContention.model_validate(
+            contention.model_dump(mode="python")
+        )
+    except Exception as error:
+        raise RecoveryQualificationError(
+            "qualification contention contract is invalid"
+        ) from error
+    if trusted_contention != contention:
+        raise RecoveryQualificationError("qualification contention contract changed")
     if (
         contention.suite_id != manifest.suite_id
         or contention.manifest_sha256 != canonical_sha256(manifest)
@@ -248,33 +251,15 @@ def _require_contention_matches_protocol(
         f"qualification-claim-{index:02}"
         for index in range(RECOVERY_QUALIFICATION_CONTENTION_WIDTH)
     )
-    provider = build_recovery_qualification_provider(
-        build_recovery_qualification_fixtures()[0]
-    )
-    operation_name = (
-        f"projects/{provider.settings.project}/locations/"
-        f"{provider.settings.location}/operations/op-1"
-    )
     for trial in contention.trials:
-        issued = _contention_permit(trial.backend, trial.permit_action)
-        expected_final = issued.model_copy(
-            update={
-                "state": ActionPermitState.CLAIMED,
-                "revision": 1,
-                "claim_id": trial.winner_claim_id,
-                "claimed_at": _CONTENTION_NOW + timedelta(seconds=1),
-            }
-        )
         receipt_ids = (
-            (
-                "provider-call-receipt-"
-                + hashlib.sha256(
-                    (
-                        f"{trial.backend.value}\0{trial.permit_action.value}\0"
-                        f"{operation_name}"
-                    ).encode()
-                ).hexdigest()[:32]
-            ),
+            "dispatch-"
+            + hashlib.sha256(
+                (
+                    f"{trial.final_permit.permit_id}\0"
+                    f"{trial.winner_claim_id}"
+                ).encode()
+            ).hexdigest()[:32],
         )
         expected_denied = tuple(
             claim_id
@@ -284,8 +269,15 @@ def _require_contention_matches_protocol(
         if (
             trial.contender_claim_ids != expected_claim_ids
             or trial.denied_claim_ids != expected_denied
-            or trial.final_permit != expected_final
             or trial.provider_call_receipt_ids != receipt_ids
+            or trial.final_permit.source_node_id
+            != ("stage" if trial.permit_action is PermitAction.CONTINUE else "record")
+            or trial.final_permit.tool_name
+            != (
+                "promote-cloud-run-traffic"
+                if trial.permit_action is PermitAction.CONTINUE
+                else "create-firestore-release-record"
+            )
         ):
             raise RecoveryQualificationError(
                 "qualification contention trial contradicts the protocol"
@@ -920,14 +912,15 @@ def _case_proof(
         witness_exercised=witness_exercised,
         witness_sha256=fixed.witness_semantic_sha256,
         reordered_witness_sha256=fixed.reordered_witness_semantic_sha256,
-        duplicated_witness_sha256=fixed.duplicated_witness_semantic_sha256,
+        replayed_witness_sha256=fixed.replayed_witness_semantic_sha256,
+        witness_replay_kind=fixed.witness_replay_kind,
         witness_reorder_valid=(
             not witness_exercised
             or fixed.witness_semantic_sha256 == fixed.reordered_witness_semantic_sha256
         ),
-        witness_duplication_valid=(
+        witness_replay_valid=(
             not witness_exercised
-            or fixed.witness_semantic_sha256 == fixed.duplicated_witness_semantic_sha256
+            or fixed.witness_semantic_sha256 == fixed.replayed_witness_semantic_sha256
         ),
         restart_exercised=restart_exercised,
         restart_lane_sha256=(
@@ -1051,7 +1044,17 @@ async def _run_recovery_qualification_in_directory(
     )
     witnesses = tuple(item for item in case_proofs if item.witness_exercised)
     witness_valid = sum(
-        item.witness_reorder_valid and item.witness_duplication_valid
+        item.witness_reorder_valid and item.witness_replay_valid
+        for item in witnesses
+    )
+    witness_evidence_duplications = sum(
+        item.witness_replay_kind
+        is RecoveryQualificationWitnessReplayKind.EVIDENCE_DUPLICATION
+        for item in witnesses
+    )
+    witness_zero_evidence_replays = sum(
+        item.witness_replay_kind
+        is RecoveryQualificationWitnessReplayKind.ZERO_EVIDENCE_REPLAY
         for item in witnesses
     )
     non_authorizing_certificates = sum(
@@ -1102,6 +1105,8 @@ async def _run_recovery_qualification_in_directory(
         wrong_hypothesis_permit_divergence_count=wrong_permits,
         witness_case_count=len(witnesses),
         witness_replay_valid_count=witness_valid,
+        witness_evidence_duplication_case_count=witness_evidence_duplications,
+        witness_zero_evidence_replay_case_count=witness_zero_evidence_replays,
         non_authorizing_certificate_case_count=non_authorizing_certificates,
         restart_case_count=len(restarts),
         restart_valid_count=restart_valid,
@@ -1159,6 +1164,16 @@ def recovery_qualification_median_reduction_basis_points(
     fixed = _median_x2(fixed_values)
     adaptive = _median_x2(adaptive_values)
     return 0 if fixed == 0 else (fixed - adaptive) * 10_000 // fixed
+
+
+def recovery_qualification_adaptive_threshold_met(
+    reduction_basis_points: int,
+) -> bool:
+    """Evaluate the preregistered 25% boundary without asserting provenance."""
+
+    if type(reduction_basis_points) is not int:
+        raise TypeError("recovery qualification reduction must be an exact integer")
+    return reduction_basis_points >= RECOVERY_QUALIFICATION_ADAPTIVE_THRESHOLD_BASIS_POINTS
 
 
 def _aggregate_metrics(
@@ -1249,78 +1264,26 @@ def compare_recovery_qualification(
             RECOVERY_QUALIFICATION_ADAPTIVE_THRESHOLD_BASIS_POINTS
         ),
         adaptive_efficiency_threshold_met=(
-            reduction >= RECOVERY_QUALIFICATION_ADAPTIVE_THRESHOLD_BASIS_POINTS
+            recovery_qualification_adaptive_threshold_met(reduction)
         ),
         execution_basis=environment.execution_basis,
         live_vertex_model_usage_measured=measured,
     )
 
 
-def _contention_permit(
+def _contention_fixture(
     backend: RecoveryQualificationStorageBackend,
     action: PermitAction,
-) -> ActionPermit:
-    suffix = f"{backend.value}-{action.value.lower()}"
-    source = f"source-{suffix}"
-    target = source if action is PermitAction.RETRY else f"target-{suffix}"
-    digest = hashlib.sha256(suffix.encode()).hexdigest()
-    certificate_id = f"qualification-certificate-{suffix}"
-    transition = CertifiedTransition(
-        action=action,
-        source_node_id=source,
-        target_node_id=target,
-        semantic_action_sha256=digest,
-        tool_name="qualification-provider-mutation",
-        tool_version="1.0.0",
-        arguments_sha256=digest,
-        target_sha256=digest,
-        precondition_sha256=digest,
-    )
-    return ActionPermit(
-        schema_version=ACTION_PERMIT_VERSION,
-        permit_id=action_permit_id(certificate_id, transition),
-        certificate_id=certificate_id,
-        certificate_sha256=digest,
-        chain_id="qualification-chain",
-        source_node_id=source,
-        target_node_id=target,
-        semantic_action_sha256=digest,
-        action=action,
-        action_profile_version="qualification-action-profile-v1",
-        action_policy_version=RECOVERY_QUALIFICATION_PERMIT_POLICY_VERSION,
-        tool_name="qualification-provider-mutation",
-        tool_version="1.0.0",
-        arguments_sha256=digest,
-        target_sha256=digest,
-        precondition_sha256=digest,
-        issued_at=_CONTENTION_NOW,
-        expires_at=_CONTENTION_NOW + timedelta(hours=1),
-        max_uses=1,
-        state=ActionPermitState.ISSUED,
-        revision=0,
-    )
-
-
-def _claim_request(permit: ActionPermit, index: int) -> PermitClaimRequest:
-    return PermitClaimRequest(
-        schema_version=PERMIT_CLAIM_REQUEST_VERSION,
-        permit_id=permit.permit_id,
-        claim_id=f"qualification-claim-{index:02}",
-        issued_permit_sha256=canonical_sha256(permit),
-        certificate_id=permit.certificate_id,
-        certificate_sha256=permit.certificate_sha256,
-        chain_id=permit.chain_id,
-        source_node_id=permit.source_node_id,
-        target_node_id=permit.target_node_id,
-        semantic_action_sha256=permit.semantic_action_sha256,
-        action_profile_version=permit.action_profile_version,
-        action_policy_version=permit.action_policy_version,
-        tool_name=permit.tool_name,
-        tool_version=permit.tool_version,
-        arguments_sha256=permit.arguments_sha256,
-        target_sha256=permit.target_sha256,
-        precondition_sha256=permit.precondition_sha256,
-        requested_at=_CONTENTION_NOW + timedelta(seconds=1),
+) -> RecoveryQualificationFixture:
+    archetype_id = {
+        PermitAction.CONTINUE: "stage-drop-committed",
+        PermitAction.RETRY: "record-predispatch-retry",
+    }[action]
+    return next(
+        fixture
+        for fixture in build_recovery_qualification_fixtures()
+        if fixture.archetype.archetype_id == archetype_id
+        and fixture.storage_backend is backend
     )
 
 
@@ -1329,54 +1292,57 @@ async def _contention_trial(
     action: PermitAction,
     directory: Path,
 ) -> RecoveryQualificationContentionTrial:
-    if backend is RecoveryQualificationStorageBackend.SQLITE:
-        database = directory / f"{backend.value}-{action.value.lower()}.sqlite3"
-        store = SqliteDurableRuntimeStore(database)
-    else:
-        store = (
-            build_qualification_firestore_store_factory(
-                f"contention-{backend.value}-{action.value.lower()}",
-                lambda: _CONTENTION_NOW,
-            )
-            .open()
-            .permit_store
-        )
-    provider = build_recovery_qualification_provider(
-        build_recovery_qualification_fixtures()[0]
+    # The contention backend names the permit authority.  A compact SQLite run
+    # ledger keeps the 32-way Firestore test focused on the permit CAS boundary.
+    fixture = _contention_fixture(RecoveryQualificationStorageBackend.SQLITE, action)
+    dispatch = await prepare_recovery_qualification_contention_dispatch(
+        fixture,
+        state_directory=directory / f"{backend.value}-{action.value.lower()}",
+        permit_backend=backend,
     )
-    permit = _contention_permit(backend, action)
-    await store.issue_permit(permit)
+    provider = dispatch.foundation.provider
+    permit = dispatch.permit
+    firestore_client = dispatch.firestore_client
+    if backend is RecoveryQualificationStorageBackend.FIRESTORE:
+        if firestore_client is None:
+            raise AssertionError("Firestore contention client is unavailable")
+        firestore_client.arm_update_contention(
+            firestore_cas_document_path(
+                FirestoreCasCollection.ACTION_PERMIT,
+                permit.permit_id,
+            ),
+            RECOVERY_QUALIFICATION_CONTENTION_WIDTH,
+        )
     start = asyncio.Event()
+    sqlite_winner_finished = asyncio.Event()
     winners: list[str] = []
     denied_claim_ids: list[str] = []
-    provider_call_receipts: list[str] = []
     denied = 0
 
     async def contend(index: int) -> None:
         nonlocal denied
         await start.wait()
-        request = _claim_request(permit, index)
+        if backend is RecoveryQualificationStorageBackend.SQLITE and index > 0:
+            await sqlite_winner_finished.wait()
+        claim_id = f"qualification-claim-{index:02}"
+        scope = dispatch.scope.model_copy(update={"claim_id": claim_id})
         try:
-            await store.claim_permit(request)
+            receipt = await dispatch.rollout_agent.execute(dispatch.prepared, scope)
         except PermitClaimDenied:
             denied += 1
-            denied_claim_ids.append(request.claim_id)
+            denied_claim_ids.append(claim_id)
             return
-        winners.append(request.claim_id)
-        accepted = await asyncio.to_thread(
-            provider.cloud_action.stage_revision,
-            mode=CloudRunFaultMode.PASS_THROUGH,
-            operation_id=provider.settings.stage_operation_id,
-            release_id=provider.settings.release_id,
-            image_digest=provider.settings.image_digest,
-            configuration_sha256=provider.settings.configuration_sha256,
-        )
-        provider_call_receipts.append(
-            "provider-call-receipt-"
-            + hashlib.sha256(
-                f"{backend.value}\0{action.value}\0{accepted.operation_name}".encode()
-            ).hexdigest()[:32]
-        )
+        if (
+            receipt.outcome is not RecoveryDispatchOutcome.SUCCEEDED
+            or receipt.action_permit is None
+            or receipt.action_permit.state is not ActionPermitState.COMPLETED
+        ):
+            raise RecoveryQualificationError(
+                "contention winner did not complete production dispatch"
+            )
+        winners.append(claim_id)
+        if backend is RecoveryQualificationStorageBackend.SQLITE:
+            sqlite_winner_finished.set()
 
     tasks = tuple(
         asyncio.create_task(contend(index))
@@ -1384,12 +1350,35 @@ async def _contention_trial(
     )
     start.set()
     await asyncio.gather(*tasks)
-    final = await store.get_permit(permit.permit_id)
-    outbound_calls = provider.counters.outbound_call_count
+    final = await dispatch.stores.permit_authority.get_permit(permit.permit_id)
+    snapshot = await dispatch.stores.run_store.get(dispatch.scope.run_id)
+    winner_claim_id = winners[0] if len(winners) == 1 else None
+    provider_call_receipts = tuple(
+        receipt.receipt_id
+        for receipt in snapshot.dispatch_receipts
+        if receipt.claim_id == winner_claim_id
+        and receipt.node_id == dispatch.prepared.target_node_id
+        and receipt.provider_contact
+    )
+    after = provider.counters.provider_mutations()
+    before = dispatch.baseline_provider_mutations
+    provider_mutations = type(after)(
+        stage_calls=after.stage_calls - before.stage_calls,
+        promote_calls=after.promote_calls - before.promote_calls,
+        record_calls=after.record_calls - before.record_calls,
+        outbound_call_count=after.outbound_call_count - before.outbound_call_count,
+    )
+    outbound_calls = provider_mutations.outbound_call_count
     if outbound_calls != len(provider_call_receipts):
         raise RecoveryQualificationError(
             "contention provider receipt accounting changed"
         )
+    cas_overlap_count = (
+        0 if firestore_client is None else firestore_client.contention_overlap_count
+    )
+    cas_conflict_count = (
+        0 if firestore_client is None else firestore_client.contention_conflict_count
+    )
     return RecoveryQualificationContentionTrial(
         backend=backend,
         permit_action=action,
@@ -1397,16 +1386,32 @@ async def _contention_trial(
         winner_count=len(winners),
         denied_count=denied,
         outbound_call_count=outbound_calls,
+        provider_mutations=provider_mutations,
+        dispatch_target_node_id=dispatch.prepared.target_node_id,
+        cas_overlap_count=cas_overlap_count,
+        cas_conflict_count=cas_conflict_count,
         contender_claim_ids=tuple(
             f"qualification-claim-{index:02}"
             for index in range(RECOVERY_QUALIFICATION_CONTENTION_WIDTH)
         ),
-        winner_claim_id=winners[0] if len(winners) == 1 else None,
+        winner_claim_id=winner_claim_id,
         denied_claim_ids=tuple(sorted(denied_claim_ids)),
-        provider_call_receipt_ids=tuple(provider_call_receipts),
+        provider_call_receipt_ids=provider_call_receipts,
         final_permit=final,
         final_permit_sha256=canonical_sha256(final),
-        passed=len(winners) == 1 and outbound_calls <= 1,
+        passed=(
+            len(winners) == 1
+            and denied == RECOVERY_QUALIFICATION_CONTENTION_WIDTH - 1
+            and outbound_calls == 1
+            and (
+                backend is RecoveryQualificationStorageBackend.SQLITE
+                or (
+                    cas_overlap_count == RECOVERY_QUALIFICATION_CONTENTION_WIDTH
+                    and cas_conflict_count
+                    == RECOVERY_QUALIFICATION_CONTENTION_WIDTH - 1
+                )
+            )
+        ),
     )
 
 
@@ -1521,7 +1526,9 @@ def authorize_recovery_qualification_claims(
             safety,
             live_vertex,
             measured,
-            comparison.median_probe_reduction_basis_points >= 2500,
+            recovery_qualification_adaptive_threshold_met(
+                comparison.median_probe_reduction_basis_points
+            ),
         )
     )
     safety_wording = "proof-to-permit safety on the frozen recovery matrix"
@@ -1573,16 +1580,22 @@ def authorize_recovery_qualification_claims(
 
 async def build_recovery_qualification_bundle(
     *,
-    source_revision: str,
-    source_tree_sha256: str,
-    repository_clean: bool,
-    dependency_lock_sha256: str,
+    source_repository: str | Path,
     created_at: datetime | None = None,
     contention_directory: str | Path | None = None,
 ) -> RecoveryQualificationBundle:
-    """Build every bound artifact, including real permit-store contention."""
+    """Build artifacts from source facts measured directly by this runner."""
 
-    generated_at = _now(created_at)
+    repository = Path(source_repository).resolve(strict=True)
+    if not repository.is_dir():
+        raise RecoveryQualificationError("qualification source must be a directory")
+    lock_path = repository / "uv.lock"
+    if not lock_path.is_file():
+        raise RecoveryQualificationError("qualification requires the checked-in uv.lock")
+    source_state = recovery_qualification_source_state(repository)
+    source_revision, source_tree_sha256, repository_clean = source_state
+    dependency_lock_sha256 = hashlib.sha256(lock_path.read_bytes()).hexdigest()
+    generated_at = _now(_CONTENTION_NOW if created_at is None else created_at)
     manifest = build_recovery_qualification_manifest(
         source_revision=source_revision,
         source_tree_sha256=source_tree_sha256,
@@ -1601,6 +1614,12 @@ async def build_recovery_qualification_bundle(
         results,
         working_directory=contention_directory,
     )
+    final_source_state = recovery_qualification_source_state(repository)
+    final_lock_sha256 = hashlib.sha256(lock_path.read_bytes()).hexdigest()
+    if final_source_state != source_state or final_lock_sha256 != dependency_lock_sha256:
+        raise RecoveryQualificationError(
+            "qualification source changed while the matrix was running"
+        )
     comparison = compare_recovery_qualification(manifest, environment, results)
     claims = authorize_recovery_qualification_claims(
         manifest,
@@ -1720,6 +1739,24 @@ def export_recovery_qualification_bundle(
         ):
             raise RecoveryQualificationError(
                 "qualification output must not overlap the measured source"
+            )
+        source_revision, source_tree_sha256, repository_clean = (
+            recovery_qualification_source_state(source)
+        )
+        lock_path = source / "uv.lock"
+        if not lock_path.is_file():
+            raise RecoveryQualificationError(
+                "qualification requires the checked-in uv.lock"
+            )
+        if (
+            source_revision != bundle.manifest.source_revision
+            or source_tree_sha256 != bundle.manifest.source_tree_sha256
+            or repository_clean is not bundle.environment.repository_clean
+            or hashlib.sha256(lock_path.read_bytes()).hexdigest()
+            != bundle.environment.dependency_lock_sha256
+        ):
+            raise RecoveryQualificationError(
+                "qualification source changed before bundle publication"
             )
     if target.exists() or target.is_symlink():
         raise FileExistsError(target)
@@ -1900,6 +1937,7 @@ __all__ = [
     "build_recovery_qualification_manifest",
     "compare_recovery_qualification",
     "export_recovery_qualification_bundle",
+    "recovery_qualification_adaptive_threshold_met",
     "recovery_qualification_median_reduction_basis_points",
     "recovery_qualification_source_state",
     "replay_recovery_qualification_fixture",

@@ -97,18 +97,6 @@
         "deterministic_resolution": {
           "$ref": "#/$defs/RecoveryQualificationResolution"
         },
-        "duplicated_witness_sha256": {
-          "anyOf": [
-            {
-              "pattern": "^[0-9a-f]{64}$",
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "title": "Duplicated Witness Sha256"
-        },
         "fixed_artifact_kind": {
           "$ref": "#/$defs/RecoveryQualificationArtifactKind"
         },
@@ -149,6 +137,18 @@
             }
           ],
           "title": "Reordered Witness Sha256"
+        },
+        "replayed_witness_sha256": {
+          "anyOf": [
+            {
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Replayed Witness Sha256"
         },
         "restart_decision_valid": {
           "title": "Restart Decision Valid",
@@ -227,16 +227,26 @@
         "storage_backend": {
           "$ref": "#/$defs/RecoveryQualificationStorageBackend"
         },
-        "witness_duplication_valid": {
-          "title": "Witness Duplication Valid",
-          "type": "boolean"
-        },
         "witness_exercised": {
           "title": "Witness Exercised",
           "type": "boolean"
         },
         "witness_reorder_valid": {
           "title": "Witness Reorder Valid",
+          "type": "boolean"
+        },
+        "witness_replay_kind": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RecoveryQualificationWitnessReplayKind"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "witness_replay_valid": {
+          "title": "Witness Replay Valid",
           "type": "boolean"
         },
         "witness_sha256": {
@@ -284,9 +294,10 @@
         "witness_exercised",
         "witness_sha256",
         "reordered_witness_sha256",
-        "duplicated_witness_sha256",
+        "replayed_witness_sha256",
+        "witness_replay_kind",
         "witness_reorder_valid",
-        "witness_duplication_valid",
+        "witness_replay_valid",
         "restart_exercised",
         "restart_lane_sha256",
         "restarted_decision_sha256",
@@ -325,16 +336,9 @@
           "$ref": "#/$defs/RecoveryHypothesisDisposition"
         },
         "hypothesis_sha256": {
-          "anyOf": [
-            {
-              "pattern": "^[0-9a-f]{64}$",
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "title": "Hypothesis Sha256"
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Hypothesis Sha256",
+          "type": "string"
         },
         "observed_decision_sha256": {
           "pattern": "^[0-9a-f]{64}$",
@@ -795,6 +799,14 @@
       ],
       "title": "RecoveryQualificationStorageBackend",
       "type": "string"
+    },
+    "RecoveryQualificationWitnessReplayKind": {
+      "enum": [
+        "EVIDENCE_DUPLICATION",
+        "ZERO_EVIDENCE_REPLAY"
+      ],
+      "title": "RecoveryQualificationWitnessReplayKind",
+      "type": "string"
     }
   },
   "additionalProperties": false,
@@ -907,10 +919,22 @@
       "title": "Witness Case Count",
       "type": "integer"
     },
+    "witness_evidence_duplication_case_count": {
+      "maximum": 100,
+      "minimum": 1,
+      "title": "Witness Evidence Duplication Case Count",
+      "type": "integer"
+    },
     "witness_replay_valid_count": {
       "maximum": 100,
       "minimum": 0,
       "title": "Witness Replay Valid Count",
+      "type": "integer"
+    },
+    "witness_zero_evidence_replay_case_count": {
+      "maximum": 100,
+      "minimum": 1,
+      "title": "Witness Zero Evidence Replay Case Count",
       "type": "integer"
     },
     "wrong_hypothesis_decision_divergence_count": {
@@ -949,6 +973,8 @@
     "wrong_hypothesis_permit_divergence_count",
     "witness_case_count",
     "witness_replay_valid_count",
+    "witness_evidence_duplication_case_count",
+    "witness_zero_evidence_replay_case_count",
     "non_authorizing_certificate_case_count",
     "restart_case_count",
     "restart_valid_count",

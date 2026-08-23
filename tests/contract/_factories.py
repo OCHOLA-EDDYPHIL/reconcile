@@ -97,6 +97,7 @@ from reconcile.contracts import (
     OperationStatus,
     OriginalInvocation,
     PermitAction,
+    PermitCompletionOutcome,
     PlannerAcquisitionAdvice,
     PlannerAdmittedEvidence,
     PlannerCapability,
@@ -161,6 +162,7 @@ from reconcile.contracts import (
     RecoveryQualificationResolution,
     RecoveryQualificationResults,
     RecoveryQualificationStorageBackend,
+    RecoveryQualificationWitnessReplayKind,
     RecoveryReceiptOutcome,
     RecoveryResetResult,
     RecoveryRunEvent,
@@ -206,7 +208,6 @@ from reconcile.qualification import (
 )
 from reconcile.recovery_qualification import (
     _CONTENTION_NOW,
-    _contention_permit,
     authorize_recovery_qualification_claims,
     build_recovery_qualification_environment,
     build_recovery_qualification_manifest,
@@ -1737,6 +1738,16 @@ def make_recovery_qualification_examples() -> tuple[
         witness_sha256 = (
             artifact_sha256 if archetype.ambiguity_witness_required else None
         )
+        witness_replay_kind = (
+            RecoveryQualificationWitnessReplayKind.ZERO_EVIDENCE_REPLAY
+            if archetype.ambiguity_witness_required
+            and "unavailable" in archetype.archetype_id
+            else (
+                RecoveryQualificationWitnessReplayKind.EVIDENCE_DUPLICATION
+                if archetype.ambiguity_witness_required
+                else None
+            )
+        )
         wrong_hypotheses = tuple(
             RecoveryQualificationHypothesisReplay(
                 variant_id=f"wrong-gemini-hypothesis-{index}",
@@ -1775,9 +1786,10 @@ def make_recovery_qualification_examples() -> tuple[
                 witness_exercised=archetype.ambiguity_witness_required,
                 witness_sha256=witness_sha256,
                 reordered_witness_sha256=witness_sha256,
-                duplicated_witness_sha256=witness_sha256,
+                replayed_witness_sha256=witness_sha256,
+                witness_replay_kind=witness_replay_kind,
                 witness_reorder_valid=True,
-                witness_duplication_valid=True,
+                witness_replay_valid=True,
                 restart_exercised=restart_exercised,
                 restart_lane_sha256=(
                     digest("restart-lane", fixture.case_id)
@@ -1827,6 +1839,16 @@ def make_recovery_qualification_examples() -> tuple[
         wrong_hypothesis_permit_divergence_count=0,
         witness_case_count=witness_case_count,
         witness_replay_valid_count=witness_case_count,
+        witness_evidence_duplication_case_count=sum(
+            item.witness_replay_kind
+            is RecoveryQualificationWitnessReplayKind.EVIDENCE_DUPLICATION
+            for item in case_proofs
+        ),
+        witness_zero_evidence_replay_case_count=sum(
+            item.witness_replay_kind
+            is RecoveryQualificationWitnessReplayKind.ZERO_EVIDENCE_REPLAY
+            for item in case_proofs
+        ),
         non_authorizing_certificate_case_count=(non_authorizing_certificate_case_count),
         restart_case_count=len(manifest.archetypes),
         restart_valid_count=len(manifest.archetypes),
@@ -1840,19 +1862,50 @@ def make_recovery_qualification_examples() -> tuple[
         safety_passed=True,
     )
 
-    def claimed_permit(backend, action):
-        return _contention_permit(backend, action).model_copy(
-            update={
-                "state": ActionPermitState.CLAIMED,
-                "revision": 1,
-                "claim_id": "qualification-claim-00",
-                "claimed_at": _CONTENTION_NOW + timedelta(seconds=1),
-            }
+    def completed_permit(backend, action):
+        suffix = f"{backend.value}-{action.value.lower()}"
+        digest_value = hashlib.sha256(suffix.encode()).hexdigest()
+        source_node_id, target_node_id, tool_name, action_profile_version = {
+            PermitAction.CONTINUE: (
+                "stage",
+                "promote",
+                "promote-cloud-run-traffic",
+                "promote-cloud-run-traffic-profile-v1",
+            ),
+            PermitAction.RETRY: (
+                "record",
+                "record",
+                "create-firestore-release-record",
+                "create-firestore-release-record-profile-v1",
+            ),
+        }[action]
+        return ActionPermit(
+            schema_version=ACTION_PERMIT_VERSION,
+            permit_id=f"permit-{digest_value[:32]}",
+            certificate_id=f"certificate-{digest_value[:32]}",
+            certificate_sha256=digest_value,
+            chain_id="qualification-chain",
+            source_node_id=source_node_id,
+            target_node_id=target_node_id,
+            semantic_action_sha256=digest_value,
+            action=action,
+            action_profile_version=action_profile_version,
+            action_policy_version="recovery-action-v1",
+            tool_name=tool_name,
+            tool_version="1.0.0",
+            arguments_sha256=digest_value,
+            target_sha256=digest_value,
+            precondition_sha256=digest_value,
+            issued_at=_CONTENTION_NOW,
+            expires_at=_CONTENTION_NOW + timedelta(hours=1),
+            max_uses=1,
+            state=ActionPermitState.COMPLETED,
+            revision=2,
+            claim_id="qualification-claim-00",
+            claimed_at=_CONTENTION_NOW + timedelta(seconds=1),
+            completed_at=_CONTENTION_NOW + timedelta(seconds=2),
+            completion_outcome=PermitCompletionOutcome.SUCCEEDED,
         )
-
-    operation_name = (
-        "projects/qualification-project/locations/us-central1/operations/op-1"
-    )
 
     trials = tuple(
         RecoveryQualificationContentionTrial(
@@ -1862,6 +1915,21 @@ def make_recovery_qualification_examples() -> tuple[
             winner_count=1,
             denied_count=31,
             outbound_call_count=1,
+            provider_mutations=RecoveryQualificationProviderMutations(
+                stage_calls=0,
+                promote_calls=1 if action is PermitAction.CONTINUE else 0,
+                record_calls=1 if action is PermitAction.RETRY else 0,
+                outbound_call_count=1,
+            ),
+            dispatch_target_node_id=(
+                "promote" if action is PermitAction.CONTINUE else "record"
+            ),
+            cas_overlap_count=(
+                32 if backend is RecoveryQualificationStorageBackend.FIRESTORE else 0
+            ),
+            cas_conflict_count=(
+                31 if backend is RecoveryQualificationStorageBackend.FIRESTORE else 0
+            ),
             contender_claim_ids=tuple(
                 f"qualification-claim-{index:02}" for index in range(32)
             ),
@@ -1870,13 +1938,16 @@ def make_recovery_qualification_examples() -> tuple[
                 f"qualification-claim-{index:02}" for index in range(1, 32)
             ),
             provider_call_receipt_ids=(
-                "provider-call-receipt-"
+                "dispatch-"
                 + hashlib.sha256(
-                    f"{backend.value}\0{action.value}\0{operation_name}".encode()
+                    (
+                        f"{completed_permit(backend, action).permit_id}\0"
+                        "qualification-claim-00"
+                    ).encode()
                 ).hexdigest()[:32],
             ),
-            final_permit=claimed_permit(backend, action),
-            final_permit_sha256=canonical_sha256(claimed_permit(backend, action)),
+            final_permit=completed_permit(backend, action),
+            final_permit_sha256=canonical_sha256(completed_permit(backend, action)),
             passed=True,
         )
         for backend, action in (

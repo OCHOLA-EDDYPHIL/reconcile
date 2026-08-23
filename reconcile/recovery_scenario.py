@@ -104,7 +104,7 @@ from reconcile.contracts.base import (
     reject_sensitive_keys,
     reject_sensitive_values,
 )
-from reconcile.controller import CapabilityRegistry, ProbeController
+from reconcile.controller import CapabilityRegistry, ControllerClock, ProbeController
 from reconcile.controller.permits import PermitAuthority
 from reconcile.evidence import EvidenceEngine, ProbeRun, TargetRuleRegistry
 from reconcile.evidence.recovery_rules import (
@@ -737,6 +737,7 @@ class ReleaseChainEvidenceSource:
         cloud_run: CloudRunCanaryReader,
         firestore: GoogleFirestoreReleaseTarget,
         clock: Callable[[], datetime] | None = None,
+        controller_clock: ControllerClock | None = None,
     ) -> None:
         from reconcile.recovery_workflow import RecoveryRunDefinition
 
@@ -759,6 +760,7 @@ class ReleaseChainEvidenceSource:
         self._firestore = firestore
         self._receipts = RecoveryRunReceiptReader(store)
         self._clock = clock or (lambda: datetime.now(UTC))
+        self._controller_clock = controller_clock
         self._sessions: dict[tuple[str, str, int], _EvidenceSession] = {}
 
     def _now(self) -> datetime:
@@ -845,7 +847,7 @@ class ReleaseChainEvidenceSource:
             controller=ProbeController(
                 envelope,
                 capabilities,
-                clock=_WallClock(self._clock),
+                clock=self._controller_clock or _WallClock(self._clock),
             ),
             engine=EvidenceEngine(envelope, rules),
             created_at=self._now(),

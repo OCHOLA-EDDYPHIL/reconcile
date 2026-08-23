@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import time
 from collections import Counter
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
@@ -41,6 +40,7 @@ from reconcile.contracts import (
     ADAPTIVE_PLANNER_INPUT_VERSION,
     ADAPTIVE_PLANNER_OUTPUT_VERSION,
     PROBE_REQUEST_VERSION,
+    RECOVERY_ACTION_SCOPE_VERSION,
     RECOVERY_RUN_REQUEST_VERSION,
     ActionPermit,
     ActionPermitState,
@@ -76,12 +76,15 @@ from reconcile.contracts import (
 )
 from reconcile.contracts.base import canonical_json_value_bytes
 from reconcile.contracts.recovery_qualification import (
+    RECOVERY_QUALIFICATION_CONTENTION_WIDTH,
     RecoveryQualificationArtifactKind,
     RecoveryQualificationModelUsage,
     RecoveryQualificationModelUsageStatus,
     RecoveryQualificationPolicy,
     RecoveryQualificationProviderMutations,
     RecoveryQualificationResolution,
+    RecoveryQualificationStorageBackend,
+    RecoveryQualificationWitnessReplayKind,
 )
 from reconcile.controller import (
     CapabilityRegistration,
@@ -90,7 +93,7 @@ from reconcile.controller import (
     ProbeController,
     ProbeStopReason,
 )
-from reconcile.controller.permits import action_permit_from_certificate
+from reconcile.controller.permits import PermitAuthority, action_permit_from_certificate
 from reconcile.evidence import EvidenceEngine, ProbeRun, TargetRuleRegistry
 from reconcile.evidence.classification import evaluate_evidence
 from reconcile.evidence.recovery_rules import (
@@ -112,6 +115,7 @@ from reconcile.hosted.firestore_release import (
     FirestoreReleaseOutcomeUnknown,
     FirestoreReleaseProviderUnavailable,
 )
+from reconcile.persistence.permits import ActionPermitStore
 from reconcile.persistence.recovery_runs import RecoveryRunEventSnapshot
 from reconcile.recovery_agents import (
     RecoveryAgent,
@@ -120,9 +124,11 @@ from reconcile.recovery_agents import (
 )
 from reconcile.recovery_qualification_fixtures import RecoveryQualificationFixture
 from reconcile.recovery_qualification_provider import (
+    DeterministicAsyncFirestoreCasClient,
     RecoveryQualificationFoundation,
     RecoveryQualificationProviderResources,
     RecoveryQualificationStores,
+    build_qualification_firestore_store_factory,
     build_recovery_qualification_foundation,
 )
 from reconcile.recovery_scenario import (
@@ -140,7 +146,11 @@ from reconcile.recovery_workflow import (
     RecoveryRunDefinition,
 )
 
-_WRONG_VARIANTS = ("unknown-capability", "invalid-arguments", "foreign-effect")
+_WRONG_VARIANTS = (
+    "unknown-capability",
+    "invalid-arguments",
+    "unsupported-version",
+)
 _UNSUPPORTED_STOP_REASONS = frozenset(
     {
         ProbeStopReason.INVALID_REQUEST,
@@ -164,7 +174,7 @@ _UNSUPPORTED_STOP_REASONS = frozenset(
 class RecoveryQualificationWrongExecution:
     variant_id: str
     planner_output_sha256: str
-    hypothesis_sha256: str | None
+    hypothesis_sha256: str
     disposition: RecoveryHypothesisDisposition
     decision_sha256: str
     permit_sha256: str | None
@@ -196,13 +206,59 @@ class RecoveryQualificationProofExecution:
     wrong_hypotheses: tuple[RecoveryQualificationWrongExecution, ...]
     witness_semantic_sha256: str | None
     reordered_witness_semantic_sha256: str | None
-    duplicated_witness_semantic_sha256: str | None
+    replayed_witness_semantic_sha256: str | None
+    witness_replay_kind: RecoveryQualificationWitnessReplayKind | None
 
 
 @dataclass(frozen=True, slots=True)
 class RecoveryQualificationBlindExecution:
     resolution: RecoveryQualificationResolution
     provider_mutations: RecoveryQualificationProviderMutations
+
+
+@dataclass(frozen=True, slots=True)
+class RecoveryQualificationContentionDispatch:
+    """A real issued permit and production dispatch path held before contact."""
+
+    foundation: RecoveryQualificationFoundation
+    stores: RecoveryQualificationStores
+    rollout_agent: RolloutAgent
+    prepared: RecoveryPreparedAction
+    scope: RecoveryActionScope
+    permit: ActionPermit
+    baseline_provider_mutations: RecoveryQualificationProviderMutations
+    firestore_client: DeterministicAsyncFirestoreCasClient | None
+
+
+class _ClaimRendezvousStore:
+    """Hold only the first claim wave before entering the real permit store."""
+
+    def __init__(self, delegate: ActionPermitStore, width: int) -> None:
+        self._delegate = delegate
+        self._width = width
+        self._arrivals = 0
+        self._lock = asyncio.Lock()
+        self._ready = asyncio.Event()
+
+    async def issue_permit(self, permit: object):
+        return await self._delegate.issue_permit(permit)  # type: ignore[arg-type]
+
+    async def get_permit(self, permit_id: str):
+        return await self._delegate.get_permit(permit_id)
+
+    async def claim_permit(self, request: object):
+        async with self._lock:
+            self._arrivals += 1
+            if self._arrivals == self._width:
+                self._ready.set()
+        await self._ready.wait()
+        return await self._delegate.claim_permit(request)  # type: ignore[arg-type]
+
+    async def complete_permit(self, request: object):
+        return await self._delegate.complete_permit(request)  # type: ignore[arg-type]
+
+    async def permit_audit_events(self, permit_id: str):
+        return await self._delegate.permit_audit_events(permit_id)
 
 
 class _ScriptedPlanner:
@@ -239,14 +295,6 @@ class _ScriptedPlanner:
                 if prior_count == 1
                 else None
             )
-        if tool_name == "promote-cloud-run-traffic" and any(
-            assertion.state.value == "ESTABLISHED"
-            for evidence in planner_input.admitted_evidence
-            for assertion in evidence.effect_assertions
-        ):
-            # Keep one preregistered fixed-favored case in the frozen matrix:
-            # deterministic authority still ignores this redundant advice.
-            return "cloud-run-revision-get"
         if tool_name == "create-firestore-release-record" and (
             planner_input.missing_evidence
         ):
@@ -261,28 +309,29 @@ class _ScriptedPlanner:
         effects = tuple(
             effect.effect_id for effect in planner_input.envelope.expected_effects
         )
-        relevant_effects = effects
         if self.variant == "unknown-capability":
             capability = "qualification-untrusted-write"
         elif self.variant == "invalid-arguments":
             capability = capability or planner_input.capabilities[0].name
             arguments = {"unexpected": True}
-        elif self.variant == "foreign-effect":
+        elif self.variant == "unsupported-version":
             capability = capability or planner_input.capabilities[0].name
-            relevant_effects = ("qualification-foreign-effect",)
         elif self.variant != "normal":
             raise ValueError("unknown scripted qualification planner variant")
 
         admitted = tuple(item.evidence_id for item in planner_input.admitted_evidence)
         weak = tuple(item.evidence_id for item in planner_input.weak_evidence)
-        rejected = tuple(item.evidence_id for item in planner_input.rejected_evidence)
         missing = tuple(
             dict.fromkeys(item.effect_id for item in planner_input.missing_evidence)
         )
+        if not admitted and not weak and not missing:
+            missing = effects
         citations = PlannerCitationRefs(
             admitted_evidence_ids=admitted,
             weak_evidence_ids=weak,
-            rejected_evidence_ids=rejected,
+            # Rejected candidates are not retained in ``EvidenceReport.evidence``
+            # and therefore cannot be cited by a well-formed Gemini hypothesis.
+            rejected_evidence_ids=(),
             missing_effect_ids=missing,
         )
         proposal = (
@@ -292,8 +341,12 @@ class _ScriptedPlanner:
                 ProbeRequest(
                     schema_version=PROBE_REQUEST_VERSION,
                     capability_name=capability,
-                    capability_version="1.0.0",
-                    relevant_effect_ids=relevant_effects,
+                    capability_version=(
+                        "9.9.9"
+                        if self.variant == "unsupported-version"
+                        else "1.0.0"
+                    ),
+                    relevant_effect_ids=effects,
                     arguments=arguments,
                     rationale="Acquire one bounded provider observation.",
                 ),
@@ -320,9 +373,7 @@ class _ScriptedPlanner:
                     "Admitted evidence was cited." if admitted else None
                 ),
                 weak_evidence=("Weak evidence was cited." if weak else None),
-                rejected_evidence=(
-                    "Rejected evidence was cited." if rejected else None
-                ),
+                rejected_evidence=None,
                 missing_evidence=("Missing effects were cited." if missing else None),
                 citations=citations,
             ),
@@ -359,8 +410,11 @@ class _RecordingEvidenceSource:
         self.repeat_target_primary = repeat_target_primary
         self._target_primary_repeated = False
         self.probe_count = 0
+        self.elapsed_ms = 0
         self.unsupported_probe_count = 0
         self._round_audit_count = 0
+        self._round_probe_count_used = 0
+        self._round_elapsed_ms = 0
         self.states: list[RecoveryEvidenceState] = []
 
     def _record(
@@ -377,7 +431,26 @@ class _RecordingEvidenceSource:
                 if refresh
                 else state.report.probe_audit[self._round_audit_count :]
             )
-            self.probe_count += len(records)
+            current_probe_count_used = (
+                state.report.probe_audit[-1].probe_count_used
+                if state.report.probe_audit
+                else 0
+            )
+            current_elapsed_ms = (
+                state.report.probe_audit[-1].session_elapsed_ms
+                if state.report.probe_audit
+                else 0
+            )
+            self.probe_count += (
+                current_probe_count_used
+                if refresh
+                else current_probe_count_used - self._round_probe_count_used
+            )
+            self.elapsed_ms += (
+                current_elapsed_ms
+                if refresh
+                else current_elapsed_ms - self._round_elapsed_ms
+            )
             decisions = {
                 item.evidence_id: item for item in state.report.evidence_decisions
             }
@@ -391,6 +464,8 @@ class _RecordingEvidenceSource:
                 for item in records
             )
             self._round_audit_count = current
+            self._round_probe_count_used = current_probe_count_used
+            self._round_elapsed_ms = current_elapsed_ms
             self.states.append(state)
         return state
 
@@ -455,9 +530,12 @@ class _RecordingEvidenceSource:
 class _QualificationControllerClock:
     def __init__(self, now: Callable[[], datetime]) -> None:
         self._now = now
+        self._monotonic_ms = 0
 
     def monotonic(self) -> float:
-        return time.monotonic()
+        value = self._monotonic_ms / 1_000
+        self._monotonic_ms += 1
+        return value
 
     def now(self) -> datetime:
         return self._now()
@@ -921,9 +999,13 @@ def _evidence_semantics(evidence: NormalizedEvidence) -> dict[str, object]:
         "authority": evidence.authority.value,
         "capability_name": evidence.capability_name,
         "capability_version": evidence.capability_version,
-        "effect_assertions": sorted(
-            (item.effect_id, item.state.value) for item in evidence.effect_assertions
-        ),
+        "effect_assertions": [
+            {"effect_id": item.effect_id, "state": item.state.value}
+            for item in sorted(
+                evidence.effect_assertions,
+                key=lambda assertion: (assertion.effect_id, assertion.state.value),
+            )
+        ],
         "operation_status": (
             None
             if evidence.operation_status is None
@@ -1264,13 +1346,14 @@ async def _wrong_hypotheses(
         target_event = hypothesis_events[target_index]
         hypothesis = target_event.payload.hypothesis
         disposition = target_event.payload.hypothesis_disposition
-        if hypothesis is not None and hypothesis.node_id != target_node_id:
+        if hypothesis is None:
+            raise AssertionError("wrong hypothesis was not well formed")
+        if hypothesis.node_id != target_node_id:
             raise AssertionError("wrong hypothesis audit changed target identity")
         if disposition not in {
             RecoveryHypothesisDisposition.UNSUPPORTED_ACTION,
             RecoveryHypothesisDisposition.UNSUPPORTED_PROBE,
             RecoveryHypothesisDisposition.INVALID_BINDING,
-            RecoveryHypothesisDisposition.MALFORMED_MODEL_OUTPUT,
         }:
             raise AssertionError("wrong qualification hypothesis was not rejected")
         decision_sha256 = _decision_semantic_sha256(decision, artifact, state)
@@ -1280,9 +1363,7 @@ async def _wrong_hypotheses(
             RecoveryQualificationWrongExecution(
                 variant_id=f"wrong-gemini-hypothesis-{index}",
                 planner_output_sha256=planner.turns[target_index].output_sha256,
-                hypothesis_sha256=(
-                    None if hypothesis is None else canonical_sha256(hypothesis)
-                ),
+                hypothesis_sha256=canonical_sha256(hypothesis),
                 disposition=disposition,
                 decision_sha256=decision_sha256,
                 permit_sha256=permit_sha256,
@@ -1303,7 +1384,7 @@ async def _duplicate_witness_state(
     run_id: str,
     node: RecoveryActionNode,
     baseline: RecoveryEvidenceState,
-) -> RecoveryEvidenceState:
+) -> tuple[RecoveryEvidenceState, RecoveryQualificationWitnessReplayKind]:
     """Repeat one target attempt, replaying raw bytes whenever a response exists."""
 
     provider = foundation.provider
@@ -1462,6 +1543,7 @@ async def _duplicate_witness_state(
             )
         ):
             raise AssertionError("exact replay did not enter evidence deduplication")
+        replay_kind = RecoveryQualificationWitnessReplayKind.EVIDENCE_DUPLICATION
     elif appended.evidence is not None or not any(
         item.evidence is None
         and item.request_sha256 == appended.request_sha256
@@ -1470,6 +1552,8 @@ async def _duplicate_witness_state(
         for item in prior
     ):
         raise AssertionError("response-free witness attempt did not repeat exactly")
+    else:
+        replay_kind = RecoveryQualificationWitnessReplayKind.ZERO_EVIDENCE_REPLAY
     now = provider.clock()
     report = engine.report(
         audit,
@@ -1477,7 +1561,7 @@ async def _duplicate_witness_state(
         updated_at=max(baseline.report.created_at, now),
         revision=max(1, len(audit)),
     )
-    return RecoveryEvidenceState(envelope, report, evaluation)
+    return RecoveryEvidenceState(envelope, report, evaluation), replay_kind
 
 
 async def _witness_replays(
@@ -1489,7 +1573,7 @@ async def _witness_replays(
     node: RecoveryActionNode,
     state: RecoveryEvidenceState,
     baseline: AmbiguityWitness,
-) -> tuple[str, str, str]:
+) -> tuple[str, str, str, RecoveryQualificationWitnessReplayKind]:
     baseline_evidence = {item.evidence_id: item for item in state.evaluation.evidence}
     semantic = hashlib.sha256(
         canonical_json_value_bytes(_witness_semantics(baseline, baseline_evidence))
@@ -1523,7 +1607,7 @@ async def _witness_replays(
     )
     if not isinstance(reordered, AmbiguityWitness):
         raise AssertionError("reordered ambiguous evidence gained authority")
-    duplicated_state = await _duplicate_witness_state(
+    duplicated_state, replay_kind = await _duplicate_witness_state(
         foundation=foundation,
         stores=stores,
         run_id=run_id,
@@ -1557,6 +1641,7 @@ async def _witness_replays(
                 )
             )
         ).hexdigest(),
+        replay_kind,
     )
 
 
@@ -1612,6 +1697,7 @@ def _build_workflow(
             cloud_run=provider.cloud_reader,
             firestore=provider.firestore,
             clock=provider.clock,
+            controller_clock=_QualificationControllerClock(provider.clock),
         ),
         target_node_id,
         repeat_target_primary=provider.archetype_id
@@ -1642,8 +1728,169 @@ def _build_workflow(
         rollout_agent=RolloutAgent(dispatch_gateway),
         permit_authority=stores.permit_authority,
         clock=provider.clock,
+        claim_id_factory=foundation.stores.next_claim_id,
     )
     return workflow, evidence
+
+
+async def prepare_recovery_qualification_contention_dispatch(
+    fixture: RecoveryQualificationFixture,
+    *,
+    state_directory: str | Path,
+    permit_backend: RecoveryQualificationStorageBackend,
+) -> RecoveryQualificationContentionDispatch:
+    """Run fixed proof until its target transition is issued but undispatched."""
+
+    action = fixture.archetype.expected_permit_action
+    if action not in {PermitAction.CONTINUE, PermitAction.RETRY}:
+        raise ValueError("contention fixture must issue CONTINUE or RETRY")
+    foundation = build_recovery_qualification_foundation(
+        fixture,
+        state_directory=state_directory,
+    )
+    provider = foundation.provider
+    provider.require_supported()
+    definition = _slice_definition(provider, fixture)
+    planner = _ScriptedPlanner()
+    stores = foundation.stores.open()
+    target_node_id = _target_node_id(fixture)
+    workflow, _source = _build_workflow(
+        foundation=foundation,
+        stores=stores,
+        definition=definition,
+        planner=planner,
+        target_node_id=target_node_id,
+        fixture=fixture,
+        stop_before_target_dispatch=True,
+    )
+    request = RecoveryRunRequest(
+        schema_version=RECOVERY_RUN_REQUEST_VERSION,
+        run_id=f"{fixture.case_id}-contention",
+        scenario="cloud-run-rollout",
+        policy=RecoveryRunPolicy.FIXED,
+        fault=_fault(fixture),
+    )
+    await stores.run_store.create(
+        request,
+        definition.chain,
+        created_at=provider.invoked_at,
+    )
+    try:
+        await workflow.run(request.run_id)
+    except asyncio.CancelledError:
+        pass
+    else:  # pragma: no cover - guarded by the stop-before-dispatch boundary
+        raise AssertionError("contention setup dispatched its target transition")
+
+    snapshot = await stores.run_store.get(request.run_id)
+    issued = tuple(
+        permit
+        for permit in snapshot.action_permits
+        if permit.state is ActionPermitState.ISSUED and permit.action is action
+    )
+    if len(issued) != 1:
+        raise AssertionError("contention setup did not retain one issued permit")
+    permit = await stores.permit_authority.get_permit(issued[0].permit_id)
+    certificate = next(
+        (
+            item
+            for item in snapshot.certificates
+            if item.certificate_id == permit.certificate_id
+            and canonical_sha256(item) == permit.certificate_sha256
+        ),
+        None,
+    )
+    if certificate is None or certificate.transition is None:
+        raise AssertionError("contention permit lost its verified certificate")
+    events = await stores.run_store.events(request.run_id)
+    report = next(
+        (
+            event.payload.report
+            for event in reversed(events.events)
+            if event.payload.report is not None
+            and canonical_sha256(event.payload.report) == certificate.report_sha256
+        ),
+        None,
+    )
+    if report is None:
+        raise AssertionError("contention certificate report is unavailable")
+    firestore_client = None
+    if permit_backend is RecoveryQualificationStorageBackend.FIRESTORE:
+        permit_factory = build_qualification_firestore_store_factory(
+            f"contention-{fixture.case_id}",
+            provider.clock,
+            counters=provider.counters,
+        )
+        permit_stores = permit_factory.open()
+        await permit_stores.permit_authority.issue_permit(certificate)
+        rendezvous_store = _ClaimRendezvousStore(
+            permit_stores.permit_store,
+            RECOVERY_QUALIFICATION_CONTENTION_WIDTH,
+        )
+        stores = RecoveryQualificationStores(
+            run_store=stores.run_store,
+            permit_store=rendezvous_store,
+            permit_authority=PermitAuthority(
+                rendezvous_store,
+                clock=provider.clock,
+                claim_id_factory=permit_factory.next_claim_id,
+            ),
+            cas_store=permit_stores.cas_store,
+        )
+        firestore_client = permit_factory.firestore_client
+    elif permit_backend is not RecoveryQualificationStorageBackend.SQLITE:
+        raise ValueError("contention permit backend is unsupported")
+    source_node = next(
+        node
+        for node in definition.chain.nodes
+        if node.node_id == permit.source_node_id
+    )
+    target_node = next(
+        node
+        for node in definition.chain.nodes
+        if node.node_id == permit.target_node_id
+    )
+    prepared = _QualificationActionPreparer(fixture).prepare(
+        request,
+        definition.chain,
+        source_node,
+        target_node,
+        report,
+        certificate,
+    )
+    scope = RecoveryActionScope(
+        schema_version=RECOVERY_ACTION_SCOPE_VERSION,
+        authority_kind=RecoveryAuthorityKind.ACTION_PERMIT,
+        run_id=request.run_id,
+        source_node_id=permit.source_node_id,
+        target_node_id=permit.target_node_id,
+        semantic_action_sha256=permit.semantic_action_sha256,
+        action_request_sha256=prepared.action_request_sha256,
+        authority_id=permit.permit_id,
+        authority_sha256=canonical_sha256(permit),
+        claim_id="qualification-claim-00",
+        permit_action=permit.action,
+        certificate_id=certificate.certificate_id,
+        certificate_sha256=canonical_sha256(certificate),
+    )
+    gateway = ReleaseChainDispatchGateway(
+        settings=provider.settings,
+        store=stores.run_store,
+        permit_authority=stores.permit_authority,
+        cloud_run=provider.cloud_action,
+        firestore=provider.firestore,
+        clock=provider.clock,
+    )
+    return RecoveryQualificationContentionDispatch(
+        foundation=foundation,
+        stores=stores,
+        rollout_agent=RolloutAgent(gateway),
+        prepared=prepared,
+        scope=scope,
+        permit=permit,
+        baseline_provider_mutations=provider.counters.provider_mutations(),
+        firestore_client=firestore_client,
+    )
 
 
 async def execute_recovery_qualification_proof_lane(
@@ -1736,6 +1983,24 @@ async def execute_recovery_qualification_proof_lane(
         )
     snapshot = await workflow.run(request.run_id)
     events = await stores.run_store.events(request.run_id)
+    if policy is RecoveryQualificationPolicy.ADAPTIVE:
+        planner_events = tuple(
+            event
+            for event in events.events
+            if event.payload.hypothesis_disposition is not None
+        )
+        if len(planner_events) != len(planner.turns) or any(
+            event.payload.hypothesis is None
+            or event.payload.hypothesis_disposition
+            not in {
+                RecoveryHypothesisDisposition.SELECTED,
+                RecoveryHypothesisDisposition.NO_PROBE,
+            }
+            for event in planner_events
+        ):
+            raise AssertionError(
+                "scripted adaptive lane emitted an invalid hypothesis or fallback"
+            )
     decision, artifact = _target_decision(events, target_node_id)
     state = _state_for_artifact(source, artifact)
     resolution = _resolution(decision, artifact)
@@ -1776,7 +2041,12 @@ async def execute_recovery_qualification_proof_lane(
         if policy is RecoveryQualificationPolicy.FIXED and _include_safety_replays
         else ()
     )
-    witness_values: tuple[str | None, str | None, str | None] = (None, None, None)
+    witness_values: tuple[
+        str | None,
+        str | None,
+        str | None,
+        RecoveryQualificationWitnessReplayKind | None,
+    ] = (None, None, None, None)
     if (
         policy is RecoveryQualificationPolicy.FIXED
         and _include_safety_replays
@@ -1814,15 +2084,7 @@ async def execute_recovery_qualification_proof_lane(
             else None
         ),
         probe_count=source.probe_count,
-        time_to_sufficient_evidence_ms=max(
-            0,
-            int(
-                (
-                    state.report.updated_at - source.states[0].report.created_at
-                ).total_seconds()
-                * 1000
-            ),
-        ),
+        time_to_sufficient_evidence_ms=source.elapsed_ms,
         unsupported_probe_count=source.unsupported_probe_count,
         provider_mutations=provider.counters.provider_mutations(),
         model_usage=(
@@ -1838,7 +2100,8 @@ async def execute_recovery_qualification_proof_lane(
         wrong_hypotheses=wrong,
         witness_semantic_sha256=witness_values[0],
         reordered_witness_semantic_sha256=witness_values[1],
-        duplicated_witness_semantic_sha256=witness_values[2],
+        replayed_witness_semantic_sha256=witness_values[2],
+        witness_replay_kind=witness_values[3],
     )
     if restart:
         if _crash_after_provider:
@@ -1976,8 +2239,10 @@ async def execute_recovery_qualification_blind_lane(
 
 __all__ = [
     "RecoveryQualificationBlindExecution",
+    "RecoveryQualificationContentionDispatch",
     "RecoveryQualificationProofExecution",
     "RecoveryQualificationWrongExecution",
     "execute_recovery_qualification_blind_lane",
     "execute_recovery_qualification_proof_lane",
+    "prepare_recovery_qualification_contention_dispatch",
 ]

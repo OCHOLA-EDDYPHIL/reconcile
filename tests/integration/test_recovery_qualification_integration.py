@@ -6,11 +6,12 @@ import asyncio
 import os
 import stat
 from datetime import UTC, datetime
+from pathlib import Path
 
 import pytest
 
 import reconcile.recovery_qualification as recovery_qualification_module
-from reconcile.contracts import PermitAction
+from reconcile.contracts import ActionPermitState, PermitAction
 from reconcile.contracts.recovery_qualification import (
     RecoveryQualificationStorageBackend,
 )
@@ -32,10 +33,7 @@ def test_both_permit_actions_survive_32_way_sqlite_and_firestore_contention(
 ) -> None:
     bundle = asyncio.run(
         build_recovery_qualification_bundle(
-            source_revision="d403db32b7507a8e04008d34484e8ba8a51bc657",
-            source_tree_sha256="a" * 64,
-            repository_clean=True,
-            dependency_lock_sha256="b" * 64,
+            source_repository=Path(__file__).parents[2],
             created_at=NOW,
             contention_directory=tmp_path,
         )
@@ -52,7 +50,22 @@ def test_both_permit_actions_survive_32_way_sqlite_and_firestore_contention(
     assert all(item.contender_count == 32 for item in bundle.contention.trials)
     assert all(item.winner_count == 1 for item in bundle.contention.trials)
     assert all(item.denied_count == 31 for item in bundle.contention.trials)
-    assert all(item.outbound_call_count <= 1 for item in bundle.contention.trials)
+    assert all(item.outbound_call_count == 1 for item in bundle.contention.trials)
+    assert all(
+        item.final_permit.state is ActionPermitState.COMPLETED
+        for item in bundle.contention.trials
+    )
+    assert {
+        (item.permit_action, item.dispatch_target_node_id)
+        for item in bundle.contention.trials
+    } == {(PermitAction.CONTINUE, "promote"), (PermitAction.RETRY, "record")}
+    firestore_trials = tuple(
+        item
+        for item in bundle.contention.trials
+        if item.backend is RecoveryQualificationStorageBackend.FIRESTORE
+    )
+    assert all(item.cas_overlap_count == 32 for item in firestore_trials)
+    assert all(item.cas_conflict_count == 31 for item in firestore_trials)
     assert bundle.contention.passed is True
     assert bundle.claim_authorization.safety_claim_authorized is True
     assert (

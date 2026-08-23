@@ -248,6 +248,18 @@
         "backend": {
           "$ref": "#/$defs/RecoveryQualificationStorageBackend"
         },
+        "cas_conflict_count": {
+          "maximum": 32,
+          "minimum": 0,
+          "title": "Cas Conflict Count",
+          "type": "integer"
+        },
+        "cas_overlap_count": {
+          "maximum": 32,
+          "minimum": 0,
+          "title": "Cas Overlap Count",
+          "type": "integer"
+        },
         "contender_claim_ids": {
           "items": {
             "maxLength": 128,
@@ -282,6 +294,13 @@
           "title": "Denied Count",
           "type": "integer"
         },
+        "dispatch_target_node_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Dispatch Target Node Id",
+          "type": "string"
+        },
         "final_permit": {
           "$ref": "#/$defs/ActionPermit"
         },
@@ -314,6 +333,9 @@
           "title": "Provider Call Receipt Ids",
           "type": "array"
         },
+        "provider_mutations": {
+          "$ref": "#/$defs/RecoveryQualificationProviderMutations"
+        },
         "winner_claim_id": {
           "anyOf": [
             {
@@ -342,6 +364,10 @@
         "winner_count",
         "denied_count",
         "outbound_call_count",
+        "provider_mutations",
+        "dispatch_target_node_id",
+        "cas_overlap_count",
+        "cas_conflict_count",
         "contender_claim_ids",
         "winner_claim_id",
         "denied_claim_ids",
@@ -351,6 +377,43 @@
         "passed"
       ],
       "title": "RecoveryQualificationContentionTrial",
+      "type": "object"
+    },
+    "RecoveryQualificationProviderMutations": {
+      "additionalProperties": false,
+      "properties": {
+        "outbound_call_count": {
+          "maximum": 48,
+          "minimum": 0,
+          "title": "Outbound Call Count",
+          "type": "integer"
+        },
+        "promote_calls": {
+          "maximum": 16,
+          "minimum": 0,
+          "title": "Promote Calls",
+          "type": "integer"
+        },
+        "record_calls": {
+          "maximum": 16,
+          "minimum": 0,
+          "title": "Record Calls",
+          "type": "integer"
+        },
+        "stage_calls": {
+          "maximum": 16,
+          "minimum": 0,
+          "title": "Stage Calls",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "stage_calls",
+        "promote_calls",
+        "record_calls",
+        "outbound_call_count"
+      ],
+      "title": "RecoveryQualificationProviderMutations",
       "type": "object"
     },
     "RecoveryQualificationStorageBackend": {

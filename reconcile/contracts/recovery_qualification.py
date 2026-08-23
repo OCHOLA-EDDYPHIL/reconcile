@@ -22,7 +22,12 @@ from reconcile.contracts.base import (
     canonical_json_value_bytes,
 )
 from reconcile.contracts.codec import canonical_sha256
-from reconcile.contracts.recovery import ActionPermit, ActionPermitState, PermitAction
+from reconcile.contracts.recovery import (
+    ActionPermit,
+    ActionPermitState,
+    PermitAction,
+    PermitCompletionOutcome,
+)
 from reconcile.contracts.recovery_run import RecoveryHypothesisDisposition
 
 RECOVERY_QUALIFICATION_BUNDLE_FORMAT = "proof-to-permit-qualification-v1"
@@ -54,10 +59,10 @@ RECOVERY_QUALIFICATION_RESTART_COUNT = 20
 RECOVERY_QUALIFICATION_CONTENTION_WIDTH = 32
 RECOVERY_QUALIFICATION_ADAPTIVE_THRESHOLD_BASIS_POINTS = 2500
 RECOVERY_QUALIFICATION_FIXTURE_CATALOG_SHA256 = (
-    "76e4fe9067534c00ff138b45c83dd449bff97ee7b5aeb7aa8240ea32020ac42c"
+    "e8a8d979e449b70d6372ccf309bb00a27666e023807070c8c15eaaeecf72780b"
 )
 RECOVERY_QUALIFICATION_ARCHETYPE_CATALOG_SHA256 = (
-    "641c9f3cefa6051d60ab7b5f9860e7399fc06bb32bbe8644807ad142d24c5006"
+    "51274ca8eeb2a4c528056b5a245a115a992f5353468052bf3f5b1195f7d23a55"
 )
 
 _MAX_SIGNED_64 = 2**63 - 1
@@ -126,6 +131,11 @@ class RecoveryQualificationArtifactKind(StrEnum):
     NONE = "NONE"
     VERIFIED_CERTIFICATE = "VERIFIED_CERTIFICATE"
     AMBIGUITY_WITNESS = "AMBIGUITY_WITNESS"
+
+
+class RecoveryQualificationWitnessReplayKind(StrEnum):
+    EVIDENCE_DUPLICATION = "EVIDENCE_DUPLICATION"
+    ZERO_EVIDENCE_REPLAY = "ZERO_EVIDENCE_REPLAY"
 
 
 class RecoveryQualificationArchetype(StrictModel):
@@ -231,6 +241,14 @@ class RecoveryQualificationManifest(StrictModel):
             RecoveryQualificationFaultClass
         ):
             raise ValueError("recovery qualification omits a fault class")
+        neutral_no_fault = tuple(
+            item
+            for item in self.archetypes
+            if item.fault_class is RecoveryQualificationFaultClass.NO_FAULT
+            and item.opportunity is RecoveryQualificationOpportunity.NEUTRAL
+        )
+        if len(neutral_no_fault) != 1:
+            raise ValueError("qualification requires one neutral no-fault control")
         if {item.opportunity for item in self.archetypes} != set(
             RecoveryQualificationOpportunity
         ):
@@ -508,7 +526,7 @@ class RecoveryQualificationHypothesisReplay(StrictModel):
     variant_id: Identifier
     provider_name: Literal["gemini"]
     planner_output_sha256: Sha256Digest
-    hypothesis_sha256: Sha256Digest | None
+    hypothesis_sha256: Sha256Digest
     disposition: RecoveryHypothesisDisposition
     observed_decision_sha256: Sha256Digest
     observed_permit_sha256: Sha256Digest | None
@@ -523,7 +541,6 @@ class RecoveryQualificationHypothesisReplay(StrictModel):
             RecoveryHypothesisDisposition.UNSUPPORTED_ACTION,
             RecoveryHypothesisDisposition.UNSUPPORTED_PROBE,
             RecoveryHypothesisDisposition.INVALID_BINDING,
-            RecoveryHypothesisDisposition.MALFORMED_MODEL_OUTPUT,
         }:
             raise ValueError("wrong-hypothesis replay requires a rejecting disposition")
         return self
@@ -554,9 +571,10 @@ class RecoveryQualificationCaseProof(StrictModel):
     witness_exercised: bool
     witness_sha256: Sha256Digest | None
     reordered_witness_sha256: Sha256Digest | None
-    duplicated_witness_sha256: Sha256Digest | None
+    replayed_witness_sha256: Sha256Digest | None
+    witness_replay_kind: RecoveryQualificationWitnessReplayKind | None
     witness_reorder_valid: bool
-    witness_duplication_valid: bool
+    witness_replay_valid: bool
     restart_exercised: bool
     restart_lane_sha256: Sha256Digest | None
     restarted_decision_sha256: Sha256Digest | None
@@ -606,21 +624,25 @@ class RecoveryQualificationCaseProof(StrictModel):
         witness_values = (
             self.witness_sha256,
             self.reordered_witness_sha256,
-            self.duplicated_witness_sha256,
+            self.replayed_witness_sha256,
         )
         if self.witness_exercised:
             if any(value is None for value in witness_values):
                 raise ValueError("witness replay requires every witness digest")
+            if self.witness_replay_kind is None:
+                raise ValueError("witness replay requires its exact replay kind")
             reorder_valid = self.witness_sha256 == self.reordered_witness_sha256
-            duplicate_valid = self.witness_sha256 == self.duplicated_witness_sha256
+            replay_valid = self.witness_sha256 == self.replayed_witness_sha256
         else:
             if any(value is not None for value in witness_values):
                 raise ValueError("non-witness cases cannot contain witness digests")
+            if self.witness_replay_kind is not None:
+                raise ValueError("non-witness cases cannot declare a replay kind")
             reorder_valid = True
-            duplicate_valid = True
+            replay_valid = True
         if (
             self.witness_reorder_valid is not reorder_valid
-            or self.witness_duplication_valid is not duplicate_valid
+            or self.witness_replay_valid is not replay_valid
         ):
             raise ValueError("witness replay validity must be derived")
         if self.restart_exercised:
@@ -712,6 +734,14 @@ class RecoveryQualificationResults(StrictModel):
     witness_case_count: int = Field(ge=1, le=RECOVERY_QUALIFICATION_CASE_COUNT)
     witness_replay_valid_count: int = Field(
         ge=0,
+        le=RECOVERY_QUALIFICATION_CASE_COUNT,
+    )
+    witness_evidence_duplication_case_count: int = Field(
+        ge=1,
+        le=RECOVERY_QUALIFICATION_CASE_COUNT,
+    )
+    witness_zero_evidence_replay_case_count: int = Field(
+        ge=1,
         le=RECOVERY_QUALIFICATION_CASE_COUNT,
     )
     non_authorizing_certificate_case_count: int = Field(
@@ -821,7 +851,17 @@ class RecoveryQualificationResults(StrictModel):
             is RecoveryQualificationArtifactKind.VERIFIED_CERTIFICATE
         )
         witness_valid = sum(
-            item.witness_reorder_valid and item.witness_duplication_valid
+            item.witness_reorder_valid and item.witness_replay_valid
+            for item in witnesses
+        )
+        evidence_duplications = sum(
+            item.witness_replay_kind
+            is RecoveryQualificationWitnessReplayKind.EVIDENCE_DUPLICATION
+            for item in witnesses
+        )
+        zero_evidence_replays = sum(
+            item.witness_replay_kind
+            is RecoveryQualificationWitnessReplayKind.ZERO_EVIDENCE_REPLAY
             for item in witnesses
         )
         restarts = tuple(item for item in self.case_proofs if item.restart_exercised)
@@ -839,6 +879,8 @@ class RecoveryQualificationResults(StrictModel):
             wrong_permits,
             len(witnesses),
             witness_valid,
+            evidence_duplications,
+            zero_evidence_replays,
             len(non_authorizing_certificates),
             len(restarts),
             restart_valid,
@@ -851,6 +893,8 @@ class RecoveryQualificationResults(StrictModel):
             self.wrong_hypothesis_permit_divergence_count,
             self.witness_case_count,
             self.witness_replay_valid_count,
+            self.witness_evidence_duplication_case_count,
+            self.witness_zero_evidence_replay_case_count,
             self.non_authorizing_certificate_case_count,
             self.restart_case_count,
             self.restart_valid_count,
@@ -904,6 +948,10 @@ class RecoveryQualificationContentionTrial(StrictModel):
     winner_count: int = Field(ge=0, le=RECOVERY_QUALIFICATION_CONTENTION_WIDTH)
     denied_count: int = Field(ge=0, le=RECOVERY_QUALIFICATION_CONTENTION_WIDTH)
     outbound_call_count: int = Field(ge=0, le=RECOVERY_QUALIFICATION_CONTENTION_WIDTH)
+    provider_mutations: RecoveryQualificationProviderMutations
+    dispatch_target_node_id: Identifier
+    cas_overlap_count: int = Field(ge=0, le=RECOVERY_QUALIFICATION_CONTENTION_WIDTH)
+    cas_conflict_count: int = Field(ge=0, le=RECOVERY_QUALIFICATION_CONTENTION_WIDTH)
     contender_claim_ids: tuple[Identifier, ...] = Field(
         min_length=RECOVERY_QUALIFICATION_CONTENTION_WIDTH,
         max_length=RECOVERY_QUALIFICATION_CONTENTION_WIDTH,
@@ -933,16 +981,61 @@ class RecoveryQualificationContentionTrial(StrictModel):
             or set((*winners, *self.denied_claim_ids)) != set(self.contender_claim_ids)
         ):
             raise ValueError("contention identities must partition contenders")
-        if self.outbound_call_count != len(self.provider_call_receipt_ids):
-            raise ValueError("outbound calls require durable receipt identities")
         if (
-            self.final_permit.state is not ActionPermitState.CLAIMED
+            self.outbound_call_count != len(self.provider_call_receipt_ids)
+            or self.outbound_call_count
+            != self.provider_mutations.outbound_call_count
+        ):
+            raise ValueError("outbound calls require durable receipt identities")
+        expected_target, expected_mutations = {
+            PermitAction.CONTINUE: (
+                "promote",
+                RecoveryQualificationProviderMutations(
+                    stage_calls=0,
+                    promote_calls=1,
+                    record_calls=0,
+                    outbound_call_count=1,
+                ),
+            ),
+            PermitAction.RETRY: (
+                "record",
+                RecoveryQualificationProviderMutations(
+                    stage_calls=0,
+                    promote_calls=0,
+                    record_calls=1,
+                    outbound_call_count=1,
+                ),
+            ),
+        }[self.permit_action]
+        if (
+            self.dispatch_target_node_id != expected_target
+            or self.provider_mutations != expected_mutations
+            or self.final_permit.target_node_id != expected_target
+        ):
+            raise ValueError("contention dispatch did not use the production mapping")
+        if self.backend is RecoveryQualificationStorageBackend.FIRESTORE:
+            cas_valid = (
+                self.cas_overlap_count == RECOVERY_QUALIFICATION_CONTENTION_WIDTH
+                and self.cas_conflict_count
+                == RECOVERY_QUALIFICATION_CONTENTION_WIDTH - 1
+            )
+        else:
+            cas_valid = self.cas_overlap_count == 0 and self.cas_conflict_count == 0
+        if (
+            self.final_permit.state is not ActionPermitState.COMPLETED
             or self.final_permit.action is not self.permit_action
             or self.final_permit.claim_id != self.winner_claim_id
+            or self.final_permit.completion_outcome
+            is not PermitCompletionOutcome.SUCCEEDED
             or canonical_sha256(self.final_permit) != self.final_permit_sha256
         ):
             raise ValueError("contention final permit does not prove the winning claim")
-        passed = self.winner_count == 1 and self.outbound_call_count <= 1
+        passed = (
+            self.winner_count == 1
+            and self.denied_count == RECOVERY_QUALIFICATION_CONTENTION_WIDTH - 1
+            and self.outbound_call_count == 1
+            and cas_valid
+        )
         if self.passed is not passed:
             raise ValueError("contention outcome must be derived")
         return self
@@ -1237,4 +1330,5 @@ __all__ = [
     "RecoveryQualificationResults",
     "RecoveryQualificationStage",
     "RecoveryQualificationStorageBackend",
+    "RecoveryQualificationWitnessReplayKind",
 ]

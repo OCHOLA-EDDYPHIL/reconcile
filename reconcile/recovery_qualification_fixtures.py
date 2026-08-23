@@ -34,6 +34,7 @@ class RecoveryQualificationFixture:
     case_id: str
     archetype: RecoveryQualificationArchetype
     seed: int
+    initial_provider_generation: int
     storage_backend: RecoveryQualificationStorageBackend
     observations: tuple[RecoveryQualificationObservation, ...]
 
@@ -82,7 +83,7 @@ RECOVERY_QUALIFICATION_ARCHETYPES = (
         "stage-drop-committed",
         stage=RecoveryQualificationStage.STAGE,
         fault=RecoveryQualificationFaultClass.DROP_AFTER_ACCEPT,
-        opportunity=RecoveryQualificationOpportunity.ADAPTIVE_FAVORED,
+        opportunity=RecoveryQualificationOpportunity.NEUTRAL,
         evidence=(
             "stage-revision-exists",
             "stage-revision-ready",
@@ -91,7 +92,7 @@ RECOVERY_QUALIFICATION_ARCHETYPES = (
         resolution=RecoveryQualificationResolution.CONTINUE,
         action=PermitAction.CONTINUE,
         fixed_probes=3,
-        adaptive_probes=2,
+        adaptive_probes=3,
     ),
     _archetype(
         "stage-pending",
@@ -184,12 +185,12 @@ RECOVERY_QUALIFICATION_ARCHETYPES = (
         "promote-committed",
         stage=RecoveryQualificationStage.PROMOTE,
         fault=RecoveryQualificationFaultClass.NO_FAULT,
-        opportunity=RecoveryQualificationOpportunity.FIXED_FAVORED,
+        opportunity=RecoveryQualificationOpportunity.NEUTRAL,
         evidence=("promote-serving-intended", "promote-service-fresh"),
         resolution=RecoveryQualificationResolution.CONTINUE,
         action=PermitAction.CONTINUE,
         fixed_probes=1,
-        adaptive_probes=2,
+        adaptive_probes=1,
     ),
     _archetype(
         "promote-pending",
@@ -349,6 +350,7 @@ def build_recovery_qualification_fixtures() -> tuple[RecoveryQualificationFixtur
                     case_id=case_id,
                     archetype=archetype,
                     seed=seed,
+                    initial_provider_generation=seed_index + 1,
                     storage_backend=backend,
                     observations=observations,
                 )
@@ -374,6 +376,7 @@ def recovery_qualification_fixture_catalog_sha256() -> str:
                 }
                 for item in fixture.observations
             ],
+            "initial_provider_generation": fixture.initial_provider_generation,
             "seed": fixture.seed,
             "storage_backend": fixture.storage_backend.value,
         }

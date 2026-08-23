@@ -15,7 +15,7 @@ import threading
 from collections import deque
 from collections.abc import Callable
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from pathlib import Path
@@ -25,7 +25,9 @@ from google.api_core import exceptions as api_exceptions
 from google.cloud import run_v2
 from google.protobuf import any_pb2
 
+from reconcile.contracts import ActionPermitState
 from reconcile.contracts.recovery_qualification import (
+    RECOVERY_QUALIFICATION_SEEDS,
     RecoveryQualificationProviderMutations,
     RecoveryQualificationStorageBackend,
 )
@@ -112,6 +114,7 @@ class RecoveryQualificationProviderScenario:
         RecoveryQualificationReleaseWriteBehavior.COMMITTED
     )
     release_reads_unavailable: bool = False
+    initial_service_generation: int = 1
     unsupported_reason: str | None = None
 
 
@@ -230,7 +233,9 @@ class DeterministicCloudRunState:
         self.settings = settings
         self.scenario = scenario
         self.counters = counters
-        self.generation = 1
+        if scenario.initial_service_generation < 1:
+            raise ValueError("initial service generation must be positive")
+        self.generation = scenario.initial_service_generation
         self.revision_read_count = 0
         self.service_read_count = 0
         self.pending_reset_reads = 0
@@ -262,9 +267,9 @@ class DeterministicCloudRunState:
         self.revisions[RECOVERY_QUALIFICATION_BASELINE] = baseline
         self.service = run_v2.Service(
             name=self.service_name,
-            etag="etag-1",
-            generation=1,
-            observed_generation=1,
+            etag=f"etag-{self.generation}",
+            generation=self.generation,
+            observed_generation=self.generation,
             terminal_condition=_ready_condition(),
             reconciling=False,
             uri=RECOVERY_QUALIFICATION_SERVICE_URI,
@@ -966,7 +971,7 @@ class _CasWriteBatch:
         timeout: float | None = None,
     ) -> list[_WriteResult]:
         del retry, timeout
-        return self._client._commit(tuple(self._operations))
+        return await self._client._commit_async(tuple(self._operations))
 
 
 class DeterministicAsyncFirestoreCasClient:
@@ -987,6 +992,13 @@ class DeterministicAsyncFirestoreCasClient:
         self._commit_before_failures: deque[BaseException] = deque()
         self._commit_after_failures: deque[BaseException] = deque()
         self._lock = threading.RLock()
+        self._contention_path: str | None = None
+        self._contention_width = 0
+        self._contention_arrivals: dict[str, asyncio.Event] = {}
+        self._contention_order: tuple[str, ...] = ()
+        self._contention_lock = asyncio.Lock()
+        self._contention_overlap_count = 0
+        self._contention_conflict_count = 0
 
     def document(self, *document_path: str) -> _CasDocumentReference:
         return _CasDocumentReference(self, "/".join(document_path))
@@ -1013,6 +1025,31 @@ class DeterministicAsyncFirestoreCasClient:
                 path: deepcopy(document)
                 for path, (document, _update_time) in self._documents.items()
             }
+
+    @property
+    def contention_overlap_count(self) -> int:
+        return self._contention_overlap_count
+
+    @property
+    def contention_conflict_count(self) -> int:
+        return self._contention_conflict_count
+
+    def arm_update_contention(self, document_path: str, width: int) -> None:
+        """Synchronize one fake-only wave of CAS updates at the commit boundary."""
+
+        if type(document_path) is not str or not document_path:
+            raise TypeError("contention document path must be non-empty text")
+        if type(width) is not int or width < 2:
+            raise ValueError("contention width must be at least two")
+        if self._contention_path is not None:
+            raise RuntimeError("Firestore CAS contention barrier is already armed")
+        self._contention_path = document_path
+        self._contention_width = width
+        self._contention_arrivals = {}
+        self._contention_order = ()
+        self._contention_lock = asyncio.Lock()
+        self._contention_overlap_count = 0
+        self._contention_conflict_count = 0
 
     def fail_next_read(self, error: BaseException | None = None) -> None:
         self._get_failures.append(
@@ -1086,6 +1123,62 @@ class DeterministicAsyncFirestoreCasClient:
             if self._commit_after_failures:
                 raise self._commit_after_failures.popleft()
             return results
+
+    @staticmethod
+    def _claim_id_for_contention(
+        operations: tuple[_CasOperation, ...],
+        document_path: str,
+    ) -> str | None:
+        matches = tuple(
+            operation
+            for operation in operations
+            if operation.kind == "update" and operation.reference.path == document_path
+        )
+        if len(matches) != 1:
+            return None
+        try:
+            aggregate = json.loads(str(matches[0].data["canonical_payload"]))
+            if aggregate["permit"]["state"] != ActionPermitState.CLAIMED.value:
+                return None
+            claim_id = aggregate["permit"]["claim_id"]
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+            return None
+        return claim_id if type(claim_id) is str and claim_id else None
+
+    async def _commit_async(
+        self,
+        operations: tuple[_CasOperation, ...],
+    ) -> list[_WriteResult]:
+        path = self._contention_path
+        claim_id = (
+            None if path is None else self._claim_id_for_contention(operations, path)
+        )
+        if path is None or claim_id is None:
+            return self._commit(operations)
+
+        async with self._contention_lock:
+            if claim_id in self._contention_arrivals:
+                raise RuntimeError("duplicate contention claim identifier")
+            turn = asyncio.Event()
+            self._contention_arrivals[claim_id] = turn
+            if len(self._contention_arrivals) == self._contention_width:
+                self._contention_overlap_count = len(self._contention_arrivals)
+                self._contention_order = tuple(sorted(self._contention_arrivals))
+                self._contention_arrivals[self._contention_order[0]].set()
+        await turn.wait()
+
+        try:
+            return self._commit(operations)
+        except api_exceptions.FailedPrecondition:
+            self._contention_conflict_count += 1
+            raise
+        finally:
+            async with self._contention_lock:
+                index = self._contention_order.index(claim_id)
+                if index == 0:
+                    for waiting_claim_id in self._contention_order[1:]:
+                        self._contention_arrivals[waiting_claim_id].set()
+                    self._contention_path = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -1246,6 +1339,11 @@ class RecoveryQualificationStoreFactory:
     def firestore_client(self) -> DeterministicAsyncFirestoreCasClient | None:
         return self._firestore_client
 
+    def next_claim_id(self) -> str:
+        """Return the deterministic claim identity shared by workflow dispatches."""
+
+        return self._claim_ids()
+
     @property
     def sqlite_paths(self) -> tuple[Path, Path] | None:
         if self.storage_backend is not RecoveryQualificationStorageBackend.SQLITE:
@@ -1389,7 +1487,18 @@ def recovery_qualification_provider_scenario(
 
     if type(fixture) is not RecoveryQualificationFixture:
         raise TypeError("provider scenario requires an exact qualification fixture")
-    return qualification_provider_scenario_for(fixture.archetype.archetype_id)
+    try:
+        expected_generation = RECOVERY_QUALIFICATION_SEEDS.index(fixture.seed) + 1
+    except ValueError:
+        raise ValueError("qualification fixture seed is outside the frozen schedule") from None
+    if fixture.initial_provider_generation != expected_generation:
+        raise ValueError("qualification fixture provider generation changed")
+    return replace(
+        qualification_provider_scenario_for(fixture.archetype.archetype_id),
+        # This is provider-visible concurrency state, not identifier decoration:
+        # each seed begins from a distinct ETag/generation precondition.
+        initial_service_generation=fixture.initial_provider_generation,
+    )
 
 
 def _fixture_clock(fixture: RecoveryQualificationFixture) -> datetime:
@@ -1556,7 +1665,11 @@ def build_recovery_qualification_provider(
         clock=clock,
         fixture=fixture,
         invoked_at=started_at,
-        scenario=scenario,
+        scenario=(
+            recovery_qualification_provider_scenario(fixture)
+            if scenario is None
+            else scenario
+        ),
     )
 
 

@@ -21,6 +21,7 @@ from reconcile.recovery_qualification import (
     build_recovery_qualification_environment,
     build_recovery_qualification_manifest,
     compare_recovery_qualification,
+    recovery_qualification_adaptive_threshold_met,
     recovery_qualification_median_reduction_basis_points,
     replay_recovery_qualification_fixture,
     run_recovery_qualification,
@@ -28,6 +29,10 @@ from reconcile.recovery_qualification import (
 from reconcile.recovery_qualification_fixtures import (
     RECOVERY_QUALIFICATION_ARCHETYPES,
     build_recovery_qualification_fixtures,
+)
+from reconcile.recovery_qualification_provider import (
+    build_recovery_qualification_provider,
+    recovery_qualification_provider_scenario,
 )
 
 NOW = datetime(2026, 8, 23, tzinfo=UTC)
@@ -81,6 +86,29 @@ def test_frozen_matrix_has_exact_schedule_and_required_coverage() -> None:
         for item in fixtures
         if item.archetype.expected_permit_action is not None
     } == {PermitAction.CONTINUE, PermitAction.RETRY}
+    neutral_no_fault = {
+        item.archetype.archetype_id
+        for item in fixtures
+        if item.archetype.fault_class is RecoveryQualificationFaultClass.NO_FAULT
+        and item.archetype.opportunity is RecoveryQualificationOpportunity.NEUTRAL
+    }
+    assert neutral_no_fault == {"promote-committed"}
+
+
+def test_each_archetype_varies_provider_precondition_state_across_seeds() -> None:
+    fixtures = build_recovery_qualification_fixtures()
+    generations_by_archetype: dict[str, set[int]] = {}
+    for fixture in fixtures:
+        scenario = recovery_qualification_provider_scenario(fixture)
+        provider = build_recovery_qualification_provider(fixture)
+        assert scenario.initial_service_generation == fixture.initial_provider_generation
+        generations_by_archetype.setdefault(
+            fixture.archetype.archetype_id,
+            set(),
+        ).add(provider.snapshot().service_generation)
+
+    assert len(fixtures) == 100
+    assert all(values == {1, 2, 3, 4, 5} for values in generations_by_archetype.values())
 
 
 def test_matrix_records_four_hundred_lanes_and_all_safety_replays() -> None:
@@ -156,6 +184,11 @@ def test_median_probe_reduction_uses_exact_even_sample_integer_formula() -> None
     assert recovery_qualification_median_reduction_basis_points((2, 3), (1, 2)) == 4000
     assert recovery_qualification_median_reduction_basis_points((2, 3), (3, 4)) == -4000
     assert recovery_qualification_median_reduction_basis_points((0, 0), (0, 0)) == 0
+
+
+def test_adaptive_efficiency_gate_includes_exact_25_percent_boundary() -> None:
+    assert recovery_qualification_adaptive_threshold_met(2500) is True
+    assert recovery_qualification_adaptive_threshold_met(2499) is False
 
 
 def test_scripted_comparison_records_zero_model_cost_and_cannot_authorize_value() -> (

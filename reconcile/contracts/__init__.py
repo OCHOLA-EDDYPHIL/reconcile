@@ -247,6 +247,7 @@ from reconcile.contracts.recovery_qualification import (
     RecoveryQualificationResults,
     RecoveryQualificationStage,
     RecoveryQualificationStorageBackend,
+    RecoveryQualificationWitnessReplayKind,
 )
 from reconcile.contracts.recovery_run import (
     MAX_RECOVERY_RUN_EVENTS,
@@ -559,6 +560,7 @@ __all__ = [
     "RecoveryQualificationResults",
     "RecoveryQualificationStage",
     "RecoveryQualificationStorageBackend",
+    "RecoveryQualificationWitnessReplayKind",
     "RecoveryReceiptOutcome",
     "RecoveryResetResult",
     "RecoveryRunEvent",
