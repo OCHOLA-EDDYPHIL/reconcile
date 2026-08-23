@@ -52,6 +52,7 @@ from reconcile.contracts import (
     RECOVERY_PREPARED_ACTION_VERSION,
     RECOVERY_RESET_RESULT_VERSION,
     RECOVERY_RUN_REQUEST_VERSION,
+    ActionPermit,
     ActionPermitState,
     AmbiguityKind,
     AmbiguousExecution,
@@ -1064,9 +1065,6 @@ class ReleaseChainDispatchGateway:
         provider_contact: bool,
     ) -> DurableDispatchReceipt:
         snapshot = await self._store.get(scope.run_id)
-        node = next(
-            item for item in snapshot.nodes if item.node_id == scope.target_node_id
-        )
         receipt = DurableDispatchReceipt(
             schema_version=RECOVERY_DISPATCH_RECEIPT_VERSION,
             receipt_id=(
@@ -1082,10 +1080,7 @@ class ReleaseChainDispatchGateway:
             action_request_sha256=scope.action_request_sha256,
             authority_id=scope.authority_id,
             claim_id=scope.claim_id,
-            attempt=max(
-                1,
-                node.attempt + int(scope.permit_action is PermitAction.RETRY),
-            ),
+            attempt=2 if scope.permit_action is PermitAction.RETRY else 1,
             provider_contact=provider_contact,
             outcome=(
                 RecoveryReceiptOutcome.PROVIDER_CONTACTED
@@ -1790,7 +1785,21 @@ class RecoveryPolicyResultRecorder:
         return cloud, firestore, created_revisions, promotion_count, record_count
 
     @staticmethod
+    def _authority_receipts(
+        snapshot: RecoveryRunSnapshot,
+        *,
+        authority_id: str,
+        claim_id: str | None,
+    ) -> tuple[DurableDispatchReceipt, ...]:
+        return tuple(
+            receipt
+            for receipt in snapshot.dispatch_receipts
+            if receipt.authority_id == authority_id and receipt.claim_id == claim_id
+        )
+
+    @classmethod
     def _accepted_action_mutation(
+        cls,
         snapshot: RecoveryRunSnapshot,
         *,
         target_node_id: str,
@@ -1804,14 +1813,17 @@ class RecoveryPolicyResultRecorder:
             if permit.target_node_id == target_node_id
         )
 
-        def provider_contact_recorded(permit_id: str, claim_id: str | None) -> bool:
-            return any(
-                receipt.authority_id == permit_id
-                and receipt.claim_id == claim_id
-                and receipt.provider_contact
-                for receipt in snapshot.dispatch_receipts
+        def dispatch_receipts(
+            permit: ActionPermit,
+        ) -> tuple[DurableDispatchReceipt, ...]:
+            return cls._authority_receipts(
+                snapshot,
+                authority_id=permit.permit_id,
+                claim_id=permit.claim_id,
             )
 
+        # The provider call precedes receipt persistence. A process can therefore
+        # leave exact claimed authority and its exact effect without a receipt.
         return int(
             any(
                 (
@@ -1822,9 +1834,9 @@ class RecoveryPolicyResultRecorder:
                             permit.completion_outcome
                             is PermitCompletionOutcome.OUTCOME_UNKNOWN
                             and observed_effect
-                            and provider_contact_recorded(
-                                permit.permit_id,
-                                permit.claim_id,
+                            and any(
+                                receipt.provider_contact
+                                for receipt in dispatch_receipts(permit)
                             )
                         )
                     )
@@ -1832,9 +1844,12 @@ class RecoveryPolicyResultRecorder:
                 or (
                     permit.state is ActionPermitState.CLAIMED
                     and observed_effect
-                    and provider_contact_recorded(
-                        permit.permit_id,
-                        permit.claim_id,
+                    and (
+                        not dispatch_receipts(permit)
+                        or any(
+                            receipt.provider_contact
+                            for receipt in dispatch_receipts(permit)
+                        )
                     )
                 )
                 for permit in permits
@@ -1847,18 +1862,21 @@ class RecoveryPolicyResultRecorder:
         snapshot: RecoveryRunSnapshot,
         cloud: RecoveryCloudRunObservation,
         firestore: RecoveryFirestoreObservation,
-    ) -> tuple[int, int, int]:
+    ) -> tuple[int, int, int, int]:
         staged = cloud.intended_revision in cloud.release_revisions
         launch = snapshot.launch_permit
-        launch_contacted = bool(
-            launch is not None
-            and any(
-                receipt.authority_id == launch.launch_permit_id
-                and receipt.claim_id == launch.claim_id
-                and receipt.provider_contact
-                for receipt in snapshot.dispatch_receipts
+        launch_receipts = (
+            ()
+            if launch is None
+            else cls._authority_receipts(
+                snapshot,
+                authority_id=launch.launch_permit_id,
+                claim_id=launch.claim_id,
             )
         )
+        launch_contacted = any(receipt.provider_contact for receipt in launch_receipts)
+        # As with action permits, a claimed launch plus its exact effect spans the
+        # unavoidable provider-return/receipt-persistence crash boundary.
         revisions_created = int(
             launch is not None
             and (
@@ -1876,7 +1894,10 @@ class RecoveryPolicyResultRecorder:
                 or (
                     launch.state is RecoveryLaunchPermitState.CLAIMED
                     and staged
-                    and launch_contacted
+                    and (
+                        not launch_receipts
+                        or any(receipt.provider_contact for receipt in launch_receipts)
+                    )
                 )
             )
         )
@@ -1901,7 +1922,36 @@ class RecoveryPolicyResultRecorder:
             target_node_id="record",
             observed_effect=exact_record,
         )
-        return revisions_created, promotions_accepted, release_records_created
+        observed_effects = {
+            "stage": staged,
+            "promote": promoted,
+            "record": exact_record,
+        }
+        inferred_contacts = int(
+            launch is not None
+            and launch.state is RecoveryLaunchPermitState.CLAIMED
+            and staged
+            and not launch_receipts
+        ) + sum(
+            permit.state is ActionPermitState.CLAIMED
+            and observed_effects.get(permit.target_node_id, False)
+            and not cls._authority_receipts(
+                snapshot,
+                authority_id=permit.permit_id,
+                claim_id=permit.claim_id,
+            )
+            for permit in snapshot.action_permits
+        )
+        provider_contacts = (
+            sum(receipt.provider_contact for receipt in snapshot.dispatch_receipts)
+            + inferred_contacts
+        )
+        return (
+            revisions_created,
+            promotions_accepted,
+            release_records_created,
+            provider_contacts,
+        )
 
     @staticmethod
     def _event_node(event: RecoveryRunEvent) -> str:
@@ -2027,10 +2077,12 @@ class RecoveryPolicyResultRecorder:
             _promotions,
             _records,
         ) = await self._observe_provider(baseline)
-        revisions, promotions, records = self._proof_mutation_counters(
-            snapshot,
-            cloud,
-            firestore,
+        revisions, promotions, records, provider_contacts = (
+            self._proof_mutation_counters(
+                snapshot,
+                cloud,
+                firestore,
+            )
         )
         permits = snapshot.action_permits
         retry_permits = tuple(
@@ -2065,9 +2117,7 @@ class RecoveryPolicyResultRecorder:
                 revisions_created=revisions,
                 promotions_accepted=promotions,
                 release_records_created=records,
-                provider_contacts=sum(
-                    receipt.provider_contact for receipt in snapshot.dispatch_receipts
-                ),
+                provider_contacts=provider_contacts,
                 continue_permits_issued=sum(
                     permit.action is PermitAction.CONTINUE for permit in permits
                 ),
@@ -2338,7 +2388,20 @@ class ReleaseChainPolicyLaneExecutor:
                 RecoveryRunLifecycle.CANCELLED,
             }:
                 raise ReleaseChainError("terminal policy lane cannot be resumed")
-            baseline = RecoveryLaneBaseline(release_revisions=())
+            launch = existing.launch_permit
+            progressed = bool(
+                launch is not None
+                and launch.state
+                in {
+                    RecoveryLaunchPermitState.CLAIMED,
+                    RecoveryLaunchPermitState.COMPLETED,
+                }
+            )
+            baseline = (
+                RecoveryLaneBaseline(release_revisions=())
+                if progressed
+                else await recorder.capture_baseline()
+            )
         snapshot = await workflow.run(run_id)
         events = await resources.store.events(run_id)
         return await recorder.record_proof(
@@ -2543,7 +2606,7 @@ class ReleaseChainResetter:
         self,
         *,
         previous_service_etag: str,
-        accepted_at: datetime,
+        previous_generation: int,
     ):
         latest = None
         for observation in range(self._max_observations):
@@ -2562,7 +2625,8 @@ class ReleaseChainResetter:
                 and not latest.reconciling
                 and latest.terminal_condition == "SUCCEEDED"
                 and latest.service_etag != previous_service_etag
-                and latest.observed_at >= accepted_at
+                and latest.generation > previous_generation
+                and latest.observed_generation >= latest.generation
             ):
                 return latest
             if observation + 1 < self._max_observations:
@@ -2576,25 +2640,31 @@ class ReleaseChainResetter:
             image_digest=self._settings.image_digest,
             configuration_sha256=self._settings.configuration_sha256,
         )
+        previous = await asyncio.to_thread(
+            self._cloud_reader.read_service,
+            release_id=self._settings.release_id,
+            revision=self._baseline,
+        )
         accepted = await self._reset_cloud_run()
         operation_name = getattr(accepted, "operation_name", None)
         accepted_revision = getattr(accepted, "revision", None)
-        previous_service_etag = getattr(accepted, "service_etag", None)
+        accepted_service_etag = getattr(accepted, "service_etag", None)
         accepted_at = getattr(accepted, "accepted_at", None)
         if (
             type(operation_name) is not str
             or not operation_name
             or accepted_revision != self._baseline
-            or type(previous_service_etag) is not str
-            or not previous_service_etag
+            or type(accepted_service_etag) is not str
+            or not accepted_service_etag
+            or accepted_service_etag != previous.service_etag
             or type(accepted_at) is not datetime
             or accepted_at.tzinfo is None
             or accepted_at.utcoffset() is None
         ):
             raise ReleaseChainError("Cloud Run reset acceptance is invalid")
         service = await self._wait_for_baseline(
-            previous_service_etag=previous_service_etag,
-            accepted_at=accepted_at.astimezone(UTC),
+            previous_service_etag=previous.service_etag,
+            previous_generation=previous.generation,
         )
         record_action = (
             build_release_chain_definition(

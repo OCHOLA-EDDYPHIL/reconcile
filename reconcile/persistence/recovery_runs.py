@@ -476,11 +476,7 @@ def apply_recovery_event(
         retry_dispatch = bool(
             len(action_matches) == 1 and action_matches[0].action is PermitAction.RETRY
         )
-        expected_attempt = (
-            None
-            if target_progress is None
-            else max(1, target_progress.attempt + int(retry_dispatch))
-        )
+        expected_attempt = 2 if retry_dispatch else 1
         if (
             snapshot.lifecycle is not RecoveryRunLifecycle.RUNNING
             or target_progress is None

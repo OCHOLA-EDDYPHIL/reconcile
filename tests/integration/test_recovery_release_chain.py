@@ -9,6 +9,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from google.api_core import exceptions as api_exceptions
 from google.cloud import run_v2
+from pydantic import ValidationError
 
 from reconcile.contracts import (
     ADAPTIVE_PLANNER_OUTPUT_VERSION,
@@ -25,17 +26,20 @@ from reconcile.contracts import (
     ProbeRequest,
     RecoveryAuthorityKind,
     RecoveryDecision,
+    RecoveryLaunchPermitState,
     RecoveryReceiptOutcome,
     RecoveryRunFault,
     RecoveryRunLifecycle,
     RecoveryRunPolicy,
     RecoveryRunRequest,
+    RecoveryRunSnapshot,
     VerifiedCertificate,
 )
 from reconcile.controller.permits import PermitAuthority
 from reconcile.evidence.recovery_verification import verify_recovery
 from reconcile.hosted.cloud_run_canary import (
     CLOUD_RUN_CANARY_HEALTH_VERSION,
+    CloudRunAcceptedOperation,
     CloudRunCanaryActionAdapter,
     CloudRunCanaryFaultProxy,
     CloudRunCanaryReader,
@@ -839,6 +843,17 @@ def test_proof_to_permit_completes_once_and_suppression_retries_once(
     assert len(retries) == (
         1 if fault is RecoveryRunFault.SUPPRESS_BEFORE_DISPATCH else 0
     )
+    if fault is RecoveryRunFault.SUPPRESS_BEFORE_DISPATCH:
+        retry_permit_ids = {permit.permit_id for permit in retries}
+        tampered = snapshot.model_dump(mode="python")
+        for receipt in tampered["dispatch_receipts"]:
+            if receipt["authority_id"] in retry_permit_ids:
+                receipt["attempt"] = 1
+        with pytest.raises(
+            ValidationError,
+            match="dispatch receipt lacks matching claimed authority",
+        ):
+            RecoveryRunSnapshot.model_validate(tampered)
     assert bool(snapshot.hypotheses) is (policy is RecoveryRunPolicy.ADAPTIVE)
 
 
@@ -934,6 +949,116 @@ def test_claimed_suppression_permit_is_counted_after_restart(
     assert result.chain_completed is True
     assert result.counters.action_permits_consumed == 3
     assert result.counters.retry_permits_consumed == 1
+
+
+@pytest.mark.parametrize("crash_node", ["stage", "record"])
+def test_claimed_mutation_without_a_receipt_is_counted_after_restart(
+    tmp_path,
+    monkeypatch,
+    crash_node: str,
+) -> None:
+    class _ProcessCrash(BaseException):
+        pass
+
+    settings = _settings()
+    _state, adapter, _action, reader, firestore, _client = _provider(settings)
+    store = InMemoryRecoveryRunStore()
+    authority = PermitAuthority(
+        SqliteDurableRuntimeStore(
+            tmp_path / f"claimed-no-receipt-{crash_node}.sqlite3"
+        ),
+        clock=lambda: NOW + timedelta(seconds=2),
+    )
+    workflow = build_release_chain_workflow(
+        settings=settings,
+        invoked_at=NOW,
+        store=store,
+        permit_authority=authority,
+        recovery_agent=RecoveryAgent(_Planner(output=_output(probe_count=0))),
+        cloud_action=adapter,
+        cloud_reader=reader,
+        firestore=firestore,
+        clock=lambda: NOW + timedelta(seconds=2),
+    )
+    request = RecoveryRunRequest(
+        schema_version=RECOVERY_RUN_REQUEST_VERSION,
+        run_id=f"fixed-claimed-no-receipt-{crash_node}-restart",
+        scenario="cloud-run-rollout",
+        policy=RecoveryRunPolicy.FIXED,
+        fault=RecoveryRunFault.NO_FAULT,
+    )
+    recorder = RecoveryPolicyResultRecorder(
+        settings=settings,
+        baseline_revision=BASELINE,
+        cloud_reader=reader,
+        firestore=firestore,
+    )
+    real_record_receipt = ReleaseChainDispatchGateway._record_receipt
+    crashed = False
+
+    async def crash_after_record_mutation(
+        self,
+        prepared,
+        scope,
+        *,
+        provider_contact,
+    ):
+        nonlocal crashed
+        if not crashed and prepared.target_node_id == crash_node and provider_contact:
+            crashed = True
+            raise _ProcessCrash
+        return await real_record_receipt(
+            self,
+            prepared,
+            scope,
+            provider_contact=provider_contact,
+        )
+
+    monkeypatch.setattr(
+        ReleaseChainDispatchGateway,
+        "_record_receipt",
+        crash_after_record_mutation,
+    )
+
+    async def exercise():
+        baseline = await recorder.capture_baseline()
+        definition = await workflow.definition(request)
+        await store.create(request, definition.chain, created_at=NOW)
+        with pytest.raises(_ProcessCrash):
+            await workflow.run(request.run_id)
+        interrupted = await store.get(request.run_id)
+        completed = await workflow.run(request.run_id)
+        result = await recorder.record_proof(
+            snapshot=completed,
+            events=await store.events(request.run_id),
+            binding=recovery_experiment_binding(settings, request.fault),
+            baseline=baseline,
+        )
+        return interrupted, completed, result
+
+    interrupted, completed, result = asyncio.run(exercise())
+
+    if crash_node == "stage":
+        assert interrupted.launch_permit is not None
+        assert interrupted.launch_permit.state is RecoveryLaunchPermitState.CLAIMED
+    else:
+        record_permits = tuple(
+            permit
+            for permit in interrupted.action_permits
+            if permit.target_node_id == "record"
+        )
+        assert len(record_permits) == 1
+        assert record_permits[0].state is ActionPermitState.CLAIMED
+    assert all(
+        receipt.node_id != crash_node for receipt in interrupted.dispatch_receipts
+    )
+    assert completed.lifecycle is RecoveryRunLifecycle.COMPLETED
+    assert result.chain_completed is True
+    assert result.counters.revisions_created == 1
+    assert result.counters.promotions_accepted == 1
+    assert result.counters.release_records_created == 1
+    assert result.counters.provider_contacts == 3
+    assert result.counters.action_permits_consumed == 2
 
 
 @pytest.mark.parametrize("mismatch", ["wrong-revision", "wrong-semantic-action"])
@@ -1205,6 +1330,95 @@ def test_reset_rejects_a_stale_pre_acceptance_baseline_snapshot(monkeypatch) -> 
         asyncio.run(resetter.reset())
 
     assert state.service.etag == "etag-1"
+
+
+def test_reset_rejects_acceptance_from_a_different_pre_reset_etag(
+    monkeypatch,
+) -> None:
+    settings = _settings()
+    _state, adapter, _action, reader, firestore, _client = _provider(settings)
+    monkeypatch.setattr(
+        adapter,
+        "reset",
+        lambda: CloudRunAcceptedOperation(
+            operation_name=(
+                f"projects/{PROJECT}/locations/{LOCATION}/operations/stale-reset"
+            ),
+            revision=BASELINE,
+            accepted_at=NOW + timedelta(seconds=1),
+            service_etag="different-etag",
+        ),
+    )
+    resetter = ReleaseChainResetter(
+        settings=settings,
+        cloud_action=adapter,
+        cloud_reader=reader,
+        firestore=firestore,
+        baseline_revision=BASELINE,
+        clock=lambda: NOW + timedelta(seconds=3),
+        max_observations=1,
+        poll_interval_seconds=0,
+    )
+
+    with pytest.raises(ReleaseChainError, match="acceptance is invalid"):
+        asyncio.run(resetter.reset())
+
+
+def test_reset_rejects_an_older_baseline_snapshot_with_a_different_etag(
+    monkeypatch,
+) -> None:
+    settings = _settings()
+    state, adapter, _action, reader, firestore, _client = _provider(settings)
+    stale = reader.read_service(
+        release_id=settings.release_id,
+        revision=BASELINE,
+    )
+    adapter.stage_revision(
+        operation_id=settings.stage_operation_id,
+        release_id=settings.release_id,
+        image_digest=settings.image_digest,
+        configuration_sha256=settings.configuration_sha256,
+    )
+    staged = reader.read_service(
+        release_id=settings.release_id,
+        revision=settings.staged_revision,
+    )
+    adapter.promote_revision(
+        release_id=settings.release_id,
+        revision=settings.staged_revision,
+        service_etag=staged.service_etag,
+    )
+
+    def accept_without_advancing_service(_request):
+        return _Accepted(
+            f"projects/{PROJECT}/locations/{LOCATION}/operations/stale-reset"
+        )
+
+    real_read_service = reader.read_service
+    reads = 0
+
+    def stale_after_reset_acceptance(**kwargs):
+        nonlocal reads
+        reads += 1
+        return real_read_service(**kwargs) if reads == 1 else stale
+
+    monkeypatch.setattr(state, "update", accept_without_advancing_service)
+    monkeypatch.setattr(reader, "read_service", stale_after_reset_acceptance)
+    resetter = ReleaseChainResetter(
+        settings=settings,
+        cloud_action=adapter,
+        cloud_reader=reader,
+        firestore=firestore,
+        baseline_revision=BASELINE,
+        clock=lambda: NOW + timedelta(seconds=3),
+        max_observations=1,
+        poll_interval_seconds=0,
+    )
+
+    with pytest.raises(ReleaseChainError, match="safe baseline"):
+        asyncio.run(resetter.reset())
+
+    assert state.service.traffic_statuses[0].revision == settings.staged_revision
 
 
 def test_provider_backed_blind_baselines_expose_duplicate_and_incomplete_release() -> (
@@ -1555,3 +1769,63 @@ def test_policy_lane_resumes_running_state_but_rejects_terminal_reuse_after_rese
     assert result.counters.release_records_created == 1
     assert reset.release_revisions_after == (settings.staged_revision,)
     assert state.update_count == 3
+
+
+def test_policy_lane_rechecks_physical_baseline_for_an_unstarted_durable_run(
+    tmp_path,
+) -> None:
+    settings = _settings()
+    state, adapter, _fault_proxy, reader, firestore, _client = _provider(settings)
+    adapter.stage_revision(
+        operation_id=settings.stage_operation_id,
+        release_id=settings.release_id,
+        image_digest=settings.image_digest,
+        configuration_sha256=settings.configuration_sha256,
+    )
+    adapter.reset()
+    store = InMemoryRecoveryRunStore()
+    resources = ReleaseChainLaneResources(
+        store=store,
+        permit_authority=PermitAuthority(
+            SqliteDurableRuntimeStore(tmp_path / "residual-resume.sqlite3"),
+            clock=lambda: NOW + timedelta(seconds=2),
+        ),
+        recovery_agent=RecoveryAgent(
+            _Planner(output=_output(probe_count=0)),
+            clock=lambda: NOW + timedelta(seconds=2),
+        ),
+        cloud_action=adapter,
+        cloud_reader=reader,
+        firestore=firestore,
+        baseline_revision=BASELINE,
+    )
+    executor = ReleaseChainPolicyLaneExecutor(
+        settings=settings,
+        invoked_at=NOW,
+        lane_factory=lambda **_kwargs: resources,
+        clock=lambda: NOW + timedelta(seconds=2),
+        reset_poll_interval_seconds=0,
+    )
+    fault = RecoveryRunFault.NO_FAULT
+    binding = recovery_experiment_binding(settings, fault)
+    run_id = executor._run_id(RecoveryRunPolicy.FIXED, fault, binding)
+    request = RecoveryRunRequest(
+        schema_version=RECOVERY_RUN_REQUEST_VERSION,
+        run_id=run_id,
+        scenario="cloud-run-rollout",
+        policy=RecoveryRunPolicy.FIXED,
+        fault=fault,
+    )
+    definition = build_release_chain_definition(settings, invoked_at=NOW)
+
+    async def exercise():
+        await store.create(request, definition.chain, created_at=NOW)
+        with pytest.raises(ReleaseChainError, match="freshly reprovisioned"):
+            await executor.execute(policy="fixed", fault=fault, binding=binding)
+        return await store.get(run_id)
+
+    snapshot = asyncio.run(exercise())
+
+    assert snapshot.lifecycle is RecoveryRunLifecycle.ACCEPTED
+    assert snapshot.launch_permit is None
+    assert state.update_count == 2

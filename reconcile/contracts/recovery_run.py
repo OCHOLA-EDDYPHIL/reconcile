@@ -576,16 +576,14 @@ class RecoveryRunSnapshot(StrictModel):
                 and permit.claimed_at is not None
                 and receipt.recorded_at >= permit.claimed_at
             )
-            progress = next(
-                node for node in self.nodes if node.node_id == receipt.node_id
-            )
             retry_dispatch = bool(
                 len(action_matches) == 1
                 and action_matches[0].action is PermitAction.RETRY
             )
-            if int(launch_match) + len(action_matches) != 1 or receipt.attempt > max(
-                1,
-                progress.attempt + int(retry_dispatch),
+            expected_attempt = 2 if retry_dispatch else 1
+            if (
+                int(launch_match) + len(action_matches) != 1
+                or receipt.attempt != expected_attempt
             ):
                 raise ValueError("dispatch receipt lacks matching claimed authority")
         report_sha256s = {canonical_sha256(report) for report in self.reports}
