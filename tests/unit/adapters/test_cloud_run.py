@@ -588,7 +588,7 @@ def test_missing_expected_revision_remains_authoritative_absence() -> None:
         target=envelope.target,
         relevant_effect_ids=(envelope.expected_effects[0].effect_id,),
         arguments={},
-        timeout_ms=5_000,
+        timeout_ms=1,
         result_byte_ceiling=8_192,
     )
 
@@ -634,12 +634,14 @@ def test_expected_revision_waits_while_service_status_references_it() -> None:
             self.calls += 1
             if self.calls == 1:
                 raise api_exceptions.NotFound("revision is becoming visible")
+            if self.calls == 2:
+                raise api_exceptions.ServiceUnavailable("revision is settling")
             request = kwargs["request"]
             return run_v2.Revision(
                 name=request.name,
                 service="reconcile-canary",
                 generation=1,
-                observed_generation=0 if self.calls == 2 else 1,
+                observed_generation=0 if self.calls == 3 else 1,
                 labels={"reconcile-release": RELEASE},
                 annotations={"reconcile.dev/configuration-sha256": CONFIGURATION},
                 containers=(
@@ -655,12 +657,12 @@ def test_expected_revision_waits_while_service_status_references_it() -> None:
                         type_="Ready",
                         state=(
                             run_v2.Condition.State.CONDITION_RECONCILING
-                            if self.calls == 2
+                            if self.calls == 3
                             else run_v2.Condition.State.CONDITION_SUCCEEDED
                         ),
                     ),
                 ),
-                reconciling=self.calls == 2,
+                reconciling=self.calls == 3,
             )
 
     revisions = Revisions()
@@ -705,7 +707,7 @@ def test_expected_revision_waits_while_service_status_references_it() -> None:
 
     assert registration.handler is not None
     raw = asyncio.run(registration.handler(probe))
-    assert revisions.calls == 3
+    assert revisions.calls == 4
     result = build_cloud_run_rule_registration(
         capability_name=CLOUD_RUN_REVISION_CAPABILITY,
         binding=_binding(),
