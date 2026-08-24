@@ -640,6 +640,31 @@ def test_structured_success_accepts_bounded_provider_thought_signature() -> None
     asyncio.run(scenario())
 
 
+def test_structured_success_normalizes_empty_continue_reason() -> None:
+    async def scenario() -> None:
+        payload = json.loads(_valid_text())
+        payload["stop"] = False
+        payload["stop_reason"] = ""
+        model = _FakeLlm(
+            model="fake-model",
+            responses=(_response(json.dumps(payload)),),
+        )
+        planner = _planner(model)
+
+        async with planner:
+            turn = await planner.plan(_planner_input(planner))
+
+        assert turn.failure is None
+        assert turn.output is not None
+        assert turn.output.stop_advice.recommend_stop is False
+        assert (
+            turn.output.stop_advice.reason
+            == "Continue bounded evidence acquisition."
+        )
+
+    asyncio.run(scenario())
+
+
 def test_qualification_facade_intercepts_and_seals_the_final_sdk_request(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

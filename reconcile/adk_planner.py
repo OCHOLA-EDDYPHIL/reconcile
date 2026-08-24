@@ -117,6 +117,7 @@ string. Use {} when the capability has no arguments. It may contain only the
 fully bound scalar or scalar-array arguments allowed by the supplied capability.
 Use the empty string for an explanation category exactly when its citation
 array is empty. Never emit private reasoning or fields outside the schema.
+Always provide a non-empty stop_reason, including when stop is false.
 """
 _ASSEMBLED_SYSTEM_INSTRUCTION = (
     _PLANNER_INSTRUCTION
@@ -299,10 +300,14 @@ class _ProviderPlannerOutput(_ProviderModel):
     def validate_output(self) -> _ProviderPlannerOutput:
         for value, label in (
             (self.acquisition, "planner acquisition summary"),
-            (self.stop_reason, "planner stop reason"),
             (self.summary, "planner explanation summary"),
         ):
             _validate_provider_text(value, label)
+        _validate_provider_text(
+            self.stop_reason,
+            "planner stop reason",
+            allow_empty=not self.stop,
+        )
         for value, label in (
             (self.admitted, "planner admitted-evidence explanation"),
             (self.weak, "planner weak-evidence explanation"),
@@ -1035,7 +1040,8 @@ def _translate_provider_output(
             },
             "stop_advice": {
                 "recommend_stop": provider_output.stop,
-                "reason": provider_output.stop_reason,
+                "reason": provider_output.stop_reason
+                or "Continue bounded evidence acquisition.",
             },
             "missing_evidence_notes": tuple(
                 {
