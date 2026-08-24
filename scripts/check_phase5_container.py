@@ -1065,6 +1065,37 @@ def _canary_baseline_revision(
     return f"reconcile-p5-canary-b-{hashlib.sha256(encoded).hexdigest()[:16]}"
 
 
+def _recovery_payload_sha256(
+    *,
+    source_revision: str,
+    image_digest: str,
+) -> str:
+    identity = {
+        "configured_model": "gemini-3.5-flash",
+        "image_digest": image_digest,
+        "infrastructure_revision": "1" * 64,
+        "maximum_count_tokens_attempts": 1,
+        "maximum_generation_attempts": 1,
+        "maximum_input_tokens": 12_000,
+        "maximum_output_tokens": 1_024,
+        "project_id": _PROJECT,
+        "prompt_sha256": _PROMPT_SHA256,
+        "prompt_version": _PROMPT_VERSION,
+        "schema_version": "reconcile/hosted-candidate-identity/v1",
+        "semantic_config_sha256": "2" * 64,
+        "source_revision": source_revision,
+        "thinking_level": "MINIMAL",
+        "vertex_location": "us",
+    }
+    encoded = json.dumps(
+        identity,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
 def component_environment(
     component: str,
     *,
@@ -1100,10 +1131,28 @@ def component_environment(
                 f"rec-p5-api@{_PROJECT}.iam.gserviceaccount.com"
             ),
             "RECONCILE_RUNTIME_DATABASE": "reconcile-p5-runtime",
+            "RECONCILE_FAULT_PROXY_AUDIENCE": audiences["fault-proxy"],
+            "RECONCILE_FAULT_PROXY_URL": "https://fault-proxy.example.test",
             "RECONCILE_SANDBOX_AUDIENCE": audiences["sandbox"],
             "RECONCILE_SANDBOX_URL": "https://sandbox.example.test",
             "RECONCILE_TARGET_BUCKET": f"{_PROJECT}-p5-target",
             "RECONCILE_TARGET_DATABASE": "reconcile-p5-target",
+            "RECONCILE_CANARY_AUDIENCE": (
+                f"https://reconcile.invalid/phase5/{_PROJECT}/canary"
+            ),
+            "RECONCILE_CANARY_BASELINE_REVISION": _canary_baseline_revision(
+                source_revision=source_revision,
+                image_digest=image_digest,
+            ),
+            "RECONCILE_CANARY_LOCATION": _REGION,
+            "RECONCILE_CANARY_SERVICE": "reconcile-p5-canary",
+            "RECONCILE_RECOVERY_DEFINITION_CREATED_AT": "2026-08-24T00:00:00Z",
+            "RECONCILE_RECOVERY_EXECUTION_TIMEOUT_SECONDS": "240",
+            "RECONCILE_RECOVERY_PAYLOAD_SHA256": _recovery_payload_sha256(
+                source_revision=source_revision,
+                image_digest=image_digest,
+            ),
+            "RECONCILE_RECOVERY_RELEASE_ID": f"p5-release-{source_revision[:24]}",
             "RECONCILE_VERTEX_LOCATION": "us",
             "RECONCILE_VERTEX_MAX_COUNT_TOKENS_ATTEMPTS": "1",
             "RECONCILE_VERTEX_MAX_GENERATION_ATTEMPTS": "1",
@@ -1133,6 +1182,9 @@ def component_environment(
             "RECONCILE_SANDBOX_URL": "https://sandbox.example.test",
             "RECONCILE_TARGET_BUCKET": f"{_PROJECT}-p5-target",
             "RECONCILE_TARGET_DATABASE": "reconcile-p5-target",
+            "RECONCILE_RECOVERY_ACTION_CALLER_EMAIL": (
+                f"rec-p5-controller@{_PROJECT}.iam.gserviceaccount.com"
+            ),
         }
     elif component == "sandbox":
         specific = {

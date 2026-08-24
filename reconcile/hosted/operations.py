@@ -16,6 +16,7 @@ from reconcile.contracts.base import (
 )
 from reconcile.contracts.codec import canonical_sha256, decode_contract
 from reconcile.contracts.recovery_run import (
+    RecoveryRunPolicy,
     RecoveryRunRequest,
     RecoveryRunSnapshot,
 )
@@ -452,6 +453,11 @@ class HostedRecoveryHandler:
     ) -> InternalOperationResponse:
         _validated_caller(caller, self._expected_caller_email)
         recovery = _decode_recovery_request(request)
+        if recovery.policy not in {
+            RecoveryRunPolicy.FIXED,
+            RecoveryRunPolicy.ADAPTIVE,
+        }:
+            raise HostedRecoveryGatewayError from None
         try:
             result = await self._service.launch_and_wait_result(recovery)
         except asyncio.CancelledError:

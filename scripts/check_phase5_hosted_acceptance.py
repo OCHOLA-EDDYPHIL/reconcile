@@ -20,6 +20,14 @@ from reconcile.phase5_hosted_acceptance import (
 )
 
 
+def _sha256(value: str) -> str:
+    if len(value) != 64 or any(
+        character not in "0123456789abcdef" for character in value
+    ):
+        raise argparse.ArgumentTypeError("value must be a lowercase SHA-256 digest")
+    return value
+
+
 def _arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("mode", choices=tuple(item.value for item in AcceptanceMode))
@@ -28,6 +36,8 @@ def _arguments() -> argparse.Namespace:
     parser.add_argument("--image-digest", required=True)
     parser.add_argument("--infrastructure-revision", required=True)
     parser.add_argument("--semantic-config-sha256", required=True)
+    parser.add_argument("--runtime-source-sha256", type=_sha256, required=True)
+    parser.add_argument("--runtime-variables-sha256", type=_sha256, required=True)
     return parser.parse_args()
 
 
@@ -58,7 +68,12 @@ def main() -> int:
         sys.stderr.buffer.write(_failure("ACCEPTANCE_INPUT_INVALID") + b"\n")
         return 1
     try:
-        backend = CloudRunAcceptanceBackend(candidate)
+        backend = CloudRunAcceptanceBackend(
+            candidate,
+            state_root=arguments.state_root,
+            runtime_source_sha256=arguments.runtime_source_sha256,
+            runtime_variables_sha256=arguments.runtime_variables_sha256,
+        )
         if arguments.mode == AcceptanceMode.PROVIDER.value:
             binding = asyncio.run(
                 run_provider_acceptance(

@@ -18,6 +18,9 @@ from typing import Annotated, Literal, Protocol
 from urllib.parse import urlsplit
 
 import httpx
+from google.auth import default as google_auth_default
+from google.auth import impersonated_credentials
+from google.cloud import firestore_v1, run_v2
 from pydantic import Field, StringConstraints, model_validator
 
 from reconcile.adapters.firestore_business import (
@@ -35,6 +38,8 @@ from reconcile.adapters.storage import (
     STORAGE_TARGET_KIND,
 )
 from reconcile.contracts import (
+    RECOVERY_POLICY_COMPARISON_VERSION,
+    RECOVERY_RUN_REQUEST_VERSION,
     SCENARIO_LAUNCH_REQUEST_VERSION,
     AdaptivePlannerPhase,
     AdvisoryTurnEventPayload,
@@ -49,6 +54,16 @@ from reconcile.contracts import (
     ProbeOutcome,
     ProbeRequestDisposition,
     ProbeRequestEventPayload,
+    RecoveryDispatchOutcome,
+    RecoveryPolicyComparison,
+    RecoveryPolicyResult,
+    RecoveryReceiptOutcome,
+    RecoveryResetResult,
+    RecoveryRunFault,
+    RecoveryRunLifecycle,
+    RecoveryRunPolicy,
+    RecoveryRunRequest,
+    RecoveryRunSnapshot,
     ScenarioHybridOutcome,
     ScenarioHybridRoute,
     ScenarioLaunchName,
@@ -74,9 +89,55 @@ from reconcile.contracts.base import (
     Sha256Digest,
     StrictModel,
 )
-from reconcile.interfaces.api_client import InvestigationConflictError
+from reconcile.hosted.cloud_run_canary import (
+    CloudRunCanaryActionAdapter,
+    CloudRunCanaryFaultProxy,
+    CloudRunCanaryReader,
+    CloudRunCanaryTarget,
+)
+from reconcile.hosted.firestore_cas import (
+    FIRESTORE_RUNTIME_DATABASE,
+    GoogleFirestoreCasStore,
+)
+from reconcile.hosted.firestore_provider_ledger import (
+    FirestoreHostedProviderLedger,
+    HostedProviderLedgerObservation,
+)
+from reconcile.hosted.firestore_release import (
+    FIRESTORE_RELEASE_DATABASE,
+    GoogleFirestoreReleaseTarget,
+)
+from reconcile.hosted.provider import (
+    HOSTED_CANDIDATE_IDENTITY_VERSION,
+    HostedCandidateIdentity,
+)
+from reconcile.interfaces.api_client import (
+    InvestigationConflictError,
+    InvestigationNotFoundError,
+)
 from reconcile.interfaces.google_identity import GcloudIdentityTokenSupplier
-from reconcile.interfaces.operator_api_client import OperatorApiClient
+from reconcile.interfaces.operator_api_client import (
+    LaunchOutcomeUnknownError,
+    OperatorApiClient,
+)
+from reconcile.persistence.recovery_runs import (
+    RECOVERY_RUN_AGGREGATE_VERSION,
+    RECOVERY_RUN_EVENT_SNAPSHOT_VERSION,
+    RecoveryRunAggregate,
+    RecoveryRunEventSnapshot,
+)
+from reconcile.recovery_agents import (
+    recovery_hypothesis_id,
+    recovery_hypothesis_id_from_hashes,
+)
+from reconcile.recovery_scenario import (
+    BlindPolicyExecutor,
+    RecoveryPolicyResultRecorder,
+    ReleaseChainBlindMutator,
+    ReleaseChainResetter,
+    ReleaseChainSettings,
+    recovery_experiment_binding,
+)
 from reconcile.scenarios.firestore_business import FIRESTORE_BUSINESS_EFFECT_IDS
 from reconcile.scenarios.sandbox_order import (
     SANDBOX_ORDER_AGGREGATE_CAPABILITY_NAME,
@@ -85,7 +146,7 @@ from reconcile.scenarios.sandbox_order import (
 )
 from reconcile.scenarios.storage import STORAGE_EFFECT_ID
 
-PHASE5_HOSTED_ACCEPTANCE_VERSION = "reconcile/phase5-hosted-acceptance/v1"
+PHASE5_HOSTED_ACCEPTANCE_VERSION = "reconcile/phase5-hosted-acceptance/v2"
 PHASE5_ACCEPTANCE_ARTIFACT_VERSION = "reconcile/phase5-acceptance-artifact/v1"
 
 _PROJECT_ID = "reconcile-dev-260813-14fa6d"
@@ -511,13 +572,15 @@ class ExactMainTestSubstitution(StrictModel):
 
 
 class ProviderAcceptanceRecord(StrictModel):
-    schema_version: Literal["reconcile/phase5-hosted-acceptance/v1"]
+    schema_version: Literal["reconcile/phase5-hosted-acceptance/v2"]
     record_type: Literal["provider-acceptance"]
     candidate: CandidateIdentity
     deployments: tuple[ServiceDeploymentObservation, ...] = Field(
         min_length=5, max_length=5
     )
-    scenario: ScenarioAcceptanceObservation
+    provider_ledger_absent_before: Literal[True]
+    adaptive_recovery: RecoveryLaneAcceptanceObservation
+    provider_ledger: HostedProviderLedgerObservation
     diagnostics: LifecycleDiagnostics
     limitations: tuple[AcceptanceLimitation, ...]
     started_at: AwareDatetime
@@ -532,14 +595,30 @@ class ProviderAcceptanceRecord(StrictModel):
             self.started_at,
             self.completed_at,
         )
-        _validate_provider_scenario(self.scenario)
-        if self.scenario.request != _launch(
-            self.candidate,
-            "provider-sandbox",
-            ScenarioLaunchName.SANDBOX_ORDER,
-            ScenarioRunMode.ADAPTIVE,
+        _validate_recovery_lane(
+            self.adaptive_recovery,
+            candidate=self.candidate,
+            policy=RecoveryRunPolicy.ADAPTIVE,
+            fault=RecoveryRunFault.DROP_AFTER_ACCEPT,
+            purpose="provider-adaptive-drop",
+        )
+        hosted_candidate = _hosted_candidate_identity(self.candidate)
+        canary = next(
+            item
+            for item in self.deployments
+            if item.component is ServiceComponent.CANARY
+        )
+        if (
+            self.provider_ledger.candidate_sha256 != hosted_candidate.sha256
+            or self.adaptive_recovery.reprovision.previous_service_uid
+            != canary.service_uid
+            or self.provider_ledger.dispatch.input_sha256
+            != self.adaptive_recovery.hypothesis_input_sha256
+            or self.provider_ledger.output_sha256
+            != self.adaptive_recovery.hypothesis_output_sha256
+            or self.adaptive_recovery.provider_hypothesis_count != 1
         ):
-            raise ValueError("provider acceptance launch identity changed")
+            raise ValueError("provider recovery and generation ledger are not bound")
         if self.limitations != _provider_limitations(self.diagnostics):
             raise ValueError("provider acceptance limitations changed")
         if self.record_sha256 != _model_hash(self, exclude={"record_sha256"}):
@@ -557,7 +636,7 @@ class AcceptanceArtifactBinding(StrictModel):
 
 
 class HostedAcceptanceRecord(StrictModel):
-    schema_version: Literal["reconcile/phase5-hosted-acceptance/v1"]
+    schema_version: Literal["reconcile/phase5-hosted-acceptance/v2"]
     record_type: Literal["hosted-acceptance"]
     candidate: CandidateIdentity
     provider_artifact: AcceptanceArtifactBinding
@@ -567,13 +646,18 @@ class HostedAcceptanceRecord(StrictModel):
     scenarios: tuple[ScenarioAcceptanceObservation, ...] = Field(
         min_length=3, max_length=3
     )
+    recovery_lanes: tuple[RecoveryLaneAcceptanceObservation, ...] = Field(
+        min_length=5, max_length=5
+    )
+    recovery_comparison: RecoveryPolicyComparison
+    provider_ledger: HostedProviderLedgerObservation
     duplicate_request: DuplicateRequestObservation
     cursor_resume: CursorResumeObservation
     interface_parity: InterfaceParityObservation
     denials: tuple[DenialObservation, ...] = Field(min_length=2, max_length=2)
     diagnostics: LifecycleDiagnostics
     exact_main_test_substitutions: tuple[ExactMainTestSubstitution, ...] = Field(
-        min_length=7, max_length=7
+        min_length=8, max_length=8
     )
     limitations: tuple[AcceptanceLimitation, ...]
     started_at: AwareDatetime
@@ -652,6 +736,7 @@ class HostedAcceptanceRecord(StrictModel):
                 )
         if observed != set(expected):
             raise ValueError("hosted acceptance scenario matrix is incomplete")
+        _validate_hosted_recovery_evidence(self)
         storage = scenario_by_key[
             (ScenarioLaunchName.STORAGE, ScenarioRunMode.ADAPTIVE)
         ]
@@ -725,6 +810,253 @@ class CanaryReprovisionObservation(StrictModel):
         return self
 
 
+class RecoveryLaneAcceptanceObservation(StrictModel):
+    """One physically isolated policy lane and its sanitized API evidence."""
+
+    purpose: Identifier
+    reprovision: CanaryReprovisionObservation
+    result: RecoveryPolicyResult
+    reset: RecoveryResetResult
+    acknowledgement_lost: bool
+    launch_outcome: RecoveryDispatchOutcome | None = None
+    launch_created: Literal[True] | None = None
+    replay_created: Literal[False] | None = None
+    request_sha256: Sha256Digest | None = None
+    snapshot_sha256: Sha256Digest | None = None
+    replay_snapshot_sha256: Sha256Digest | None = None
+    events_sha256: Sha256Digest | None = None
+    event_count: int = Field(ge=0, le=512)
+    replay_provider_contact_delta: Literal[0] | None = None
+    live_authority_replay_denial_count: int = Field(ge=0, le=1)
+    provider_hypothesis_count: int = Field(ge=0, le=1)
+    hypothesis_id: Identifier | None = None
+    hypothesis_chain_sha256: Sha256Digest | None = None
+    hypothesis_node_sha256: Sha256Digest | None = None
+    hypothesis_input_sha256: Sha256Digest | None = None
+    hypothesis_output_sha256: Sha256Digest | None = None
+
+    @model_validator(mode="after")
+    def validate_lane(self) -> RecoveryLaneAcceptanceObservation:
+        if (
+            self.reprovision.release_id != self.result.firestore.release_id
+            or self.reprovision.baseline_revision
+            != self.result.cloud_run.baseline_revision
+            or self.reset.release_id != self.reprovision.release_id
+            or self.reset.baseline_revision != self.reprovision.baseline_revision
+            or self.reset.release_revisions_before
+            != self.result.cloud_run.release_revisions
+        ):
+            raise ValueError("recovery lane changed its physical target")
+        proof_policy = self.result.policy in {"fixed", "adaptive"}
+        drop_after_accept = self.result.fault == "drop-after-accept"
+        if self.acknowledgement_lost != drop_after_accept:
+            raise ValueError("recovery lane fault was not observed at its boundary")
+        api_fields = (
+            self.launch_created,
+            self.replay_created,
+            self.request_sha256,
+            self.snapshot_sha256,
+            self.replay_snapshot_sha256,
+            self.events_sha256,
+            self.replay_provider_contact_delta,
+        )
+        hypothesis_fields = (
+            self.hypothesis_id,
+            self.hypothesis_chain_sha256,
+            self.hypothesis_node_sha256,
+            self.hypothesis_input_sha256,
+            self.hypothesis_output_sha256,
+        )
+        replay_denials = tuple(
+            receipt
+            for receipt in self.result.dispatch_receipts
+            if receipt.outcome
+            is RecoveryReceiptOutcome.REJECTED_BEFORE_PROVIDER_CONTACT
+        )
+        expected_live_replay = proof_policy and self.result.fault in {
+            RecoveryRunFault.DROP_AFTER_ACCEPT.value,
+            RecoveryRunFault.NO_FAULT.value,
+        }
+        if (
+            self.live_authority_replay_denial_count != len(replay_denials)
+            or self.live_authority_replay_denial_count != int(expected_live_replay)
+            or any(
+                receipt.node_id != "stage"
+                or receipt.provider_contact
+                or receipt.attempt != 1
+                for receipt in replay_denials
+            )
+        ):
+            raise ValueError("live recovery authority replay evidence changed")
+        if proof_policy:
+            if (
+                any(value is None for value in api_fields)
+                or self.snapshot_sha256 != self.replay_snapshot_sha256
+                or self.event_count < 1
+                or not self.result.chain_completed
+                or self.launch_outcome
+                is not (
+                    RecoveryDispatchOutcome.OUTCOME_UNKNOWN
+                    if drop_after_accept
+                    else RecoveryDispatchOutcome.SUCCEEDED
+                )
+            ):
+                raise ValueError("proof lane lacks terminal hosted API evidence")
+            adaptive = self.result.policy == "adaptive"
+            if adaptive != (self.provider_hypothesis_count == 1) or adaptive != all(
+                value is not None for value in hypothesis_fields
+            ):
+                raise ValueError("proof lane changed its Gemini hypothesis evidence")
+            if adaptive and self.hypothesis_id != recovery_hypothesis_id_from_hashes(
+                chain_sha256=self.hypothesis_chain_sha256,
+                node_sha256=self.hypothesis_node_sha256,
+                input_sha256=self.hypothesis_input_sha256,
+                output_sha256=self.hypothesis_output_sha256,
+            ):
+                raise ValueError("adaptive hypothesis binding changed")
+        elif (
+            any(value is not None for value in api_fields)
+            or self.launch_outcome is not None
+            or self.event_count != 0
+            or self.provider_hypothesis_count != 0
+            or any(value is not None for value in hypothesis_fields)
+        ):
+            raise ValueError("blind lane acquired hosted proof artifacts")
+        if self.result.policy == "blind-retry" and not self.result.chain_completed:
+            raise ValueError("blind retry did not expose its completed duplicate chain")
+        if self.result.fault == "suppress-before-dispatch":
+            record_receipts = tuple(
+                receipt
+                for receipt in self.result.dispatch_receipts
+                if receipt.node_id == "record"
+            )
+            if tuple(item.outcome for item in record_receipts) != (
+                RecoveryReceiptOutcome.SUPPRESSED_BEFORE_DISPATCH,
+                RecoveryReceiptOutcome.PROVIDER_CONTACTED,
+            ) or tuple(item.attempt for item in record_receipts) != (1, 2):
+                raise ValueError("suppressed dispatch retry evidence changed")
+        return self
+
+
+def _validate_recovery_lane(
+    lane: RecoveryLaneAcceptanceObservation,
+    *,
+    candidate: CandidateIdentity,
+    policy: RecoveryRunPolicy,
+    fault: RecoveryRunFault,
+    purpose: str,
+) -> None:
+    settings = _candidate_release_settings(candidate)
+    binding = recovery_experiment_binding(settings, fault)
+    if (
+        lane.purpose != purpose
+        or lane.result.policy != policy.value
+        or lane.result.fault != fault.value
+        or lane.result.target_sha256 != binding.target_sha256
+        or lane.result.input_intent_sha256 != binding.input_intent_sha256
+        or lane.result.fault_boundary_sha256 != binding.fault_boundary_sha256
+        or lane.result.observation_catalog_sha256 != binding.observation_catalog_sha256
+        or lane.result.run_id
+        != _recovery_run_id(
+            policy=policy,
+            fault=fault,
+            purpose=purpose,
+            service_uid=lane.reprovision.service_uid,
+            candidate_sha256=candidate.candidate_sha256,
+        )
+        or lane.result.cloud_run.intended_revision != settings.staged_revision
+        or lane.result.firestore.release_id != settings.release_id
+        or lane.result.firestore.expected_payload_sha256 != settings.payload_sha256
+    ):
+        raise ValueError("recovery acceptance lane identity changed")
+
+
+def _validate_hosted_recovery_evidence(record: HostedAcceptanceRecord) -> None:
+    expected = (
+        (
+            RecoveryRunPolicy.BLIND_RETRY,
+            RecoveryRunFault.DROP_AFTER_ACCEPT,
+            "hosted-blind-retry-drop",
+        ),
+        (
+            RecoveryRunPolicy.BLIND_ABORT,
+            RecoveryRunFault.DROP_AFTER_ACCEPT,
+            "hosted-blind-abort-drop",
+        ),
+        (
+            RecoveryRunPolicy.FIXED,
+            RecoveryRunFault.DROP_AFTER_ACCEPT,
+            "hosted-fixed-drop",
+        ),
+        (
+            RecoveryRunPolicy.FIXED,
+            RecoveryRunFault.NO_FAULT,
+            "hosted-fixed-no-fault",
+        ),
+        (
+            RecoveryRunPolicy.FIXED,
+            RecoveryRunFault.SUPPRESS_BEFORE_DISPATCH,
+            "hosted-fixed-suppress",
+        ),
+    )
+    for lane, (policy, fault, purpose) in zip(
+        record.recovery_lanes,
+        expected,
+        strict=True,
+    ):
+        _validate_recovery_lane(
+            lane,
+            candidate=record.candidate,
+            policy=policy,
+            fault=fault,
+            purpose=purpose,
+        )
+    comparison = record.recovery_comparison
+    drop_lanes = record.recovery_lanes[:3]
+    canary = next(
+        item for item in record.deployments if item.component is ServiceComponent.CANARY
+    )
+    common = comparison.lanes[0]
+    if (
+        comparison.schema_version != RECOVERY_POLICY_COMPARISON_VERSION
+        or comparison.fault != RecoveryRunFault.DROP_AFTER_ACCEPT.value
+        or comparison.lanes[:3] != tuple(item.result for item in drop_lanes)
+        or comparison.reset_results[:3] != tuple(item.reset for item in drop_lanes)
+        or comparison.lanes[3].policy != RecoveryRunPolicy.ADAPTIVE.value
+        or record.provider_ledger.candidate_sha256
+        != _hosted_candidate_identity(record.candidate).sha256
+        or record.recovery_lanes[0].reprovision.previous_service_uid
+        != canary.service_uid
+        or any(
+            (
+                lane.result.target_sha256,
+                lane.result.input_intent_sha256,
+                lane.result.observation_catalog_sha256,
+            )
+            != (
+                common.target_sha256,
+                common.input_intent_sha256,
+                common.observation_catalog_sha256,
+            )
+            for lane in record.recovery_lanes[3:]
+        )
+    ):
+        raise ValueError("hosted recovery comparison changed accepted evidence")
+    if any(
+        current.reprovision.previous_service_uid != previous.reprovision.service_uid
+        for previous, current in zip(
+            record.recovery_lanes[:-1],
+            record.recovery_lanes[1:],
+            strict=True,
+        )
+    ):
+        raise ValueError("hosted recovery reprovision chain changed")
+
+
+ProviderAcceptanceRecord.model_rebuild()
+HostedAcceptanceRecord.model_rebuild()
+
+
 class RecoveryReleaseRecordReader(Protocol):
     async def read(self, release_id: str) -> object | None: ...
 
@@ -744,6 +1076,18 @@ class HostedAcceptanceBackend(Protocol):
         *,
         purpose: str,
     ) -> ScenarioAcceptanceObservation: ...
+
+    async def provider_ledger_absent(self) -> bool: ...
+
+    async def recovery_lane(
+        self,
+        *,
+        policy: RecoveryRunPolicy,
+        fault: RecoveryRunFault,
+        purpose: str,
+    ) -> RecoveryLaneAcceptanceObservation: ...
+
+    async def provider_ledger(self) -> HostedProviderLedgerObservation: ...
 
     async def concurrent_replay(
         self,
@@ -802,6 +1146,9 @@ def _required_service_environment(
     component: ServiceComponent,
     candidate: CandidateIdentity,
     service_uris: Mapping[ServiceComponent, str],
+    *,
+    canary_baseline_revision: str | None,
+    recovery_definition_created_at: str | None,
 ) -> dict[str, str]:
     if component is ServiceComponent.CANARY:
         return {
@@ -835,11 +1182,29 @@ def _required_service_environment(
             }
         )
     elif component is ServiceComponent.CONTROLLER:
+        if canary_baseline_revision is None or recovery_definition_created_at is None:
+            raise HostedAcceptanceError("DEPLOYMENT_EXPECTATION_INCOMPLETE")
         required.update(
             {
                 "RECONCILE_ALLOWED_CALLER_EMAILS": _SERVICE_ACCOUNTS[
                     ServiceComponent.API
                 ],
+                "RECONCILE_CANARY_AUDIENCE": _CANARY_AUDIENCE,
+                "RECONCILE_CANARY_BASELINE_REVISION": canary_baseline_revision,
+                "RECONCILE_CANARY_LOCATION": candidate.region,
+                "RECONCILE_CANARY_SERVICE": _CANARY_SERVICE,
+                "RECONCILE_FAULT_PROXY_AUDIENCE": _FAULT_PROXY_AUDIENCE,
+                "RECONCILE_FAULT_PROXY_URL": service_uris[ServiceComponent.FAULT_PROXY],
+                "RECONCILE_RECOVERY_DEFINITION_CREATED_AT": (
+                    recovery_definition_created_at
+                ),
+                "RECONCILE_RECOVERY_EXECUTION_TIMEOUT_SECONDS": "240",
+                "RECONCILE_RECOVERY_PAYLOAD_SHA256": _hosted_candidate_identity(
+                    candidate
+                ).sha256,
+                "RECONCILE_RECOVERY_RELEASE_ID": (
+                    f"p5-release-{candidate.source_revision[:24]}"
+                ),
                 "RECONCILE_SANDBOX_AUDIENCE": _SANDBOX_AUDIENCE,
                 "RECONCILE_SANDBOX_URL": service_uris[ServiceComponent.SANDBOX],
                 "RECONCILE_TARGET_BUCKET": f"{_PROJECT_ID}-p5-target",
@@ -856,10 +1221,19 @@ def _required_service_environment(
             }
         )
     elif component is ServiceComponent.FAULT_PROXY:
+        if canary_baseline_revision is None:
+            raise HostedAcceptanceError("DEPLOYMENT_EXPECTATION_INCOMPLETE")
         required.update(
             {
                 "RECONCILE_ALLOWED_CALLER_EMAILS": _SERVICE_ACCOUNTS[
                     ServiceComponent.API
+                ],
+                "RECONCILE_CANARY_AUDIENCE": _CANARY_AUDIENCE,
+                "RECONCILE_CANARY_BASELINE_REVISION": canary_baseline_revision,
+                "RECONCILE_CANARY_LOCATION": candidate.region,
+                "RECONCILE_CANARY_SERVICE": _CANARY_SERVICE,
+                "RECONCILE_RECOVERY_ACTION_CALLER_EMAIL": _SERVICE_ACCOUNTS[
+                    ServiceComponent.CONTROLLER
                 ],
                 "RECONCILE_SANDBOX_AUDIENCE": _SANDBOX_AUDIENCE,
                 "RECONCILE_SANDBOX_URL": service_uris[ServiceComponent.SANDBOX],
@@ -913,6 +1287,63 @@ def build_candidate_identity(
         **values,  # type: ignore[arg-type]
         candidate_sha256=_json_hash(values),  # type: ignore[arg-type]
     )
+
+
+def _hosted_candidate_identity(candidate: CandidateIdentity) -> HostedCandidateIdentity:
+    if type(candidate) is not CandidateIdentity:
+        raise TypeError("hosted candidate identity requires an exact candidate")
+    return HostedCandidateIdentity(
+        schema_version=HOSTED_CANDIDATE_IDENTITY_VERSION,
+        source_revision=candidate.source_revision,
+        image_digest=candidate.image_digest,
+        infrastructure_revision=candidate.infrastructure_revision,
+        semantic_config_sha256=candidate.semantic_config_sha256,
+        project_id=candidate.project_id,
+        vertex_location="us",
+        configured_model=candidate.gemini_model,
+        prompt_version=candidate.prompt_version,
+        prompt_sha256=candidate.prompt_sha256,
+        maximum_input_tokens=candidate.input_token_limit,
+        maximum_output_tokens=candidate.output_token_limit,
+        thinking_level="MINIMAL",
+        maximum_count_tokens_attempts=candidate.count_tokens_attempt_limit,
+        maximum_generation_attempts=candidate.billed_generation_limit,
+    )
+
+
+def _candidate_release_settings(candidate: CandidateIdentity) -> ReleaseChainSettings:
+    if type(candidate) is not CandidateIdentity:
+        raise TypeError("release settings require an exact candidate")
+    return ReleaseChainSettings(
+        project=candidate.project_id,
+        location=candidate.region,
+        service=_CANARY_SERVICE,
+        release_id=f"p5-release-{candidate.source_revision[:24]}",
+        image_digest=candidate.image_digest,
+        configuration_sha256=candidate.semantic_config_sha256,
+        payload_sha256=_hosted_candidate_identity(candidate).sha256,
+        database=FIRESTORE_RELEASE_DATABASE,
+    )
+
+
+def _recovery_run_id(
+    *,
+    policy: RecoveryRunPolicy,
+    fault: RecoveryRunFault,
+    purpose: str,
+    service_uid: str,
+    candidate_sha256: str,
+) -> str:
+    suffix = _json_hash(
+        {
+            "candidate_sha256": candidate_sha256,
+            "fault": fault.value,
+            "policy": policy.value,
+            "purpose": purpose,
+            "service_uid": service_uid,
+        }
+    )[:32]
+    return f"p5r-{policy.value}-{suffix}"
 
 
 def _model_hash(model: StrictModel, *, exclude: set[str] | None = None) -> str:
@@ -1452,6 +1883,15 @@ def _exact_main_substitutions() -> tuple[ExactMainTestSubstitution, ...]:
                 "tests/unit/hosted/test_firestore_provider_ledger.py::test_restart_never_reopens_any_persisted_state",
             ),
         ),
+        ExactMainTestSubstitution(
+            control="recovery-action-authority-non-replay-denials",
+            tests=(
+                "tests/unit/hosted/test_recovery_cloud_run_authority.py::test_recovery_authorizer_rejects_legacy_replayable_scope",
+                "tests/unit/hosted/test_recovery_cloud_run_authority.py::test_missing_promotion_authority_is_rejected_before_claim",
+                "tests/unit/hosted/test_recovery_cloud_run_authority.py::test_certificate_bound_promotion_rejects_tampering_before_claim",
+                "tests/unit/hosted/test_recovery_cloud_run_authority.py::test_expired_promotion_permit_is_rejected_before_provider_authority",
+            ),
+        ),
     )
 
 
@@ -1462,7 +1902,6 @@ def _provider_limitations(
         AcceptanceLimitation.PROVIDER_TIMEOUT_NOT_FORCED,
         AcceptanceLimitation.PROVIDER_CONSTRUCTION_FAILURE_NOT_FORCED,
         AcceptanceLimitation.PLATFORM_LOGS_DIAGNOSTIC_ONLY,
-        AcceptanceLimitation.SANDBOX_DISCARD_OUTCOME_NOT_LIVE,
     ]
     if not diagnostics.available:
         result.append(AcceptanceLimitation.LIFECYCLE_DIAGNOSTICS_UNAVAILABLE)
@@ -1521,22 +1960,23 @@ async def run_provider_acceptance(
     _require_record_absent(state_root, AcceptanceMode.PROVIDER, candidate)
     started_at = clock()
     deployments = await backend.deployments(candidate)
-    scenario = await backend.scenario(
-        _launch(
-            candidate,
-            "provider-sandbox",
-            ScenarioLaunchName.SANDBOX_ORDER,
-            ScenarioRunMode.ADAPTIVE,
-        ),
-        purpose="provider-sandbox-adaptive",
+    if not await backend.provider_ledger_absent():
+        raise HostedAcceptanceError("PROVIDER_LEDGER_ALREADY_CONSUMED")
+    adaptive_recovery = await backend.recovery_lane(
+        policy=RecoveryRunPolicy.ADAPTIVE,
+        fault=RecoveryRunFault.DROP_AFTER_ACCEPT,
+        purpose="provider-adaptive-drop",
     )
+    provider_ledger = await backend.provider_ledger()
     diagnostics = await backend.diagnostics()
     values = {
         "schema_version": PHASE5_HOSTED_ACCEPTANCE_VERSION,
         "record_type": "provider-acceptance",
         "candidate": candidate,
         "deployments": deployments,
-        "scenario": scenario,
+        "provider_ledger_absent_before": True,
+        "adaptive_recovery": adaptive_recovery,
+        "provider_ledger": provider_ledger,
         "diagnostics": diagnostics,
         "limitations": _provider_limitations(diagnostics),
         "started_at": started_at,
@@ -1559,7 +1999,6 @@ async def run_hosted_acceptance(
     _require_record_absent(state_root, AcceptanceMode.HOSTED, candidate)
     started_at = clock()
     provider, provider_binding = read_provider_record(state_root, candidate)
-    _validate_provider_scenario(provider.scenario)
     deployments = await backend.deployments(candidate)
     requests = (
         (
@@ -1596,6 +2035,76 @@ async def run_hosted_acceptance(
             for request, purpose in requests
         ]
     )
+    recovery_specs = (
+        (
+            RecoveryRunPolicy.BLIND_RETRY,
+            RecoveryRunFault.DROP_AFTER_ACCEPT,
+            "hosted-blind-retry-drop",
+        ),
+        (
+            RecoveryRunPolicy.BLIND_ABORT,
+            RecoveryRunFault.DROP_AFTER_ACCEPT,
+            "hosted-blind-abort-drop",
+        ),
+        (
+            RecoveryRunPolicy.FIXED,
+            RecoveryRunFault.DROP_AFTER_ACCEPT,
+            "hosted-fixed-drop",
+        ),
+        (
+            RecoveryRunPolicy.FIXED,
+            RecoveryRunFault.NO_FAULT,
+            "hosted-fixed-no-fault",
+        ),
+        (
+            RecoveryRunPolicy.FIXED,
+            RecoveryRunFault.SUPPRESS_BEFORE_DISPATCH,
+            "hosted-fixed-suppress",
+        ),
+    )
+    recovery_lanes = tuple(
+        [
+            await backend.recovery_lane(
+                policy=policy,
+                fault=fault,
+                purpose=purpose,
+            )
+            for policy, fault, purpose in recovery_specs
+        ]
+    )
+    provider_ledger = await backend.provider_ledger()
+    if provider_ledger != provider.provider_ledger:
+        raise HostedAcceptanceError("PROVIDER_LEDGER_CHANGED")
+    comparison_lanes = (
+        *(lane.result for lane in recovery_lanes[:3]),
+        provider.adaptive_recovery.result,
+    )
+    comparison_resets = (
+        *(lane.reset for lane in recovery_lanes[:3]),
+        provider.adaptive_recovery.reset,
+    )
+    common = provider.adaptive_recovery.result
+    recovery_comparison = RecoveryPolicyComparison(
+        schema_version=RECOVERY_POLICY_COMPARISON_VERSION,
+        comparison_id=(
+            "comparison-"
+            + _json_hash(
+                {
+                    "candidate_sha256": candidate.candidate_sha256,
+                    "run_ids": [lane.run_id for lane in comparison_lanes],
+                }
+            )[:32]
+        ),
+        release_id=common.firestore.release_id,
+        fault=RecoveryRunFault.DROP_AFTER_ACCEPT.value,
+        target_sha256=common.target_sha256,
+        input_intent_sha256=common.input_intent_sha256,
+        fault_boundary_sha256=common.fault_boundary_sha256,
+        observation_catalog_sha256=common.observation_catalog_sha256,
+        lanes=comparison_lanes,
+        reset_results=comparison_resets,
+        created_at=started_at,
+    )
     storage = scenarios[0]
     duplicate = await backend.concurrent_replay(storage)
     resume = await backend.cursor_resume(storage)
@@ -1609,6 +2118,9 @@ async def run_hosted_acceptance(
         "provider_artifact": provider_binding,
         "deployments": deployments,
         "scenarios": scenarios,
+        "recovery_lanes": recovery_lanes,
+        "recovery_comparison": recovery_comparison,
+        "provider_ledger": provider_ledger,
         "duplicate_request": duplicate,
         "cursor_resume": resume,
         "interface_parity": parity,
@@ -1831,6 +2343,19 @@ def read_acceptance_record(
         if (
             not isinstance(provider, ProviderAcceptanceRecord)
             or record.provider_artifact != provider_binding
+            or record.provider_ledger != provider.provider_ledger
+            or record.recovery_comparison.lanes[3] != provider.adaptive_recovery.result
+            or record.recovery_comparison.reset_results[3]
+            != provider.adaptive_recovery.reset
+            or record.recovery_lanes[0].reprovision.previous_service_uid
+            != provider.adaptive_recovery.reprovision.service_uid
+            or len(
+                {
+                    provider.adaptive_recovery.reprovision.service_uid,
+                    *(lane.reprovision.service_uid for lane in record.recovery_lanes),
+                }
+            )
+            != 1 + len(record.recovery_lanes)
         ):
             raise HostedAcceptanceError("HOSTED_PROVIDER_CHAIN_INVALID")
     return record, binding
@@ -2196,12 +2721,16 @@ class GcloudReadOnlyInspector:
         command_runner: CommandRunner = _default_command_runner,
         environ: Mapping[str, str] | None = None,
         clock: Callable[[], datetime] = _utc_now,
+        canary_baseline_revision: str | None = None,
+        recovery_definition_created_at: str | None = None,
     ) -> None:
         self._runner = command_runner
         self._environment = _minimal_environment(
             os.environ if environ is None else environ
         )
         self._clock = clock
+        self._canary_baseline_revision = canary_baseline_revision
+        self._recovery_definition_created_at = recovery_definition_created_at
 
     def _run(self, argv: tuple[str, ...], *, timeout: int = 30) -> bytes:
         try:
@@ -2284,6 +2813,8 @@ class GcloudReadOnlyInspector:
                 component=component,
                 candidate=candidate,
                 service_uris=service_uris,
+                canary_baseline_revision=self._canary_baseline_revision,
+                recovery_definition_created_at=(self._recovery_definition_created_at),
                 api_invoker_iam_sha256=(
                     api_invoker_iam_sha256
                     if component is ServiceComponent.API
@@ -2423,6 +2954,8 @@ def _normalize_service_description(
     component: ServiceComponent,
     candidate: CandidateIdentity,
     service_uris: Mapping[ServiceComponent, str],
+    canary_baseline_revision: str | None,
+    recovery_definition_created_at: str | None,
     api_invoker_iam_sha256: str | None,
     observed_at: datetime,
 ) -> ServiceDeploymentObservation:
@@ -2475,6 +3008,8 @@ def _normalize_service_description(
         component,
         candidate,
         service_uris,
+        canary_baseline_revision=canary_baseline_revision,
+        recovery_definition_created_at=recovery_definition_created_at,
     )
     if env_values != required_environment:
         raise HostedAcceptanceError("DEPLOYMENT_IDENTITY_MISMATCH")
@@ -3041,17 +3576,36 @@ class CloudRunAcceptanceBackend:
         self,
         candidate: CandidateIdentity,
         *,
+        state_root: Path | None = None,
+        runtime_source_sha256: str | None = None,
+        runtime_variables_sha256: str | None = None,
         inspector: GcloudReadOnlyInspector | None = None,
         identity_supplier: GcloudIdentityTokenSupplier | None = None,
+        credentials_factory: Callable[[], object] | None = None,
         command_runner: CommandRunner = _default_command_runner,
         environ: Mapping[str, str] | None = None,
     ) -> None:
         self._candidate = candidate
-        source = os.environ if environ is None else environ
-        self._inspector = inspector or GcloudReadOnlyInspector(
-            command_runner=command_runner,
-            environ=source,
+        recovery_values = (
+            state_root,
+            runtime_source_sha256,
+            runtime_variables_sha256,
         )
+        if any(value is not None for value in recovery_values) and not all(
+            value is not None for value in recovery_values
+        ):
+            raise ValueError("hosted recovery binding is incomplete")
+        self._recovery_binding = (
+            None
+            if state_root is None
+            else CanaryReprovisionBinding(
+                state_root=str(state_root),
+                runtime_source_sha256=runtime_source_sha256,
+                runtime_variables_sha256=runtime_variables_sha256,
+            )
+        )
+        source = os.environ if environ is None else environ
+        self._inspector = inspector
         self._identity_supplier = identity_supplier or GcloudIdentityTokenSupplier(
             source
         )
@@ -3059,6 +3613,15 @@ class CloudRunAcceptanceBackend:
         self._environment = _minimal_environment(source)
         self._bound_pythonpath = source.get("PYTHONPATH")
         self._api_uri: str | None = None
+        self._credentials_factory = credentials_factory
+        self._operator_credentials_value: object | None = None
+        self._recovery_settings: ReleaseChainSettings | None = None
+        self._recovery_invoked_at: datetime | None = None
+        self._recovery_definition_created_at_text: str | None = None
+        self._recovery_baseline_revision: str | None = None
+        self._release_target_value: GoogleFirestoreReleaseTarget | None = None
+        self._provider_ledger_value: FirestoreHostedProviderLedger | None = None
+        self._reprovisioner_value: TerraformCanaryReprovisioner | None = None
 
     async def deployments(
         self,
@@ -3066,8 +3629,20 @@ class CloudRunAcceptanceBackend:
     ) -> tuple[ServiceDeploymentObservation, ...]:
         if candidate != self._candidate:
             raise HostedAcceptanceError("CANDIDATE_IDENTITY_CHANGED")
+        inspector = self._inspector
+        if inspector is None:
+            self._load_recovery_configuration()
+            inspector = GcloudReadOnlyInspector(
+                command_runner=self._command_runner,
+                environ=self._environment,
+                canary_baseline_revision=self._recovery_baseline_revision,
+                recovery_definition_created_at=(
+                    self._recovery_definition_created_at_text
+                ),
+            )
+            self._inspector = inspector
         deployments = await asyncio.to_thread(
-            self._inspector.inspect_deployments,
+            inspector.inspect_deployments,
             candidate,
         )
         self._api_uri = next(
@@ -3122,6 +3697,462 @@ class CloudRunAcceptanceBackend:
             events_sha256=_models_hash(events),
             operational_status_sha256=_model_hash(status),
         )
+
+    def _operator_credentials(self) -> object:
+        existing = self._operator_credentials_value
+        if existing is not None:
+            return existing
+        try:
+            if self._credentials_factory is not None:
+                credentials = self._credentials_factory()
+            else:
+                source, _project = google_auth_default(
+                    scopes=("https://www.googleapis.com/auth/cloud-platform",)
+                )
+                credentials = impersonated_credentials.Credentials(
+                    source_credentials=source,
+                    target_principal=_APPLY_SERVICE_ACCOUNT,
+                    target_scopes=("https://www.googleapis.com/auth/cloud-platform",),
+                    lifetime=3_600,
+                )
+        except Exception as error:
+            raise HostedAcceptanceError("OPERATOR_CREDENTIALS_UNAVAILABLE") from error
+        self._operator_credentials_value = credentials
+        return credentials
+
+    def _load_recovery_configuration(
+        self,
+    ) -> tuple[ReleaseChainSettings, datetime]:
+        settings = self._recovery_settings
+        invoked_at = self._recovery_invoked_at
+        if settings is not None and invoked_at is not None:
+            return settings, invoked_at
+        binding = self._recovery_binding
+        if binding is None:
+            raise HostedAcceptanceError("RECOVERY_ACCEPTANCE_BINDING_MISSING")
+        root = _private_directory(Path(binding.state_root), writable=True)
+        source = _private_directory(root / "source", writable=False)
+        plans = _private_directory(root / "plans", writable=False)
+        variables_payload = _read_owner_file(
+            plans / "runtime-create.tfvars.json",
+            maximum=1_048_576,
+            exact_mode=0o400,
+        )
+        if (
+            _runtime_source_sha256(source) != binding.runtime_source_sha256
+            or hashlib.sha256(variables_payload).hexdigest()
+            != binding.runtime_variables_sha256
+        ):
+            raise HostedAcceptanceError("RECOVERY_ACCEPTANCE_BINDING_CHANGED")
+        variables = _json_object(
+            variables_payload,
+            canonical=True,
+            failure="RECOVERY_ACCEPTANCE_INPUT_INVALID",
+        )
+        baseline_revision = _expected_canary_revision(self._candidate, variables)
+        try:
+            raw_invoked_at = variables["recovery_definition_created_at"]
+        except KeyError as error:
+            raise HostedAcceptanceError("RECOVERY_ACCEPTANCE_INPUT_INVALID") from error
+        invoked_at = _parse_timestamp(raw_invoked_at)
+        settings = _candidate_release_settings(self._candidate)
+        self._recovery_settings = settings
+        self._recovery_invoked_at = invoked_at
+        self._recovery_definition_created_at_text = str(raw_invoked_at)
+        self._recovery_baseline_revision = baseline_revision
+        return settings, invoked_at
+
+    def _firestore_client(self, database: str):
+        return firestore_v1.AsyncClient(
+            project=self._candidate.project_id,
+            database=database,
+            credentials=self._operator_credentials(),
+        )
+
+    def _release_target(self) -> GoogleFirestoreReleaseTarget:
+        if self._release_target_value is None:
+            self._release_target_value = GoogleFirestoreReleaseTarget(
+                project_id=self._candidate.project_id,
+                database_id=FIRESTORE_RELEASE_DATABASE,
+                client_factory=lambda: self._firestore_client(
+                    FIRESTORE_RELEASE_DATABASE
+                ),
+            )
+        return self._release_target_value
+
+    def _provider_ledger_boundary(self) -> FirestoreHostedProviderLedger:
+        if self._provider_ledger_value is None:
+            store = GoogleFirestoreCasStore(
+                project_id=self._candidate.project_id,
+                database_id=FIRESTORE_RUNTIME_DATABASE,
+                client_factory=lambda: self._firestore_client(
+                    FIRESTORE_RUNTIME_DATABASE
+                ),
+            )
+            self._provider_ledger_value = FirestoreHostedProviderLedger(store)
+        return self._provider_ledger_value
+
+    def _reprovisioner(self) -> TerraformCanaryReprovisioner:
+        if self._reprovisioner_value is not None:
+            return self._reprovisioner_value
+        settings, _invoked_at = self._load_recovery_configuration()
+        binding = self._recovery_binding
+        if binding is None:  # pragma: no cover - configuration loader guards this
+            raise HostedAcceptanceError("RECOVERY_ACCEPTANCE_BINDING_MISSING")
+        self._reprovisioner_value = TerraformCanaryReprovisioner(
+            self._candidate,
+            binding=binding,
+            release_id=settings.release_id,
+            release_reader=self._release_target(),
+            command_runner=self._command_runner,
+            environ=self._environment,
+        )
+        return self._reprovisioner_value
+
+    def _canary_boundaries(
+        self,
+        baseline_revision: str,
+    ) -> tuple[
+        CloudRunCanaryActionAdapter,
+        CloudRunCanaryFaultProxy,
+        CloudRunCanaryReader,
+    ]:
+        target = CloudRunCanaryTarget(
+            project=self._candidate.project_id,
+            location=self._candidate.region,
+            service=_CANARY_SERVICE,
+            image_repository=(
+                f"{self._candidate.region}-docker.pkg.dev/"
+                f"{self._candidate.project_id}/reconcile-p5/reconcile"
+            ),
+            baseline_revision=baseline_revision,
+            health_audience=_CANARY_AUDIENCE,
+            timeout_seconds=5.0,
+        )
+
+        def services_factory():
+            return run_v2.ServicesClient(credentials=self._operator_credentials())
+
+        def revisions_factory():
+            return run_v2.RevisionsClient(credentials=self._operator_credentials())
+
+        action = CloudRunCanaryActionAdapter(
+            target=target,
+            services_factory=services_factory,
+            revisions_factory=revisions_factory,
+        )
+        reader = CloudRunCanaryReader(
+            target=target,
+            services_factory=services_factory,
+            revisions_factory=revisions_factory,
+        )
+        return action, CloudRunCanaryFaultProxy(action), reader
+
+    async def provider_ledger_absent(self) -> bool:
+        try:
+            return await self._provider_ledger_boundary().is_absent(
+                _hosted_candidate_identity(self._candidate)
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            raise HostedAcceptanceError("PROVIDER_LEDGER_READ_FAILED") from error
+
+    async def provider_ledger(self) -> HostedProviderLedgerObservation:
+        try:
+            return await self._provider_ledger_boundary().observe_finalized(
+                _hosted_candidate_identity(self._candidate)
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            raise HostedAcceptanceError("PROVIDER_LEDGER_READ_FAILED") from error
+
+    async def recovery_lane(
+        self,
+        *,
+        policy: RecoveryRunPolicy,
+        fault: RecoveryRunFault,
+        purpose: str,
+    ) -> RecoveryLaneAcceptanceObservation:
+        if type(policy) is not RecoveryRunPolicy or type(fault) is not RecoveryRunFault:
+            raise TypeError("recovery acceptance policy and fault must be exact")
+        if type(purpose) is not str or not purpose:
+            raise ValueError("recovery acceptance purpose is invalid")
+        settings, invoked_at = self._load_recovery_configuration()
+        reprovision = await self._reprovisioner().reprovision()
+        _action, fault_proxy, reader = self._canary_boundaries(
+            reprovision.baseline_revision
+        )
+        firestore = self._release_target()
+        recorder = RecoveryPolicyResultRecorder(
+            settings=settings,
+            baseline_revision=reprovision.baseline_revision,
+            cloud_reader=reader,
+            firestore=firestore,
+        )
+        baseline = await recorder.capture_baseline()
+        binding = recovery_experiment_binding(settings, fault)
+        run_id = _recovery_run_id(
+            policy=policy,
+            fault=fault,
+            purpose=purpose,
+            service_uid=reprovision.service_uid,
+            candidate_sha256=self._candidate.candidate_sha256,
+        )
+        resetter = ReleaseChainResetter(
+            settings=settings,
+            cloud_action=fault_proxy,
+            cloud_reader=reader,
+            firestore=firestore,
+            baseline_revision=reprovision.baseline_revision,
+            max_observations=120,
+            poll_interval_seconds=1,
+        )
+        result: RecoveryPolicyResult
+        acknowledgement_lost = False
+        launch_outcome: RecoveryDispatchOutcome | None = None
+        launched_created: bool | None = None
+        replay_created: bool | None = None
+        request_sha256: str | None = None
+        snapshot_sha256: str | None = None
+        replay_snapshot_sha256: str | None = None
+        events_sha256: str | None = None
+        event_count = 0
+        replay_provider_contact_delta: int | None = None
+        live_authority_replay_denial_count = 0
+        provider_hypothesis_count = 0
+        hypothesis_id: str | None = None
+        hypothesis_chain_sha256: str | None = None
+        hypothesis_node_sha256: str | None = None
+        hypothesis_input_sha256: str | None = None
+        hypothesis_output_sha256: str | None = None
+        terminal_owned = policy in {
+            RecoveryRunPolicy.BLIND_RETRY,
+            RecoveryRunPolicy.BLIND_ABORT,
+        }
+        try:
+            if policy in {
+                RecoveryRunPolicy.BLIND_RETRY,
+                RecoveryRunPolicy.BLIND_ABORT,
+            }:
+                mutator = ReleaseChainBlindMutator(
+                    settings=settings,
+                    cloud_action=fault_proxy,
+                    cloud_reader=reader,
+                    firestore=firestore,
+                    invoked_at=invoked_at,
+                    max_settle_observations=240,
+                    settle_poll_interval_seconds=1,
+                )
+                executor = BlindPolicyExecutor(mutator)
+                if policy is RecoveryRunPolicy.BLIND_RETRY:
+                    outcome = await executor.blind_retry(
+                        operation_id=settings.stage_operation_id,
+                        fault=fault,
+                    )
+                else:
+                    outcome = await executor.blind_abort(
+                        operation_id=settings.stage_operation_id,
+                        fault=fault,
+                    )
+                result = await recorder.record_blind(
+                    run_id=run_id,
+                    policy=policy,
+                    fault=fault,
+                    binding=binding,
+                    baseline=baseline,
+                    outcome=outcome,
+                )
+                acknowledgement_lost = fault is RecoveryRunFault.DROP_AFTER_ACCEPT
+            else:
+                request = RecoveryRunRequest(
+                    schema_version=RECOVERY_RUN_REQUEST_VERSION,
+                    run_id=run_id,
+                    scenario="cloud-run-rollout",
+                    policy=policy,
+                    fault=fault,
+                )
+                async with self._client() as client:
+                    current = await self._launch_recovery_terminal(client, request)
+                    terminal_owned = True
+                    events = tuple(
+                        [
+                            event
+                            async for event in client.recovery_events(
+                                request.run_id,
+                                after=0,
+                            )
+                        ]
+                    )
+                    reread = await client.get_recovery_snapshot(request.run_id)
+                    contacts_before_replay = sum(
+                        item.provider_contact for item in reread.dispatch_receipts
+                    )
+                    replay = await client.launch_recovery(request)
+                    contacts_after_replay = sum(
+                        item.provider_contact
+                        for item in replay.snapshot.dispatch_receipts
+                    )
+                if (
+                    reread != current
+                    or replay.created
+                    or replay.snapshot != current
+                    or not events
+                    or current.lifecycle
+                    not in {
+                        RecoveryRunLifecycle.COMPLETED,
+                        RecoveryRunLifecycle.ESCALATED,
+                    }
+                ):
+                    raise HostedAcceptanceError("RECOVERY_API_EVIDENCE_CHANGED")
+                event_snapshot = RecoveryRunEventSnapshot(
+                    schema_version=RECOVERY_RUN_EVENT_SNAPSHOT_VERSION,
+                    run_id=request.run_id,
+                    cursor=current.event_cursor,
+                    terminal=True,
+                    events=events,
+                )
+                RecoveryRunAggregate(
+                    schema_version=RECOVERY_RUN_AGGREGATE_VERSION,
+                    snapshot=current,
+                    events=events,
+                )
+                if (
+                    current.launch_permit is None
+                    or current.launch_permit.outcome is None
+                ):
+                    raise HostedAcceptanceError("RECOVERY_LAUNCH_AUTHORITY_CHANGED")
+                launch_outcome = current.launch_permit.outcome
+                acknowledgement_lost = (
+                    launch_outcome is RecoveryDispatchOutcome.OUTCOME_UNKNOWN
+                )
+                if policy is RecoveryRunPolicy.FIXED and current.hypotheses:
+                    raise HostedAcceptanceError("FIXED_RECOVERY_USED_PROVIDER")
+                result = await recorder.record_proof(
+                    snapshot=current,
+                    events=event_snapshot,
+                    binding=binding,
+                    baseline=baseline,
+                )
+                live_authority_replay_denial_count = sum(
+                    receipt.outcome
+                    is RecoveryReceiptOutcome.REJECTED_BEFORE_PROVIDER_CONTACT
+                    for receipt in result.dispatch_receipts
+                )
+                launched_created = True
+                replay_created = False
+                request_sha256 = _model_hash(request)
+                snapshot_sha256 = _model_hash(current)
+                replay_snapshot_sha256 = _model_hash(replay.snapshot)
+                events_sha256 = _models_hash(events)
+                event_count = len(events)
+                replay_provider_contact_delta = (
+                    contacts_after_replay - contacts_before_replay
+                )
+                if replay_provider_contact_delta != 0:
+                    raise HostedAcceptanceError("RECOVERY_REPLAY_CONTACTED_PROVIDER")
+                if policy is RecoveryRunPolicy.ADAPTIVE:
+                    ledger = await self.provider_ledger()
+                    if len(current.hypotheses) != 1:
+                        raise HostedAcceptanceError(
+                            "RECOVERY_PROVIDER_HYPOTHESIS_CHANGED"
+                        )
+                    hypothesis = current.hypotheses[0]
+                    node = next(
+                        (
+                            item
+                            for item in current.chain.nodes
+                            if item.node_id == hypothesis.node_id
+                        ),
+                        None,
+                    )
+                    if node is None:
+                        raise HostedAcceptanceError(
+                            "RECOVERY_PROVIDER_HYPOTHESIS_CHANGED"
+                        )
+                    expected_hypothesis_id = recovery_hypothesis_id(
+                        chain=current.chain,
+                        node=node,
+                        input_sha256=ledger.dispatch.input_sha256,
+                        output_sha256=ledger.output_sha256,
+                    )
+                    if hypothesis.hypothesis_id != expected_hypothesis_id:
+                        raise HostedAcceptanceError(
+                            "RECOVERY_PROVIDER_HYPOTHESIS_CHANGED"
+                        )
+                    provider_hypothesis_count = 1
+                    hypothesis_id = hypothesis.hypothesis_id
+                    hypothesis_chain_sha256 = _model_hash(current.chain)
+                    hypothesis_node_sha256 = _model_hash(node)
+                    hypothesis_input_sha256 = ledger.dispatch.input_sha256
+                    hypothesis_output_sha256 = ledger.output_sha256
+        finally:
+            if terminal_owned:
+                reset = await resetter.reset()
+        return RecoveryLaneAcceptanceObservation(
+            purpose=purpose,
+            reprovision=reprovision,
+            result=result,
+            reset=reset,
+            acknowledgement_lost=acknowledgement_lost,
+            launch_outcome=launch_outcome,
+            launch_created=launched_created,
+            replay_created=replay_created,
+            request_sha256=request_sha256,
+            snapshot_sha256=snapshot_sha256,
+            replay_snapshot_sha256=replay_snapshot_sha256,
+            events_sha256=events_sha256,
+            event_count=event_count,
+            replay_provider_contact_delta=replay_provider_contact_delta,
+            live_authority_replay_denial_count=(live_authority_replay_denial_count),
+            provider_hypothesis_count=provider_hypothesis_count,
+            hypothesis_id=hypothesis_id,
+            hypothesis_chain_sha256=hypothesis_chain_sha256,
+            hypothesis_node_sha256=hypothesis_node_sha256,
+            hypothesis_input_sha256=hypothesis_input_sha256,
+            hypothesis_output_sha256=hypothesis_output_sha256,
+        )
+
+    @staticmethod
+    async def _launch_recovery_terminal(
+        client: OperatorApiClient,
+        request: RecoveryRunRequest,
+    ) -> RecoveryRunSnapshot:
+        snapshot: RecoveryRunSnapshot | None = None
+        outcome_was_unknown = False
+        for _attempt in range(3):
+            try:
+                launched = await client.launch_recovery(request)
+            except LaunchOutcomeUnknownError:
+                outcome_was_unknown = True
+                try:
+                    snapshot = await client.get_recovery_snapshot(request.run_id)
+                except InvestigationNotFoundError:
+                    continue
+                break
+            if not launched.created and not outcome_was_unknown:
+                raise HostedAcceptanceError("RECOVERY_LAUNCH_REPLAYED")
+            snapshot = launched.snapshot
+            break
+        if snapshot is None:
+            raise HostedAcceptanceError("RECOVERY_LAUNCH_UNRESOLVED")
+        if snapshot.lifecycle not in {
+            RecoveryRunLifecycle.COMPLETED,
+            RecoveryRunLifecycle.ESCALATED,
+        }:
+            async for _event in client.recovery_events(
+                request.run_id,
+                after=snapshot.event_cursor,
+            ):
+                pass
+            snapshot = await client.get_recovery_snapshot(request.run_id)
+        if snapshot.lifecycle not in {
+            RecoveryRunLifecycle.COMPLETED,
+            RecoveryRunLifecycle.ESCALATED,
+        }:
+            raise HostedAcceptanceError("RECOVERY_LAUNCH_UNRESOLVED")
+        return snapshot
 
     async def concurrent_replay(
         self,
@@ -3337,7 +4368,10 @@ class CloudRunAcceptanceBackend:
         )
 
     async def diagnostics(self) -> LifecycleDiagnostics:
-        return await asyncio.to_thread(self._inspector.lifecycle_diagnostics)
+        inspector = self._inspector
+        if inspector is None:
+            raise HostedAcceptanceError("DEPLOYMENT_NOT_INSPECTED")
+        return await asyncio.to_thread(inspector.lifecycle_diagnostics)
 
 
 async def _bounded_denial_request(
@@ -3396,6 +4430,7 @@ __all__ = [
     "InterfaceParityObservation",
     "LifecycleDiagnostics",
     "ProviderAcceptanceRecord",
+    "RecoveryLaneAcceptanceObservation",
     "RecoveryReleaseRecordReader",
     "ScenarioAcceptanceObservation",
     "ServiceComponent",

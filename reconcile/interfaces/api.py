@@ -34,6 +34,7 @@ from reconcile.contracts import (
     RecoveryRunEvent,
     RecoveryRunEventType,
     RecoveryRunLifecycle,
+    RecoveryRunPolicy,
     RecoveryRunRequest,
     RecoveryRunSnapshot,
     ScenarioLaunchName,
@@ -1255,6 +1256,11 @@ def create_app(
     async def launch_recovery_run(request: Request) -> Response:
         _reject_query_parameters(request, allowed=set())
         launch = _decode_recovery_launch(await _read_contract_body(request))
+        if hosted and launch.policy not in {
+            RecoveryRunPolicy.FIXED,
+            RecoveryRunPolicy.ADAPTIVE,
+        }:
+            raise _InvalidApiRequest
         request.state.investigation_id = launch.run_id
         service = _recovery_service(application)
         operation = service.launch_and_wait_result if hosted else service.launch

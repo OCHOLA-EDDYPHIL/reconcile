@@ -29,6 +29,8 @@ from reconcile.recovery_agents import (
     RecoveryAgent,
     RecoveryAgentTurn,
     _alternative_histories,
+    recovery_hypothesis_id,
+    recovery_hypothesis_id_from_hashes,
     recovery_remaining_budget,
 )
 from tests.contract._factories import (
@@ -40,6 +42,42 @@ from tests.contract._factories import (
 )
 
 pytestmark = pytest.mark.unit
+
+
+def test_recovery_hypothesis_identity_binds_all_provider_inputs() -> None:
+    chain = make_recovery_examples()[0]
+    node = chain.nodes[0]
+    expected = recovery_hypothesis_id(
+        chain=chain,
+        node=node,
+        input_sha256="1" * 64,
+        output_sha256="2" * 64,
+    )
+    assert expected == recovery_hypothesis_id_from_hashes(
+        chain_sha256=canonical_sha256(chain),
+        node_sha256=canonical_sha256(node),
+        input_sha256="1" * 64,
+        output_sha256="2" * 64,
+    )
+
+    assert expected == recovery_hypothesis_id(
+        chain=chain,
+        node=node,
+        input_sha256="1" * 64,
+        output_sha256="2" * 64,
+    )
+    assert expected != recovery_hypothesis_id(
+        chain=chain,
+        node=node,
+        input_sha256="3" * 64,
+        output_sha256="2" * 64,
+    )
+    assert expected != recovery_hypothesis_id(
+        chain=chain,
+        node=node,
+        input_sha256="1" * 64,
+        output_sha256="4" * 64,
+    )
 
 
 def _output(*, probe_count: int = 1) -> AdaptivePlannerOutput:

@@ -1297,7 +1297,11 @@ class BlindReleaseMutator(Protocol):
 
     async def stage(self, *, operation_id: str, drop_after_accept: bool) -> None: ...
 
+    async def settle_stage(self) -> None: ...
+
     async def promote(self) -> None: ...
+
+    async def settle_promotion(self) -> None: ...
 
     async def create_record(self, *, suppress_before_dispatch: bool) -> None: ...
 
@@ -1314,6 +1318,9 @@ class ReleaseChainBlindMutator:
         firestore: GoogleFirestoreReleaseTarget,
         invoked_at: datetime,
         clock: Callable[[], datetime] | None = None,
+        max_settle_observations: int = 120,
+        settle_poll_interval_seconds: float = 0.5,
+        sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     ) -> None:
         if type(settings) is not ReleaseChainSettings:
             raise TypeError("blind mutator requires exact release settings")
@@ -1327,11 +1334,22 @@ class ReleaseChainBlindMutator:
         _require_firestore_target(settings, firestore)
         if invoked_at.tzinfo is None or invoked_at.utcoffset() is None:
             raise ValueError("blind mutator invocation time must be aware")
+        if (
+            type(max_settle_observations) is not int
+            or not 1 <= max_settle_observations <= 240
+            or type(settle_poll_interval_seconds) not in {int, float}
+            or not 0 <= float(settle_poll_interval_seconds) <= 5
+            or not callable(sleep)
+        ):
+            raise ValueError("blind mutator settle policy is invalid")
         self._settings = settings
         self._cloud_action = cloud_action
         self._cloud_reader = cloud_reader
         self._firestore = firestore
         self._clock = clock or (lambda: datetime.now(UTC))
+        self._max_settle_observations = max_settle_observations
+        self._settle_poll_interval_seconds = float(settle_poll_interval_seconds)
+        self._sleep = sleep
         self._revision = settings.staged_revision
         self._record_action_sha256 = (
             build_release_chain_definition(
@@ -1374,6 +1392,43 @@ class ReleaseChainBlindMutator:
             **kwargs,
         )
 
+    async def settle_stage(self) -> None:
+        """Wait for an accepted stage to settle without changing the blind decision."""
+
+        for observation in range(self._max_settle_observations):
+            try:
+                service, revision = await asyncio.gather(
+                    asyncio.to_thread(
+                        self._cloud_reader.read_service,
+                        release_id=self._settings.release_id,
+                        revision=self._revision,
+                    ),
+                    asyncio.to_thread(
+                        self._cloud_reader.read_revision,
+                        release_id=self._settings.release_id,
+                        revision=self._revision,
+                    ),
+                )
+            except CloudRunCanaryError:
+                service = revision = None
+            if (
+                service is not None
+                and revision is not None
+                and not service.reconciling
+                and service.terminal_condition == "SUCCEEDED"
+                and service.observed_generation >= service.generation
+                and not revision.reconciling
+                and revision.terminal_condition == "SUCCEEDED"
+                and revision.readiness == "READY"
+            ):
+                return
+            if observation + 1 < self._max_settle_observations:
+                await self._sleep(self._settle_poll_interval_seconds)
+        # Settlement is only an operational pause for the deliberately blind
+        # baseline.  Provider observations are recorded after the lane and are
+        # the authority for whether the chain actually completed.
+        return
+
     async def promote(self) -> None:
         service = await asyncio.to_thread(
             self._cloud_reader.read_service,
@@ -1388,6 +1443,33 @@ class ReleaseChainBlindMutator:
         if type(self._cloud_action) is not CloudRunCanaryActionAdapter:
             kwargs["mode"] = CloudRunFaultMode.PASS_THROUGH
         await _invoke_provider(self._cloud_action.promote_revision, **kwargs)
+
+    async def settle_promotion(self) -> None:
+        """Wait for accepted traffic to settle without granting proof authority."""
+
+        for observation in range(self._max_settle_observations):
+            try:
+                service = await asyncio.to_thread(
+                    self._cloud_reader.read_service,
+                    release_id=self._settings.release_id,
+                    revision=self._revision,
+                )
+            except CloudRunCanaryError:
+                service = None
+            if (
+                service is not None
+                and not service.reconciling
+                and service.terminal_condition == "SUCCEEDED"
+                and service.observed_generation >= service.generation
+                and service.revision_traffic_percent == 100
+            ):
+                return
+            if observation + 1 < self._max_settle_observations:
+                await self._sleep(self._settle_poll_interval_seconds)
+        # An accepted mutation that never becomes visible is evidence of an
+        # incomplete lane, not an orchestration failure.  The result recorder
+        # captures that provider state after the baseline finishes.
+        return
 
     async def create_record(self, *, suppress_before_dispatch: bool) -> None:
         if suppress_before_dispatch:
@@ -1419,7 +1501,13 @@ class BlindPolicyExecutor:
     def __init__(self, mutator: BlindReleaseMutator) -> None:
         if any(
             not callable(getattr(mutator, name, None))
-            for name in ("stage", "promote", "create_record")
+            for name in (
+                "stage",
+                "settle_stage",
+                "promote",
+                "settle_promotion",
+                "create_record",
+            )
         ):
             raise TypeError("blind baseline mutator is incomplete")
         self._mutator = mutator
@@ -1446,12 +1534,14 @@ class BlindPolicyExecutor:
                     detail="The baseline received no stage acknowledgement.",
                 )
             )
+            await self._mutator.settle_stage()
             # This is the deliberately unsafe behavior under comparison.
             provider_contacts += 1
             await self._mutator.stage(
                 operation_id=f"{operation_id}-retry",
                 drop_after_accept=False,
             )
+            await self._mutator.settle_stage()
             timeline.append(
                 RecoveryTimelineEntry(
                     sequence=len(timeline) + 1,
@@ -1461,6 +1551,7 @@ class BlindPolicyExecutor:
                 )
             )
         else:
+            await self._mutator.settle_stage()
             timeline.append(
                 RecoveryTimelineEntry(
                     sequence=len(timeline) + 1,
@@ -1471,6 +1562,7 @@ class BlindPolicyExecutor:
             )
         provider_contacts += 1
         await self._mutator.promote()
+        await self._mutator.settle_promotion()
         timeline.append(
             RecoveryTimelineEntry(
                 sequence=len(timeline) + 1,
@@ -1534,6 +1626,7 @@ class BlindPolicyExecutor:
                 drop_after_accept=fault is RecoveryRunFault.DROP_AFTER_ACCEPT,
             )
         except Exception:
+            await self._mutator.settle_stage()
             # This is intentionally incomplete and has no proof authority.
             return BlindPolicyOutcome(
                 chain_completed=False,
@@ -1555,8 +1648,10 @@ class BlindPolicyExecutor:
                 detail="The baseline received the stage acknowledgement.",
             )
         )
+        await self._mutator.settle_stage()
         provider_contacts += 1
         await self._mutator.promote()
+        await self._mutator.settle_promotion()
         timeline.append(
             RecoveryTimelineEntry(
                 sequence=2,

@@ -403,6 +403,55 @@ def test_certificate_bound_promotion_rejects_tampering_before_claim(tmp_path) ->
     assert completed.claim_id == "claim-7"
 
 
+def test_missing_promotion_authority_is_rejected_before_claim(tmp_path) -> None:
+    certificate, _evaluation, report, chain, _envelope = _verify(
+        node_id="stage",
+        kind="committed",
+    )
+    request = _run_request("recovery-missing-promotion-7")
+    store = InMemoryRecoveryRunStore()
+    permit_authority = PermitAuthority(
+        SqliteDurableRuntimeStore(tmp_path / "missing-promotion.sqlite3"),
+        clock=lambda: NOW + timedelta(seconds=7),
+    )
+    permit = asyncio.run(permit_authority.issue_permit(certificate))
+    assert permit is not None
+    action = _promotion_action(request, chain, certificate, permit)
+    action = action.model_copy(
+        update={
+            "scope": action.scope.model_copy(
+                update={
+                    "authority_id": "permit-missing-7",
+                    "authority_sha256": "0" * 64,
+                }
+            )
+        }
+    )
+    authorizer = RecoveryCloudRunCanaryActionAuthorizer(
+        recovery_store=store,
+        permit_authority=permit_authority,
+        target=canary_target(),
+        clock=lambda: NOW + timedelta(seconds=7),
+    )
+
+    async def exercise():
+        await _record_dispatchable_promotion(
+            store,
+            request,
+            chain,
+            report,
+            certificate,
+            permit,
+        )
+        with pytest.raises(PermissionError, match="unavailable"):
+            await authorizer.claim(action)
+        return await permit_authority.get_permit(permit.permit_id)
+
+    retained = asyncio.run(exercise())
+    assert retained.state is ActionPermitState.ISSUED
+    assert retained.claim_id is None
+
+
 def test_expired_promotion_permit_is_rejected_before_provider_authority(
     tmp_path,
 ) -> None:

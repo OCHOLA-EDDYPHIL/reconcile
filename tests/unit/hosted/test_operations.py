@@ -14,6 +14,7 @@ from reconcile.contracts import (
     RecoveryRunEventType,
     RecoveryRunFailureCategory,
     RecoveryRunLifecycle,
+    RecoveryRunPolicy,
     canonical_sha256,
 )
 from reconcile.contracts.base import canonical_json_value_bytes
@@ -298,6 +299,38 @@ def test_recovery_handler_returns_only_the_terminal_snapshot_identity() -> None:
         assert response.payload == receipt.model_dump(mode="json")
         assert "snapshot" not in response.payload
         assert len(canonical_internal_json_bytes(response)) < 1_024
+
+    asyncio.run(scenario())
+
+
+def test_recovery_handler_rejects_blind_policy_before_service_contact() -> None:
+    async def scenario() -> None:
+        request = make_recovery_run_examples()[0].model_copy(
+            update={"policy": RecoveryRunPolicy.BLIND_RETRY}
+        )
+
+        class Service:
+            calls = 0
+
+            async def launch_and_wait_result(self, _received):
+                self.calls += 1
+                raise AssertionError("blind request reached recovery service")
+
+        service = Service()
+        handler = HostedRecoveryHandler(
+            expected_caller_email=CALLER.email,
+            service=service,
+        )
+        internal = InternalOperationRequest(
+            schema_version=INTERNAL_OPERATION_REQUEST_VERSION,
+            request_id="hosted-blind-request-7",
+            operation=InternalOperation.RECOVER,
+            payload=request.model_dump(mode="json"),
+        )
+
+        with pytest.raises(HostedRecoveryGatewayError):
+            await handler(CALLER, internal)
+        assert service.calls == 0
 
     asyncio.run(scenario())
 

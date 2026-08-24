@@ -38,6 +38,7 @@ from reconcile.contracts.codec import (
 from reconcile.contracts.recovery import (
     ActionPermit,
     ActionPermitState,
+    PermitAction,
     PermitCompletionOutcome,
 )
 from reconcile.contracts.recovery_run import (
@@ -52,6 +53,13 @@ from reconcile.contracts.recovery_run import (
     RecoveryRunFault,
     RecoveryRunLifecycle,
     RecoveryRunSnapshot,
+)
+from reconcile.contracts.recovery_scenario import (
+    RECOVERY_DISPATCH_RECEIPT_VERSION,
+    RecoveryReceiptOutcome,
+)
+from reconcile.contracts.recovery_scenario import (
+    RecoveryDispatchReceipt as DurableDispatchReceipt,
 )
 from reconcile.controller.permits import PermitAuthority, action_permit_from_certificate
 from reconcile.evidence.recovery_rules import CLOUD_RUN_SERVICE_TARGET_KIND
@@ -68,6 +76,7 @@ from reconcile.hosted.cloud_run_canary import (
 from reconcile.hosted.identity import VerifiedCaller
 from reconcile.hosted.workflow import HostedOperationScope, HostedWorkflowOperation
 from reconcile.persistence.permits import (
+    PermitNotFound,
     same_action_permit_authority,
     same_action_permit_state,
 )
@@ -187,6 +196,12 @@ class CloudRunCanaryActionAuthorizer(Protocol):
         outcome: RecoveryDispatchOutcome,
     ) -> RecoveryLaunchPermit | ActionPermit: ...
 
+    async def record_receipt(
+        self,
+        request: CloudRunCanaryActionRequest,
+        lease: CloudRunCanaryDispatchLease,
+    ) -> DurableDispatchReceipt: ...
+
 
 class LegacyCloudRunCanaryActionAuthorizer(Protocol):
     """Compatibility boundary for pre-recovery scenario authorization."""
@@ -211,6 +226,14 @@ class ClosedCloudRunCanaryActionAuthorizer:
         outcome: RecoveryDispatchOutcome,
     ) -> RecoveryLaunchPermit | ActionPermit:
         del lease, outcome
+        raise PermissionError("canary permit integration is not installed")
+
+    async def record_receipt(
+        self,
+        request: CloudRunCanaryActionRequest,
+        lease: CloudRunCanaryDispatchLease,
+    ) -> DurableDispatchReceipt:
+        del request, lease
         raise PermissionError("canary permit integration is not installed")
 
 
@@ -435,11 +458,14 @@ class RecoveryCloudRunCanaryActionAuthorizer:
             )
         except (TypeError, ValueError):
             projected_matches = False
-        durable = (
-            None
-            if expected is None
-            else await self._permit_authority.get_permit(expected.permit_id)
-        )
+        try:
+            durable = (
+                None
+                if expected is None
+                else await self._permit_authority.get_permit(scope.authority_id)
+            )
+        except PermitNotFound:
+            raise PermissionError("canary action permit is unavailable") from None
         try:
             durable_matches = (
                 durable is not None
@@ -524,6 +550,65 @@ class RecoveryCloudRunCanaryActionAuthorizer:
         permit_outcome = PermitCompletionOutcome(outcome.value)
         return await self._permit_authority.complete_dispatch(claimed, permit_outcome)
 
+    async def record_receipt(
+        self,
+        request: CloudRunCanaryActionRequest,
+        lease: CloudRunCanaryDispatchLease,
+    ) -> DurableDispatchReceipt:
+        if (
+            type(request) is not CloudRunCanaryActionRequest
+            or type(lease) is not CloudRunCanaryDispatchLease
+            or type(request.scope) is not RecoveryActionScope
+            or lease.request_sha256 != canonical_sha256(request)
+        ):
+            raise PermissionError("canary dispatch receipt authority changed")
+        if lease.action_permit is not None:
+            await self._mirror_action_permit(
+                request.scope.run_id,
+                lease.action_permit,
+            )
+        snapshot = await self._store.get(request.scope.run_id)
+        action_permit = lease.action_permit
+        receipt = DurableDispatchReceipt(
+            schema_version=RECOVERY_DISPATCH_RECEIPT_VERSION,
+            receipt_id=(
+                "dispatch-"
+                + hashlib.sha256(
+                    f"{lease.authority_id}\0{lease.claim_id}".encode()
+                ).hexdigest()[:32]
+            ),
+            run_id=request.scope.run_id,
+            release_id=str(request.release_id),
+            node_id=request.scope.target_node_id,
+            semantic_action_sha256=request.scope.semantic_action_sha256,
+            action_request_sha256=request.scope.action_request_sha256,
+            authority_id=lease.authority_id,
+            claim_id=lease.claim_id,
+            attempt=(
+                2
+                if action_permit is not None
+                and action_permit.action is PermitAction.RETRY
+                else 1
+            ),
+            provider_contact=True,
+            outcome=RecoveryReceiptOutcome.PROVIDER_CONTACTED,
+            recorded_at=max(self._now(), snapshot.updated_at),
+        )
+        for _attempt in range(8):
+            snapshot = await self._store.get(request.scope.run_id)
+            try:
+                await self._store.append(
+                    request.scope.run_id,
+                    expected_revision=snapshot.revision,
+                    event_type=RecoveryRunEventType.DISPATCH_RECEIPT,
+                    payload=RecoveryRunEventPayload(dispatch_receipt=receipt),
+                    occurred_at=max(receipt.recorded_at, snapshot.updated_at),
+                )
+                return receipt
+            except RecoveryRunConflict:
+                continue
+        raise PermissionError("canary dispatch receipt is contended")
+
 
 def cloud_run_release_id(scope: HostedOperationScope) -> str:
     """Derive the stable provider label from a durable authorized investigation."""
@@ -562,7 +647,7 @@ class _DisconnectAfterAcceptance(Response):
 def _error(*, code: str, status: HTTPStatus) -> Response:
     return Response(
         content=f'{{"code":"{code}"}}'.encode("ascii"),
-        status_code=status,
+        status_code=int(status),
         media_type="application/json",
         headers={"Cache-Control": "no-store"},
     )
@@ -640,6 +725,22 @@ async def _finish_before_cancellation[T](operation: Awaitable[T]) -> T:
     return result
 
 
+async def _finalize_recovery_dispatch(
+    authorizer: CloudRunCanaryActionAuthorizer,
+    request: CloudRunCanaryActionRequest,
+    lease: CloudRunCanaryDispatchLease,
+    outcome: RecoveryDispatchOutcome,
+) -> RecoveryLaunchPermit | ActionPermit:
+    """Persist provider contact before consuming the claimed authority."""
+
+    try:
+        await authorizer.record_receipt(request, lease)
+    except Exception:
+        await authorizer.complete(lease, outcome)
+        raise
+    return await authorizer.complete(lease, outcome)
+
+
 def install_cloud_run_canary_fault_route(
     application: FastAPI,
     *,
@@ -659,7 +760,7 @@ def install_cloud_run_canary_fault_route(
         raise TypeError("canary fault route requires the exact fault proxy")
     modern_authorizer = all(
         callable(getattr(action_authorizer, name, None))
-        for name in ("claim", "complete")
+        for name in ("claim", "record_receipt", "complete")
     )
     if not modern_authorizer and not callable(action_authorizer):
         raise TypeError("canary fault route requires an action authorizer")
@@ -721,7 +822,9 @@ def install_cloud_run_canary_fault_route(
             if lease is not None:
                 try:
                     await _finish_before_cancellation(
-                        action_authorizer.complete(  # type: ignore[union-attr]
+                        _finalize_recovery_dispatch(
+                            action_authorizer,  # type: ignore[arg-type]
+                            action,
                             lease,
                             RecoveryDispatchOutcome.OUTCOME_UNKNOWN,
                         )
@@ -736,7 +839,9 @@ def install_cloud_run_canary_fault_route(
             if lease is not None:
                 try:
                     await _finish_before_cancellation(
-                        action_authorizer.complete(  # type: ignore[union-attr]
+                        _finalize_recovery_dispatch(
+                            action_authorizer,  # type: ignore[arg-type]
+                            action,
                             lease,
                             RecoveryDispatchOutcome.REJECTED,
                         )
@@ -762,7 +867,9 @@ def install_cloud_run_canary_fault_route(
             if lease is not None:
                 try:
                     await _finish_before_cancellation(
-                        action_authorizer.complete(  # type: ignore[union-attr]
+                        _finalize_recovery_dispatch(
+                            action_authorizer,  # type: ignore[arg-type]
+                            action,
                             lease,
                             RecoveryDispatchOutcome.OUTCOME_UNKNOWN,
                         )
@@ -774,7 +881,9 @@ def install_cloud_run_canary_fault_route(
             if lease is not None:
                 try:
                     await _finish_before_cancellation(
-                        action_authorizer.complete(  # type: ignore[union-attr]
+                        _finalize_recovery_dispatch(
+                            action_authorizer,  # type: ignore[arg-type]
+                            action,
                             lease,
                             RecoveryDispatchOutcome.OUTCOME_UNKNOWN,
                         )
@@ -788,7 +897,9 @@ def install_cloud_run_canary_fault_route(
         if lease is not None:
             try:
                 await _finish_before_cancellation(
-                    action_authorizer.complete(  # type: ignore[union-attr]
+                    _finalize_recovery_dispatch(
+                        action_authorizer,  # type: ignore[arg-type]
+                        action,
                         lease,
                         RecoveryDispatchOutcome.SUCCEEDED,
                     )
