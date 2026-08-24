@@ -433,6 +433,8 @@ class _CloudRunReadHandler:
     def _revision(self) -> str | None:
         if self.binding.revision is not None:
             return self.binding.revision
+        if self.binding.expected_revision is not None:
+            return self.binding.expected_revision
         try:
             revision = self.reader.discover_revision(
                 release_id=self.binding.release_id,

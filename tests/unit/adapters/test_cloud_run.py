@@ -448,13 +448,39 @@ def test_successful_operation_is_weak_when_requested_effect_is_outside_its_autho
     assert result.effect_assertions[0].state is EffectAssertionState.UNVERIFIED
 
 
-def test_missing_operation_and_delayed_revision_visibility_are_weak() -> None:
+def test_expected_revision_read_does_not_wait_for_list_visibility() -> None:
     class Services:
         pass
 
     class Revisions:
         def list_revisions(self, **_: object) -> tuple[()]:
-            return ()
+            raise AssertionError("an exact expected revision must be read directly")
+
+        def get_revision(self, **kwargs: object) -> run_v2.Revision:
+            request = kwargs["request"]
+            assert request.name.endswith(f"/revisions/{REVISION}")
+            return run_v2.Revision(
+                name=request.name,
+                service="reconcile-canary",
+                generation=1,
+                observed_generation=1,
+                labels={"reconcile-release": RELEASE},
+                annotations={"reconcile.dev/configuration-sha256": CONFIGURATION},
+                containers=(
+                    run_v2.Container(
+                        image=(
+                            "us-central1-docker.pkg.dev/demo-project/"
+                            f"reconcile-p5/reconcile@{DIGEST}"
+                        )
+                    ),
+                ),
+                conditions=(
+                    run_v2.Condition(
+                        type_="Ready",
+                        state=run_v2.Condition.State.CONDITION_SUCCEEDED,
+                    ),
+                ),
+            )
 
     target = CloudRunCanaryTarget(
         project="demo-project",
@@ -497,7 +523,7 @@ def test_missing_operation_and_delayed_revision_visibility_are_weak() -> None:
     import asyncio
 
     raw = asyncio.run(registration.handler(probe))
-    assert raw.payload == {"observation": None}
+    assert raw.payload["observation"]["revision"] == REVISION
     result = build_cloud_run_rule_registration(
         capability_name=CLOUD_RUN_REVISION_CAPABILITY,
         binding=_binding(),
@@ -509,8 +535,8 @@ def test_missing_operation_and_delayed_revision_visibility_are_weak() -> None:
             payload=raw.payload,
         )
     )
-    assert result.verdict is RuleVerdict.ABSENCE_ONLY
-    assert result.operation_id is None
+    assert result.verdict is RuleVerdict.AUTHORITATIVE_EFFECTS
+    assert result.operation_id == envelope.operation_id
 
 
 def test_known_operation_polling_does_not_wait_for_revision_list_visibility() -> None:
