@@ -265,6 +265,16 @@ def test_complete_path_persists_identity_usage_model_hashes_and_exact_revisions(
         assert final["reported_model"] == "gemini-3.5-flash-001"
         assert final["reported_model_raw_sha256"] == "5" * 64
 
+        observation = await ledger.observe_finalized(candidate)
+        assert observation.candidate_sha256 == candidate.sha256
+        assert observation.state == HostedProviderLedgerState.FINALIZED
+        assert observation.count_attempts == 1
+        assert observation.generation_attempts == 1
+        assert observation.count_usage == count_usage
+        assert observation.generation_usage == generation_usage
+        assert observation.output_sha256 == "4" * 64
+        assert observation.reported_model == "gemini-3.5-flash-001"
+
         assert [document.revision for document in store.writes] == [1, 2, 3, 4]
         assert len({document.mutation_id for document in store.writes}) == 4
         assert all(
@@ -277,6 +287,23 @@ def test_complete_path_persists_identity_usage_model_hashes_and_exact_revisions(
             2,
             3,
         ]
+
+    asyncio.run(scenario())
+
+
+def test_observe_finalized_rejects_nonterminal_or_other_candidate() -> None:
+    async def scenario() -> None:
+        store = _MemoryCasStore()
+        ledger = FirestoreHostedProviderLedger(store)
+        candidate = _candidate()
+        await ledger.reserve_count_tokens(candidate, _dispatch())
+
+        with pytest.raises(HostedProviderLedgerError):
+            await ledger.observe_finalized(candidate)
+        with pytest.raises(HostedProviderLedgerError):
+            await ledger.observe_finalized(
+                _candidate(source_revision="f" * 40),
+            )
 
     asyncio.run(scenario())
 

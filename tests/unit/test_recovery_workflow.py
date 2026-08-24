@@ -36,7 +36,11 @@ from reconcile.contracts import (
 )
 from reconcile.contracts.base import canonical_json_value_bytes
 from reconcile.controller.permits import PermitAuthority
-from reconcile.persistence import InMemoryRecoveryRunStore, SqliteDurableRuntimeStore
+from reconcile.persistence import (
+    InMemoryRecoveryRunStore,
+    RecoveryRunStoreUnavailable,
+    SqliteDurableRuntimeStore,
+)
 from reconcile.recovery_agents import (
     RecoveryAgent,
     RecoveryDispatchReceipt,
@@ -1339,6 +1343,165 @@ def test_explicit_cancellation_is_terminal_but_shutdown_remains_restartable(
     assert cancelled.failure_category is RecoveryRunFailureCategory.CANCELLED
     assert cancelled.nodes[0].state is RecoveryNodeState.RECONCILING
     assert len(gateway.scopes) == 1
+
+
+def test_request_cancellation_joins_worker_without_recording_user_intent(
+    tmp_path,
+) -> None:
+    definition, _states = _definition_and_states()
+    request = RecoveryRunRequest(
+        schema_version=RECOVERY_RUN_REQUEST_VERSION,
+        run_id="recovery-request-cancel-7",
+        scenario="cloud-run-rollout",
+        policy=RecoveryRunPolicy.ADAPTIVE,
+        fault=RecoveryRunFault.DROP_AFTER_ACCEPT,
+    )
+    store = InMemoryRecoveryRunStore()
+    authority = PermitAuthority(
+        SqliteDurableRuntimeStore(tmp_path / "request-cancel.sqlite3"),
+        clock=lambda: NOW + timedelta(seconds=7),
+    )
+    evidence = _BlockingEvidence()
+    gateway = _Gateway(store, authority, definition)
+    service = RecoveryRunApplicationService(
+        ProofToPermitWorkflow(
+            store=store,
+            definition_factory=lambda _request: definition,
+            evidence_source=evidence,
+            action_preparer=_Preparer(),
+            recovery_agent=RecoveryAgent(_DynamicPlanner()),
+            rollout_agent=RolloutAgent(gateway),
+            permit_authority=authority,
+            clock=lambda: NOW + timedelta(seconds=7),
+            claim_id_factory=lambda: "claim-launch",
+        ),
+        store,
+        clock=lambda: NOW,
+    )
+
+    async def exercise():
+        request_task = asyncio.create_task(service.launch_and_wait_result(request))
+        await asyncio.wait_for(evidence.started.wait(), timeout=1)
+        request_task.cancel()
+        request_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await request_task
+        snapshot = await store.get(request.run_id)
+        events = await store.events(request.run_id)
+        owned = tuple(service._tasks)
+        await service.aclose()
+        return snapshot, events, owned
+
+    snapshot, events, owned = asyncio.run(exercise())
+    assert snapshot.lifecycle is RecoveryRunLifecycle.RUNNING
+    assert owned == ()
+    assert all(
+        event.payload.lifecycle is not RecoveryRunLifecycle.CANCELLED
+        for event in events.events
+        if event.type is RecoveryRunEventType.LIFECYCLE
+    )
+
+
+def test_execution_timeout_joins_worker_without_recording_user_intent(
+    tmp_path,
+) -> None:
+    definition, _states = _definition_and_states()
+    request = RecoveryRunRequest(
+        schema_version=RECOVERY_RUN_REQUEST_VERSION,
+        run_id="recovery-request-timeout-7",
+        scenario="cloud-run-rollout",
+        policy=RecoveryRunPolicy.ADAPTIVE,
+        fault=RecoveryRunFault.DROP_AFTER_ACCEPT,
+    )
+    store = InMemoryRecoveryRunStore()
+    authority = PermitAuthority(
+        SqliteDurableRuntimeStore(tmp_path / "request-timeout.sqlite3"),
+        clock=lambda: NOW + timedelta(seconds=7),
+    )
+    service = RecoveryRunApplicationService(
+        ProofToPermitWorkflow(
+            store=store,
+            definition_factory=lambda _request: definition,
+            evidence_source=_BlockingEvidence(),
+            action_preparer=_Preparer(),
+            recovery_agent=RecoveryAgent(_DynamicPlanner()),
+            rollout_agent=RolloutAgent(_Gateway(store, authority, definition)),
+            permit_authority=authority,
+            clock=lambda: NOW + timedelta(seconds=7),
+            claim_id_factory=lambda: "claim-launch",
+        ),
+        store,
+        execution_timeout_seconds=0.01,
+        clock=lambda: NOW,
+    )
+
+    async def exercise():
+        with pytest.raises(RecoveryRunStoreUnavailable):
+            await service.launch_and_wait_result(request)
+        snapshot = await store.get(request.run_id)
+        events = await store.events(request.run_id)
+        owned = tuple(service._tasks)
+        await service.aclose()
+        return snapshot, events, owned
+
+    snapshot, events, owned = asyncio.run(exercise())
+    assert snapshot.lifecycle is RecoveryRunLifecycle.RUNNING
+    assert owned == ()
+    assert all(
+        event.payload.lifecycle is not RecoveryRunLifecycle.CANCELLED
+        for event in events.events
+        if event.type is RecoveryRunEventType.LIFECYCLE
+    )
+
+
+def test_launch_and_wait_returns_terminal_replay_and_releases_owned_task(
+    tmp_path,
+) -> None:
+    definition, states = _definition_and_states()
+    request = RecoveryRunRequest(
+        schema_version=RECOVERY_RUN_REQUEST_VERSION,
+        run_id="recovery-request-terminal-7",
+        scenario="cloud-run-rollout",
+        policy=RecoveryRunPolicy.ADAPTIVE,
+        fault=RecoveryRunFault.DROP_AFTER_ACCEPT,
+    )
+    store = InMemoryRecoveryRunStore()
+    authority = PermitAuthority(
+        SqliteDurableRuntimeStore(tmp_path / "request-terminal.sqlite3"),
+        clock=lambda: NOW + timedelta(seconds=7),
+    )
+    service = RecoveryRunApplicationService(
+        ProofToPermitWorkflow(
+            store=store,
+            definition_factory=lambda _request: definition,
+            evidence_source=_Evidence(states),
+            action_preparer=_Preparer(),
+            recovery_agent=RecoveryAgent(_DynamicPlanner()),
+            rollout_agent=RolloutAgent(_Gateway(store, authority, definition)),
+            permit_authority=authority,
+            clock=lambda: NOW + timedelta(seconds=7),
+            claim_id_factory=iter(
+                ("claim-launch", "claim-promote", "claim-record")
+            ).__next__,
+        ),
+        store,
+        clock=lambda: NOW,
+    )
+
+    async def exercise():
+        created = await service.launch_and_wait_result(request)
+        first_owned = tuple(service._tasks)
+        replayed = await service.launch_and_wait_result(request)
+        second_owned = tuple(service._tasks)
+        await service.aclose()
+        return created, first_owned, replayed, second_owned
+
+    created, first_owned, replayed, second_owned = asyncio.run(exercise())
+    assert created.created is True
+    assert created.snapshot.lifecycle is RecoveryRunLifecycle.COMPLETED
+    assert replayed.created is False
+    assert replayed.snapshot == created.snapshot
+    assert first_owned == second_owned == ()
 
 
 def test_cancellation_after_action_claim_mirrors_authority_and_never_redispatches(

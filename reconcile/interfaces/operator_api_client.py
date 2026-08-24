@@ -68,6 +68,7 @@ _DEFAULT_RECONNECTS = 3
 _CONNECT_TIMEOUT_SECONDS = 5.0
 _JSON_READ_TIMEOUT_SECONDS = 10.0
 _LAUNCH_READ_TIMEOUT_SECONDS = 20.0
+_RECOVERY_LAUNCH_READ_TIMEOUT_SECONDS = 270.0
 _WRITE_TIMEOUT_SECONDS = 5.0
 _POOL_TIMEOUT_SECONDS = 5.0
 _IDENTIFIER_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
@@ -503,6 +504,12 @@ class OperatorApiClient:
             write=_WRITE_TIMEOUT_SECONDS,
             pool=_POOL_TIMEOUT_SECONDS,
         )
+        self._recovery_launch_timeout = httpx.Timeout(
+            connect=_CONNECT_TIMEOUT_SECONDS,
+            read=_RECOVERY_LAUNCH_READ_TIMEOUT_SECONDS,
+            write=_WRITE_TIMEOUT_SECONDS,
+            pool=_POOL_TIMEOUT_SECONDS,
+        )
         self._event_timeout = httpx.Timeout(
             connect=_CONNECT_TIMEOUT_SECONDS,
             read=None,
@@ -670,7 +677,7 @@ class OperatorApiClient:
                 "/api/v1/recovery-runs",
                 content=payload,
                 headers=headers,
-                timeout=self._launch_timeout,
+                timeout=self._recovery_launch_timeout,
             ) as response:
                 if response.status_code not in {HTTPStatus.OK, HTTPStatus.ACCEPTED}:
                     await _raise_api_error(response)

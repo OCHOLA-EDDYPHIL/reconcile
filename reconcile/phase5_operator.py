@@ -654,11 +654,17 @@ class Phase5ApprovalManifest(_HasRecordHash):
         actions = tuple(item.action for item in self.commands)
         if len(actions) != len(set(actions)) or set(actions) != set(Phase5Action):
             raise ValueError("command inventory is not closed-world")
+        runtime_source_sha256, runtime_variables_sha256 = _runtime_acceptance_hashes(
+            self.terraform_stacks,
+            self.terraform_plans,
+        )
         expected_commands = _fixed_commands(
             self.source_revision,
             self.image_digest,
             self.infrastructure_revision,
             self.semantic_config_sha256,
+            runtime_source_sha256=runtime_source_sha256,
+            runtime_variables_sha256=runtime_variables_sha256,
             state_root=state_root,
             image_archive=expected_archive,
         )
@@ -670,6 +676,8 @@ class Phase5ApprovalManifest(_HasRecordHash):
                     self.image_digest,
                     self.infrastructure_revision,
                     self.semantic_config_sha256,
+                    runtime_source_sha256=runtime_source_sha256,
+                    runtime_variables_sha256=runtime_variables_sha256,
                     state_root=state_root,
                     image_archive=expected_archive,
                     include_state_bucket_cleanup=False,
@@ -683,6 +691,8 @@ class Phase5ApprovalManifest(_HasRecordHash):
                     self.image_digest,
                     self.infrastructure_revision,
                     self.semantic_config_sha256,
+                    runtime_source_sha256=runtime_source_sha256,
+                    runtime_variables_sha256=runtime_variables_sha256,
                     state_root=state_root,
                     image_archive=expected_archive,
                     include_bootstrap_protection_update=False,
@@ -695,6 +705,8 @@ class Phase5ApprovalManifest(_HasRecordHash):
                     self.image_digest,
                     self.infrastructure_revision,
                     self.semantic_config_sha256,
+                    runtime_source_sha256=runtime_source_sha256,
+                    runtime_variables_sha256=runtime_variables_sha256,
                     state_root=state_root,
                     image_archive=expected_archive,
                     image_identity_format="--format={{.Id}}",
@@ -707,6 +719,8 @@ class Phase5ApprovalManifest(_HasRecordHash):
                         self.image_digest,
                         self.infrastructure_revision,
                         self.semantic_config_sha256,
+                        runtime_source_sha256=runtime_source_sha256,
+                        runtime_variables_sha256=runtime_variables_sha256,
                         state_root=state_root,
                         image_archive=expected_archive,
                         image_identity_format="--format={{.Id}}",
@@ -1061,12 +1075,30 @@ def _iam_inventory_hash(plans: tuple[TerraformPlanBinding, ...]) -> str:
     )
 
 
+def _runtime_acceptance_hashes(
+    stacks: tuple[TerraformStackBinding, ...],
+    plans: tuple[TerraformPlanBinding, ...],
+) -> tuple[str, str]:
+    runtime_stacks = tuple(item for item in stacks if item.stack == "runtime")
+    runtime_apply_plans = tuple(
+        item for item in plans if item.action is Phase5Action.RUNTIME_APPLY
+    )
+    if len(runtime_stacks) != 1 or len(runtime_apply_plans) != 1:
+        raise ValueError("hosted acceptance runtime bindings are incomplete")
+    return (
+        runtime_stacks[0].sources.sha256,
+        runtime_apply_plans[0].variables_sha256,
+    )
+
+
 def fixed_command_descriptors(
     draft: Phase5ManifestDraft,
     *,
     state_root: Path,
     infrastructure_revision: str,
     semantic_config_sha256: str,
+    runtime_source_sha256: str,
+    runtime_variables_sha256: str,
 ) -> tuple[CommandDescriptor, ...]:
     """Build the closed, shell-free argv inventory bound into a manifest."""
 
@@ -1076,6 +1108,8 @@ def fixed_command_descriptors(
         draft.image_digest,
         infrastructure_revision,
         semantic_config_sha256,
+        runtime_source_sha256=runtime_source_sha256,
+        runtime_variables_sha256=runtime_variables_sha256,
         state_root=root,
         image_archive=root / "images" / "reconcile.oci.tar",
     )
@@ -1087,6 +1121,8 @@ def _fixed_commands(
     infrastructure_revision: str,
     semantic_config_sha256: str,
     *,
+    runtime_source_sha256: str,
+    runtime_variables_sha256: str,
     state_root: Path,
     image_archive: Path,
     image_identity_format: Literal[
@@ -1288,6 +1324,10 @@ def _fixed_commands(
                     infrastructure_revision,
                     "--semantic-config-sha256",
                     semantic_config_sha256,
+                    "--runtime-source-sha256",
+                    runtime_source_sha256,
+                    "--runtime-variables-sha256",
+                    runtime_variables_sha256,
                 ),
             ),
             environment=(
@@ -1322,6 +1362,10 @@ def _fixed_commands(
                     infrastructure_revision,
                     "--semantic-config-sha256",
                     semantic_config_sha256,
+                    "--runtime-source-sha256",
+                    runtime_source_sha256,
+                    "--runtime-variables-sha256",
+                    runtime_variables_sha256,
                 ),
             ),
             environment=(
@@ -1334,7 +1378,7 @@ def _fixed_commands(
                     value=f"{source_root}:{dependency_root}",
                 ),
             ),
-            timeout_seconds=3_600,
+            timeout_seconds=14_400,
         ),
         terraform_action(Phase5Action.RUNTIME_TEARDOWN),
         terraform_action(Phase5Action.FOUNDATION_TEARDOWN),
@@ -3397,6 +3441,7 @@ def _capture_artifact_bindings(
         semantic_sources.sha256,
         prompt_version,
         prompt_sha256,
+        _canonical_utc_timestamp(draft.created_at),
     }
     plans = tuple(
         sorted(
@@ -3450,6 +3495,10 @@ def build_manifest(
         f"{_REGION}-docker.pkg.dev/{_PROJECT_ID}/reconcile-p5/"
         f"reconcile@{draft.image_digest}"
     )
+    runtime_source_sha256, runtime_variables_sha256 = _runtime_acceptance_hashes(
+        artifacts["terraform_stacks"],
+        artifacts["terraform_plans"],
+    )
     return _seal(
         Phase5ApprovalManifest,
         schema_version=_SCHEMA,
@@ -3494,6 +3543,8 @@ def build_manifest(
             draft.image_digest,
             artifacts["infrastructure_revision"],
             artifacts["semantic_config_sha256"],
+            runtime_source_sha256=runtime_source_sha256,
+            runtime_variables_sha256=runtime_variables_sha256,
             state_root=state_root,
             image_archive=Path(artifacts["image_artifact"].archive_path),
         ),
@@ -3654,6 +3705,7 @@ def _prepare_terraform_from_snapshot(
     for name in (
         "image_digest",
         "infrastructure_revision",
+        "recovery_definition_created_at",
         "semantic_config_sha256",
         "source_revision",
         "vertex_prompt_sha256",
@@ -3761,9 +3813,11 @@ def prepare_phase5_artifacts(
         _default_runner,
         cli_config=state.root / "terraform.rc",
     )
+    moment = _utc(created_at)
     runtime_identity = {
         "image_digest": image_digest,
         "infrastructure_revision": infrastructure_revision,
+        "recovery_definition_created_at": _canonical_utc_timestamp(moment),
         "semantic_config_sha256": semantic_sources.sha256,
         "source_revision": source_revision,
         "vertex_prompt_sha256": prompt_sha256,
@@ -3777,7 +3831,6 @@ def prepare_phase5_artifacts(
         runner=_default_runner,
     )
 
-    moment = _utc(created_at)
     draft = Phase5ManifestDraft(
         schema_version="reconcile/phase5-operator-draft/v1",
         source_revision=source_revision,
@@ -3824,6 +3877,12 @@ def _utc(value: datetime) -> datetime:
     if value.tzinfo is None or value.utcoffset() is None:
         raise OperatorError("TIMESTAMP_MUST_BE_AWARE")
     return value.astimezone(UTC)
+
+
+def _canonical_utc_timestamp(value: datetime) -> str:
+    moment = _utc(value)
+    timespec = "microseconds" if moment.microsecond else "seconds"
+    return moment.isoformat(timespec=timespec).replace("+00:00", "Z")
 
 
 def _canonical_absolute_path(path: Path, *, require_exists: bool) -> Path:

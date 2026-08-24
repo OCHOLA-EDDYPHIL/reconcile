@@ -28,7 +28,9 @@ from reconcile.contracts.codec import (
     decode_contract,
 )
 from reconcile.contracts.envelope import ExecutionEnvelope
+from reconcile.contracts.recovery_run import RecoveryRunRequest
 from reconcile.contracts.report import InvestigationStatus
+from reconcile.controller.permits import PermitAuthority
 from reconcile.durable_application import (
     DurableExecutionContext,
     DurableExecutionOutcome,
@@ -40,9 +42,10 @@ from reconcile.hosted.apps import InternalOperationHandler, create_component_app
 from reconcile.hosted.cloud_run_canary import (
     CloudRunCanaryActionAdapter,
     CloudRunCanaryFaultProxy,
+    CloudRunCanaryReader,
     CloudRunCanaryTarget,
 )
-from reconcile.hosted.cloud_run_fault import ClosedCloudRunCanaryActionAuthorizer
+from reconcile.hosted.cloud_run_fault import RecoveryCloudRunCanaryActionAuthorizer
 from reconcile.hosted.config import Component, HostedConfig
 from reconcile.hosted.contracts import (
     INTERNAL_OPERATION_REQUEST_VERSION,
@@ -58,7 +61,13 @@ from reconcile.hosted.firestore_business import (
     build_google_firestore_business_targets,
 )
 from reconcile.hosted.firestore_cas import GoogleFirestoreCasStore
+from reconcile.hosted.firestore_permits import FirestoreActionPermitStore
 from reconcile.hosted.firestore_provider_ledger import FirestoreHostedProviderLedger
+from reconcile.hosted.firestore_recovery_runs import FirestoreRecoveryRunStore
+from reconcile.hosted.firestore_release import GoogleFirestoreReleaseTarget
+from reconcile.hosted.firestore_release_action import (
+    RecoveryFirestoreReleaseActionAuthorizer,
+)
 from reconcile.hosted.firestore_runtime import FirestoreDurableRuntimeStore
 from reconcile.hosted.firestore_scenarios import (
     FirestoreScenarioOperationAuthority,
@@ -70,6 +79,8 @@ from reconcile.hosted.operations import (
     HostedHttpWorkflowGateway,
     HostedInvestigationHandler,
     HostedOperationHandler,
+    HostedRecoveryHandler,
+    HostedRecoveryRunGateway,
     HostedWorkflowGatewayError,
 )
 from reconcile.hosted.planner import HostedGeminiPlanner
@@ -77,6 +88,7 @@ from reconcile.hosted.provider import (
     HOSTED_CANDIDATE_IDENTITY_VERSION,
     HostedCandidateIdentity,
 )
+from reconcile.hosted.recovery_dispatch import HostedRecoveryDispatchGateway
 from reconcile.hosted.sandbox import (
     FirestoreSandboxEvidenceReader,
     HostedSandboxEvidenceTarget,
@@ -116,6 +128,15 @@ from reconcile.hosted.workflow import (
 )
 from reconcile.operator import OperatorApplicationService
 from reconcile.persistence.scenarios import ScenarioWorkItem
+from reconcile.recovery_agents import RecoveryAgent
+from reconcile.recovery_scenario import (
+    ReleaseChainSettings,
+    build_release_chain_workflow,
+)
+from reconcile.recovery_workflow import (
+    RecoveryRunApplicationService,
+    RecoveryRunLaunchResult,
+)
 from reconcile.scenarios.firestore_business import (
     execute_cloud_firestore_business_baseline,
 )
@@ -865,6 +886,106 @@ def _cas(config: HostedConfig) -> GoogleFirestoreCasStore:
     )
 
 
+def _canary_target(config: HostedConfig) -> CloudRunCanaryTarget:
+    location = _required(config.canary_location, "canary location")
+    return CloudRunCanaryTarget(
+        project=config.project_id,
+        location=location,
+        service=_required(config.canary_service, "canary service"),
+        image_repository=(
+            f"{location}-docker.pkg.dev/{config.project_id}/reconcile-p5/reconcile"
+        ),
+        baseline_revision=_required(
+            config.canary_baseline_revision,
+            "canary baseline revision",
+        ),
+        health_audience=_required(config.canary_audience, "canary audience"),
+    )
+
+
+def _release_chain_settings(
+    config: HostedConfig,
+    candidate: HostedCandidateIdentity,
+) -> tuple[ReleaseChainSettings, datetime, int]:
+    release_id = _required(config.recovery_release_id, "recovery release ID")
+    payload_sha256 = _required(
+        config.recovery_payload_sha256,
+        "recovery payload digest",
+    )
+    invoked_at = config.recovery_definition_created_at
+    timeout = config.recovery_execution_timeout_seconds
+    if release_id != f"p5-release-{config.source_revision[:24]}":
+        raise ValueError("hosted recovery release identity drifted")
+    if payload_sha256 != candidate.sha256:
+        raise ValueError("hosted recovery payload identity drifted")
+    if (
+        type(invoked_at) is not datetime
+        or invoked_at.tzinfo is None
+        or invoked_at.utcoffset() is None
+        or invoked_at.utcoffset().total_seconds() != 0
+    ):
+        raise ValueError("hosted recovery definition timestamp is invalid")
+    if type(timeout) is not int or timeout != 240:
+        raise ValueError("hosted recovery execution timeout drifted")
+    settings = ReleaseChainSettings(
+        project=config.project_id,
+        location=_required(config.canary_location, "canary location"),
+        service=_required(config.canary_service, "canary service"),
+        release_id=release_id,
+        image_digest=config.image_digest,
+        configuration_sha256=config.semantic_config_sha256,
+        payload_sha256=payload_sha256,
+        database=_required(config.target_database, "target database"),
+    )
+    return settings, invoked_at.astimezone(UTC), timeout
+
+
+class _LazyRecoveryRunService:
+    """Construct the provider-backed recovery service on its first request."""
+
+    def __init__(
+        self,
+        factory: Callable[[], RecoveryRunApplicationService],
+    ) -> None:
+        if not callable(factory):
+            raise TypeError("recovery service factory is invalid")
+        self._factory = factory
+        self._service: RecoveryRunApplicationService | None = None
+        self._lock = asyncio.Lock()
+        self._closed = False
+
+    async def _get(self) -> RecoveryRunApplicationService:
+        async with self._lock:
+            if self._closed:
+                raise RuntimeError("recovery service is closed")
+            service = self._service
+            if service is None:
+                service = self._factory()
+                if not callable(getattr(service, "launch_and_wait_result", None)):
+                    raise TypeError(
+                        "recovery service factory returned an invalid service"
+                    )
+                self._service = service
+            return service
+
+    async def launch_and_wait_result(
+        self,
+        request: RecoveryRunRequest,
+    ) -> RecoveryRunLaunchResult:
+        service = await self._get()
+        return await service.launch_and_wait_result(request)
+
+    async def aclose(self) -> None:
+        async with self._lock:
+            if self._closed:
+                return
+            self._closed = True
+            service = self._service
+            self._service = None
+        if service is not None:
+            await service.aclose()
+
+
 def _handlers(
     *entries: tuple[InternalOperation, InternalOperationHandler],
 ) -> Mapping[InternalOperation, InternalOperationHandler]:
@@ -883,7 +1004,10 @@ def create_runtime_component_app(
     candidate = build_hosted_candidate(config)
     cas = _cas(config)
     scenario_store = FirestoreScenarioStore(cas, candidate)
-    selected_transport = transport or HostedHttpTransport()
+    selected_transport = transport or HostedHttpTransport(
+        request_timeout_seconds=(265.0 if config.component is Component.API else None),
+        total_timeout_seconds=(270.0 if config.component is Component.API else None),
+    )
 
     if config.component is Component.API:
         target_bucket = _required(config.target_bucket, "target bucket")
@@ -908,10 +1032,16 @@ def create_runtime_component_app(
             runner=workflow,
             projection_store=scenario_store,
         )
+        recovery = HostedRecoveryRunGateway(
+            config,
+            selected_transport,
+            FirestoreRecoveryRunStore(cas),
+        )
         return create_component_app(
             config,
             transport=selected_transport,
             operator_service=operator,
+            recovery_service=recovery,
         )
 
     authorizer = FirestoreHostedOperationScopeAuthorizer(scenario_store)
@@ -937,6 +1067,8 @@ def create_runtime_component_app(
             cas_store=cas,
         )
         provider_ledger = FirestoreHostedProviderLedger(cas)
+        recovery_store = FirestoreRecoveryRunStore(cas)
+        permit_authority = PermitAuthority(FirestoreActionPermitStore(cas))
 
         def planner_factory() -> AdvisoryPlanner:
             planner = AdkGeminiPlanner.from_vertex_adc_guarded(
@@ -967,31 +1099,62 @@ def create_runtime_component_app(
             authorizer=authorizer,
             dispatcher=dispatcher,
         )
+        recovery_settings, recovery_invoked_at, recovery_timeout = (
+            _release_chain_settings(config, candidate)
+        )
+        recovery_cloud_reader = CloudRunCanaryReader(target=_canary_target(config))
+        recovery_firestore = GoogleFirestoreReleaseTarget(
+            project_id=config.project_id,
+            database_id=_required(config.target_database, "target database"),
+        )
+        recovery_dispatch = HostedRecoveryDispatchGateway(
+            fault_proxy_url=_required(config.fault_proxy_url, "fault proxy URL"),
+            fault_proxy_audience=_required(
+                config.fault_proxy_audience,
+                "fault proxy audience",
+            ),
+            transport=selected_transport,
+            recovery_store=recovery_store,
+            permit_authority=permit_authority,
+        )
+
+        def recovery_service_factory() -> RecoveryRunApplicationService:
+            workflow = build_release_chain_workflow(
+                settings=recovery_settings,
+                invoked_at=recovery_invoked_at,
+                store=recovery_store,
+                permit_authority=permit_authority,
+                recovery_agent=RecoveryAgent(planner_factory()),
+                cloud_action=None,
+                cloud_reader=recovery_cloud_reader,
+                firestore=recovery_firestore,
+                dispatch_gateway=recovery_dispatch,
+            )
+            return RecoveryRunApplicationService(
+                workflow,
+                recovery_store,
+                execution_timeout_seconds=recovery_timeout,
+            )
+
+        recovery_service = _LazyRecoveryRunService(recovery_service_factory)
         return create_component_app(
             config,
             transport=selected_transport,
             internal_operation_handlers=_handlers(
-                (InternalOperation.INVESTIGATE, handler)
+                (InternalOperation.INVESTIGATE, handler),
+                (
+                    InternalOperation.RECOVER,
+                    HostedRecoveryHandler(
+                        expected_caller_email=config.allowed_caller_emails[0],
+                        service=recovery_service,
+                    ),
+                ),
             ),
         )
 
     if config.component is Component.FAULT_PROXY:
         target_bucket = _required(config.target_bucket, "target bucket")
-        canary_location = _required(config.canary_location, "canary location")
-        canary_target = CloudRunCanaryTarget(
-            project=config.project_id,
-            location=canary_location,
-            service=_required(config.canary_service, "canary service"),
-            image_repository=(
-                f"{canary_location}-docker.pkg.dev/{config.project_id}/"
-                "reconcile-p5/reconcile"
-            ),
-            baseline_revision=_required(
-                config.canary_baseline_revision,
-                "canary baseline revision",
-            ),
-            health_audience=_required(config.canary_audience, "canary audience"),
-        )
+        canary_target = _canary_target(config)
         storage_mutation = CloudStorageMutationTarget(
             project_id=config.project_id,
             bucket_name=target_bucket,
@@ -1022,13 +1185,36 @@ def create_runtime_component_app(
             ),
         )
         caller = config.allowed_caller_emails[0]
+        recovery_store = FirestoreRecoveryRunStore(cas)
+        permit_authority = PermitAuthority(FirestoreActionPermitStore(cas))
+        canary_proxy = CloudRunCanaryFaultProxy(
+            CloudRunCanaryActionAdapter(target=canary_target)
+        )
+        release_target = GoogleFirestoreReleaseTarget(
+            project_id=config.project_id,
+            database_id=_required(config.target_database, "target database"),
+        )
         return create_component_app(
             config,
             transport=selected_transport,
-            cloud_run_canary_fault_proxy=CloudRunCanaryFaultProxy(
-                CloudRunCanaryActionAdapter(target=canary_target)
+            cloud_run_canary_fault_proxy=canary_proxy,
+            cloud_run_canary_action_authorizer=RecoveryCloudRunCanaryActionAuthorizer(
+                recovery_store=recovery_store,
+                permit_authority=permit_authority,
+                target=canary_target,
             ),
-            cloud_run_canary_action_authorizer=(ClosedCloudRunCanaryActionAuthorizer()),
+            firestore_release_target=release_target,
+            firestore_release_action_authorizer=(
+                RecoveryFirestoreReleaseActionAuthorizer(
+                    recovery_store=recovery_store,
+                    permit_authority=permit_authority,
+                    target=release_target,
+                )
+            ),
+            recovery_action_caller_email=_required(
+                config.recovery_action_caller_email,
+                "recovery action caller",
+            ),
             internal_operation_handlers=_handlers(
                 (
                     InternalOperation.EXECUTE_FAULT,

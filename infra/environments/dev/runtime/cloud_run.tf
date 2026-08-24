@@ -178,18 +178,19 @@ resource "google_cloud_run_v2_service" "fault_proxy" {
 
       dynamic "env" {
         for_each = merge(local.common_runtime_environment, {
-          RECONCILE_ALLOWED_CALLER_EMAILS    = local.caller_emails.api
-          RECONCILE_AUTH_AUDIENCE            = local.audiences.fault_proxy
-          RECONCILE_CANARY_AUDIENCE          = local.audiences.canary
-          RECONCILE_CANARY_BASELINE_REVISION = local.canary_baseline_revision
-          RECONCILE_CANARY_LOCATION          = var.region
-          RECONCILE_CANARY_SERVICE           = google_cloud_run_v2_service.canary.name
-          RECONCILE_COMPONENT                = "fault-proxy"
-          RECONCILE_RUNTIME_DATABASE         = local.runtime_database_name
-          RECONCILE_SANDBOX_AUDIENCE         = local.audiences.sandbox
-          RECONCILE_SANDBOX_URL              = google_cloud_run_v2_service.sandbox.uri
-          RECONCILE_TARGET_BUCKET            = local.target_bucket_name
-          RECONCILE_TARGET_DATABASE          = local.target_database_name
+          RECONCILE_ALLOWED_CALLER_EMAILS        = local.caller_emails.api
+          RECONCILE_AUTH_AUDIENCE                = local.audiences.fault_proxy
+          RECONCILE_CANARY_AUDIENCE              = local.audiences.canary
+          RECONCILE_CANARY_BASELINE_REVISION     = local.canary_baseline_revision
+          RECONCILE_CANARY_LOCATION              = var.region
+          RECONCILE_CANARY_SERVICE               = google_cloud_run_v2_service.canary.name
+          RECONCILE_COMPONENT                    = "fault-proxy"
+          RECONCILE_RECOVERY_ACTION_CALLER_EMAIL = local.caller_emails.controller
+          RECONCILE_RUNTIME_DATABASE             = local.runtime_database_name
+          RECONCILE_SANDBOX_AUDIENCE             = local.audiences.sandbox
+          RECONCILE_SANDBOX_URL                  = google_cloud_run_v2_service.sandbox.uri
+          RECONCILE_TARGET_BUCKET                = local.target_bucket_name
+          RECONCILE_TARGET_DATABASE              = local.target_database_name
         })
 
         content {
@@ -243,23 +244,33 @@ resource "google_cloud_run_v2_service" "controller" {
 
       dynamic "env" {
         for_each = merge(local.common_runtime_environment, {
-          RECONCILE_ALLOWED_CALLER_EMAILS            = local.caller_emails.api
-          RECONCILE_AUTH_AUDIENCE                    = local.audiences.controller
-          RECONCILE_COMPONENT                        = "controller"
-          RECONCILE_RUNTIME_DATABASE                 = local.runtime_database_name
-          RECONCILE_SANDBOX_AUDIENCE                 = local.audiences.sandbox
-          RECONCILE_SANDBOX_URL                      = google_cloud_run_v2_service.sandbox.uri
-          RECONCILE_TARGET_BUCKET                    = local.target_bucket_name
-          RECONCILE_TARGET_DATABASE                  = local.target_database_name
-          RECONCILE_VERTEX_LOCATION                  = var.vertex_location
-          RECONCILE_VERTEX_MAX_COUNT_TOKENS_ATTEMPTS = "1"
-          RECONCILE_VERTEX_MAX_GENERATION_ATTEMPTS   = "1"
-          RECONCILE_VERTEX_MAX_INPUT_TOKENS          = "12000"
-          RECONCILE_VERTEX_MAX_OUTPUT_TOKENS         = "1024"
-          RECONCILE_VERTEX_MODEL                     = var.vertex_model
-          RECONCILE_VERTEX_PROMPT_SHA256             = var.vertex_prompt_sha256
-          RECONCILE_VERTEX_PROMPT_VERSION            = var.vertex_prompt_version
-          RECONCILE_VERTEX_THINKING_LEVEL            = "MINIMAL"
+          RECONCILE_ALLOWED_CALLER_EMAILS              = local.caller_emails.api
+          RECONCILE_AUTH_AUDIENCE                      = local.audiences.controller
+          RECONCILE_CANARY_AUDIENCE                    = local.audiences.canary
+          RECONCILE_CANARY_BASELINE_REVISION           = local.canary_baseline_revision
+          RECONCILE_CANARY_LOCATION                    = var.region
+          RECONCILE_CANARY_SERVICE                     = google_cloud_run_v2_service.canary.name
+          RECONCILE_COMPONENT                          = "controller"
+          RECONCILE_FAULT_PROXY_AUDIENCE               = local.audiences.fault_proxy
+          RECONCILE_FAULT_PROXY_URL                    = google_cloud_run_v2_service.fault_proxy.uri
+          RECONCILE_RECOVERY_DEFINITION_CREATED_AT     = var.recovery_definition_created_at
+          RECONCILE_RECOVERY_EXECUTION_TIMEOUT_SECONDS = tostring(local.recovery_execution_timeout_seconds)
+          RECONCILE_RECOVERY_PAYLOAD_SHA256            = local.recovery_payload_sha256
+          RECONCILE_RECOVERY_RELEASE_ID                = local.recovery_release_id
+          RECONCILE_RUNTIME_DATABASE                   = local.runtime_database_name
+          RECONCILE_SANDBOX_AUDIENCE                   = local.audiences.sandbox
+          RECONCILE_SANDBOX_URL                        = google_cloud_run_v2_service.sandbox.uri
+          RECONCILE_TARGET_BUCKET                      = local.target_bucket_name
+          RECONCILE_TARGET_DATABASE                    = local.target_database_name
+          RECONCILE_VERTEX_LOCATION                    = var.vertex_location
+          RECONCILE_VERTEX_MAX_COUNT_TOKENS_ATTEMPTS   = "1"
+          RECONCILE_VERTEX_MAX_GENERATION_ATTEMPTS     = "1"
+          RECONCILE_VERTEX_MAX_INPUT_TOKENS            = "12000"
+          RECONCILE_VERTEX_MAX_OUTPUT_TOKENS           = "1024"
+          RECONCILE_VERTEX_MODEL                       = var.vertex_model
+          RECONCILE_VERTEX_PROMPT_SHA256               = var.vertex_prompt_sha256
+          RECONCILE_VERTEX_PROMPT_VERSION              = var.vertex_prompt_version
+          RECONCILE_VERTEX_THINKING_LEVEL              = "MINIMAL"
         })
 
         content {

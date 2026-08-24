@@ -20,6 +20,7 @@ from reconcile.contracts import (
     RecoveryRunEventType,
     RecoveryRunFailureCategory,
     RecoveryRunLifecycle,
+    RecoveryRunPolicy,
     RecoveryRunRequest,
     RecoveryRunSnapshot,
     canonical_json_bytes,
@@ -50,8 +51,10 @@ class _RecoveryService:
     def __init__(self) -> None:
         self.store = InMemoryRecoveryRunStore()
         self.closed = False
+        self.launch_calls = 0
 
     async def launch(self, request: RecoveryRunRequest) -> RecoveryRunLaunchResult:
+        self.launch_calls += 1
         chain = make_recovery_run_examples()[3].chain
         snapshot, created = await self.store.create(
             request,
@@ -77,6 +80,12 @@ class _RecoveryService:
                 occurred_at=snapshot.updated_at + timedelta(seconds=1),
             )
         return RecoveryRunLaunchResult(snapshot=snapshot, created=created)
+
+    async def launch_and_wait_result(
+        self,
+        request: RecoveryRunRequest,
+    ) -> RecoveryRunLaunchResult:
+        return await self.launch(request)
 
     async def get(self, run_id: str) -> RecoveryRunSnapshot:
         return await self.store.get(run_id)
@@ -185,6 +194,27 @@ def test_recovery_api_launch_get_and_resumable_sse() -> None:
     assert "id: 3\nevent: LIFECYCLE" in events.text
     assert "id: 4\nevent: LIFECYCLE" in events.text
     assert service.closed is True
+
+
+@pytest.mark.parametrize(
+    "policy",
+    (RecoveryRunPolicy.BLIND_RETRY, RecoveryRunPolicy.BLIND_ABORT),
+)
+def test_hosted_recovery_api_rejects_blind_policy_before_service_contact(
+    policy: RecoveryRunPolicy,
+) -> None:
+    request = make_recovery_run_examples()[0].model_copy(update={"policy": policy})
+    service = _RecoveryService()
+
+    response = TestClient(create_app(recovery_service=service, hosted=True)).post(
+        "/api/v1/recovery-runs",
+        content=canonical_json_bytes(request),
+        headers={"Content-Type": "application/json"},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["code"] == "invalid_contract"
+    assert service.launch_calls == 0
 
 
 def test_recovery_api_rejects_noncanonical_cursor_without_calling_service() -> None:

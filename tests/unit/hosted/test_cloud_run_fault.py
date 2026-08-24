@@ -136,6 +136,7 @@ def _config() -> HostedConfig:
         canary_service=SERVICE,
         canary_baseline_revision=BASELINE,
         canary_audience=f"https://reconcile.invalid/phase5/{PROJECT}/canary",
+        recovery_action_caller_email=CALLER,
     )
 
 

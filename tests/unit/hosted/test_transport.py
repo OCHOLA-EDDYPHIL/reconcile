@@ -75,6 +75,32 @@ def test_transport_has_no_inbound_header_forwarding_surface() -> None:
     assert "x_serverless_authorization" not in parameters
 
 
+def test_transport_accepts_one_bounded_long_running_profile() -> None:
+    transport = HostedHttpTransport(
+        lambda _audience: "header.payload.signature",
+        request_timeout_seconds=265,
+        total_timeout_seconds=270,
+    )
+
+    assert transport._request_timeout_seconds == 265.0
+    assert transport._total_timeout_seconds == 270.0
+
+
+@pytest.mark.parametrize(
+    ("request_timeout", "total_timeout"),
+    ((0, 15), (10, 0), (291, 292), (10, 296), (True, 15)),
+)
+def test_transport_rejects_invalid_timeout_profiles(
+    request_timeout: object,
+    total_timeout: object,
+) -> None:
+    with pytest.raises(HostedRequestError):
+        HostedHttpTransport(
+            request_timeout_seconds=request_timeout,  # type: ignore[arg-type]
+            total_timeout_seconds=total_timeout,  # type: ignore[arg-type]
+        )
+
+
 def test_async_token_supplier_receives_exact_destination_audience() -> None:
     audiences: list[str] = []
 

@@ -460,8 +460,13 @@ def test_canary_runtime_drift_and_baseline_rotation_are_explicit() -> None:
         == 3
     )
     assert (
-        "RECONCILE_CANARY_BASELINE_REVISION = local.canary_baseline_revision"
-        in cloud_run
+        len(
+            re.findall(
+                r"RECONCILE_CANARY_BASELINE_REVISION\s*=\s*local[.]canary_baseline_revision",
+                cloud_run,
+            )
+        )
+        == 2
     )
 
 
@@ -643,12 +648,12 @@ def test_apply_identity_and_runtime_iam_graph_are_closed_world() -> None:
         "runtime_database_user": (
             '"roles/datastore.user"',
             '"serviceAccount:${google_service_account.runtime[each.value].email}"',
-            'toset(["api", "controller"])',
+            'toset(["api", "controller", "fault_proxy"])',
         ),
         "runtime_database_viewer": (
             '"roles/datastore.viewer"',
             '"serviceAccount:${google_service_account.runtime[each.value].email}"',
-            'toset(["fault_proxy", "sandbox"])',
+            'toset(["sandbox"])',
         ),
         "sandbox_database_user": (
             '"roles/datastore.user"',
@@ -808,6 +813,10 @@ def test_apply_identity_and_runtime_iam_graph_are_closed_world() -> None:
           api_to_fault_proxy = {
             service = google_cloud_run_v2_service.fault_proxy.name
             member  = var.service_account_emails.api
+          }
+          controller_to_fault_proxy = {
+            service = google_cloud_run_v2_service.fault_proxy.name
+            member  = var.service_account_emails.controller
           }
           controller_to_sandbox = {
             service = google_cloud_run_v2_service.sandbox.name

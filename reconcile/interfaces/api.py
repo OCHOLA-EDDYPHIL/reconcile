@@ -34,6 +34,7 @@ from reconcile.contracts import (
     RecoveryRunEvent,
     RecoveryRunEventType,
     RecoveryRunLifecycle,
+    RecoveryRunPolicy,
     RecoveryRunRequest,
     RecoveryRunSnapshot,
     ScenarioLaunchName,
@@ -183,6 +184,11 @@ class _RecoveryLaunchResult(Protocol):
 class _RecoveryRunService(Protocol):
     async def launch(self, request: RecoveryRunRequest) -> _RecoveryLaunchResult: ...
 
+    async def launch_and_wait_result(
+        self,
+        request: RecoveryRunRequest,
+    ) -> _RecoveryLaunchResult: ...
+
     async def get(self, run_id: str) -> RecoveryRunSnapshot: ...
 
     async def snapshot(
@@ -315,6 +321,12 @@ class _UnavailableOperatorService:
 
 class _UnavailableRecoveryRunService:
     async def launch(self, _request: RecoveryRunRequest) -> _RecoveryLaunchResult:
+        raise _DependencyUnavailable
+
+    async def launch_and_wait_result(
+        self,
+        _request: RecoveryRunRequest,
+    ) -> _RecoveryLaunchResult:
         raise _DependencyUnavailable
 
     async def get(self, _run_id: str) -> RecoveryRunSnapshot:
@@ -1244,8 +1256,15 @@ def create_app(
     async def launch_recovery_run(request: Request) -> Response:
         _reject_query_parameters(request, allowed=set())
         launch = _decode_recovery_launch(await _read_contract_body(request))
+        if hosted and launch.policy not in {
+            RecoveryRunPolicy.FIXED,
+            RecoveryRunPolicy.ADAPTIVE,
+        }:
+            raise _InvalidApiRequest
         request.state.investigation_id = launch.run_id
-        result = await _call_service(_recovery_service(application).launch(launch))
+        service = _recovery_service(application)
+        operation = service.launch_and_wait_result if hosted else service.launch
+        result = await _call_service(operation(launch))
         try:
             created = result.created
             snapshot = _validated_recovery_snapshot(
@@ -1255,6 +1274,8 @@ def create_app(
         except Exception as error:
             raise _InternalApiFailure from error
         if type(created) is not bool:
+            raise _InternalApiFailure
+        if hosted and snapshot.lifecycle not in _TERMINAL_RECOVERY_LIFECYCLES:
             raise _InternalApiFailure
         return Response(
             content=canonical_json_bytes(snapshot),

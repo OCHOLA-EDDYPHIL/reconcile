@@ -279,8 +279,14 @@ class _BlindMutator:
         if drop_after_accept:
             raise ConnectionError("acknowledgement lost")
 
+    async def settle_stage(self) -> None:
+        return None
+
     async def promote(self) -> None:
         self.promotions += 1
+
+    async def settle_promotion(self) -> None:
+        return None
 
     async def create_record(self, *, suppress_before_dispatch: bool) -> None:
         if suppress_before_dispatch:

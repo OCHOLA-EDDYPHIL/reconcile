@@ -4,10 +4,19 @@ from __future__ import annotations
 
 import asyncio
 from datetime import UTC, datetime, timedelta
+from http import HTTPStatus
 
 import pytest
 
-from reconcile.contracts import Classification, canonical_sha256
+from reconcile.contracts import (
+    Classification,
+    RecoveryRunEventPayload,
+    RecoveryRunEventType,
+    RecoveryRunFailureCategory,
+    RecoveryRunLifecycle,
+    RecoveryRunPolicy,
+    canonical_sha256,
+)
 from reconcile.contracts.base import canonical_json_value_bytes
 from reconcile.contracts.codec import decode_contract
 from reconcile.hosted.apps import InternalOperationDenied
@@ -23,10 +32,15 @@ from reconcile.hosted.contracts import (
 from reconcile.hosted.identity import VerifiedCaller
 from reconcile.hosted.operations import (
     HOSTED_INVESTIGATION_RECEIPT_VERSION,
+    HOSTED_RECOVERY_RECEIPT_VERSION,
     HostedHttpWorkflowGateway,
     HostedInvestigationHandler,
     HostedInvestigationReceipt,
     HostedOperationHandler,
+    HostedRecoveryGatewayError,
+    HostedRecoveryHandler,
+    HostedRecoveryReceipt,
+    HostedRecoveryRunGateway,
     HostedWorkflowGatewayError,
 )
 from reconcile.hosted.transport import HostedHttpResponse, HostedHttpTransport
@@ -39,7 +53,9 @@ from reconcile.hosted.workflow import (
     HostedOperationScope,
     HostedWorkflowOperation,
 )
-from tests.contract._factories import make_report
+from reconcile.persistence import InMemoryRecoveryRunStore, RecoveryRunConflict
+from reconcile.recovery_workflow import RecoveryRunLaunchResult
+from tests.contract._factories import make_recovery_run_examples, make_report
 
 pytestmark = pytest.mark.unit
 
@@ -118,6 +134,33 @@ def _api_config() -> HostedConfig:
         fault_proxy_url="https://fault.example.test",
         fault_proxy_audience="https://reconcile.invalid/phase5/fault-proxy",
     )
+
+
+async def _terminal_recovery(store: InMemoryRecoveryRunStore):
+    request, _event, _launch, initial, _scope = make_recovery_run_examples()
+    snapshot, created = await store.create(
+        request,
+        initial.chain,
+        created_at=NOW,
+    )
+    snapshot = await store.append(
+        request.run_id,
+        expected_revision=snapshot.revision,
+        event_type=RecoveryRunEventType.LIFECYCLE,
+        payload=RecoveryRunEventPayload(lifecycle=RecoveryRunLifecycle.RUNNING),
+        occurred_at=NOW + timedelta(seconds=1),
+    )
+    snapshot = await store.append(
+        request.run_id,
+        expected_revision=snapshot.revision,
+        event_type=RecoveryRunEventType.LIFECYCLE,
+        payload=RecoveryRunEventPayload(
+            lifecycle=RecoveryRunLifecycle.FAILED,
+            failure_category=RecoveryRunFailureCategory.INTERNAL_FAILURE,
+        ),
+        occurred_at=NOW + timedelta(seconds=2),
+    )
+    return request, snapshot, created
 
 
 def test_operation_handlers_bind_caller_scope_and_result_identity() -> None:
@@ -221,6 +264,188 @@ def test_investigation_handler_returns_only_durable_report_identity() -> None:
         assert response.payload == receipt.model_dump(mode="json")
         assert "report" not in response.payload
         assert authorized == [scope]
+
+    asyncio.run(scenario())
+
+
+def test_recovery_handler_returns_only_the_terminal_snapshot_identity() -> None:
+    async def scenario() -> None:
+        store = InMemoryRecoveryRunStore()
+        request, snapshot, created = await _terminal_recovery(store)
+
+        class Service:
+            async def launch_and_wait_result(self, received):
+                assert received == request
+                return RecoveryRunLaunchResult(snapshot=snapshot, created=created)
+
+        handler = HostedRecoveryHandler(
+            expected_caller_email=CALLER.email,
+            service=Service(),
+        )
+        internal = InternalOperationRequest(
+            schema_version=INTERNAL_OPERATION_REQUEST_VERSION,
+            request_id="hosted-recover-request-7",
+            operation=InternalOperation.RECOVER,
+            payload=request.model_dump(mode="json"),
+        )
+        response = await handler(CALLER, internal)
+        receipt = HostedRecoveryReceipt(
+            schema_version=HOSTED_RECOVERY_RECEIPT_VERSION,
+            run_id=request.run_id,
+            request_sha256=canonical_sha256(request),
+            snapshot_sha256=canonical_sha256(snapshot),
+            created=True,
+        )
+        assert response.payload == receipt.model_dump(mode="json")
+        assert "snapshot" not in response.payload
+        assert len(canonical_internal_json_bytes(response)) < 1_024
+
+    asyncio.run(scenario())
+
+
+def test_recovery_handler_rejects_blind_policy_before_service_contact() -> None:
+    async def scenario() -> None:
+        request = make_recovery_run_examples()[0].model_copy(
+            update={"policy": RecoveryRunPolicy.BLIND_RETRY}
+        )
+
+        class Service:
+            calls = 0
+
+            async def launch_and_wait_result(self, _received):
+                self.calls += 1
+                raise AssertionError("blind request reached recovery service")
+
+        service = Service()
+        handler = HostedRecoveryHandler(
+            expected_caller_email=CALLER.email,
+            service=service,
+        )
+        internal = InternalOperationRequest(
+            schema_version=INTERNAL_OPERATION_REQUEST_VERSION,
+            request_id="hosted-blind-request-7",
+            operation=InternalOperation.RECOVER,
+            payload=request.model_dump(mode="json"),
+        )
+
+        with pytest.raises(HostedRecoveryGatewayError):
+            await handler(CALLER, internal)
+        assert service.calls == 0
+
+    asyncio.run(scenario())
+
+
+def test_recovery_gateway_rereads_and_verifies_the_firestore_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def scenario() -> None:
+        store = InMemoryRecoveryRunStore()
+        request, snapshot, _created = await _terminal_recovery(store)
+        transport = HostedHttpTransport()
+        calls: list[tuple[str, str, str]] = []
+
+        async def send(method, url, *, audience, content=b""):
+            calls.append((method, url, audience))
+            internal = decode_contract(content, InternalOperationRequest)
+            assert internal.operation is InternalOperation.RECOVER
+            assert internal.payload == request.model_dump(mode="json")
+            receipt = HostedRecoveryReceipt(
+                schema_version=HOSTED_RECOVERY_RECEIPT_VERSION,
+                run_id=request.run_id,
+                request_sha256=canonical_sha256(request),
+                snapshot_sha256=canonical_sha256(snapshot),
+                created=True,
+            )
+            response = InternalOperationResponse(
+                schema_version=INTERNAL_OPERATION_RESPONSE_VERSION,
+                request_id=internal.request_id,
+                operation=internal.operation,
+                accepted=True,
+                payload=receipt.model_dump(mode="json"),
+            )
+            return HostedHttpResponse(
+                status_code=HTTPStatus.OK,
+                content=canonical_internal_json_bytes(response),
+            )
+
+        monkeypatch.setattr(transport, "request", send)
+        gateway = HostedRecoveryRunGateway(_api_config(), transport, store)
+        result = await gateway.launch_and_wait_result(request)
+
+        assert result == RecoveryRunLaunchResult(snapshot=snapshot, created=True)
+        assert calls == [
+            (
+                "POST",
+                "https://controller.example.test/internal/v1/recovery-runs",
+                "https://reconcile.invalid/phase5/controller",
+            )
+        ]
+
+    asyncio.run(scenario())
+
+
+def test_recovery_gateway_fails_closed_when_receipt_differs_from_firestore(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def scenario() -> None:
+        store = InMemoryRecoveryRunStore()
+        request, _snapshot, _created = await _terminal_recovery(store)
+        transport = HostedHttpTransport()
+
+        async def send(_method, _url, *, audience, content=b""):
+            del audience
+            internal = decode_contract(content, InternalOperationRequest)
+            receipt = HostedRecoveryReceipt(
+                schema_version=HOSTED_RECOVERY_RECEIPT_VERSION,
+                run_id=request.run_id,
+                request_sha256=canonical_sha256(request),
+                snapshot_sha256="9" * 64,
+                created=True,
+            )
+            response = InternalOperationResponse(
+                schema_version=INTERNAL_OPERATION_RESPONSE_VERSION,
+                request_id=internal.request_id,
+                operation=internal.operation,
+                accepted=True,
+                payload=receipt.model_dump(mode="json"),
+            )
+            return HostedHttpResponse(
+                status_code=HTTPStatus.OK,
+                content=canonical_internal_json_bytes(response),
+            )
+
+        monkeypatch.setattr(transport, "request", send)
+        gateway = HostedRecoveryRunGateway(_api_config(), transport, store)
+        with pytest.raises(HostedRecoveryGatewayError) as captured:
+            await gateway.launch_and_wait_result(request)
+        assert captured.value.__cause__ is None
+
+    asyncio.run(scenario())
+
+
+def test_recovery_gateway_preserves_durable_identity_conflicts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def scenario() -> None:
+        request = make_recovery_run_examples()[0]
+        transport = HostedHttpTransport()
+
+        async def send(_method, _url, *, audience, content=b""):
+            del audience, content
+            return HostedHttpResponse(
+                status_code=HTTPStatus.CONFLICT,
+                content=b'{"code":"operation-conflict"}',
+            )
+
+        monkeypatch.setattr(transport, "request", send)
+        gateway = HostedRecoveryRunGateway(
+            _api_config(),
+            transport,
+            InMemoryRecoveryRunStore(),
+        )
+        with pytest.raises(RecoveryRunConflict) as captured:
+            await gateway.launch_and_wait_result(request)
+        assert captured.value.run_id == request.run_id
 
     asyncio.run(scenario())
 

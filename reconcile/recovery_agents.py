@@ -157,6 +157,60 @@ def _evidence_views(
     return tuple(admitted), tuple(weak), tuple(rejected)
 
 
+def recovery_hypothesis_id_from_hashes(
+    *,
+    chain_sha256: str,
+    node_sha256: str,
+    input_sha256: str,
+    output_sha256: str,
+) -> str:
+    """Bind one Gemini output to sealed chain, node, input, and output hashes."""
+
+    for digest in (
+        chain_sha256,
+        node_sha256,
+        input_sha256,
+        output_sha256,
+    ):
+        if (
+            type(digest) is not str
+            or len(digest) != 64
+            or any(character not in "0123456789abcdef" for character in digest)
+        ):
+            raise ValueError("recovery hypothesis identity requires SHA-256 inputs")
+    identity_material: Mapping[str, JsonValue] = {
+        "chain_sha256": chain_sha256,
+        "input_sha256": input_sha256,
+        "node_sha256": node_sha256,
+        "output_sha256": output_sha256,
+    }
+    return (
+        "hypothesis-"
+        + hashlib.sha256(
+            canonical_json_value_bytes(dict(identity_material))
+        ).hexdigest()[:32]
+    )
+
+
+def recovery_hypothesis_id(
+    *,
+    chain: RecoveryChain,
+    node: RecoveryActionNode,
+    input_sha256: str,
+    output_sha256: str,
+) -> str:
+    """Bind one Gemini output to the exact recovery input, node, and chain."""
+
+    if type(chain) is not RecoveryChain or type(node) is not RecoveryActionNode:
+        raise TypeError("recovery hypothesis identity requires exact chain inputs")
+    return recovery_hypothesis_id_from_hashes(
+        chain_sha256=canonical_sha256(chain),
+        node_sha256=canonical_sha256(node),
+        input_sha256=input_sha256,
+        output_sha256=output_sha256,
+    )
+
+
 def _planner_input(
     *,
     envelope: object,
@@ -465,17 +519,11 @@ class RecoveryAgent:
                     reason="The model cited no retained evidence.",
                 ),
             )
-        identity_material: Mapping[str, JsonValue] = {
-            "chain_sha256": canonical_sha256(chain),
-            "input_sha256": input_sha256,
-            "node_sha256": canonical_sha256(node),
-            "output_sha256": turn.output_sha256,
-        }
-        hypothesis_id = (
-            "hypothesis-"
-            + hashlib.sha256(
-                canonical_json_value_bytes(dict(identity_material))
-            ).hexdigest()[:32]
+        hypothesis_id = recovery_hypothesis_id(
+            chain=chain,
+            node=node,
+            input_sha256=input_sha256,
+            output_sha256=turn.output_sha256,
         )
         try:
             hypothesis = GeminiHypothesis(
@@ -600,5 +648,7 @@ __all__ = [
     "RecoveryHypothesisAgent",
     "RolloutAgent",
     "probe_request_sha256",
+    "recovery_hypothesis_id",
+    "recovery_hypothesis_id_from_hashes",
     "recovery_remaining_budget",
 ]

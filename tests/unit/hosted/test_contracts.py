@@ -47,6 +47,7 @@ def test_internal_operations_are_exact_and_bounded() -> None:
         InternalOperation.EXECUTE_FAULT,
         InternalOperation.READ_EVIDENCE,
         InternalOperation.CLEANUP,
+        InternalOperation.RECOVER,
     )
     assert MAX_INTERNAL_PAYLOAD_BYTES == 16_384
 

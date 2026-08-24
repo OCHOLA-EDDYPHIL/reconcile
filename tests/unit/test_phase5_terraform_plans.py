@@ -10,9 +10,35 @@ from typing import Any
 
 import pytest
 
+from reconcile.hosted.provider import (
+    HOSTED_CANDIDATE_IDENTITY_VERSION,
+    HostedCandidateIdentity,
+)
 from scripts import check_phase5_terraform_plans as plans
 
 pytestmark = pytest.mark.unit
+
+
+def test_recovery_payload_hash_is_the_canonical_hosted_candidate_identity() -> None:
+    candidate = HostedCandidateIdentity(
+        schema_version=HOSTED_CANDIDATE_IDENTITY_VERSION,
+        source_revision=plans._SOURCE_REVISION,
+        image_digest=plans._IMAGE_DIGEST,
+        infrastructure_revision=plans._INFRASTRUCTURE_REVISION,
+        semantic_config_sha256=plans._SEMANTIC_CONFIG_SHA256,
+        project_id=plans._PROJECT,
+        vertex_location="us",
+        configured_model="gemini-3.5-flash",
+        prompt_version=plans._VERTEX_PROMPT_VERSION,
+        prompt_sha256=plans._VERTEX_PROMPT_SHA256,
+        maximum_input_tokens=12_000,
+        maximum_output_tokens=1_024,
+        thinking_level="MINIMAL",
+        maximum_count_tokens_attempts=1,
+        maximum_generation_attempts=1,
+    )
+
+    assert plans._RECOVERY_PAYLOAD_SHA256 == candidate.sha256
 
 
 def test_subprocess_failure_includes_bounded_diagnostics(

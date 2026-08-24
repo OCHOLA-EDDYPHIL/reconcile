@@ -301,6 +301,7 @@ def _runtime_values(repo_root: Path, image_digest: str) -> set[str]:
         image_digest,
         immutable_reference,
         infrastructure,
+        operator._canonical_utc_timestamp(_NOW),
         semantic.sha256,
         prompt_version,
         prompt_sha,
@@ -791,6 +792,12 @@ def _records(
 def _legacy_image_id_manifest(
     manifest: operator.Phase5ApprovalManifest,
 ) -> operator.Phase5ApprovalManifest:
+    runtime_source_sha256, runtime_variables_sha256 = (
+        operator._runtime_acceptance_hashes(
+            manifest.terraform_stacks,
+            manifest.terraform_plans,
+        )
+    )
     values = {
         name: getattr(manifest, name)
         for name in type(manifest).model_fields
@@ -801,6 +808,8 @@ def _legacy_image_id_manifest(
         manifest.image_digest,
         manifest.infrastructure_revision,
         manifest.semantic_config_sha256,
+        runtime_source_sha256=runtime_source_sha256,
+        runtime_variables_sha256=runtime_variables_sha256,
         state_root=Path(manifest.operator_state_root),
         image_archive=Path(manifest.image_artifact.archive_path),
         image_identity_format="--format={{.Id}}",
@@ -1295,6 +1304,25 @@ def test_manifest_freezes_exact_identity_limits_estimates_and_commands(
         "provider",
     )
     assert provider.commands[0][:4] == (operator._PYTHON, "-P", "-S", "-m")
+    runtime_stack = next(
+        item for item in manifest.terraform_stacks if item.stack == "runtime"
+    )
+    runtime_apply = manifest.terraform_plan_for(operator.Phase5Action.RUNTIME_APPLY)
+    assert runtime_apply is not None
+    for action, mode, timeout in (
+        (operator.Phase5Action.PROVIDER_ACCEPTANCE, "provider", 3_600),
+        (operator.Phase5Action.HOSTED_ACCEPTANCE, "hosted", 14_400),
+    ):
+        descriptor = manifest.command_for(action)
+        command = descriptor.commands[0]
+        assert command[4:6] == ("scripts.check_phase5_hosted_acceptance", mode)
+        assert command[command.index("--runtime-source-sha256") + 1] == (
+            runtime_stack.sources.sha256
+        )
+        assert command[command.index("--runtime-variables-sha256") + 1] == (
+            runtime_apply.variables_sha256
+        )
+        assert descriptor.timeout_seconds == timeout
     assert manifest.python_interpreter == operator._PYTHON
     assert manifest.python_interpreter_sha256 == operator._PYTHON_SHA256
     assert manifest.terraform_executable == operator._TERRAFORM
@@ -2931,6 +2959,7 @@ def test_snapshot_checkers_use_pinned_python_and_reverify_before_terraform(
     runtime_identity = {
         "image_digest": f"sha256:{'b' * 64}",
         "infrastructure_revision": "c" * 64,
+        "recovery_definition_created_at": "2026-08-24T00:00:00Z",
         "semantic_config_sha256": "d" * 64,
         "source_revision": _SOURCE,
         "vertex_prompt_sha256": "e" * 64,

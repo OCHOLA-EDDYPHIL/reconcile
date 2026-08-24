@@ -12,7 +12,11 @@ import pytest
 from fastapi.testclient import TestClient
 
 from reconcile.contracts.codec import decode_contract
-from reconcile.hosted.apps import InternalOperationDenied, create_component_app
+from reconcile.hosted.apps import (
+    InternalOperationConflict,
+    InternalOperationDenied,
+    create_component_app,
+)
 from reconcile.hosted.config import Component, HostedConfig
 from reconcile.hosted.contracts import (
     INTERNAL_OPERATION_REQUEST_VERSION,
@@ -146,6 +150,11 @@ def _post(
             InternalOperation.INVESTIGATE,
         ),
         (
+            Component.CONTROLLER,
+            "/internal/v1/recovery-runs",
+            InternalOperation.RECOVER,
+        ),
+        (
             Component.FAULT_PROXY,
             "/internal/v1/faults",
             InternalOperation.EXECUTE_FAULT,
@@ -219,6 +228,11 @@ def test_each_allowed_handler_receives_exact_caller_and_request(
             InternalOperation.INVESTIGATE,
         ),
         (
+            Component.CONTROLLER,
+            "/internal/v1/recovery-runs",
+            InternalOperation.RECOVER,
+        ),
+        (
             Component.FAULT_PROXY,
             "/internal/v1/faults",
             InternalOperation.EXECUTE_FAULT,
@@ -267,6 +281,7 @@ def test_every_missing_allowed_handler_retains_the_exact_placeholder(
     (
         (Component.API, InternalOperation.INVESTIGATE),
         (Component.CONTROLLER, InternalOperation.CLEANUP),
+        (Component.FAULT_PROXY, InternalOperation.RECOVER),
         (Component.FAULT_PROXY, InternalOperation.INVESTIGATE),
         (Component.SANDBOX, InternalOperation.INVESTIGATE),
         (Component.SANDBOX, InternalOperation.READ_EVIDENCE),
@@ -329,6 +344,11 @@ def test_handler_mapping_and_entries_are_strict() -> None:
             HTTPStatus.SERVICE_UNAVAILABLE,
             b'{"code":"operation-unavailable"}',
         ),
+        (
+            "raised-conflict",
+            HTTPStatus.CONFLICT,
+            b'{"code":"operation-conflict"}',
+        ),
     ),
 )
 def test_handler_denial_and_failure_are_sanitized_and_not_cached(
@@ -346,6 +366,8 @@ def test_handler_denial_and_failure_are_sanitized_and_not_cached(
             return denied
         if failure == "raised-denial":
             raise InternalOperationDenied
+        if failure == "raised-conflict":
+            raise InternalOperationConflict
         raise RuntimeError("private dependency failure")
 
     application = create_component_app(

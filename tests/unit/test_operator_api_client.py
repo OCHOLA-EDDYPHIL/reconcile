@@ -1247,6 +1247,7 @@ def test_client_disables_environment_proxy_redirects_and_bounds_timeouts(
     assert client._client.timeout.connect == 5.0
     assert client._client.timeout.read == 10.0
     assert client._launch_timeout.read == 20.0
+    assert client._recovery_launch_timeout.read == 270.0
     assert client._event_timeout.read is None
     asyncio.run(client.aclose())
 

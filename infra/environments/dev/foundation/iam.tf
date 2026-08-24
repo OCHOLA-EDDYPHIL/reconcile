@@ -1,5 +1,5 @@
 resource "google_project_iam_member" "runtime_database_user" {
-  for_each = toset(["api", "controller"])
+  for_each = toset(["api", "controller", "fault_proxy"])
 
   project = var.project_id
   role    = "roles/datastore.user"
@@ -17,7 +17,7 @@ resource "google_project_iam_member" "runtime_database_user" {
 }
 
 resource "google_project_iam_member" "runtime_database_viewer" {
-  for_each = toset(["fault_proxy", "sandbox"])
+  for_each = toset(["sandbox"])
 
   project = var.project_id
   role    = "roles/datastore.viewer"

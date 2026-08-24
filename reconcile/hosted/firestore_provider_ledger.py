@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 from enum import StrEnum
 from typing import Literal, Never, Protocol
 from uuid import uuid4
@@ -43,6 +44,37 @@ class HostedProviderLedgerState(StrEnum):
     GENERATION_USAGE_RECORDED = "generation-usage-recorded"
     GENERATION_FAILED = "generation-failed"
     FINALIZED = "finalized"
+
+
+class HostedProviderLedgerObservation(StrictModel):
+    """Sanitized proof that the candidate's sole generation was finalized."""
+
+    schema_version: Literal["reconcile/hosted-provider-ledger-observation/v1"]
+    candidate_id: Identifier
+    candidate_sha256: Sha256Digest
+    state: Literal["finalized"]
+    revision: Literal[4]
+    count_attempts: Literal[1] = 1
+    generation_attempts: Literal[1] = 1
+    dispatch: HostedProviderDispatch
+    dispatch_sha256: Sha256Digest
+    count_usage: HostedCountTokensUsage
+    generation_usage: HostedGenerationUsage
+    planner_outcome: Literal[HostedPlannerOutcome.SUCCEEDED]
+    output_sha256: Sha256Digest
+    reported_model: Identifier
+    reported_model_raw_sha256: Sha256Digest
+    record_sha256: Sha256Digest
+
+    @model_validator(mode="after")
+    def validate_candidate(self) -> HostedProviderLedgerObservation:
+        if (
+            self.candidate_id != f"candidate-{self.candidate_sha256}"
+            or self.dispatch_sha256
+            != hashlib.sha256(canonical_json_bytes(self.dispatch)).hexdigest()
+        ):
+            raise ValueError("provider ledger observation changed candidate identity")
+        return self
 
 
 class _ProviderLedgerDocument(StrictModel):
@@ -266,6 +298,22 @@ class FirestoreHostedProviderLedger:
         if record.candidate_id != candidate_id:
             _ledger_failure()
         return snapshot, record
+
+    async def is_absent(self, candidate: HostedCandidateIdentity) -> bool:
+        """Prove that no candidate-wide provider allowance has been consumed."""
+
+        if type(candidate) is not HostedCandidateIdentity:
+            _ledger_failure()
+        try:
+            snapshot = await self._cas_store.read(
+                FirestoreCasCollection.PROVIDER_CANDIDATE,
+                candidate.candidate_id,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            _ledger_failure()
+        return snapshot is None
 
     async def _create(
         self,
@@ -520,9 +568,53 @@ class FirestoreHostedProviderLedger:
             _ledger_failure()
         await self._update(snapshot, replacement)
 
+    async def observe_finalized(
+        self,
+        candidate: HostedCandidateIdentity,
+    ) -> HostedProviderLedgerObservation:
+        """Read one successful terminal ledger without exposing reservation IDs."""
+
+        if type(candidate) is not HostedCandidateIdentity:
+            _ledger_failure()
+        _snapshot, current = await self._load(candidate.candidate_id)
+        if (
+            current.candidate != candidate
+            or current.state is not HostedProviderLedgerState.FINALIZED
+            or current.revision != 4
+            or current.count_usage is None
+            or current.generation_usage is None
+            or current.planner_outcome is not HostedPlannerOutcome.SUCCEEDED
+            or current.output_sha256 is None
+            or current.reported_model is None
+            or current.reported_model_raw_sha256 is None
+        ):
+            _ledger_failure()
+        try:
+            return HostedProviderLedgerObservation(
+                schema_version="reconcile/hosted-provider-ledger-observation/v1",
+                candidate_id=current.candidate_id,
+                candidate_sha256=candidate.sha256,
+                state="finalized",
+                revision=4,
+                dispatch=current.dispatch,
+                dispatch_sha256=hashlib.sha256(
+                    canonical_json_bytes(current.dispatch)
+                ).hexdigest(),
+                count_usage=current.count_usage,
+                generation_usage=current.generation_usage,
+                planner_outcome=HostedPlannerOutcome.SUCCEEDED,
+                output_sha256=current.output_sha256,
+                reported_model=current.reported_model,
+                reported_model_raw_sha256=current.reported_model_raw_sha256,
+                record_sha256=hashlib.sha256(canonical_json_bytes(current)).hexdigest(),
+            )
+        except (TypeError, ValueError):
+            _ledger_failure()
+
 
 __all__ = [
     "HOSTED_PROVIDER_LEDGER_DOCUMENT_VERSION",
     "FirestoreHostedProviderLedger",
+    "HostedProviderLedgerObservation",
     "HostedProviderLedgerState",
 ]

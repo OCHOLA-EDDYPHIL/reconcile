@@ -24,6 +24,11 @@ from reconcile.adapters.storage import STORAGE_CAPABILITY_NAME, STORAGE_TARGET_K
 from reconcile.contracts import (
     BOUNDED_HYBRID_ROUTE_POLICY_VERSION,
     EXECUTION_ENVELOPE_SUMMARY_VERSION,
+    RECOVERY_DISPATCH_RECEIPT_VERSION,
+    RECOVERY_POLICY_RESULT_VERSION,
+    RECOVERY_RESET_RESULT_VERSION,
+    RECOVERY_RUN_EVENT_VERSION,
+    RECOVERY_RUN_REQUEST_VERSION,
     SCENARIO_LAUNCH_REQUEST_VERSION,
     SCENARIO_OPERATIONAL_STATUS_VERSION,
     SCENARIO_RUN_EVENT_VERSION,
@@ -50,6 +55,23 @@ from reconcile.contracts import (
     ProbeOutcome,
     ProbeRequestDisposition,
     ProbeRequestEventPayload,
+    RecoveryCloudRunObservation,
+    RecoveryDecision,
+    RecoveryDispatchOutcome,
+    RecoveryDispatchReceipt,
+    RecoveryFirestoreObservation,
+    RecoveryMutationCounters,
+    RecoveryPolicyResult,
+    RecoveryReceiptOutcome,
+    RecoveryResetResult,
+    RecoveryRunEvent,
+    RecoveryRunEventPayload,
+    RecoveryRunEventType,
+    RecoveryRunFault,
+    RecoveryRunLifecycle,
+    RecoveryRunPolicy,
+    RecoveryRunRequest,
+    RecoveryTimelineEntry,
     SanitizedDeterministicProof,
     SanitizedEffectFinding,
     SanitizedEvidenceSummary,
@@ -79,11 +101,29 @@ from reconcile.contracts import (
     canonical_json_bytes,
 )
 from reconcile.evidence.classification import _action_gates
-from reconcile.interfaces.operator_api_client import ScenarioLaunchResult
+from reconcile.hosted.firestore_provider_ledger import HostedProviderLedgerObservation
+from reconcile.hosted.provider import (
+    HostedCountTokensUsage,
+    HostedGenerationUsage,
+    HostedPlannerOutcome,
+    HostedProviderDispatch,
+)
+from reconcile.interfaces.api_client import InvestigationNotFoundError
+from reconcile.interfaces.operator_api_client import (
+    LaunchOutcomeUnknownError,
+    RecoveryLaunchResult,
+    ScenarioLaunchResult,
+)
+from reconcile.persistence.recovery_runs import (
+    RecoveryRunAggregate,
+    apply_recovery_event,
+    create_recovery_run_aggregate,
+)
 from reconcile.phase5_hosted_acceptance import (
     PHASE5_HOSTED_ACCEPTANCE_VERSION,
     AcceptanceLimitation,
     AcceptanceMode,
+    CanaryReprovisionObservation,
     CandidateIdentity,
     CloudRunAcceptanceBackend,
     CursorResumeObservation,
@@ -95,6 +135,7 @@ from reconcile.phase5_hosted_acceptance import (
     HostedAcceptanceRecord,
     InterfaceParityObservation,
     LifecycleDiagnostics,
+    RecoveryLaneAcceptanceObservation,
     ScenarioAcceptanceObservation,
     ServiceComponent,
     ServiceDeploymentObservation,
@@ -107,6 +148,10 @@ from reconcile.phase5_hosted_acceptance import (
     run_hosted_acceptance,
     run_provider_acceptance,
 )
+from reconcile.recovery_agents import recovery_hypothesis_id_from_hashes
+from reconcile.recovery_scenario import (
+    recovery_experiment_binding,
+)
 from reconcile.scenarios.firestore_business import FIRESTORE_BUSINESS_EFFECT_IDS
 from reconcile.scenarios.sandbox_order import (
     SANDBOX_ORDER_AGGREGATE_CAPABILITY_NAME,
@@ -114,6 +159,7 @@ from reconcile.scenarios.sandbox_order import (
     SANDBOX_ORDER_INGRESS_CAPABILITY_NAME,
 )
 from reconcile.scenarios.storage import STORAGE_EFFECT_ID
+from tests.contract._factories import make_recovery_examples, make_report
 
 pytestmark = pytest.mark.unit
 
@@ -637,9 +683,12 @@ def _observation(
 
 def _deployments(
     candidate: CandidateIdentity,
+    *,
+    canary_service_uid: str = "reconcile-p5-canary-uid",
 ) -> tuple[ServiceDeploymentObservation, ...]:
     accounts = {
         ServiceComponent.API: f"rec-p5-api@{PROJECT}.iam.gserviceaccount.com",
+        ServiceComponent.CANARY: f"rec-p5-canary@{PROJECT}.iam.gserviceaccount.com",
         ServiceComponent.CONTROLLER: (
             f"rec-p5-controller@{PROJECT}.iam.gserviceaccount.com"
         ),
@@ -648,12 +697,14 @@ def _deployments(
     }
     names = {
         ServiceComponent.API: "reconcile-p5-api",
+        ServiceComponent.CANARY: "reconcile-p5-canary",
         ServiceComponent.CONTROLLER: "reconcile-p5-controller",
         ServiceComponent.FAULT_PROXY: "reconcile-p5-fault-proxy",
         ServiceComponent.SANDBOX: "reconcile-p5-sandbox",
     }
     audiences = {
         ServiceComponent.API: f"https://reconcile.invalid/phase5/{PROJECT}/api",
+        ServiceComponent.CANARY: (f"https://reconcile.invalid/phase5/{PROJECT}/canary"),
         ServiceComponent.CONTROLLER: (
             f"https://reconcile.invalid/phase5/{PROJECT}/controller"
         ),
@@ -669,6 +720,11 @@ def _deployments(
         ServiceDeploymentObservation(
             component=component,
             service_name=names[component],
+            service_uid=(
+                canary_service_uid
+                if component is ServiceComponent.CANARY
+                else f"{names[component]}-uid"
+            ),
             uri=f"https://{names[component]}.example.test",
             custom_audience=audiences[component],
             generation=1,
@@ -700,13 +756,426 @@ def _deployments(
     )
 
 
+def _provider_ledger(candidate: CandidateIdentity) -> HostedProviderLedgerObservation:
+    hosted_candidate = acceptance_module._hosted_candidate_identity(candidate)
+    dispatch = HostedProviderDispatch(
+        schema_version="reconcile/hosted-provider-dispatch/v1",
+        input_sha256=SHA_B,
+        count_request_sha256="d" * 64,
+        generation_request_sha256="e" * 64,
+        request_byte_count=512,
+    )
+    return HostedProviderLedgerObservation(
+        schema_version="reconcile/hosted-provider-ledger-observation/v1",
+        candidate_id=hosted_candidate.candidate_id,
+        candidate_sha256=hosted_candidate.sha256,
+        state="finalized",
+        revision=4,
+        dispatch=dispatch,
+        dispatch_sha256=hashlib.sha256(canonical_json_bytes(dispatch)).hexdigest(),
+        count_usage=HostedCountTokensUsage(
+            total_tokens=256,
+            cached_content_tokens=0,
+        ),
+        generation_usage=HostedGenerationUsage(
+            prompt_tokens=256,
+            candidates_tokens=32,
+            thoughts_tokens=16,
+            tool_use_prompt_tokens=0,
+            cached_content_tokens=0,
+            total_tokens=304,
+            traffic_type="ON_DEMAND",
+        ),
+        planner_outcome=HostedPlannerOutcome.SUCCEEDED,
+        output_sha256=SHA_C,
+        reported_model="gemini-3.5-flash",
+        reported_model_raw_sha256="f" * 64,
+        record_sha256="0" * 64,
+    )
+
+
+def _terminal_recovery_aggregate() -> RecoveryRunAggregate:
+    chain, _hypothesis, _certificate, witness, _permit = make_recovery_examples()
+    report = make_report(Classification.COMMITTED)
+    request = RecoveryRunRequest(
+        schema_version=RECOVERY_RUN_REQUEST_VERSION,
+        run_id="hosted-launch-reconciliation",
+        scenario="cloud-run-rollout",
+        policy=RecoveryRunPolicy.FIXED,
+        fault=RecoveryRunFault.NO_FAULT,
+    )
+    aggregate = create_recovery_run_aggregate(
+        request,
+        chain,
+        created_at=NOW,
+    )
+    snapshot = aggregate.snapshot
+    events = list(aggregate.events)
+    payloads = (
+        (
+            RecoveryRunEventType.LIFECYCLE,
+            RecoveryRunEventPayload(lifecycle=RecoveryRunLifecycle.RUNNING),
+        ),
+        (
+            RecoveryRunEventType.EVIDENCE,
+            RecoveryRunEventPayload(report=report),
+        ),
+        (
+            RecoveryRunEventType.DECISION,
+            RecoveryRunEventPayload(
+                decision=RecoveryDecision.ESCALATE,
+                witness=witness,
+            ),
+        ),
+        (
+            RecoveryRunEventType.LIFECYCLE,
+            RecoveryRunEventPayload(lifecycle=RecoveryRunLifecycle.ESCALATED),
+        ),
+    )
+    for offset, (event_type, payload) in enumerate(payloads, start=6):
+        event = RecoveryRunEvent(
+            schema_version=RECOVERY_RUN_EVENT_VERSION,
+            run_id=request.run_id,
+            cursor=snapshot.event_cursor + 1,
+            type=event_type,
+            occurred_at=NOW + timedelta(seconds=offset),
+            payload=payload,
+        )
+        events.append(event)
+        snapshot = apply_recovery_event(snapshot, event)
+    return RecoveryRunAggregate(
+        schema_version=aggregate.schema_version,
+        snapshot=snapshot,
+        events=tuple(events),
+    )
+
+
+class _RecoveryLaunchClient:
+    def __init__(
+        self,
+        aggregate: RecoveryRunAggregate,
+        *,
+        launches: list[RecoveryLaunchResult | Exception],
+        reads: list[object | Exception],
+    ) -> None:
+        self.aggregate = aggregate
+        self.launches = launches
+        self.reads = reads
+        self.launch_calls = 0
+        self.read_calls = 0
+        self.event_calls: list[int] = []
+
+    async def launch_recovery(self, _request):
+        self.launch_calls += 1
+        outcome = self.launches.pop(0)
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
+
+    async def get_recovery_snapshot(self, _run_id):
+        self.read_calls += 1
+        outcome = self.reads.pop(0) if self.reads else self.aggregate.snapshot
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
+
+    async def recovery_events(self, _run_id, *, after=0):
+        self.event_calls.append(after)
+        for event in self.aggregate.events:
+            if event.cursor > after:
+                yield event
+
+
+def _recovery_result(
+    *,
+    candidate: CandidateIdentity,
+    policy: RecoveryRunPolicy,
+    fault: RecoveryRunFault,
+    purpose: str,
+    service_uid: str,
+) -> RecoveryPolicyResult:
+    settings = acceptance_module._candidate_release_settings(candidate)
+    binding = recovery_experiment_binding(settings, fault)
+    run_id = acceptance_module._recovery_run_id(
+        policy=policy,
+        fault=fault,
+        purpose=purpose,
+        service_uid=service_uid,
+        candidate_sha256=candidate.candidate_sha256,
+    )
+    blind_retry = policy is RecoveryRunPolicy.BLIND_RETRY
+    blind_abort = policy is RecoveryRunPolicy.BLIND_ABORT
+    proof_policy = policy in {RecoveryRunPolicy.FIXED, RecoveryRunPolicy.ADAPTIVE}
+    suppressed = fault is RecoveryRunFault.SUPPRESS_BEFORE_DISPATCH
+    intended_revision = settings.staged_revision
+    duplicate_revision = settings.revision_for_operation(
+        f"{settings.stage_operation_id}-retry"
+    )
+    serving_revision = (
+        "reconcile-p5-canary-baseline"
+        if blind_abort
+        else duplicate_revision
+        if blind_retry
+        else intended_revision
+    )
+    release_revisions = (
+        (intended_revision, duplicate_revision) if blind_retry else (intended_revision,)
+    )
+    receipts: tuple[RecoveryDispatchReceipt, ...] = ()
+    if suppressed:
+        receipts = (
+            RecoveryDispatchReceipt(
+                schema_version=RECOVERY_DISPATCH_RECEIPT_VERSION,
+                receipt_id=f"receipt-suppressed-{run_id}",
+                run_id=run_id,
+                release_id=settings.release_id,
+                node_id="record",
+                semantic_action_sha256="6" * 64,
+                action_request_sha256="7" * 64,
+                authority_id=f"permit-suppressed-{run_id}",
+                claim_id=f"claim-suppressed-{run_id}",
+                attempt=1,
+                provider_contact=False,
+                outcome=RecoveryReceiptOutcome.SUPPRESSED_BEFORE_DISPATCH,
+                recorded_at=NOW,
+            ),
+            RecoveryDispatchReceipt(
+                schema_version=RECOVERY_DISPATCH_RECEIPT_VERSION,
+                receipt_id=f"receipt-contacted-{run_id}",
+                run_id=run_id,
+                release_id=settings.release_id,
+                node_id="record",
+                semantic_action_sha256="6" * 64,
+                action_request_sha256="7" * 64,
+                authority_id=f"permit-contacted-{run_id}",
+                claim_id=f"claim-contacted-{run_id}",
+                attempt=2,
+                provider_contact=True,
+                outcome=RecoveryReceiptOutcome.PROVIDER_CONTACTED,
+                recorded_at=NOW,
+            ),
+        )
+    elif proof_policy and fault in {
+        RecoveryRunFault.DROP_AFTER_ACCEPT,
+        RecoveryRunFault.NO_FAULT,
+    }:
+        receipts = (
+            RecoveryDispatchReceipt(
+                schema_version=RECOVERY_DISPATCH_RECEIPT_VERSION,
+                receipt_id=f"receipt-replay-denied-{run_id}",
+                run_id=run_id,
+                release_id=settings.release_id,
+                node_id="stage",
+                semantic_action_sha256="6" * 64,
+                action_request_sha256="7" * 64,
+                authority_id=f"launch-replay-{run_id}",
+                claim_id=f"claim-replay-{run_id}",
+                attempt=1,
+                provider_contact=False,
+                outcome=RecoveryReceiptOutcome.REJECTED_BEFORE_PROVIDER_CONTACT,
+                recorded_at=NOW,
+            ),
+        )
+    return RecoveryPolicyResult(
+        schema_version=RECOVERY_POLICY_RESULT_VERSION,
+        run_id=run_id,
+        policy=policy.value,
+        fault=fault.value,
+        target_sha256=binding.target_sha256,
+        input_intent_sha256=binding.input_intent_sha256,
+        fault_boundary_sha256=binding.fault_boundary_sha256,
+        observation_catalog_sha256=binding.observation_catalog_sha256,
+        chain_completed=not blind_abort,
+        terminal_disposition="ABORTED" if blind_abort else "COMPLETED",
+        counters=RecoveryMutationCounters(
+            revisions_created=2 if blind_retry else 1,
+            promotions_accepted=0 if blind_abort else 1,
+            release_records_created=0 if blind_abort else 1,
+            provider_contacts=4 if blind_retry else 1 if blind_abort else 3,
+            continue_permits_issued=2 if proof_policy else 0,
+            retry_permits_issued=1 if suppressed else 0,
+            retry_permits_consumed=1 if suppressed else 0,
+            action_permits_consumed=(3 if suppressed else 2) if proof_policy else 0,
+        ),
+        cloud_run=RecoveryCloudRunObservation(
+            baseline_revision="reconcile-p5-canary-baseline",
+            intended_revision=intended_revision,
+            release_revisions=release_revisions,
+            serving_revision=serving_revision,
+            serving_percent=100,
+            observed_service_etag_sha256="5" * 64,
+        ),
+        firestore=RecoveryFirestoreObservation(
+            release_id=settings.release_id,
+            document_path=f"releases/{settings.release_id}",
+            expected_payload_sha256=settings.payload_sha256,
+            expected_semantic_action_sha256="6" * 64,
+            payload_sha256=None if blind_abort else settings.payload_sha256,
+            semantic_action_sha256=None if blind_abort else "6" * 64,
+            exists=not blind_abort,
+            cloud_run_revision=None if blind_abort else serving_revision,
+        ),
+        dispatch_receipts=receipts,
+        timeline=(
+            RecoveryTimelineEntry(
+                sequence=1,
+                node_id="release",
+                event="policy-finished",
+                detail="The isolated lane reached its recorded terminal outcome.",
+            ),
+        ),
+        certificate_sha256s=("9" * 64,) if proof_policy else (),
+        witness_sha256s=(),
+    )
+
+
+def _recovery_lane(
+    *,
+    candidate: CandidateIdentity,
+    policy: RecoveryRunPolicy,
+    fault: RecoveryRunFault,
+    purpose: str,
+    previous_service_uid: str,
+    service_uid: str,
+) -> RecoveryLaneAcceptanceObservation:
+    result = _recovery_result(
+        candidate=candidate,
+        policy=policy,
+        fault=fault,
+        purpose=purpose,
+        service_uid=service_uid,
+    )
+    reprovision = CanaryReprovisionObservation(
+        previous_service_uid=previous_service_uid,
+        service_uid=service_uid,
+        baseline_revision=result.cloud_run.baseline_revision,
+        revision_names=(result.cloud_run.baseline_revision,),
+        release_id=result.firestore.release_id,
+        changed_resource_addresses=acceptance_module._CANARY_REPROVISION_ADDRESSES,
+        execution_plan_sha256="a" * 64,
+        normalized_plan_sha256="b" * 64,
+        observed_at=NOW,
+    )
+    reset = RecoveryResetResult(
+        schema_version=RECOVERY_RESET_RESULT_VERSION,
+        release_id=result.firestore.release_id,
+        baseline_revision=result.cloud_run.baseline_revision,
+        serving_revision=result.cloud_run.baseline_revision,
+        serving_percent=100,
+        release_record_absent=True,
+        release_revisions_before=result.cloud_run.release_revisions,
+        release_revisions_after=result.cloud_run.release_revisions,
+        reset_operation_name_sha256="c" * 64,
+        verified_at=NOW,
+    )
+    if policy is RecoveryRunPolicy.ADAPTIVE:
+        chain_sha256 = "d" * 64
+        node_sha256 = "e" * 64
+        hypothesis_id = recovery_hypothesis_id_from_hashes(
+            chain_sha256=chain_sha256,
+            node_sha256=node_sha256,
+            input_sha256=SHA_B,
+            output_sha256=SHA_C,
+        )
+        hypothesis_values = {
+            "provider_hypothesis_count": 1,
+            "hypothesis_id": hypothesis_id,
+            "hypothesis_chain_sha256": chain_sha256,
+            "hypothesis_node_sha256": node_sha256,
+            "hypothesis_input_sha256": SHA_B,
+            "hypothesis_output_sha256": SHA_C,
+        }
+    else:
+        hypothesis_values = {"provider_hypothesis_count": 0}
+    proof_policy = policy in {RecoveryRunPolicy.FIXED, RecoveryRunPolicy.ADAPTIVE}
+    api_values = (
+        {
+            "launch_created": True,
+            "replay_created": False,
+            "request_sha256": "1" * 64,
+            "snapshot_sha256": "2" * 64,
+            "replay_snapshot_sha256": "2" * 64,
+            "events_sha256": "3" * 64,
+            "event_count": 7,
+            "replay_provider_contact_delta": 0,
+        }
+        if proof_policy
+        else {"event_count": 0}
+    )
+    return RecoveryLaneAcceptanceObservation(
+        purpose=purpose,
+        reprovision=reprovision,
+        result=result,
+        reset=reset,
+        acknowledgement_lost=fault is RecoveryRunFault.DROP_AFTER_ACCEPT,
+        launch_outcome=(
+            None
+            if not proof_policy
+            else RecoveryDispatchOutcome.OUTCOME_UNKNOWN
+            if fault is RecoveryRunFault.DROP_AFTER_ACCEPT
+            else RecoveryDispatchOutcome.SUCCEEDED
+        ),
+        live_authority_replay_denial_count=(
+            1
+            if proof_policy
+            and fault in {RecoveryRunFault.DROP_AFTER_ACCEPT, RecoveryRunFault.NO_FAULT}
+            else 0
+        ),
+        **api_values,
+        **hypothesis_values,
+    )
+
+
 class _Backend:
-    def __init__(self) -> None:
+    def __init__(self, *, hosted: bool = False) -> None:
         self.calls: list[tuple[str, object]] = []
+        self.candidate: CandidateIdentity | None = None
+        self.recovery_count = 0
+        self.hosted = hosted
 
     async def deployments(self, candidate):
         self.calls.append(("deployments", candidate))
-        return _deployments(candidate)
+        self.candidate = candidate
+        return _deployments(
+            candidate,
+            canary_service_uid=(
+                "canary-provider-uid" if self.hosted else "reconcile-p5-canary-uid"
+            ),
+        )
+
+    async def provider_ledger_absent(self):
+        self.calls.append(("provider-ledger-absent", True))
+        return True
+
+    async def recovery_lane(self, *, policy, fault, purpose):
+        self.calls.append(("recovery", (policy, fault, purpose)))
+        if self.candidate is None:
+            raise AssertionError("deployments must bind the candidate first")
+        self.recovery_count += 1
+        if policy is RecoveryRunPolicy.ADAPTIVE:
+            previous_uid = "reconcile-p5-canary-uid"
+            service_uid = "canary-provider-uid"
+        else:
+            previous_uid = (
+                "canary-provider-uid"
+                if self.recovery_count == 1
+                else f"canary-hosted-{self.recovery_count - 1}-uid"
+            )
+            service_uid = f"canary-hosted-{self.recovery_count}-uid"
+        return _recovery_lane(
+            candidate=self.candidate,
+            policy=policy,
+            fault=fault,
+            purpose=purpose,
+            previous_service_uid=previous_uid,
+            service_uid=service_uid,
+        )
+
+    async def provider_ledger(self):
+        self.calls.append(("provider-ledger", True))
+        if self.candidate is None:
+            raise AssertionError("deployments must bind the candidate first")
+        return _provider_ledger(self.candidate)
 
     async def scenario(self, request, *, purpose: str):
         self.calls.append(("scenario", (request.scenario, request.mode)))
@@ -828,15 +1297,30 @@ def test_provider_seals_one_canonical_owner_only_record(tmp_path: Path) -> None:
     record, observed_binding = read_provider_record(root, candidate)
     assert canonical_json_bytes(record) == payload
     assert observed_binding == binding
-    assert record.scenario.request.mode is ScenarioRunMode.ADAPTIVE
-    assert record.scenario.snapshot.report is not None
-    assert record.scenario.snapshot.report.classification is Classification.UNKNOWN
+    assert record.provider_ledger_absent_before
+    assert record.adaptive_recovery.result.policy == RecoveryRunPolicy.ADAPTIVE.value
+    assert (
+        record.adaptive_recovery.result.fault
+        == RecoveryRunFault.DROP_AFTER_ACCEPT.value
+    )
+    assert record.provider_ledger.generation_attempts == 1
+    assert record.adaptive_recovery.live_authority_replay_denial_count == 1
+    assert (
+        record.provider_ledger.dispatch.input_sha256
+        == record.adaptive_recovery.hypothesis_input_sha256
+    )
+    assert (
+        record.provider_ledger.output_sha256
+        == record.adaptive_recovery.hypothesis_output_sha256
+    )
     assert record.limitations[-1] is (
         AcceptanceLimitation.LIFECYCLE_DIAGNOSTICS_UNAVAILABLE
     )
     assert [item[0] for item in backend.calls] == [
         "deployments",
-        "scenario",
+        "provider-ledger-absent",
+        "recovery",
+        "provider-ledger",
         "diagnostics",
     ]
     second_backend = _Backend()
@@ -852,62 +1336,106 @@ def test_provider_seals_one_canonical_owner_only_record(tmp_path: Path) -> None:
     assert second_backend.calls == []
 
 
-def test_provider_fixed_fallback_proves_no_planner_invocation(tmp_path: Path) -> None:
-    class FallbackBackend(_Backend):
-        def __init__(self, *, planner_invoked: bool) -> None:
-            super().__init__()
-            self.planner_invoked = planner_invoked
+def test_provider_rejects_a_generation_ledger_unbound_from_adaptive_recovery(
+    tmp_path: Path,
+) -> None:
+    class UnboundLedgerBackend(_Backend):
+        async def provider_ledger(self):
+            ledger = await super().provider_ledger()
+            return ledger.model_copy(update={"output_sha256": "a" * 64})
 
-        async def scenario(self, request, *, purpose: str):
-            self.calls.append(("scenario", (request.scenario, request.mode)))
-            route = ScenarioRouteProvenance(
-                policy_version=BOUNDED_HYBRID_ROUTE_POLICY_VERSION,
-                route=ScenarioHybridRoute.PLANNER_HETEROGENEOUS,
-                outcome=ScenarioHybridOutcome.FIXED_FALLBACK,
-                planner_invoked=self.planner_invoked,
-                fixed_connector_invoked=True,
-                provider_failure=True,
-                provider_cleanup_failure=False,
-            )
-            return _observation(
-                request,
-                purpose,
-                Classification.UNKNOWN,
-                route,
-                capabilities=(
-                    SANDBOX_ORDER_INGRESS_CAPABILITY_NAME,
-                    SANDBOX_ORDER_AGGREGATE_CAPABILITY_NAME,
-                ),
-            )
-
-    candidate = _candidate()
-    accepted_root = tmp_path / "accepted"
-    accepted_root.mkdir(mode=0o700)
-    asyncio.run(
-        run_provider_acceptance(
-            candidate,
-            state_root=accepted_root,
-            backend=FallbackBackend(planner_invoked=False),
-            clock=lambda: NOW,
-        )
-    )
-    record, _binding = read_provider_record(accepted_root, candidate)
-    route = record.scenario.snapshot.report.route_provenance
-    assert route is not None
-    assert route.outcome is ScenarioHybridOutcome.FIXED_FALLBACK
-    assert not route.planner_invoked
-
-    rejected_root = tmp_path / "rejected"
-    rejected_root.mkdir(mode=0o700)
-    with pytest.raises(ValueError, match="fixed fallback provenance changed"):
+    with pytest.raises(
+        ValueError,
+        match="provider recovery and generation ledger are not bound",
+    ):
         asyncio.run(
             run_provider_acceptance(
-                candidate,
-                state_root=rejected_root,
-                backend=FallbackBackend(planner_invoked=True),
+                _candidate(),
+                state_root=_state_root(tmp_path),
+                backend=UnboundLedgerBackend(),
                 clock=lambda: NOW,
             )
         )
+
+
+def test_provider_rejects_a_recovery_lane_unbound_from_the_candidate(
+    tmp_path: Path,
+) -> None:
+    class UnboundLaneBackend(_Backend):
+        async def recovery_lane(self, *, policy, fault, purpose):
+            lane = await super().recovery_lane(
+                policy=policy,
+                fault=fault,
+                purpose=purpose,
+            )
+            return lane.model_copy(
+                update={
+                    "result": lane.result.model_copy(update={"target_sha256": "f" * 64})
+                }
+            )
+
+    with pytest.raises(ValueError, match="recovery acceptance lane identity changed"):
+        asyncio.run(
+            run_provider_acceptance(
+                _candidate(),
+                state_root=_state_root(tmp_path),
+                backend=UnboundLaneBackend(),
+                clock=lambda: NOW,
+            )
+        )
+
+
+def test_recovery_lane_rejects_a_live_replay_count_without_its_receipt() -> None:
+    lane = _recovery_lane(
+        candidate=_candidate(),
+        policy=RecoveryRunPolicy.ADAPTIVE,
+        fault=RecoveryRunFault.DROP_AFTER_ACCEPT,
+        purpose="provider-adaptive-drop",
+        previous_service_uid="canary-baseline-uid",
+        service_uid="canary-provider-uid",
+    )
+    values = lane.model_dump(mode="python")
+    values["result"]["dispatch_receipts"] = ()
+
+    with pytest.raises(
+        ValueError,
+        match="live recovery authority replay evidence changed",
+    ):
+        RecoveryLaneAcceptanceObservation.model_validate(values)
+
+
+def test_legacy_provider_fixed_fallback_proves_no_planner_invocation() -> None:
+    request = ScenarioLaunchRequest(
+        schema_version=SCENARIO_LAUNCH_REQUEST_VERSION,
+        launch_id="provider-fixed-fallback",
+        scenario=ScenarioLaunchName.SANDBOX_ORDER,
+        mode=ScenarioRunMode.ADAPTIVE,
+    )
+
+    def observation(*, planner_invoked: bool) -> ScenarioAcceptanceObservation:
+        route = ScenarioRouteProvenance(
+            policy_version=BOUNDED_HYBRID_ROUTE_POLICY_VERSION,
+            route=ScenarioHybridRoute.PLANNER_HETEROGENEOUS,
+            outcome=ScenarioHybridOutcome.FIXED_FALLBACK,
+            planner_invoked=planner_invoked,
+            fixed_connector_invoked=True,
+            provider_failure=True,
+            provider_cleanup_failure=False,
+        )
+        return _observation(
+            request,
+            "provider-sandbox-adaptive",
+            Classification.UNKNOWN,
+            route,
+            capabilities=(
+                SANDBOX_ORDER_INGRESS_CAPABILITY_NAME,
+                SANDBOX_ORDER_AGGREGATE_CAPABILITY_NAME,
+            ),
+        )
+
+    _validate_provider_scenario(observation(planner_invoked=False))
+    with pytest.raises(ValueError, match="fixed fallback provenance changed"):
+        _validate_provider_scenario(observation(planner_invoked=True))
 
 
 @pytest.mark.parametrize(
@@ -1148,7 +1676,7 @@ def test_hosted_revalidates_provider_and_never_launches_another_adaptive_sandbox
             clock=lambda: NOW,
         )
     )
-    backend = _Backend()
+    backend = _Backend(hosted=True)
 
     binding = asyncio.run(
         run_hosted_acceptance(
@@ -1176,6 +1704,62 @@ def test_hosted_revalidates_provider_and_never_launches_another_adaptive_sandbox
         (ScenarioLaunchName.FIRESTORE_BUSINESS, ScenarioRunMode.ADAPTIVE),
         (ScenarioLaunchName.SANDBOX_ORDER, ScenarioRunMode.FIXED),
     ]
+    recovery_calls = [value for name, value in backend.calls if name == "recovery"]
+    assert recovery_calls == [
+        (
+            RecoveryRunPolicy.BLIND_RETRY,
+            RecoveryRunFault.DROP_AFTER_ACCEPT,
+            "hosted-blind-retry-drop",
+        ),
+        (
+            RecoveryRunPolicy.BLIND_ABORT,
+            RecoveryRunFault.DROP_AFTER_ACCEPT,
+            "hosted-blind-abort-drop",
+        ),
+        (
+            RecoveryRunPolicy.FIXED,
+            RecoveryRunFault.DROP_AFTER_ACCEPT,
+            "hosted-fixed-drop",
+        ),
+        (
+            RecoveryRunPolicy.FIXED,
+            RecoveryRunFault.NO_FAULT,
+            "hosted-fixed-no-fault",
+        ),
+        (
+            RecoveryRunPolicy.FIXED,
+            RecoveryRunFault.SUPPRESS_BEFORE_DISPATCH,
+            "hosted-fixed-suppress",
+        ),
+    ]
+    assert tuple(lane.policy for lane in record.recovery_comparison.lanes) == (
+        "blind-retry",
+        "blind-abort",
+        "fixed",
+        "adaptive",
+    )
+    provider, _ = read_provider_record(root, candidate)
+    assert record.recovery_comparison.lanes[3] == provider.adaptive_recovery.result
+    assert record.provider_ledger == provider.provider_ledger
+    assert record.recovery_lanes[0].reprovision.previous_service_uid == (
+        provider.adaptive_recovery.reprovision.service_uid
+    )
+    assert tuple(
+        lane.live_authority_replay_denial_count for lane in record.recovery_lanes
+    ) == (0, 0, 1, 1, 0)
+    all_uids = (
+        provider.adaptive_recovery.reprovision.service_uid,
+        *(lane.reprovision.service_uid for lane in record.recovery_lanes),
+    )
+    assert len(set(all_uids)) == 6
+    assert all(
+        current.reprovision.previous_service_uid == previous.reprovision.service_uid
+        for previous, current in zip(
+            record.recovery_lanes[:-1],
+            record.recovery_lanes[1:],
+            strict=True,
+        )
+    )
     assert tuple(item.control for item in record.exact_main_test_substitutions) == (
         "controller-restart",
         "provider-timeout",
@@ -1184,6 +1768,18 @@ def test_hosted_revalidates_provider_and_never_launches_another_adaptive_sandbox
         "negative-evidence-injection",
         "budget-exhaustion",
         "cloud-run-cold-start",
+        "recovery-action-authority-non-replay-denials",
+    )
+    authority_substitution = record.exact_main_test_substitutions[-1]
+    assert authority_substitution.tests == (
+        "tests/unit/hosted/test_recovery_cloud_run_authority.py::"
+        "test_recovery_authorizer_rejects_legacy_replayable_scope",
+        "tests/unit/hosted/test_recovery_cloud_run_authority.py::"
+        "test_missing_promotion_authority_is_rejected_before_claim",
+        "tests/unit/hosted/test_recovery_cloud_run_authority.py::"
+        "test_certificate_bound_promotion_rejects_tampering_before_claim",
+        "tests/unit/hosted/test_recovery_cloud_run_authority.py::"
+        "test_expired_promotion_permit_is_rejected_before_provider_authority",
     )
     assert AcceptanceLimitation.INFLIGHT_CONTROLLER_RESTART_NOT_FORCED in (
         record.limitations
@@ -1195,8 +1791,45 @@ def test_hosted_revalidates_provider_and_never_launches_another_adaptive_sandbox
     assert AcceptanceLimitation.CLOUD_RUN_COLD_START_NOT_FORCED in record.limitations
 
 
+def test_hosted_rejects_a_changed_provider_ledger(tmp_path: Path) -> None:
+    class ChangedLedgerBackend(_Backend):
+        async def provider_ledger(self):
+            ledger = await super().provider_ledger()
+            return ledger.model_copy(update={"record_sha256": "f" * 64})
+
+    candidate = _candidate()
+    root = _state_root(tmp_path)
+    asyncio.run(
+        run_provider_acceptance(
+            candidate,
+            state_root=root,
+            backend=_Backend(),
+            clock=lambda: NOW,
+        )
+    )
+
+    with pytest.raises(HostedAcceptanceError, match="PROVIDER_LEDGER_CHANGED"):
+        asyncio.run(
+            run_hosted_acceptance(
+                candidate,
+                state_root=root,
+                backend=ChangedLedgerBackend(hosted=True),
+                clock=lambda: NOW + timedelta(minutes=1),
+            )
+        )
+
+
+@pytest.mark.parametrize(
+    ("tamper", "error"),
+    (
+        ("provider-artifact", "HOSTED_PROVIDER_CHAIN_INVALID"),
+        ("reprovision-chain", "ACCEPTANCE_RECORD_INVALID"),
+    ),
+)
 def test_hosted_reader_rejects_a_rehashed_provider_chain_substitution(
     tmp_path: Path,
+    tamper: str,
+    error: str,
 ) -> None:
     candidate = _candidate()
     root = _state_root(tmp_path)
@@ -1212,13 +1845,18 @@ def test_hosted_reader_rejects_a_rehashed_provider_chain_substitution(
         run_hosted_acceptance(
             candidate,
             state_root=root,
-            backend=_Backend(),
+            backend=_Backend(hosted=True),
             clock=lambda: NOW + timedelta(minutes=1),
         )
     )
     path = Path(hosted_binding.path)
     value = json.loads(path.read_bytes())
-    value["provider_artifact"]["file_sha256"] = "d" * 64
+    if tamper == "provider-artifact":
+        value["provider_artifact"]["file_sha256"] = "d" * 64
+    else:
+        value["recovery_lanes"][0]["reprovision"]["previous_service_uid"] = (
+            "canary-tampered-uid"
+        )
     record_body = {key: item for key, item in value.items() if key != "record_sha256"}
     value["record_sha256"] = hashlib.sha256(
         json.dumps(record_body, separators=(",", ":"), sort_keys=True).encode()
@@ -1228,7 +1866,7 @@ def test_hosted_reader_rejects_a_rehashed_provider_chain_substitution(
     path.write_bytes(payload)
     path.chmod(0o400)
 
-    with pytest.raises(HostedAcceptanceError, match="HOSTED_PROVIDER_CHAIN_INVALID"):
+    with pytest.raises(HostedAcceptanceError, match=error):
         read_acceptance_record(root, candidate, AcceptanceMode.HOSTED)
 
 
@@ -1242,7 +1880,7 @@ def test_hosted_rejects_missing_or_candidate_mismatched_provider_record(
             run_hosted_acceptance(
                 candidate,
                 state_root=root,
-                backend=_Backend(),
+                backend=_Backend(hosted=True),
             )
         )
 
@@ -1265,7 +1903,7 @@ def test_hosted_rejects_missing_or_candidate_mismatched_provider_record(
             run_hosted_acceptance(
                 changed,
                 state_root=root,
-                backend=_Backend(),
+                backend=_Backend(hosted=True),
             )
         )
 
@@ -1276,16 +1914,27 @@ def _description(component: str, account: str) -> bytes:
         service = "reconcile-p5-fault-proxy"
     image = f"us-central1-docker.pkg.dev/{PROJECT}/reconcile-p5/reconcile@{IMAGE}"
     audience = f"https://reconcile.invalid/phase5/{PROJECT}/{component}"
-    environment = {
-        "GOOGLE_CLOUD_PROJECT": PROJECT,
-        "RECONCILE_AUTH_AUDIENCE": audience,
-        "RECONCILE_COMPONENT": component,
-        "RECONCILE_SOURCE_REVISION": SOURCE,
-        "RECONCILE_IMAGE_DIGEST": IMAGE,
-        "RECONCILE_INFRA_REVISION": SHA_A,
-        "RECONCILE_RUNTIME_DATABASE": "reconcile-p5-runtime",
-        "RECONCILE_SEMANTIC_CONFIG_SHA256": SHA_C,
-    }
+    if component == "canary":
+        environment = {
+            "GOOGLE_CLOUD_PROJECT": PROJECT,
+            "RECONCILE_CANARY_CONFIGURATION_SHA256": SHA_C,
+            "RECONCILE_CANARY_RELEASE_ID": "baseline",
+            "RECONCILE_IMAGE_DIGEST": IMAGE,
+            "RECONCILE_INFRA_REVISION": SHA_A,
+            "RECONCILE_SEMANTIC_CONFIG_SHA256": SHA_C,
+            "RECONCILE_SOURCE_REVISION": SOURCE,
+        }
+    else:
+        environment = {
+            "GOOGLE_CLOUD_PROJECT": PROJECT,
+            "RECONCILE_AUTH_AUDIENCE": audience,
+            "RECONCILE_COMPONENT": component,
+            "RECONCILE_SOURCE_REVISION": SOURCE,
+            "RECONCILE_IMAGE_DIGEST": IMAGE,
+            "RECONCILE_INFRA_REVISION": SHA_A,
+            "RECONCILE_RUNTIME_DATABASE": "reconcile-p5-runtime",
+            "RECONCILE_SEMANTIC_CONFIG_SHA256": SHA_C,
+        }
     if component == "api":
         environment.update(
             {
@@ -1313,6 +1962,24 @@ def _description(component: str, account: str) -> bytes:
                 "RECONCILE_ALLOWED_CALLER_EMAILS": (
                     f"rec-p5-api@{PROJECT}.iam.gserviceaccount.com"
                 ),
+                "RECONCILE_CANARY_AUDIENCE": (
+                    f"https://reconcile.invalid/phase5/{PROJECT}/canary"
+                ),
+                "RECONCILE_CANARY_BASELINE_REVISION": ("reconcile-p5-canary-00007"),
+                "RECONCILE_CANARY_LOCATION": "us-central1",
+                "RECONCILE_CANARY_SERVICE": "reconcile-p5-canary",
+                "RECONCILE_FAULT_PROXY_AUDIENCE": (
+                    f"https://reconcile.invalid/phase5/{PROJECT}/fault-proxy"
+                ),
+                "RECONCILE_FAULT_PROXY_URL": (
+                    "https://reconcile-p5-fault-proxy.example.test"
+                ),
+                "RECONCILE_RECOVERY_DEFINITION_CREATED_AT": ("2026-08-18T12:00:00Z"),
+                "RECONCILE_RECOVERY_EXECUTION_TIMEOUT_SECONDS": "240",
+                "RECONCILE_RECOVERY_PAYLOAD_SHA256": (
+                    acceptance_module._hosted_candidate_identity(_candidate()).sha256
+                ),
+                "RECONCILE_RECOVERY_RELEASE_ID": f"p5-release-{SOURCE[:24]}",
                 "RECONCILE_SANDBOX_AUDIENCE": (
                     f"https://reconcile.invalid/phase5/{PROJECT}/sandbox"
                 ),
@@ -1338,6 +2005,15 @@ def _description(component: str, account: str) -> bytes:
                 "RECONCILE_ALLOWED_CALLER_EMAILS": (
                     f"rec-p5-api@{PROJECT}.iam.gserviceaccount.com"
                 ),
+                "RECONCILE_CANARY_AUDIENCE": (
+                    f"https://reconcile.invalid/phase5/{PROJECT}/canary"
+                ),
+                "RECONCILE_CANARY_BASELINE_REVISION": ("reconcile-p5-canary-00007"),
+                "RECONCILE_CANARY_LOCATION": "us-central1",
+                "RECONCILE_CANARY_SERVICE": "reconcile-p5-canary",
+                "RECONCILE_RECOVERY_ACTION_CALLER_EMAIL": (
+                    f"rec-p5-controller@{PROJECT}.iam.gserviceaccount.com"
+                ),
                 "RECONCILE_SANDBOX_AUDIENCE": (
                     f"https://reconcile.invalid/phase5/{PROJECT}/sandbox"
                 ),
@@ -1346,7 +2022,7 @@ def _description(component: str, account: str) -> bytes:
                 "RECONCILE_TARGET_DATABASE": "reconcile-p5-target",
             }
         )
-    else:
+    elif component == "sandbox":
         environment.update(
             {
                 "RECONCILE_SANDBOX_MUTATION_CALLER_EMAIL": (
@@ -1367,6 +2043,7 @@ def _description(component: str, account: str) -> bytes:
                 },
                 "generation": 7,
                 "name": service,
+                "uid": f"{service}-uid",
             },
             "spec": {
                 "template": {
@@ -1456,6 +2133,7 @@ def test_gcloud_inspector_uses_only_exact_read_only_commands(tmp_path: Path) -> 
     calls: list[tuple[tuple[str, ...], Path, dict[str, str], int]] = []
     accounts = {
         "reconcile-p5-api": f"rec-p5-api@{PROJECT}.iam.gserviceaccount.com",
+        "reconcile-p5-canary": f"rec-p5-canary@{PROJECT}.iam.gserviceaccount.com",
         "reconcile-p5-controller": (
             f"rec-p5-controller@{PROJECT}.iam.gserviceaccount.com"
         ),
@@ -1503,6 +2181,8 @@ def test_gcloud_inspector_uses_only_exact_read_only_commands(tmp_path: Path) -> 
         command_runner=runner,
         environ={"HOME": str(tmp_path)},
         clock=lambda: NOW,
+        canary_baseline_revision="reconcile-p5-canary-00007",
+        recovery_definition_created_at="2026-08-18T12:00:00Z",
     )
     deployments = inspector.inspect_deployments(_candidate())
     diagnostics = inspector.lifecycle_diagnostics()
@@ -1524,10 +2204,10 @@ def test_gcloud_inspector_uses_only_exact_read_only_commands(tmp_path: Path) -> 
     assert diagnostics.available
     assert diagnostics.diagnostic_only
     assert diagnostics.revision_names == ("reconcile-p5-api-00007",)
-    assert len(calls) == 10
+    assert len(calls) == 12
     command_kinds = tuple(item[0][1:4] for item in calls)
-    assert command_kinds.count(("run", "services", "describe")) == 4
-    assert command_kinds.count(("run", "revisions", "describe")) == 4
+    assert command_kinds.count(("run", "services", "describe")) == 5
+    assert command_kinds.count(("run", "revisions", "describe")) == 5
     assert command_kinds.count(("run", "services", "get-iam-policy")) == 1
     assert sum(item[0][1:3] == ("logging", "read") for item in calls) == 1
     assert all(item[0][0] == "/usr/bin/gcloud" for item in calls)
@@ -1559,6 +2239,7 @@ def test_gcloud_inspector_rejects_full_environment_drift(
 ) -> None:
     accounts = {
         "reconcile-p5-api": f"rec-p5-api@{PROJECT}.iam.gserviceaccount.com",
+        "reconcile-p5-canary": f"rec-p5-canary@{PROJECT}.iam.gserviceaccount.com",
         "reconcile-p5-controller": (
             f"rec-p5-controller@{PROJECT}.iam.gserviceaccount.com"
         ),
@@ -1601,6 +2282,8 @@ def test_gcloud_inspector_rejects_full_environment_drift(
         command_runner=runner,
         environ={"HOME": str(tmp_path)},
         clock=lambda: NOW,
+        canary_baseline_revision="reconcile-p5-canary-00007",
+        recovery_definition_created_at="2026-08-18T12:00:00Z",
     )
 
     with pytest.raises(HostedAcceptanceError, match="DEPLOYMENT_IDENTITY_MISMATCH"):
@@ -1624,6 +2307,7 @@ def test_gcloud_inspector_requires_current_ready_single_revision_and_iam_check(
 ) -> None:
     accounts = {
         "reconcile-p5-api": f"rec-p5-api@{PROJECT}.iam.gserviceaccount.com",
+        "reconcile-p5-canary": f"rec-p5-canary@{PROJECT}.iam.gserviceaccount.com",
         "reconcile-p5-controller": (
             f"rec-p5-controller@{PROJECT}.iam.gserviceaccount.com"
         ),
@@ -1682,6 +2366,8 @@ def test_gcloud_inspector_requires_current_ready_single_revision_and_iam_check(
         command_runner=runner,
         environ={"HOME": str(tmp_path)},
         clock=lambda: NOW,
+        canary_baseline_revision="reconcile-p5-canary-00007",
+        recovery_definition_created_at="2026-08-18T12:00:00Z",
     )
 
     with pytest.raises(HostedAcceptanceError, match=error_code):
@@ -1691,6 +2377,7 @@ def test_gcloud_inspector_requires_current_ready_single_revision_and_iam_check(
 def test_gcloud_inspector_rejects_public_api_invoker_policy(tmp_path: Path) -> None:
     accounts = {
         "reconcile-p5-api": f"rec-p5-api@{PROJECT}.iam.gserviceaccount.com",
+        "reconcile-p5-canary": f"rec-p5-canary@{PROJECT}.iam.gserviceaccount.com",
         "reconcile-p5-controller": (
             f"rec-p5-controller@{PROJECT}.iam.gserviceaccount.com"
         ),
@@ -1718,6 +2405,8 @@ def test_gcloud_inspector_rejects_public_api_invoker_policy(tmp_path: Path) -> N
         command_runner=runner,
         environ={"HOME": str(tmp_path)},
         clock=lambda: NOW,
+        canary_baseline_revision="reconcile-p5-canary-00007",
+        recovery_definition_created_at="2026-08-18T12:00:00Z",
     )
 
     with pytest.raises(HostedAcceptanceError, match="API_INVOKER_IAM_MISMATCH"):
@@ -1727,6 +2416,7 @@ def test_gcloud_inspector_rejects_public_api_invoker_policy(tmp_path: Path) -> N
 def test_gcloud_inspector_rejects_unready_serving_revision(tmp_path: Path) -> None:
     accounts = {
         "reconcile-p5-api": f"rec-p5-api@{PROJECT}.iam.gserviceaccount.com",
+        "reconcile-p5-canary": f"rec-p5-canary@{PROJECT}.iam.gserviceaccount.com",
         "reconcile-p5-controller": (
             f"rec-p5-controller@{PROJECT}.iam.gserviceaccount.com"
         ),
@@ -1759,6 +2449,8 @@ def test_gcloud_inspector_rejects_unready_serving_revision(tmp_path: Path) -> No
         command_runner=runner,
         environ={"HOME": str(tmp_path)},
         clock=lambda: NOW,
+        canary_baseline_revision="reconcile-p5-canary-00007",
+        recovery_definition_created_at="2026-08-18T12:00:00Z",
     )
 
     with pytest.raises(HostedAcceptanceError, match="DEPLOYMENT_NOT_READY"):
@@ -1778,6 +2470,8 @@ def test_gcloud_service_failure_is_mandatory_but_log_failure_is_diagnostic(
         command_runner=runner,
         environ={"HOME": str(tmp_path)},
         clock=lambda: NOW,
+        canary_baseline_revision="reconcile-p5-canary-00007",
+        recovery_definition_created_at="2026-08-18T12:00:00Z",
     )
 
     with pytest.raises(HostedAcceptanceError, match="READ_ONLY_COMMAND_FAILED"):
@@ -1793,6 +2487,89 @@ def test_gcloud_service_failure_is_mandatory_but_log_failure_is_diagnostic(
         "rec-p5-apply@reconcile-dev-260813-14fa6d.iam.gserviceaccount.com" in argv
         for argv in calls
     )
+
+
+def test_recovery_launch_recovers_a_terminal_result_after_unknown_post() -> None:
+    aggregate = _terminal_recovery_aggregate()
+    client = _RecoveryLaunchClient(
+        aggregate,
+        launches=[LaunchOutcomeUnknownError()],
+        reads=[aggregate.snapshot],
+    )
+
+    observed = asyncio.run(
+        CloudRunAcceptanceBackend._launch_recovery_terminal(
+            client,  # type: ignore[arg-type]
+            aggregate.snapshot.request,
+        )
+    )
+
+    assert observed == aggregate.snapshot
+    assert client.launch_calls == 1
+    assert client.read_calls == 1
+
+
+def test_recovery_launch_replays_only_after_unknown_post_is_not_found() -> None:
+    aggregate = _terminal_recovery_aggregate()
+    client = _RecoveryLaunchClient(
+        aggregate,
+        launches=[
+            LaunchOutcomeUnknownError(),
+            RecoveryLaunchResult(created=False, snapshot=aggregate.snapshot),
+        ],
+        reads=[InvestigationNotFoundError()],
+    )
+
+    observed = asyncio.run(
+        CloudRunAcceptanceBackend._launch_recovery_terminal(
+            client,  # type: ignore[arg-type]
+            aggregate.snapshot.request,
+        )
+    )
+
+    assert observed == aggregate.snapshot
+    assert client.launch_calls == 2
+    assert client.read_calls == 1
+
+
+def test_recovery_launch_rejects_an_unprompted_existing_run() -> None:
+    aggregate = _terminal_recovery_aggregate()
+    client = _RecoveryLaunchClient(
+        aggregate,
+        launches=[RecoveryLaunchResult(created=False, snapshot=aggregate.snapshot)],
+        reads=[],
+    )
+
+    with pytest.raises(HostedAcceptanceError, match="RECOVERY_LAUNCH_REPLAYED"):
+        asyncio.run(
+            CloudRunAcceptanceBackend._launch_recovery_terminal(
+                client,  # type: ignore[arg-type]
+                aggregate.snapshot.request,
+            )
+        )
+
+    assert client.launch_calls == 1
+    assert client.read_calls == 0
+
+
+def test_recovery_launch_rejects_an_unresolved_unknown_outcome() -> None:
+    aggregate = _terminal_recovery_aggregate()
+    client = _RecoveryLaunchClient(
+        aggregate,
+        launches=[LaunchOutcomeUnknownError() for _ in range(3)],
+        reads=[InvestigationNotFoundError() for _ in range(3)],
+    )
+
+    with pytest.raises(HostedAcceptanceError, match="RECOVERY_LAUNCH_UNRESOLVED"):
+        asyncio.run(
+            CloudRunAcceptanceBackend._launch_recovery_terminal(
+                client,  # type: ignore[arg-type]
+                aggregate.snapshot.request,
+            )
+        )
+
+    assert client.launch_calls == 3
+    assert client.read_calls == 3
 
 
 def test_cli_snapshot_imports_only_from_the_bound_snapshot(

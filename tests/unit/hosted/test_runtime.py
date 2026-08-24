@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import socket
+from dataclasses import replace
 from datetime import UTC, datetime
 from types import SimpleNamespace
 
@@ -18,6 +19,7 @@ from reconcile.durable_application import DurableExecutionStrategy
 from reconcile.hosted.config import Component, HostedConfig
 from reconcile.hosted.contracts import (
     INTERNAL_OPERATION_RESPONSE_VERSION,
+    InternalOperation,
     InternalOperationRequest,
     InternalOperationResponse,
     canonical_internal_json_bytes,
@@ -87,8 +89,18 @@ def _config(component: Component) -> HostedConfig:
             "runtime_database": _RUNTIME_DATABASE,
             "target_database": _TARGET_DATABASE,
             "target_bucket": _BUCKET,
+            "fault_proxy_url": "https://fault.example.run.app",
+            "fault_proxy_audience": _audience(Component.FAULT_PROXY),
             "sandbox_url": "https://sandbox.example.run.app",
             "sandbox_audience": _audience(Component.SANDBOX),
+            "canary_location": "us-central1",
+            "canary_service": "reconcile-p5-canary",
+            "canary_baseline_revision": "reconcile-p5-canary-b-0123456789abcdef",
+            "canary_audience": (f"https://reconcile.invalid/phase5/{_PROJECT}/canary"),
+            "recovery_release_id": f"p5-release-{'a' * 24}",
+            "recovery_payload_sha256": "e" * 64,
+            "recovery_definition_created_at": datetime(2026, 8, 24, tzinfo=UTC),
+            "recovery_execution_timeout_seconds": 240,
             "vertex_location": "us",
             "vertex_model": "gemini-3.5-flash",
             "vertex_prompt_version": "adaptive-planner-v3",
@@ -111,6 +123,7 @@ def _config(component: Component) -> HostedConfig:
             "canary_service": "reconcile-p5-canary",
             "canary_baseline_revision": "reconcile-p5-canary-b-0123456789abcdef",
             "canary_audience": (f"https://reconcile.invalid/phase5/{_PROJECT}/canary"),
+            "recovery_action_caller_email": _CONTROLLER,
         }
     else:
         values = {
@@ -120,7 +133,13 @@ def _config(component: Component) -> HostedConfig:
             "sandbox_read_caller_email": _CONTROLLER,
             "sandbox_mutation_caller_email": _FAULT,
         }
-    return HostedConfig(**common, **values)  # type: ignore[arg-type]
+    config = HostedConfig(**common, **values)  # type: ignore[arg-type]
+    if component is Component.CONTROLLER:
+        config = replace(
+            config,
+            recovery_payload_sha256=build_hosted_candidate(config).sha256,
+        )
+    return config
 
 
 def _scope(operation: HostedWorkflowOperation) -> HostedOperationScope:
@@ -179,7 +198,7 @@ def test_every_component_assembles_one_identical_candidate_without_io(
         assert application.state.hosted_config is config
 
 
-def test_fault_proxy_canary_route_is_deployed_with_closed_permit_gate(
+def test_fault_proxy_recovery_actions_use_durable_authorizers(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     captured: dict[str, object] = {}
@@ -195,8 +214,52 @@ def test_fault_proxy_canary_route_is_deployed_with_closed_permit_gate(
 
     assert result is sentinel
     assert type(captured["cloud_run_canary_action_authorizer"]) is (
-        hosted_runtime.ClosedCloudRunCanaryActionAuthorizer
+        hosted_runtime.RecoveryCloudRunCanaryActionAuthorizer
     )
+    assert type(captured["firestore_release_action_authorizer"]) is (
+        hosted_runtime.RecoveryFirestoreReleaseActionAuthorizer
+    )
+    assert captured["recovery_action_caller_email"] == _CONTROLLER
+
+
+def test_controller_registers_lazy_recovery_with_manifest_bound_settings(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+    sentinel = object()
+
+    def capture(_config: HostedConfig, **kwargs: object) -> object:
+        captured.update(kwargs)
+        return sentinel
+
+    def deny_planner(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("controller startup constructed the recovery planner")
+
+    monkeypatch.setattr(hosted_runtime, "create_component_app", capture)
+    monkeypatch.setattr(
+        hosted_runtime.AdkGeminiPlanner,
+        "from_vertex_adc_guarded",
+        deny_planner,
+    )
+    config = _config(Component.CONTROLLER)
+
+    result = create_runtime_component_app(config)
+
+    assert result is sentinel
+    handlers = captured["internal_operation_handlers"]
+    assert isinstance(handlers, dict)
+    assert (
+        type(handlers[InternalOperation.RECOVER])
+        is hosted_runtime.HostedRecoveryHandler
+    )
+    settings, invoked_at, timeout = hosted_runtime._release_chain_settings(
+        config,
+        build_hosted_candidate(config),
+    )
+    assert settings.release_id == f"p5-release-{'a' * 24}"
+    assert settings.payload_sha256 == build_hosted_candidate(config).sha256
+    assert invoked_at == datetime(2026, 8, 24, tzinfo=UTC)
+    assert timeout == 240
 
 
 def test_fixed_executor_routes_storage_and_firestore_to_fixed_connectors(

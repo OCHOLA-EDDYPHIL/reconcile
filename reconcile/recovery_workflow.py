@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import inspect
 from collections.abc import Awaitable, Callable, Mapping
+from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Protocol
@@ -69,6 +70,7 @@ from reconcile.persistence.recovery_runs import (
     RecoveryRunConflict,
     RecoveryRunEventSnapshot,
     RecoveryRunStore,
+    RecoveryRunStoreUnavailable,
     is_terminal_recovery_run,
 )
 from reconcile.recovery_agents import (
@@ -1417,15 +1419,27 @@ class RecoveryRunApplicationService:
         store: RecoveryRunStore,
         *,
         poll_interval_seconds: float = 0.01,
+        execution_timeout_seconds: float | None = None,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         if type(workflow) is not ProofToPermitWorkflow or not isinstance(
             store, RecoveryRunStore
         ):
             raise TypeError("recovery service dependencies are invalid")
+        if execution_timeout_seconds is not None and (
+            not isinstance(execution_timeout_seconds, (int, float))
+            or isinstance(execution_timeout_seconds, bool)
+            or execution_timeout_seconds <= 0
+        ):
+            raise ValueError("recovery execution timeout is invalid")
         self._workflow = workflow
         self._store = store
         self._poll = poll_interval_seconds
+        self._execution_timeout = (
+            None
+            if execution_timeout_seconds is None
+            else float(execution_timeout_seconds)
+        )
         self._clock = clock or (lambda: datetime.now(UTC))
         self._tasks: dict[str, asyncio.Task[None]] = {}
         self._lock = asyncio.Lock()
@@ -1465,16 +1479,22 @@ class RecoveryRunApplicationService:
             except Exception:
                 pass
 
-    async def _schedule(self, run_id: str) -> None:
+    async def _schedule(self, run_id: str) -> asyncio.Task[None]:
         async with self._lock:
+            if self._closed:
+                raise RecoveryRunConflict(run_id)
             task = self._tasks.get(run_id)
             if task is None or task.done():
-                self._tasks[run_id] = asyncio.create_task(
+                task = asyncio.create_task(
                     self._worker(run_id),
                     name=f"recovery-run-{run_id}",
                 )
+                self._tasks[run_id] = task
+            return task
 
     async def launch(self, request: RecoveryRunRequest) -> RecoveryRunLaunchResult:
+        if type(request) is not RecoveryRunRequest:
+            raise TypeError("recovery launch requires an exact request")
         if self._closed:
             raise RecoveryRunConflict(request.run_id)
         definition = await self._workflow.definition(request)
@@ -1489,6 +1509,130 @@ class RecoveryRunApplicationService:
         }:
             await self._schedule(request.run_id)
         return RecoveryRunLaunchResult(snapshot=snapshot, created=created)
+
+    async def launch_and_wait(
+        self,
+        request: RecoveryRunRequest,
+    ) -> RecoveryRunSnapshot:
+        """Launch or replay one recovery run and join its terminal snapshot."""
+
+        return (await self.launch_and_wait_result(request)).snapshot
+
+    async def launch_and_wait_result(
+        self,
+        request: RecoveryRunRequest,
+    ) -> RecoveryRunLaunchResult:
+        """Join request-scoped work without turning transport loss into intent."""
+
+        if type(request) is not RecoveryRunRequest:
+            raise TypeError("recovery launch requires an exact request")
+        if self._execution_timeout is None:
+            return await self._launch_and_wait_result(request)
+        try:
+            async with asyncio.timeout(self._execution_timeout):
+                return await self._launch_and_wait_result(request)
+        except TimeoutError:
+            raise RecoveryRunStoreUnavailable from None
+
+    async def _launch_and_wait_result(
+        self,
+        request: RecoveryRunRequest,
+    ) -> RecoveryRunLaunchResult:
+        task: asyncio.Task[None] | None = None
+        try:
+            launched = await self.launch(request)
+            async with self._lock:
+                task = self._tasks.get(request.run_id)
+            while True:
+                snapshot = await self._store.get(request.run_id)
+                if snapshot.request != request:
+                    raise RecoveryRunConflict(request.run_id)
+                if is_terminal_recovery_run(snapshot.lifecycle):
+                    await self._settle_owned_task(
+                        request.run_id,
+                        task,
+                        cancel=False,
+                    )
+                    return RecoveryRunLaunchResult(
+                        snapshot=snapshot,
+                        created=launched.created,
+                    )
+
+                async with self._lock:
+                    task = self._tasks.get(request.run_id)
+                if task is None or task.done():
+                    if task is not None:
+                        await self._settle_owned_task(
+                            request.run_id,
+                            task,
+                            cancel=False,
+                        )
+                    task = await self._schedule(request.run_id)
+                await asyncio.shield(task)
+                await self._settle_owned_task(
+                    request.run_id,
+                    task,
+                    cancel=False,
+                )
+                task = None
+                snapshot = await self._store.get(request.run_id)
+                if snapshot.request != request:
+                    raise RecoveryRunConflict(request.run_id)
+                if is_terminal_recovery_run(snapshot.lifecycle):
+                    return RecoveryRunLaunchResult(
+                        snapshot=snapshot,
+                        created=launched.created,
+                    )
+                await asyncio.sleep(self._poll)
+        except asyncio.CancelledError:
+            settlement = asyncio.create_task(
+                self._settle_owned_task(request.run_id, task, cancel=True),
+                name=f"recovery-request-cancel-{request.run_id}",
+            )
+            await self._join_owned_tasks((settlement,))
+            raise
+        except (RecoveryRunConflict, RecoveryRunStoreUnavailable):
+            await self._settle_owned_task(request.run_id, task, cancel=True)
+            raise
+        except Exception:
+            await self._settle_owned_task(request.run_id, task, cancel=True)
+            raise RecoveryRunStoreUnavailable from None
+
+    @staticmethod
+    async def _join_owned_tasks(
+        tasks: tuple[asyncio.Task[None], ...],
+    ) -> None:
+        for task in tasks:
+            while not task.done():
+                try:
+                    await asyncio.shield(task)
+                except asyncio.CancelledError:
+                    if task.done():
+                        break
+                    continue
+                except Exception:
+                    break
+            if task.done():
+                with suppress(asyncio.CancelledError):
+                    task.exception()
+
+    async def _settle_owned_task(
+        self,
+        run_id: str,
+        task: asyncio.Task[None] | None,
+        *,
+        cancel: bool,
+    ) -> None:
+        async with self._lock:
+            current = self._tasks.get(run_id)
+            candidates = (task,) if task is not None else ()
+            if cancel:
+                for candidate in candidates:
+                    if not candidate.done():
+                        candidate.cancel()
+            if current is task:
+                self._tasks.pop(run_id, None)
+        await self._join_owned_tasks(candidates)
 
     async def get(self, run_id: str) -> RecoveryRunSnapshot:
         return await self._store.get(run_id)
@@ -1519,13 +1663,7 @@ class RecoveryRunApplicationService:
     async def cancel(self, run_id: str) -> RecoveryRunSnapshot:
         async with self._lock:
             task = self._tasks.get(run_id)
-            if task is not None and not task.done():
-                task.cancel()
-        if task is not None:
-            try:
-                await task
-            except asyncio.CancelledError:
-                pass
+        await self._settle_owned_task(run_id, task, cancel=True)
         snapshot = await self._store.get(run_id)
         if snapshot.lifecycle in {
             RecoveryRunLifecycle.ACCEPTED,
@@ -1556,10 +1694,12 @@ class RecoveryRunApplicationService:
     async def aclose(self) -> None:
         self._closed = True
         async with self._lock:
-            tasks = tuple(task for task in self._tasks.values() if not task.done())
+            tasks = tuple(dict.fromkeys(self._tasks.values()))
+            self._tasks.clear()
             for task in tasks:
-                task.cancel()
-        await asyncio.gather(*tasks, return_exceptions=True)
+                if not task.done():
+                    task.cancel()
+        await self._join_owned_tasks(tasks)
         await self._recovery_agent_close()
 
     async def _recovery_agent_close(self) -> None:

@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import re
-from collections.abc import Collection, Mapping
+from collections.abc import AsyncIterator, Collection, Mapping
+from contextlib import asynccontextmanager
 from http import HTTPStatus
 from typing import Protocol
 
@@ -28,6 +29,12 @@ from reconcile.hosted.contracts import (
     InternalOperationResponse,
     canonical_internal_json_bytes,
 )
+from reconcile.hosted.firestore_release import GoogleFirestoreReleaseTarget
+from reconcile.hosted.firestore_release_action import (
+    FIRESTORE_RELEASE_ACTION_PATH,
+    RecoveryFirestoreReleaseActionAuthorizer,
+    install_firestore_release_action_route,
+)
 from reconcile.hosted.identity import (
     GoogleIdentityVerifier,
     IdentityVerificationError,
@@ -45,6 +52,7 @@ from reconcile.interfaces.api import create_app
 _MAX_INTERNAL_REQUEST_BYTES = MAX_INTERNAL_PAYLOAD_BYTES + 4_096
 
 _CONTROLLER_PATH = "/internal/v1/investigations"
+_RECOVERY_PATH = "/internal/v1/recovery-runs"
 _FAULT_PATH = "/internal/v1/faults"
 _EVIDENCE_PATH = "/internal/v1/evidence"
 _MUTATION_PATH = "/internal/v1/mutations"
@@ -84,12 +92,18 @@ _API_PATHS = (
     ),
 )
 _INTERNAL_PATHS = {
-    Component.CONTROLLER: frozenset({("POST", _CONTROLLER_PATH.encode("ascii"))}),
+    Component.CONTROLLER: frozenset(
+        {
+            ("POST", _CONTROLLER_PATH.encode("ascii")),
+            ("POST", _RECOVERY_PATH.encode("ascii")),
+        }
+    ),
     Component.FAULT_PROXY: frozenset(
         {
             ("POST", _FAULT_PATH.encode("ascii")),
             ("POST", _CLEANUP_PATH.encode("ascii")),
             ("POST", CLOUD_RUN_CANARY_ACTION_PATH.encode("ascii")),
+            ("POST", FIRESTORE_RELEASE_ACTION_PATH.encode("ascii")),
         }
     ),
 }
@@ -121,6 +135,13 @@ class InternalOperationDenied(Exception):
         super().__init__("internal operation denied")
 
 
+class InternalOperationConflict(Exception):
+    """The request identity conflicts with durable operation authority."""
+
+    def __init__(self) -> None:
+        super().__init__("internal operation conflict")
+
+
 def _single_header(scope: Scope, name: bytes) -> str | None:
     values = [value for key, value in scope.get("headers", ()) if key.lower() == name]
     if not values:
@@ -144,6 +165,13 @@ def _allowed_callers(
             for allowed_method, pattern in _API_PATHS
         ):
             return config.allowed_caller_emails
+        return ()
+    if config.component is Component.FAULT_PROXY and raw_path in {
+        CLOUD_RUN_CANARY_ACTION_PATH.encode("ascii"),
+        FIRESTORE_RELEASE_ACTION_PATH.encode("ascii"),
+    }:
+        if method == "POST" and config.recovery_action_caller_email is not None:
+            return (config.recovery_action_caller_email,)
         return ()
     if config.component in _INTERNAL_PATHS:
         if (method, raw_path) in _INTERNAL_PATHS[config.component]:
@@ -379,6 +407,11 @@ def _install_handler(
                 code="operation-denied",
                 status_code=HTTPStatus.FORBIDDEN,
             )
+        except InternalOperationConflict:
+            return _internal_error(
+                code="operation-conflict",
+                status_code=HTTPStatus.CONFLICT,
+            )
         except Exception:
             return _internal_error(
                 code="operation-unavailable",
@@ -470,9 +503,29 @@ def _internal_app(
     handlers: Mapping[InternalOperation, InternalOperationHandler],
     cloud_run_canary_fault_proxy: CloudRunCanaryFaultProxy | None,
     cloud_run_canary_action_authorizer: CloudRunCanaryActionAuthorizer | None,
+    firestore_release_target: GoogleFirestoreReleaseTarget | None,
+    firestore_release_action_authorizer: (
+        RecoveryFirestoreReleaseActionAuthorizer | None
+    ),
+    recovery_action_caller_email: str | None,
 ) -> FastAPI:
+    @asynccontextmanager
+    async def lifespan(_application: FastAPI) -> AsyncIterator[None]:
+        try:
+            yield
+        finally:
+            closed: set[int] = set()
+            for handler in handlers.values():
+                if id(handler) in closed:
+                    continue
+                closed.add(id(handler))
+                closer = getattr(handler, "aclose", None)
+                if callable(closer):
+                    await closer()
+
     application = FastAPI(
         title=f"RECONCILE {config.component.value}",
+        lifespan=lifespan,
         docs_url=None,
         redoc_url=None,
         openapi_url=None,
@@ -497,6 +550,20 @@ def _internal_app(
                 _CONTROLLER_PATH,
                 InternalOperation.INVESTIGATE,
                 handler,
+            )
+        recovery_handler = handlers.get(InternalOperation.RECOVER)
+        if recovery_handler is None:
+            _install_placeholder(
+                application,
+                _RECOVERY_PATH,
+                InternalOperation.RECOVER,
+            )
+        else:
+            _install_handler(
+                application,
+                _RECOVERY_PATH,
+                InternalOperation.RECOVER,
+                recovery_handler,
             )
     elif config.component is Component.FAULT_PROXY:
         fault_handler = handlers.get(InternalOperation.EXECUTE_FAULT)
@@ -528,9 +595,20 @@ def _internal_app(
                 application,
                 proxy=cloud_run_canary_fault_proxy,
                 action_authorizer=cloud_run_canary_action_authorizer,
-                expected_caller_email=config.allowed_caller_emails[0],
+                expected_caller_email=(
+                    recovery_action_caller_email or config.allowed_caller_emails[0]
+                ),
                 expected_image_digest=config.image_digest,
                 expected_configuration_sha256=config.semantic_config_sha256,
+            )
+        if firestore_release_target is not None:
+            install_firestore_release_action_route(
+                application,
+                target=firestore_release_target,
+                authorizer=firestore_release_action_authorizer,
+                expected_caller_email=(
+                    recovery_action_caller_email or config.allowed_caller_emails[0]
+                ),
             )
     elif config.component is Component.SANDBOX:
         if sandbox_evidence_reader is None:
@@ -581,6 +659,11 @@ def create_component_app(
     sandbox_evidence_reader: SandboxEvidenceReader | None = None,
     cloud_run_canary_fault_proxy: CloudRunCanaryFaultProxy | None = None,
     cloud_run_canary_action_authorizer: CloudRunCanaryActionAuthorizer | None = None,
+    firestore_release_target: GoogleFirestoreReleaseTarget | None = None,
+    firestore_release_action_authorizer: (
+        RecoveryFirestoreReleaseActionAuthorizer | None
+    ) = None,
+    recovery_action_caller_email: str | None = None,
     internal_operation_handlers: Mapping[InternalOperation, InternalOperationHandler]
     | None = None,
 ) -> FastAPI:
@@ -601,6 +684,20 @@ def create_component_app(
         config.component is not Component.FAULT_PROXY
     ):
         raise ValueError("only the fault proxy accepts a Cloud Run canary proxy")
+    if (firestore_release_target is None) != (
+        firestore_release_action_authorizer is None
+    ):
+        raise ValueError("Firestore release target and authority must be paired")
+    if firestore_release_target is not None and (
+        config.component is not Component.FAULT_PROXY
+    ):
+        raise ValueError("only the fault proxy accepts a Firestore release target")
+    if recovery_action_caller_email is not None and (
+        type(recovery_action_caller_email) is not str
+        or not recovery_action_caller_email
+        or (cloud_run_canary_fault_proxy is None and firestore_release_target is None)
+    ):
+        raise ValueError("recovery action caller requires a deployed action route")
     if internal_operation_handlers is None:
         handlers: dict[InternalOperation, InternalOperationHandler] = {}
     else:
@@ -612,7 +709,9 @@ def create_component_app(
                 raise TypeError("internal operation handler entries must be exact")
     allowed_handler_operations = {
         Component.API: frozenset(),
-        Component.CONTROLLER: frozenset({InternalOperation.INVESTIGATE}),
+        Component.CONTROLLER: frozenset(
+            {InternalOperation.INVESTIGATE, InternalOperation.RECOVER}
+        ),
         Component.FAULT_PROXY: frozenset(
             {InternalOperation.EXECUTE_FAULT, InternalOperation.CLEANUP}
         ),
@@ -645,6 +744,9 @@ def create_component_app(
             handlers=handlers,
             cloud_run_canary_fault_proxy=cloud_run_canary_fault_proxy,
             cloud_run_canary_action_authorizer=cloud_run_canary_action_authorizer,
+            firestore_release_target=firestore_release_target,
+            firestore_release_action_authorizer=(firestore_release_action_authorizer),
+            recovery_action_caller_email=recovery_action_caller_email,
         )
     application.state.hosted_config = config
     application.state.hosted_transport = transport or HostedHttpTransport()
@@ -658,6 +760,7 @@ def create_component_app(
 
 __all__ = [
     "ApplicationIdentityMiddleware",
+    "InternalOperationConflict",
     "InternalOperationDenied",
     "InternalOperationHandler",
     "create_component_app",

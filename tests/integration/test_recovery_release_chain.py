@@ -1638,6 +1638,8 @@ def test_accepted_but_not_visible_promotion_is_not_a_completed_chain(
         firestore=firestore,
         invoked_at=NOW,
         clock=lambda: NOW + timedelta(seconds=2),
+        max_settle_observations=1,
+        settle_poll_interval_seconds=0,
     )
 
     async def exercise():
