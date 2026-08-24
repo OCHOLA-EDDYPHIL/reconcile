@@ -2739,9 +2739,19 @@ def _validate_canary_reprovision_plan(
             if (
                 projection.get("project") != candidate.project_id
                 or projection.get("location") != candidate.region
-                or projection.get("name") != _CANARY_SERVICE
             ):
                 raise HostedAcceptanceError("CANARY_REPROVISION_TARGET_CHANGED")
+        before_names = {_CANARY_SERVICE}
+        if address in _CANARY_REPROVISION_IAM:
+            before_names.add(
+                f"projects/{candidate.project_id}/locations/{candidate.region}/"
+                f"services/{_CANARY_SERVICE}"
+            )
+        if (
+            before.get("name") not in before_names
+            or after.get("name") != _CANARY_SERVICE
+        ):
+            raise HostedAcceptanceError("CANARY_REPROVISION_TARGET_CHANGED")
         if address in _CANARY_REPROVISION_IAM:
             role, member = _CANARY_REPROVISION_IAM[address]
             if any(

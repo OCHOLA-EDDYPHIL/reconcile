@@ -239,13 +239,18 @@ def _replacement(address: str) -> dict[str, object]:
     if address in acceptance_module._CANARY_REPROVISION_IAM:
         role, member = acceptance_module._CANARY_REPROVISION_IAM[address]
         projection.update({"member": member, "role": role})
+    before = json.loads(json.dumps(projection))
+    if address in acceptance_module._CANARY_REPROVISION_IAM:
+        before["name"] = (
+            f"projects/{PROJECT}/locations/us-central1/services/reconcile-p5-canary"
+        )
     return {
         "action_reason": "replace_by_request",
         "address": address,
         "change": {
             "actions": ["delete", "create"],
             "after": projection,
-            "before": projection,
+            "before": before,
         },
         "mode": "managed",
         "provider_name": "registry.terraform.io/hashicorp/google",
