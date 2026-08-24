@@ -1587,6 +1587,7 @@ def _build_qualification_provider(
         revisions_factory=lambda: evidence_revisions,
         health_client=_CloudRunHealthClient(state, counters),
         clock=reader_clock,
+        revision_settle_delay_seconds=0.0,
     )
     release_client = DeterministicFirestoreReleaseClient(
         scenario=selected,

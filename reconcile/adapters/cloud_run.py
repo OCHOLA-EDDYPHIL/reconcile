@@ -497,7 +497,6 @@ class _CloudRunReadHandler:
         while True:
             try:
                 snapshot = await asyncio.to_thread(self._read)
-                break
             except CloudRunCanaryError as error:
                 if (
                     self.capability_name == CLOUD_RUN_SERVICE_CAPABILITY
@@ -529,6 +528,17 @@ class _CloudRunReadHandler:
                 raise CapabilityUnavailable from None
             except (ValueError, TypeError):
                 raise CapabilityUnavailable from None
+            if (
+                self.capability_name == CLOUD_RUN_REVISION_CAPABILITY
+                and isinstance(snapshot, CloudRunRevisionSnapshot)
+                and snapshot.reconciling
+                and self.reader.revision_settle_delay_seconds > 0
+                and loop.time() + self.reader.revision_settle_delay_seconds
+                < visibility_deadline
+            ):
+                await asyncio.sleep(self.reader.revision_settle_delay_seconds)
+                continue
+            break
         if snapshot is None:
             observed_at = self.clock()
             if not isinstance(observed_at, datetime) or observed_at.tzinfo is None:
