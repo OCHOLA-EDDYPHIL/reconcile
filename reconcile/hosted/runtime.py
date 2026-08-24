@@ -163,7 +163,7 @@ from reconcile.scenarios.storage import execute_cloud_storage_baseline
 _SANDBOX_MUTATION_PATH = "/internal/v1/mutations"
 _SANDBOX_CLEANUP_PATH = "/internal/v1/cleanup"
 _PLANNER_ESTIMATED_COST_MICROUNITS = 1
-_HOSTED_PROVIDER_TIMEOUT_SECONDS = 3.0
+_HOSTED_PROVIDER_TIMEOUT_SECONDS = 30.0
 
 if (
     _HOSTED_PROVIDER_TIMEOUT_SECONDS * 1_000

@@ -121,7 +121,7 @@ SANDBOX_ORDER_CONDITIONAL_POLICY = AdaptiveInvestigationPolicy(
         Classification.NOT_COMMITTED,
     ),
     max_turns=1,
-    planner_timeout_ms=4_000,
+    planner_timeout_ms=35_000,
     include_explanation=False,
 )
 
@@ -315,7 +315,7 @@ def build_hosted_sandbox_order_scenario_preparation(
             correlation_fields={},
             evidence_budget=EvidenceBudget(
                 max_probes=2,
-                max_elapsed_ms=5_000,
+                max_elapsed_ms=40_000,
                 max_total_result_bytes=8_192,
                 max_cost_units=2,
             ),
@@ -498,7 +498,7 @@ class SandboxOrderScenarioDefinition:
                 correlation_fields={},
                 evidence_budget=EvidenceBudget(
                     max_probes=2,
-                    max_elapsed_ms=5_000,
+                    max_elapsed_ms=40_000,
                     max_total_result_bytes=8_192,
                     max_cost_units=2,
                 ),
