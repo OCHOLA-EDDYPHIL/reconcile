@@ -1990,7 +1990,7 @@ def _description(component: str, account: str) -> bytes:
                 "RECONCILE_VERTEX_MAX_COUNT_TOKENS_ATTEMPTS": "1",
                 "RECONCILE_VERTEX_MAX_GENERATION_ATTEMPTS": "1",
                 "RECONCILE_VERTEX_MAX_INPUT_TOKENS": "12000",
-                "RECONCILE_VERTEX_MAX_OUTPUT_TOKENS": "1024",
+                "RECONCILE_VERTEX_MAX_OUTPUT_TOKENS": "4096",
                 "RECONCILE_VERTEX_MODEL": "gemini-3.5-flash",
                 "RECONCILE_VERTEX_PROMPT_SHA256": (
                     "a18ac5bbd22570562acc6dfbc49437a82f0db6a265a4de737c1371b6ef2ca2d3"

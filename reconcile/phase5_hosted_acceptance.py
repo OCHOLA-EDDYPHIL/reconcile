@@ -301,7 +301,7 @@ class CandidateIdentity(StrictModel):
     count_tokens_attempt_limit: Literal[1] = 1
     billed_generation_limit: Literal[1] = 1
     input_token_limit: Literal[12000] = 12_000
-    output_token_limit: Literal[1024] = 1_024
+    output_token_limit: Literal[1024, 4096] = 4_096
     candidate_sha256: Sha256Digest
 
     @model_validator(mode="after")
@@ -1213,7 +1213,7 @@ def _required_service_environment(
                 "RECONCILE_VERTEX_MAX_COUNT_TOKENS_ATTEMPTS": "1",
                 "RECONCILE_VERTEX_MAX_GENERATION_ATTEMPTS": "1",
                 "RECONCILE_VERTEX_MAX_INPUT_TOKENS": "12000",
-                "RECONCILE_VERTEX_MAX_OUTPUT_TOKENS": "1024",
+                "RECONCILE_VERTEX_MAX_OUTPUT_TOKENS": "4096",
                 "RECONCILE_VERTEX_MODEL": _GEMINI_MODEL,
                 "RECONCILE_VERTEX_PROMPT_SHA256": _PROMPT_SHA256,
                 "RECONCILE_VERTEX_PROMPT_VERSION": _PROMPT_VERSION,
@@ -1281,7 +1281,7 @@ def build_candidate_identity(
         "count_tokens_attempt_limit": 1,
         "billed_generation_limit": 1,
         "input_token_limit": 12_000,
-        "output_token_limit": 1_024,
+        "output_token_limit": 4_096,
     }
     return CandidateIdentity(
         **values,  # type: ignore[arg-type]

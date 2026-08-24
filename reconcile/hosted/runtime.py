@@ -164,7 +164,7 @@ _SANDBOX_MUTATION_PATH = "/internal/v1/mutations"
 _SANDBOX_CLEANUP_PATH = "/internal/v1/cleanup"
 _PLANNER_ESTIMATED_COST_MICROUNITS = 1
 _HOSTED_PROVIDER_TIMEOUT_SECONDS = 3.0
-_HOSTED_RECOVERY_PROVIDER_TIMEOUT_SECONDS = 20.0
+_HOSTED_RECOVERY_PROVIDER_TIMEOUT_SECONDS = 25.0
 
 if (
     _HOSTED_PROVIDER_TIMEOUT_SECONDS * 1_000
@@ -195,7 +195,7 @@ def build_hosted_candidate(config: HostedConfig) -> HostedCandidateIdentity:
     count_attempts = config.vertex_max_count_tokens_attempts or 1
     generation_attempts = config.vertex_max_generation_attempts or 1
     maximum_input = config.vertex_max_input_tokens or 12_000
-    maximum_output = config.vertex_max_output_tokens or 1_024
+    maximum_output = config.vertex_max_output_tokens or 4_096
     thinking = config.vertex_thinking_level or "MINIMAL"
     candidate = HostedCandidateIdentity(
         schema_version=HOSTED_CANDIDATE_IDENTITY_VERSION,
