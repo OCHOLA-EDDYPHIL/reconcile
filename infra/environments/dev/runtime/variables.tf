@@ -75,6 +75,18 @@ variable "semantic_config_sha256" {
   }
 }
 
+variable "recovery_definition_created_at" {
+  type = string
+
+  validation {
+    condition = (
+      can(regex("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]{6})?Z$", var.recovery_definition_created_at)) &&
+      can(timecmp(var.recovery_definition_created_at, var.recovery_definition_created_at))
+    )
+    error_message = "The recovery definition timestamp must be canonical UTC RFC3339."
+  }
+}
+
 variable "api_invoker_members" {
   type = set(string)
 
@@ -107,6 +119,14 @@ variable "request_timeout_seconds" {
       for timeout in values(var.request_timeout_seconds) : timeout >= 1 && timeout <= 3600 && floor(timeout) == timeout
     ])
     error_message = "Request timeouts must be whole seconds between 1 and 3600."
+  }
+
+  validation {
+    condition = (
+      var.request_timeout_seconds.api > 240 &&
+      var.request_timeout_seconds.controller > 240
+    )
+    error_message = "API and controller request timeouts must exceed the fixed 240-second recovery execution bound."
   }
 }
 

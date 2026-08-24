@@ -23,6 +23,27 @@ locals {
   }))
   canary_baseline_revision = "reconcile-p5-canary-b-${substr(local.canary_baseline_identity, 0, 16)}"
 
+  recovery_release_id = "p5-release-${substr(var.source_revision, 0, 24)}"
+  recovery_candidate_identity = {
+    configured_model              = var.vertex_model
+    image_digest                  = var.image_digest
+    infrastructure_revision       = var.infrastructure_revision
+    maximum_count_tokens_attempts = 1
+    maximum_generation_attempts   = 1
+    maximum_input_tokens          = 12000
+    maximum_output_tokens         = 1024
+    project_id                    = var.project_id
+    prompt_sha256                 = var.vertex_prompt_sha256
+    prompt_version                = var.vertex_prompt_version
+    schema_version                = "reconcile/hosted-candidate-identity/v1"
+    semantic_config_sha256        = var.semantic_config_sha256
+    source_revision               = var.source_revision
+    thinking_level                = "MINIMAL"
+    vertex_location               = var.vertex_location
+  }
+  recovery_payload_sha256            = sha256(jsonencode(local.recovery_candidate_identity))
+  recovery_execution_timeout_seconds = 240
+
   audience_origin = join("", ["https:", "/", "/reconcile.invalid/phase5/reconcile-dev-260813-14fa6d"])
   audiences = {
     api         = "${local.audience_origin}/api"

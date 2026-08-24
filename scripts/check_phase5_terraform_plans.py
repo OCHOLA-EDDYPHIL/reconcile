@@ -11,6 +11,7 @@ import stat
 import subprocess
 import tempfile
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -39,6 +40,7 @@ _IMAGE_REFERENCE = (
 _SOURCE_REVISION = "a" * 40
 _INFRASTRUCTURE_REVISION = "b" * 64
 _SEMANTIC_CONFIG_SHA256 = "c" * 64
+_RECOVERY_DEFINITION_CREATED_AT = "2026-08-24T00:00:00Z"
 _VERTEX_PROMPT_VERSION = "adaptive-planner-v3"
 _VERTEX_PROMPT_SHA256 = (
     "a18ac5bbd22570562acc6dfbc49437a82f0db6a265a4de737c1371b6ef2ca2d3"
@@ -77,6 +79,41 @@ def _canary_baseline_identity(
     return hashlib.sha256(encoded).hexdigest()
 
 
+def _recovery_payload_sha256(
+    *,
+    image_digest: str,
+    infrastructure_revision: str,
+    semantic_config_sha256: str,
+    source_revision: str,
+    vertex_location: str = "us",
+    vertex_model: str = "gemini-3.5-flash",
+    vertex_prompt_sha256: str = _VERTEX_PROMPT_SHA256,
+    vertex_prompt_version: str = _VERTEX_PROMPT_VERSION,
+) -> str:
+    encoded = json.dumps(
+        {
+            "configured_model": vertex_model,
+            "image_digest": image_digest,
+            "infrastructure_revision": infrastructure_revision,
+            "maximum_count_tokens_attempts": 1,
+            "maximum_generation_attempts": 1,
+            "maximum_input_tokens": 12_000,
+            "maximum_output_tokens": 1_024,
+            "project_id": _PROJECT,
+            "prompt_sha256": vertex_prompt_sha256,
+            "prompt_version": vertex_prompt_version,
+            "schema_version": "reconcile/hosted-candidate-identity/v1",
+            "semantic_config_sha256": semantic_config_sha256,
+            "source_revision": source_revision,
+            "thinking_level": "MINIMAL",
+            "vertex_location": vertex_location,
+        },
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
 _CANARY_BASELINE_IDENTITY = _canary_baseline_identity(
     image_digest=_IMAGE_DIGEST,
     infrastructure_revision=_INFRASTRUCTURE_REVISION,
@@ -84,6 +121,13 @@ _CANARY_BASELINE_IDENTITY = _canary_baseline_identity(
     source_revision=_SOURCE_REVISION,
 )
 _CANARY_BASELINE_REVISION = f"reconcile-p5-canary-b-{_CANARY_BASELINE_IDENTITY[:16]}"
+_RECOVERY_RELEASE_ID = f"p5-release-{_SOURCE_REVISION[:24]}"
+_RECOVERY_PAYLOAD_SHA256 = _recovery_payload_sha256(
+    image_digest=_IMAGE_DIGEST,
+    infrastructure_revision=_INFRASTRUCTURE_REVISION,
+    semantic_config_sha256=_SEMANTIC_CONFIG_SHA256,
+    source_revision=_SOURCE_REVISION,
+)
 _SERVICE_NAMES = {
     "api": "reconcile-p5-api",
     "canary": "reconcile-p5-canary",
@@ -145,7 +189,17 @@ _RUNTIME_ENVIRONMENT = {
     | {
         "RECONCILE_ALLOWED_CALLER_EMAILS": _RUNTIME_EMAILS["api"],
         "RECONCILE_AUTH_AUDIENCE": _AUDIENCES["controller"],
+        "RECONCILE_CANARY_AUDIENCE": _AUDIENCES["canary"],
+        "RECONCILE_CANARY_BASELINE_REVISION": _CANARY_BASELINE_REVISION,
+        "RECONCILE_CANARY_LOCATION": _REGION,
+        "RECONCILE_CANARY_SERVICE": "reconcile-p5-canary",
         "RECONCILE_COMPONENT": "controller",
+        "RECONCILE_FAULT_PROXY_AUDIENCE": _AUDIENCES["fault_proxy"],
+        "RECONCILE_FAULT_PROXY_URL": None,
+        "RECONCILE_RECOVERY_DEFINITION_CREATED_AT": _RECOVERY_DEFINITION_CREATED_AT,
+        "RECONCILE_RECOVERY_EXECUTION_TIMEOUT_SECONDS": "240",
+        "RECONCILE_RECOVERY_PAYLOAD_SHA256": _RECOVERY_PAYLOAD_SHA256,
+        "RECONCILE_RECOVERY_RELEASE_ID": _RECOVERY_RELEASE_ID,
         "RECONCILE_RUNTIME_DATABASE": "reconcile-p5-runtime",
         "RECONCILE_SANDBOX_AUDIENCE": _AUDIENCES["sandbox"],
         "RECONCILE_SANDBOX_URL": None,
@@ -170,6 +224,7 @@ _RUNTIME_ENVIRONMENT = {
         "RECONCILE_CANARY_LOCATION": _REGION,
         "RECONCILE_CANARY_SERVICE": "reconcile-p5-canary",
         "RECONCILE_COMPONENT": "fault-proxy",
+        "RECONCILE_RECOVERY_ACTION_CALLER_EMAIL": _RUNTIME_EMAILS["controller"],
         "RECONCILE_RUNTIME_DATABASE": "reconcile-p5-runtime",
         "RECONCILE_SANDBOX_AUDIENCE": _AUDIENCES["sandbox"],
         "RECONCILE_SANDBOX_URL": None,
@@ -305,6 +360,7 @@ _STACKS = (
             "api_invoker_members": [_OPERATOR_MEMBER],
             "image_digest": _IMAGE_DIGEST,
             "infrastructure_revision": _INFRASTRUCTURE_REVISION,
+            "recovery_definition_created_at": _RECOVERY_DEFINITION_CREATED_AT,
             "semantic_config_sha256": _SEMANTIC_CONFIG_SHA256,
             "service_account_emails": _RUNTIME_EMAILS,
             "source_revision": _SOURCE_REVISION,
@@ -334,6 +390,7 @@ _VARIABLE_NAMES = {
         "project_id",
         "region",
         "request_timeout_seconds",
+        "recovery_definition_created_at",
         "semantic_config_sha256",
         "service_account_emails",
         "source_revision",
@@ -785,6 +842,7 @@ def _verify_cloud_run(
         else {
             "image_digest": _IMAGE_DIGEST,
             "infrastructure_revision": _INFRASTRUCTURE_REVISION,
+            "recovery_definition_created_at": _RECOVERY_DEFINITION_CREATED_AT,
             "semantic_config_sha256": _SEMANTIC_CONFIG_SHA256,
             "source_revision": _SOURCE_REVISION,
             "vertex_location": "us",
@@ -834,6 +892,32 @@ def _verify_cloud_run(
         request_timeout_seconds=timeout,
     )
     baseline_revision = f"reconcile-p5-canary-b-{baseline_identity[:16]}"
+    recovery_definition_created_at = variables.get("recovery_definition_created_at")
+    if not isinstance(recovery_definition_created_at, str):
+        _fail("recovery definition timestamp is invalid")
+    try:
+        parsed_recovery_timestamp = datetime.fromisoformat(
+            recovery_definition_created_at.replace("Z", "+00:00")
+        ).astimezone(UTC)
+    except ValueError:
+        _fail("recovery definition timestamp is invalid")
+    timespec = "microseconds" if parsed_recovery_timestamp.microsecond else "seconds"
+    if (
+        parsed_recovery_timestamp.isoformat(timespec=timespec).replace("+00:00", "Z")
+        != recovery_definition_created_at
+    ):
+        _fail("recovery definition timestamp is not canonical")
+    recovery_release_id = f"p5-release-{str(variables.get('source_revision'))[:24]}"
+    recovery_payload_sha256 = _recovery_payload_sha256(
+        image_digest=image_digest,
+        infrastructure_revision=str(variables.get("infrastructure_revision")),
+        semantic_config_sha256=str(variables.get("semantic_config_sha256")),
+        source_revision=str(variables.get("source_revision")),
+        vertex_location=str(variables.get("vertex_location")),
+        vertex_model=str(variables.get("vertex_model")),
+        vertex_prompt_sha256=str(variables.get("vertex_prompt_sha256")),
+        vertex_prompt_version=str(variables.get("vertex_prompt_version")),
+    )
     trigger = resources.get("terraform_data.canary_baseline")
     if (
         trigger is None
@@ -842,6 +926,14 @@ def _verify_cloud_run(
         _fail("canary baseline replacement trigger is not content-addressed")
     runtime_environment["fault_proxy"]["RECONCILE_CANARY_BASELINE_REVISION"] = (
         baseline_revision
+    )
+    runtime_environment["controller"].update(
+        {
+            "RECONCILE_CANARY_BASELINE_REVISION": baseline_revision,
+            "RECONCILE_RECOVERY_DEFINITION_CREATED_AT": recovery_definition_created_at,
+            "RECONCILE_RECOVERY_PAYLOAD_SHA256": recovery_payload_sha256,
+            "RECONCILE_RECOVERY_RELEASE_ID": recovery_release_id,
+        }
     )
     images: set[str] = set()
     for component in _RUNTIME_EMAILS:
@@ -1279,6 +1371,7 @@ def _operator_stacks(
     required = {
         "image_digest",
         "infrastructure_revision",
+        "recovery_definition_created_at",
         "semantic_config_sha256",
         "source_revision",
         "vertex_prompt_sha256",
@@ -1289,6 +1382,12 @@ def _operator_stacks(
     if (
         re.fullmatch(r"sha256:[0-9a-f]{64}", runtime_identity["image_digest"]) is None
         or re.fullmatch(r"[0-9a-f]{64}", runtime_identity["infrastructure_revision"])
+        is None
+        or not isinstance(runtime_identity["recovery_definition_created_at"], str)
+        or re.fullmatch(
+            r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:[.][0-9]{6})?Z",
+            runtime_identity["recovery_definition_created_at"],
+        )
         is None
         or re.fullmatch(r"[0-9a-f]{64}", runtime_identity["semantic_config_sha256"])
         is None
@@ -2013,6 +2112,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--artifact-output", type=Path)
     parser.add_argument("--image-digest")
     parser.add_argument("--infrastructure-revision")
+    parser.add_argument("--recovery-definition-created-at")
     parser.add_argument("--semantic-config-sha256")
     parser.add_argument("--source-revision")
     parser.add_argument("--vertex-prompt-sha256")
@@ -2039,6 +2139,7 @@ def main() -> int:
     identity_values = {
         "image_digest": arguments.image_digest,
         "infrastructure_revision": arguments.infrastructure_revision,
+        "recovery_definition_created_at": arguments.recovery_definition_created_at,
         "semantic_config_sha256": arguments.semantic_config_sha256,
         "source_revision": arguments.source_revision,
         "vertex_prompt_sha256": arguments.vertex_prompt_sha256,

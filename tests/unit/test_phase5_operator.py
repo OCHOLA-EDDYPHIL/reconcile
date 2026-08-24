@@ -301,6 +301,7 @@ def _runtime_values(repo_root: Path, image_digest: str) -> set[str]:
         image_digest,
         immutable_reference,
         infrastructure,
+        operator._canonical_utc_timestamp(_NOW),
         semantic.sha256,
         prompt_version,
         prompt_sha,
@@ -2931,6 +2932,7 @@ def test_snapshot_checkers_use_pinned_python_and_reverify_before_terraform(
     runtime_identity = {
         "image_digest": f"sha256:{'b' * 64}",
         "infrastructure_revision": "c" * 64,
+        "recovery_definition_created_at": "2026-08-24T00:00:00Z",
         "semantic_config_sha256": "d" * 64,
         "source_revision": _SOURCE,
         "vertex_prompt_sha256": "e" * 64,

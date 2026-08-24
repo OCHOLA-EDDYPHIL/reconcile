@@ -3397,6 +3397,7 @@ def _capture_artifact_bindings(
         semantic_sources.sha256,
         prompt_version,
         prompt_sha256,
+        _canonical_utc_timestamp(draft.created_at),
     }
     plans = tuple(
         sorted(
@@ -3654,6 +3655,7 @@ def _prepare_terraform_from_snapshot(
     for name in (
         "image_digest",
         "infrastructure_revision",
+        "recovery_definition_created_at",
         "semantic_config_sha256",
         "source_revision",
         "vertex_prompt_sha256",
@@ -3761,9 +3763,11 @@ def prepare_phase5_artifacts(
         _default_runner,
         cli_config=state.root / "terraform.rc",
     )
+    moment = _utc(created_at)
     runtime_identity = {
         "image_digest": image_digest,
         "infrastructure_revision": infrastructure_revision,
+        "recovery_definition_created_at": _canonical_utc_timestamp(moment),
         "semantic_config_sha256": semantic_sources.sha256,
         "source_revision": source_revision,
         "vertex_prompt_sha256": prompt_sha256,
@@ -3777,7 +3781,6 @@ def prepare_phase5_artifacts(
         runner=_default_runner,
     )
 
-    moment = _utc(created_at)
     draft = Phase5ManifestDraft(
         schema_version="reconcile/phase5-operator-draft/v1",
         source_revision=source_revision,
@@ -3824,6 +3827,12 @@ def _utc(value: datetime) -> datetime:
     if value.tzinfo is None or value.utcoffset() is None:
         raise OperatorError("TIMESTAMP_MUST_BE_AWARE")
     return value.astimezone(UTC)
+
+
+def _canonical_utc_timestamp(value: datetime) -> str:
+    moment = _utc(value)
+    timespec = "microseconds" if moment.microsecond else "seconds"
+    return moment.isoformat(timespec=timespec).replace("+00:00", "Z")
 
 
 def _canonical_absolute_path(path: Path, *, require_exists: bool) -> Path:

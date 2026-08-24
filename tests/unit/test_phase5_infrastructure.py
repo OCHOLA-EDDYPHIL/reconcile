@@ -460,8 +460,13 @@ def test_canary_runtime_drift_and_baseline_rotation_are_explicit() -> None:
         == 3
     )
     assert (
-        "RECONCILE_CANARY_BASELINE_REVISION = local.canary_baseline_revision"
-        in cloud_run
+        len(
+            re.findall(
+                r"RECONCILE_CANARY_BASELINE_REVISION\s*=\s*local[.]canary_baseline_revision",
+                cloud_run,
+            )
+        )
+        == 2
     )
 
 
