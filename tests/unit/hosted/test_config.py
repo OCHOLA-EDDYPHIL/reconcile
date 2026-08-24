@@ -5,10 +5,15 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Mapping
+from datetime import UTC, datetime
 
 import pytest
 
 from reconcile.hosted.config import Component, HostedConfigError, load_config
+from reconcile.hosted.provider import (
+    HOSTED_CANDIDATE_IDENTITY_VERSION,
+    HostedCandidateIdentity,
+)
 
 pytestmark = pytest.mark.unit
 
@@ -33,6 +38,26 @@ def _canary_baseline() -> str:
     }
     encoded = json.dumps(identity, separators=(",", ":"), sort_keys=True).encode()
     return f"reconcile-p5-canary-b-{hashlib.sha256(encoded).hexdigest()[:16]}"
+
+
+def _candidate_sha256() -> str:
+    return HostedCandidateIdentity(
+        schema_version=HOSTED_CANDIDATE_IDENTITY_VERSION,
+        source_revision="a" * 40,
+        image_digest=f"sha256:{'b' * 64}",
+        infrastructure_revision="c" * 64,
+        semantic_config_sha256="d" * 64,
+        project_id=_PROJECT,
+        vertex_location="us",
+        configured_model="gemini-3.5-flash",
+        prompt_version="adaptive-planner-v3",
+        prompt_sha256=_PROMPT_SHA256,
+        maximum_input_tokens=12_000,
+        maximum_output_tokens=1_024,
+        thinking_level="MINIMAL",
+        maximum_count_tokens_attempts=1,
+        maximum_generation_attempts=1,
+    ).sha256
 
 
 def _audience(component: Component) -> str:
@@ -73,8 +98,20 @@ def _environment(component: Component) -> dict[str, str]:
                 "RECONCILE_RUNTIME_DATABASE": "reconcile-p5-runtime",
                 "RECONCILE_TARGET_DATABASE": "reconcile-p5-target",
                 "RECONCILE_TARGET_BUCKET": f"{_PROJECT}-p5-target",
+                "RECONCILE_FAULT_PROXY_URL": "https://fault-proxy.example.run.app",
+                "RECONCILE_FAULT_PROXY_AUDIENCE": _audience(Component.FAULT_PROXY),
                 "RECONCILE_SANDBOX_URL": "https://sandbox.example.run.app",
                 "RECONCILE_SANDBOX_AUDIENCE": _audience(Component.SANDBOX),
+                "RECONCILE_CANARY_LOCATION": "us-central1",
+                "RECONCILE_CANARY_SERVICE": "reconcile-p5-canary",
+                "RECONCILE_CANARY_BASELINE_REVISION": _canary_baseline(),
+                "RECONCILE_CANARY_AUDIENCE": (
+                    f"https://reconcile.invalid/phase5/{_PROJECT}/canary"
+                ),
+                "RECONCILE_RECOVERY_RELEASE_ID": f"p5-release-{'a' * 24}",
+                "RECONCILE_RECOVERY_PAYLOAD_SHA256": _candidate_sha256(),
+                "RECONCILE_RECOVERY_DEFINITION_CREATED_AT": ("2026-08-24T03:15:00Z"),
+                "RECONCILE_RECOVERY_EXECUTION_TIMEOUT_SECONDS": "240",
                 "RECONCILE_VERTEX_LOCATION": "us",
                 "RECONCILE_VERTEX_MODEL": "gemini-3.5-flash",
                 "RECONCILE_VERTEX_PROMPT_VERSION": "adaptive-planner-v3",
@@ -101,6 +138,7 @@ def _environment(component: Component) -> dict[str, str]:
                 "RECONCILE_CANARY_AUDIENCE": (
                     f"https://reconcile.invalid/phase5/{_PROJECT}/canary"
                 ),
+                "RECONCILE_RECOVERY_ACTION_CALLER_EMAIL": _SANDBOX_READ_CALLER,
             }
         )
     else:
@@ -153,7 +191,26 @@ def test_every_component_loads_only_its_exact_fields(component: Component) -> No
         assert config.target_database is None
     elif component is Component.CONTROLLER:
         assert config.allowed_caller_emails == (_INTERNAL_CALLER,)
+        assert config.fault_proxy_url == "https://fault-proxy.example.run.app"
+        assert config.fault_proxy_audience == _audience(Component.FAULT_PROXY)
         assert config.sandbox_url == "https://sandbox.example.run.app"
+        assert config.canary_location == "us-central1"
+        assert config.canary_service == "reconcile-p5-canary"
+        assert config.canary_baseline_revision == _canary_baseline()
+        assert config.canary_audience == (
+            f"https://reconcile.invalid/phase5/{_PROJECT}/canary"
+        )
+        assert config.recovery_release_id == f"p5-release-{'a' * 24}"
+        assert config.recovery_payload_sha256 == _candidate_sha256()
+        assert config.recovery_definition_created_at == datetime(
+            2026,
+            8,
+            24,
+            3,
+            15,
+            tzinfo=UTC,
+        )
+        assert config.recovery_execution_timeout_seconds == 240
         assert config.vertex_prompt_version == "adaptive-planner-v3"
         assert config.vertex_prompt_sha256 == _PROMPT_SHA256
         assert config.vertex_max_count_tokens_attempts == 1
@@ -170,6 +227,7 @@ def test_every_component_loads_only_its_exact_fields(component: Component) -> No
         assert config.canary_audience == (
             f"https://reconcile.invalid/phase5/{_PROJECT}/canary"
         )
+        assert config.recovery_action_caller_email == _SANDBOX_READ_CALLER
     else:
         assert config.allowed_caller_emails == (
             _SANDBOX_READ_CALLER,
@@ -250,6 +308,10 @@ def test_port_is_canonical_and_bounded(port: str) -> None:
         ("RECONCILE_VERTEX_MAX_INPUT_TOKENS", "12001"),
         ("RECONCILE_VERTEX_MAX_OUTPUT_TOKENS", "1025"),
         ("RECONCILE_VERTEX_THINKING_LEVEL", "LOW"),
+        ("RECONCILE_RECOVERY_RELEASE_ID", "p5-release-wrong"),
+        ("RECONCILE_RECOVERY_PAYLOAD_SHA256", "0" * 64),
+        ("RECONCILE_RECOVERY_DEFINITION_CREATED_AT", "2026-08-24T03:15:00"),
+        ("RECONCILE_RECOVERY_EXECUTION_TIMEOUT_SECONDS", "239"),
     ),
 )
 def test_controller_rejects_values_outside_the_frozen_boundary(
@@ -333,6 +395,14 @@ def test_destination_url_is_a_canonical_https_origin(value: str) -> None:
 def test_sandbox_route_callers_are_exact_and_distinct(name: str, value: str) -> None:
     environment = _environment(Component.SANDBOX)
     environment[name] = value
+
+    with pytest.raises(HostedConfigError, match="is invalid"):
+        load_config(environment)
+
+
+def test_recovery_action_caller_is_exactly_the_controller_identity() -> None:
+    environment = _environment(Component.FAULT_PROXY)
+    environment["RECONCILE_RECOVERY_ACTION_CALLER_EMAIL"] = _INTERNAL_CALLER
 
     with pytest.raises(HostedConfigError, match="is invalid"):
         load_config(environment)

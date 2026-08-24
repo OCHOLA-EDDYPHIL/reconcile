@@ -45,6 +45,7 @@ from reconcile.interfaces.api import create_app
 _MAX_INTERNAL_REQUEST_BYTES = MAX_INTERNAL_PAYLOAD_BYTES + 4_096
 
 _CONTROLLER_PATH = "/internal/v1/investigations"
+_RECOVERY_PATH = "/internal/v1/recovery-runs"
 _FAULT_PATH = "/internal/v1/faults"
 _EVIDENCE_PATH = "/internal/v1/evidence"
 _MUTATION_PATH = "/internal/v1/mutations"
@@ -84,7 +85,12 @@ _API_PATHS = (
     ),
 )
 _INTERNAL_PATHS = {
-    Component.CONTROLLER: frozenset({("POST", _CONTROLLER_PATH.encode("ascii"))}),
+    Component.CONTROLLER: frozenset(
+        {
+            ("POST", _CONTROLLER_PATH.encode("ascii")),
+            ("POST", _RECOVERY_PATH.encode("ascii")),
+        }
+    ),
     Component.FAULT_PROXY: frozenset(
         {
             ("POST", _FAULT_PATH.encode("ascii")),
@@ -119,6 +125,13 @@ class InternalOperationDenied(Exception):
 
     def __init__(self) -> None:
         super().__init__("internal operation denied")
+
+
+class InternalOperationConflict(Exception):
+    """The request identity conflicts with durable operation authority."""
+
+    def __init__(self) -> None:
+        super().__init__("internal operation conflict")
 
 
 def _single_header(scope: Scope, name: bytes) -> str | None:
@@ -379,6 +392,11 @@ def _install_handler(
                 code="operation-denied",
                 status_code=HTTPStatus.FORBIDDEN,
             )
+        except InternalOperationConflict:
+            return _internal_error(
+                code="operation-conflict",
+                status_code=HTTPStatus.CONFLICT,
+            )
         except Exception:
             return _internal_error(
                 code="operation-unavailable",
@@ -498,6 +516,20 @@ def _internal_app(
                 InternalOperation.INVESTIGATE,
                 handler,
             )
+        recovery_handler = handlers.get(InternalOperation.RECOVER)
+        if recovery_handler is None:
+            _install_placeholder(
+                application,
+                _RECOVERY_PATH,
+                InternalOperation.RECOVER,
+            )
+        else:
+            _install_handler(
+                application,
+                _RECOVERY_PATH,
+                InternalOperation.RECOVER,
+                recovery_handler,
+            )
     elif config.component is Component.FAULT_PROXY:
         fault_handler = handlers.get(InternalOperation.EXECUTE_FAULT)
         if fault_handler is None:
@@ -612,7 +644,9 @@ def create_component_app(
                 raise TypeError("internal operation handler entries must be exact")
     allowed_handler_operations = {
         Component.API: frozenset(),
-        Component.CONTROLLER: frozenset({InternalOperation.INVESTIGATE}),
+        Component.CONTROLLER: frozenset(
+            {InternalOperation.INVESTIGATE, InternalOperation.RECOVER}
+        ),
         Component.FAULT_PROXY: frozenset(
             {InternalOperation.EXECUTE_FAULT, InternalOperation.CLEANUP}
         ),
@@ -658,6 +692,7 @@ def create_component_app(
 
 __all__ = [
     "ApplicationIdentityMiddleware",
+    "InternalOperationConflict",
     "InternalOperationDenied",
     "InternalOperationHandler",
     "create_component_app",

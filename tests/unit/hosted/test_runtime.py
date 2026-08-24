@@ -87,8 +87,18 @@ def _config(component: Component) -> HostedConfig:
             "runtime_database": _RUNTIME_DATABASE,
             "target_database": _TARGET_DATABASE,
             "target_bucket": _BUCKET,
+            "fault_proxy_url": "https://fault.example.run.app",
+            "fault_proxy_audience": _audience(Component.FAULT_PROXY),
             "sandbox_url": "https://sandbox.example.run.app",
             "sandbox_audience": _audience(Component.SANDBOX),
+            "canary_location": "us-central1",
+            "canary_service": "reconcile-p5-canary",
+            "canary_baseline_revision": "reconcile-p5-canary-b-0123456789abcdef",
+            "canary_audience": (f"https://reconcile.invalid/phase5/{_PROJECT}/canary"),
+            "recovery_release_id": f"p5-release-{'a' * 24}",
+            "recovery_payload_sha256": "e" * 64,
+            "recovery_definition_created_at": datetime(2026, 8, 24, tzinfo=UTC),
+            "recovery_execution_timeout_seconds": 240,
             "vertex_location": "us",
             "vertex_model": "gemini-3.5-flash",
             "vertex_prompt_version": "adaptive-planner-v3",
@@ -111,6 +121,7 @@ def _config(component: Component) -> HostedConfig:
             "canary_service": "reconcile-p5-canary",
             "canary_baseline_revision": "reconcile-p5-canary-b-0123456789abcdef",
             "canary_audience": (f"https://reconcile.invalid/phase5/{_PROJECT}/canary"),
+            "recovery_action_caller_email": _CONTROLLER,
         }
     else:
         values = {

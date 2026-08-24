@@ -26,6 +26,7 @@ class InternalOperation(StrEnum):
     EXECUTE_FAULT = "execute-fault"
     READ_EVIDENCE = "read-evidence"
     CLEANUP = "cleanup"
+    RECOVER = "recover"
 
 
 def _validate_payload(value: dict[str, JsonValue]) -> dict[str, JsonValue]:

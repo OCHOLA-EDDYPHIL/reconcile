@@ -8,6 +8,7 @@ import os
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from enum import StrEnum
 from urllib.parse import urlsplit
 
@@ -53,6 +54,11 @@ class HostedConfig:
     canary_service: str | None = None
     canary_baseline_revision: str | None = None
     canary_audience: str | None = None
+    recovery_release_id: str | None = None
+    recovery_payload_sha256: str | None = None
+    recovery_definition_created_at: datetime | None = None
+    recovery_execution_timeout_seconds: int | None = None
+    recovery_action_caller_email: str | None = None
     vertex_location: str | None = None
     vertex_model: str | None = None
     vertex_prompt_version: str | None = None
@@ -88,6 +94,11 @@ _CANARY_LOCATION = "RECONCILE_CANARY_LOCATION"
 _CANARY_SERVICE = "RECONCILE_CANARY_SERVICE"
 _CANARY_BASELINE_REVISION = "RECONCILE_CANARY_BASELINE_REVISION"
 _CANARY_AUDIENCE = "RECONCILE_CANARY_AUDIENCE"
+_RECOVERY_RELEASE_ID = "RECONCILE_RECOVERY_RELEASE_ID"
+_RECOVERY_PAYLOAD_SHA256 = "RECONCILE_RECOVERY_PAYLOAD_SHA256"
+_RECOVERY_DEFINITION_CREATED_AT = "RECONCILE_RECOVERY_DEFINITION_CREATED_AT"
+_RECOVERY_EXECUTION_TIMEOUT_SECONDS = "RECONCILE_RECOVERY_EXECUTION_TIMEOUT_SECONDS"
+_RECOVERY_ACTION_CALLER = "RECONCILE_RECOVERY_ACTION_CALLER_EMAIL"
 _VERTEX_LOCATION = "RECONCILE_VERTEX_LOCATION"
 _VERTEX_MODEL = "RECONCILE_VERTEX_MODEL"
 _VERTEX_PROMPT_VERSION = "RECONCILE_VERTEX_PROMPT_VERSION"
@@ -128,8 +139,18 @@ _COMPONENT_NAMES = {
             _RUNTIME_DATABASE,
             _TARGET_DATABASE,
             _TARGET_BUCKET,
+            _FAULT_PROXY_URL,
+            _FAULT_PROXY_AUDIENCE,
             _SANDBOX_URL,
             _SANDBOX_AUDIENCE,
+            _CANARY_LOCATION,
+            _CANARY_SERVICE,
+            _CANARY_BASELINE_REVISION,
+            _CANARY_AUDIENCE,
+            _RECOVERY_RELEASE_ID,
+            _RECOVERY_PAYLOAD_SHA256,
+            _RECOVERY_DEFINITION_CREATED_AT,
+            _RECOVERY_EXECUTION_TIMEOUT_SECONDS,
             _VERTEX_LOCATION,
             _VERTEX_MODEL,
             _VERTEX_PROMPT_VERSION,
@@ -153,6 +174,7 @@ _COMPONENT_NAMES = {
             _CANARY_SERVICE,
             _CANARY_BASELINE_REVISION,
             _CANARY_AUDIENCE,
+            _RECOVERY_ACTION_CALLER,
         }
     ),
     Component.SANDBOX: frozenset(
@@ -181,6 +203,10 @@ _HOST_PATTERN = re.compile(
 _SOURCE_REVISION_PATTERN = re.compile(r"[0-9a-f]{40}")
 _IMAGE_DIGEST_PATTERN = re.compile(r"sha256:[0-9a-f]{64}")
 _SHA256_PATTERN = re.compile(r"[0-9a-f]{64}")
+_UTC_TIMESTAMP_PATTERN = re.compile(
+    r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}"
+    r"(?:\.[0-9]{6})?Z"
+)
 _APPROVED_PROJECT_ID = "reconcile-dev-260813-14fa6d"
 _APPROVED_RUNTIME_DATABASE = "reconcile-p5-runtime"
 _APPROVED_SANDBOX_DATABASE = "reconcile-p5-sandbox"
@@ -244,6 +270,40 @@ def _expected_canary_baseline_revision(
         sort_keys=True,
     ).encode("utf-8")
     return f"reconcile-p5-canary-b-{hashlib.sha256(encoded).hexdigest()[:16]}"
+
+
+def _expected_recovery_payload_sha256(
+    *,
+    project_id: str,
+    image_digest: str,
+    infrastructure_revision: str,
+    semantic_config_sha256: str,
+    source_revision: str,
+) -> str:
+    identity = {
+        "configured_model": "gemini-3.5-flash",
+        "image_digest": image_digest,
+        "infrastructure_revision": infrastructure_revision,
+        "maximum_count_tokens_attempts": 1,
+        "maximum_generation_attempts": 1,
+        "maximum_input_tokens": 12_000,
+        "maximum_output_tokens": 1_024,
+        "project_id": project_id,
+        "prompt_sha256": _APPROVED_VERTEX_PROMPT_SHA256,
+        "prompt_version": _APPROVED_VERTEX_PROMPT_VERSION,
+        "schema_version": "reconcile/hosted-candidate-identity/v1",
+        "semantic_config_sha256": semantic_config_sha256,
+        "source_revision": source_revision,
+        "thinking_level": "MINIMAL",
+        "vertex_location": "us",
+    }
+    encoded = json.dumps(
+        identity,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def _managed_environment(source: Mapping[str, str]) -> dict[str, str]:
@@ -355,6 +415,19 @@ def _https_origin(environment: Mapping[str, str], name: str) -> str:
     return value
 
 
+def _utc_timestamp(environment: Mapping[str, str], name: str) -> datetime:
+    value = _pattern(environment, name, _UTC_TIMESTAMP_PATTERN)
+    try:
+        parsed = datetime.fromisoformat(f"{value[:-1]}+00:00").astimezone(UTC)
+    except ValueError as error:
+        raise HostedConfigError("is invalid") from error
+    timespec = "microseconds" if parsed.microsecond else "seconds"
+    canonical = parsed.isoformat(timespec=timespec).replace("+00:00", "Z")
+    if value != canonical:
+        raise HostedConfigError("is invalid")
+    return parsed
+
+
 def _load_config(environment: Mapping[str, str]) -> HostedConfig:
     managed = _managed_environment(environment)
     try:
@@ -416,6 +489,21 @@ def _load_config(environment: Mapping[str, str]) -> HostedConfig:
             ),
         }
     elif component is Component.CONTROLLER:
+        expected_baseline = _expected_canary_baseline_revision(
+            project_id=str(common["project_id"]),
+            image_digest=str(common["image_digest"]),
+            infrastructure_revision=str(common["infra_revision"]),
+            semantic_config_sha256=str(common["semantic_config_sha256"]),
+            source_revision=str(common["source_revision"]),
+        )
+        expected_release_id = f"p5-release-{str(common['source_revision'])[:24]}"
+        expected_payload_sha256 = _expected_recovery_payload_sha256(
+            project_id=str(common["project_id"]),
+            image_digest=str(common["image_digest"]),
+            infrastructure_revision=str(common["infra_revision"]),
+            semantic_config_sha256=str(common["semantic_config_sha256"]),
+            source_revision=str(common["source_revision"]),
+        )
         specific = {
             "runtime_database": _exact(
                 managed, _RUNTIME_DATABASE, _APPROVED_RUNTIME_DATABASE
@@ -424,9 +512,49 @@ def _load_config(environment: Mapping[str, str]) -> HostedConfig:
                 managed, _TARGET_DATABASE, _APPROVED_TARGET_DATABASE
             ),
             "target_bucket": _exact(managed, _TARGET_BUCKET, _APPROVED_TARGET_BUCKET),
+            "fault_proxy_url": _https_origin(managed, _FAULT_PROXY_URL),
+            "fault_proxy_audience": _audience(
+                managed, _FAULT_PROXY_AUDIENCE, Component.FAULT_PROXY
+            ),
             "sandbox_url": _https_origin(managed, _SANDBOX_URL),
             "sandbox_audience": _audience(
                 managed, _SANDBOX_AUDIENCE, Component.SANDBOX
+            ),
+            "canary_location": _exact(managed, _CANARY_LOCATION, "us-central1"),
+            "canary_service": _exact(
+                managed,
+                _CANARY_SERVICE,
+                "reconcile-p5-canary",
+            ),
+            "canary_baseline_revision": _exact(
+                managed,
+                _CANARY_BASELINE_REVISION,
+                expected_baseline,
+            ),
+            "canary_audience": _exact(
+                managed,
+                _CANARY_AUDIENCE,
+                _APPROVED_CANARY_AUDIENCE,
+            ),
+            "recovery_release_id": _exact(
+                managed,
+                _RECOVERY_RELEASE_ID,
+                expected_release_id,
+            ),
+            "recovery_payload_sha256": _exact(
+                managed,
+                _RECOVERY_PAYLOAD_SHA256,
+                expected_payload_sha256,
+            ),
+            "recovery_definition_created_at": _utc_timestamp(
+                managed,
+                _RECOVERY_DEFINITION_CREATED_AT,
+            ),
+            "recovery_execution_timeout_seconds": _integer(
+                managed,
+                _RECOVERY_EXECUTION_TIMEOUT_SECONDS,
+                minimum=240,
+                maximum=240,
             ),
             "vertex_location": _exact(managed, _VERTEX_LOCATION, "us"),
             "vertex_model": _exact(managed, _VERTEX_MODEL, "gemini-3.5-flash"),
@@ -497,6 +625,11 @@ def _load_config(environment: Mapping[str, str]) -> HostedConfig:
                 managed,
                 _CANARY_AUDIENCE,
                 _APPROVED_CANARY_AUDIENCE,
+            ),
+            "recovery_action_caller_email": _exact(
+                managed,
+                _RECOVERY_ACTION_CALLER,
+                _APPROVED_SANDBOX_READ_CALLER,
             ),
         }
     else:

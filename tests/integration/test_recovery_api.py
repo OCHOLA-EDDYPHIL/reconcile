@@ -78,6 +78,12 @@ class _RecoveryService:
             )
         return RecoveryRunLaunchResult(snapshot=snapshot, created=created)
 
+    async def launch_and_wait_result(
+        self,
+        request: RecoveryRunRequest,
+    ) -> RecoveryRunLaunchResult:
+        return await self.launch(request)
+
     async def get(self, run_id: str) -> RecoveryRunSnapshot:
         return await self.store.get(run_id)
 

@@ -59,6 +59,7 @@ from reconcile.hosted.firestore_business import (
 )
 from reconcile.hosted.firestore_cas import GoogleFirestoreCasStore
 from reconcile.hosted.firestore_provider_ledger import FirestoreHostedProviderLedger
+from reconcile.hosted.firestore_recovery_runs import FirestoreRecoveryRunStore
 from reconcile.hosted.firestore_runtime import FirestoreDurableRuntimeStore
 from reconcile.hosted.firestore_scenarios import (
     FirestoreScenarioOperationAuthority,
@@ -70,6 +71,7 @@ from reconcile.hosted.operations import (
     HostedHttpWorkflowGateway,
     HostedInvestigationHandler,
     HostedOperationHandler,
+    HostedRecoveryRunGateway,
     HostedWorkflowGatewayError,
 )
 from reconcile.hosted.planner import HostedGeminiPlanner
@@ -908,10 +910,16 @@ def create_runtime_component_app(
             runner=workflow,
             projection_store=scenario_store,
         )
+        recovery = HostedRecoveryRunGateway(
+            config,
+            selected_transport,
+            FirestoreRecoveryRunStore(cas),
+        )
         return create_component_app(
             config,
             transport=selected_transport,
             operator_service=operator,
+            recovery_service=recovery,
         )
 
     authorizer = FirestoreHostedOperationScopeAuthorizer(scenario_store)

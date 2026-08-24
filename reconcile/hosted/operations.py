@@ -9,13 +9,18 @@ from http import HTTPStatus
 from typing import Literal, Protocol
 
 from reconcile.contracts.base import (
+    Identifier,
     Sha256Digest,
     StrictModel,
     canonical_json_value_bytes,
 )
 from reconcile.contracts.codec import canonical_sha256, decode_contract
+from reconcile.contracts.recovery_run import (
+    RecoveryRunRequest,
+    RecoveryRunSnapshot,
+)
 from reconcile.contracts.report import InvestigationReport
-from reconcile.hosted.apps import InternalOperationDenied
+from reconcile.hosted.apps import InternalOperationConflict, InternalOperationDenied
 from reconcile.hosted.config import Component, HostedConfig
 from reconcile.hosted.contracts import (
     INTERNAL_OPERATION_REQUEST_VERSION,
@@ -46,14 +51,24 @@ from reconcile.persistence.durable import (
     DurableRunState,
     DurableRuntimeStore,
 )
+from reconcile.persistence.recovery_runs import (
+    RecoveryRunConflict,
+    RecoveryRunEventSnapshot,
+    RecoveryRunStore,
+    RecoveryRunStoreUnavailable,
+    is_terminal_recovery_run,
+)
 from reconcile.persistence.scenarios import (
     ScenarioInvestigationState,
     ScenarioMutationState,
 )
+from reconcile.recovery_workflow import RecoveryRunLaunchResult
 
 HOSTED_INVESTIGATION_RECEIPT_VERSION = "reconcile/hosted-investigation-receipt/v1"
+HOSTED_RECOVERY_RECEIPT_VERSION = "reconcile/hosted-recovery-receipt/v1"
 
 _CONTROLLER_PATH = "/internal/v1/investigations"
+_RECOVERY_PATH = "/internal/v1/recovery-runs"
 _FAULT_PATH = "/internal/v1/faults"
 _CLEANUP_PATH = "/internal/v1/cleanup"
 
@@ -66,11 +81,28 @@ class HostedInvestigationReceipt(StrictModel):
     report_sha256: Sha256Digest
 
 
+class HostedRecoveryReceipt(StrictModel):
+    """Minimal recovery response whose snapshot remains in runtime Firestore."""
+
+    schema_version: Literal["reconcile/hosted-recovery-receipt/v1"]
+    run_id: Identifier
+    request_sha256: Sha256Digest
+    snapshot_sha256: Sha256Digest
+    created: bool
+
+
 class HostedWorkflowGatewayError(RuntimeError):
     """A sanitized internal dependency failure."""
 
     def __init__(self) -> None:
         super().__init__("hosted workflow dependency is unavailable")
+
+
+class HostedRecoveryGatewayError(RecoveryRunStoreUnavailable):
+    """A sanitized hosted recovery transport or verification failure."""
+
+    def __init__(self) -> None:
+        super().__init__("hosted recovery dependency is unavailable")
 
 
 class HostedReportLoader(Protocol):
@@ -89,6 +121,13 @@ class HostedInvestigationDispatcher(Protocol):
         self,
         scope: HostedOperationScope,
     ) -> HostedInvestigationResult: ...
+
+
+class HostedRecoveryService(Protocol):
+    async def launch_and_wait_result(
+        self,
+        request: RecoveryRunRequest,
+    ) -> RecoveryRunLaunchResult: ...
 
 
 class HostedOperationScopeAuthorizer(Protocol):
@@ -242,6 +281,29 @@ def _request(scope: HostedOperationScope) -> InternalOperationRequest:
     )
 
 
+def _recovery_request(request: RecoveryRunRequest) -> InternalOperationRequest:
+    request_sha256 = canonical_sha256(request)
+    return InternalOperationRequest(
+        schema_version=INTERNAL_OPERATION_REQUEST_VERSION,
+        request_id=f"hosted-recover-{request_sha256[:32]}",
+        operation=InternalOperation.RECOVER,
+        payload=request.model_dump(mode="json"),
+    )
+
+
+def _decode_recovery_request(
+    request: InternalOperationRequest,
+) -> RecoveryRunRequest:
+    if request.operation is not InternalOperation.RECOVER:
+        raise ValueError("hosted recovery does not match its route")
+    recovery = RecoveryRunRequest.model_validate_json(
+        canonical_json_value_bytes(request.payload)
+    )
+    if request.payload != recovery.model_dump(mode="json"):
+        raise ValueError("hosted recovery request is not exact")
+    return recovery
+
+
 def _decode_scope(
     request: InternalOperationRequest,
     operation: HostedWorkflowOperation,
@@ -363,6 +425,59 @@ class HostedInvestigationHandler:
             report_sha256=canonical_sha256(result.report),
         )
         return _response(request, receipt.model_dump(mode="json"))
+
+
+class HostedRecoveryHandler:
+    """Join one controller-owned recovery and return only durable identity."""
+
+    def __init__(
+        self,
+        *,
+        expected_caller_email: str,
+        service: HostedRecoveryService,
+    ) -> None:
+        if type(expected_caller_email) is not str or not expected_caller_email:
+            raise ValueError("hosted recovery caller is invalid")
+        if not callable(getattr(service, "launch_and_wait_result", None)):
+            raise TypeError("hosted recovery service is invalid")
+        self._expected_caller_email = expected_caller_email
+        self._service = service
+
+    async def __call__(
+        self,
+        caller: VerifiedCaller,
+        request: InternalOperationRequest,
+    ) -> InternalOperationResponse:
+        _validated_caller(caller, self._expected_caller_email)
+        recovery = _decode_recovery_request(request)
+        try:
+            result = await self._service.launch_and_wait_result(recovery)
+        except asyncio.CancelledError:
+            raise
+        except RecoveryRunConflict:
+            raise InternalOperationConflict from None
+        try:
+            if type(result) is not RecoveryRunLaunchResult:
+                raise TypeError
+            snapshot = result.snapshot
+            if (
+                type(snapshot) is not RecoveryRunSnapshot
+                or snapshot.request != recovery
+                or snapshot.request_sha256 != canonical_sha256(recovery)
+                or not is_terminal_recovery_run(snapshot.lifecycle)
+                or type(result.created) is not bool
+            ):
+                raise ValueError
+            receipt = HostedRecoveryReceipt(
+                schema_version=HOSTED_RECOVERY_RECEIPT_VERSION,
+                run_id=recovery.run_id,
+                request_sha256=canonical_sha256(recovery),
+                snapshot_sha256=canonical_sha256(snapshot),
+                created=result.created,
+            )
+            return _response(request, receipt.model_dump(mode="json"))
+        except (TypeError, ValueError):
+            raise HostedRecoveryGatewayError from None
 
 
 class HostedHttpWorkflowGateway(HostedWorkflowGateway):
@@ -526,8 +641,128 @@ class HostedHttpWorkflowGateway(HostedWorkflowGateway):
             raise HostedWorkflowGatewayError from None
 
 
+class HostedRecoveryRunGateway:
+    """Call the controller, then verify its minimal receipt against Firestore."""
+
+    def __init__(
+        self,
+        config: HostedConfig,
+        transport: HostedHttpTransport,
+        store: RecoveryRunStore,
+        *,
+        poll_interval_seconds: float = 0.01,
+    ) -> None:
+        if type(config) is not HostedConfig or config.component is not Component.API:
+            raise ValueError("hosted recovery gateway requires API configuration")
+        if type(transport) is not HostedHttpTransport:
+            raise TypeError("hosted recovery gateway requires exact transport")
+        if not isinstance(store, RecoveryRunStore):
+            raise TypeError("hosted recovery gateway requires a recovery store")
+        if (
+            type(config.controller_url) is not str
+            or not config.controller_url
+            or type(config.controller_audience) is not str
+            or not config.controller_audience
+        ):
+            raise ValueError("hosted recovery controller destination is incomplete")
+        if (
+            not isinstance(poll_interval_seconds, (int, float))
+            or isinstance(poll_interval_seconds, bool)
+            or poll_interval_seconds <= 0
+        ):
+            raise ValueError("hosted recovery poll interval is invalid")
+        self._endpoint = f"{config.controller_url}{_RECOVERY_PATH}"
+        self._audience = config.controller_audience
+        self._transport = transport
+        self._store = store
+        self._poll = float(poll_interval_seconds)
+
+    async def launch(
+        self,
+        request: RecoveryRunRequest,
+    ) -> RecoveryRunLaunchResult:
+        return await self.launch_and_wait_result(request)
+
+    async def launch_and_wait_result(
+        self,
+        recovery: RecoveryRunRequest,
+    ) -> RecoveryRunLaunchResult:
+        if type(recovery) is not RecoveryRunRequest:
+            raise TypeError("hosted recovery launch requires an exact request")
+        request = _recovery_request(recovery)
+        try:
+            response = await self._transport.request(
+                "POST",
+                self._endpoint,
+                audience=self._audience,
+                content=canonical_internal_json_bytes(request),
+            )
+            if (
+                type(response) is HostedHttpResponse
+                and response.status_code == HTTPStatus.CONFLICT
+            ):
+                raise RecoveryRunConflict(recovery.run_id)
+            decoded = HostedHttpWorkflowGateway._decode_response(response, request)
+            receipt = HostedRecoveryReceipt.model_validate_json(
+                canonical_json_value_bytes(decoded.payload)
+            )
+            snapshot = await self._store.get(recovery.run_id)
+            if (
+                decoded.payload != receipt.model_dump(mode="json")
+                or receipt.run_id != recovery.run_id
+                or receipt.request_sha256 != canonical_sha256(recovery)
+                or type(receipt.created) is not bool
+                or type(snapshot) is not RecoveryRunSnapshot
+                or snapshot.request != recovery
+                or snapshot.request_sha256 != receipt.request_sha256
+                or canonical_sha256(snapshot) != receipt.snapshot_sha256
+                or not is_terminal_recovery_run(snapshot.lifecycle)
+            ):
+                raise ValueError
+            return RecoveryRunLaunchResult(
+                snapshot=snapshot,
+                created=receipt.created,
+            )
+        except asyncio.CancelledError:
+            raise
+        except RecoveryRunConflict:
+            raise
+        except Exception:
+            raise HostedRecoveryGatewayError from None
+
+    async def get(self, run_id: str) -> RecoveryRunSnapshot:
+        return await self._store.get(run_id)
+
+    async def snapshot(
+        self,
+        run_id: str,
+        *,
+        after: int = 0,
+    ) -> RecoveryRunEventSnapshot:
+        return await self._store.events(run_id, after=after)
+
+    async def wait_for_events(
+        self,
+        run_id: str,
+        *,
+        after: int = 0,
+        cancellation_event: asyncio.Event | None = None,
+    ) -> RecoveryRunEventSnapshot:
+        while True:
+            snapshot = await self.snapshot(run_id, after=after)
+            if snapshot.events or snapshot.terminal:
+                return snapshot
+            if cancellation_event is not None and cancellation_event.is_set():
+                return snapshot
+            await asyncio.sleep(self._poll)
+
+    async def aclose(self) -> None:
+        return None
+
+
 __all__ = [
     "HOSTED_INVESTIGATION_RECEIPT_VERSION",
+    "HOSTED_RECOVERY_RECEIPT_VERSION",
     "DurableRuntimeReportLoader",
     "FirestoreHostedOperationScopeAuthorizer",
     "HostedHttpWorkflowGateway",
@@ -537,6 +772,11 @@ __all__ = [
     "HostedOperationDispatcher",
     "HostedOperationHandler",
     "HostedOperationScopeAuthorizer",
+    "HostedRecoveryGatewayError",
+    "HostedRecoveryHandler",
+    "HostedRecoveryReceipt",
+    "HostedRecoveryRunGateway",
+    "HostedRecoveryService",
     "HostedReportLoader",
     "HostedWorkflowGatewayError",
 ]
