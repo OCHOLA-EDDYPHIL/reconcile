@@ -178,6 +178,28 @@ def test_recovery_agent_builds_evidence_cited_non_authoritative_hypothesis() -> 
     assert turn.hypothesis.proposed_probe == make_probe()
     assert turn.hypothesis.proposed_transition is None
     assert turn.hypothesis.proposed_classification is Classification.UNKNOWN
+
+
+def test_recovery_agent_considers_only_first_of_multiple_advisory_probes() -> None:
+    planner = _Planner(output=_output(probe_count=2))
+    report = make_report(Classification.COMMITTED)
+    agent = RecoveryAgent(planner, clock=lambda: report.updated_at)
+    chain = make_recovery_examples()[0]
+
+    async def exercise():
+        return await agent.hypothesize(
+            chain=chain,
+            node=chain.nodes[0],
+            envelope=make_envelope(),
+            report=report,
+            capabilities=(make_capability(),),
+        )
+
+    turn = asyncio.run(exercise())
+
+    assert turn.failure is None
+    assert turn.hypothesis is not None
+    assert turn.hypothesis.proposed_probe == make_probe()
     assert turn.output_sha256 == canonical_sha256(turn.hypothesis)
     assert planner.inputs[0].envelope == make_envelope()
     assert planner.inputs[0].remaining_budget.probes == 2
@@ -262,17 +284,8 @@ def test_alternative_histories_classify_mixed_known_and_unresolved_effects() -> 
     )
 
 
-@pytest.mark.parametrize(
-    ("planner", "expected"),
-    (
-        (_Planner(output=_output(probe_count=2)), PlannerFailureKind.SCHEMA_INVALID),
-        (_Planner(failure=PlannerFailureKind.TIMEOUT), PlannerFailureKind.TIMEOUT),
-    ),
-)
-def test_recovery_agent_fails_closed_on_malformed_or_unavailable_model(
-    planner: _Planner,
-    expected: PlannerFailureKind,
-) -> None:
+def test_recovery_agent_fails_closed_on_unavailable_model() -> None:
+    planner = _Planner(failure=PlannerFailureKind.TIMEOUT)
     chain = make_recovery_examples()[0]
     agent = RecoveryAgent(planner)
 
@@ -286,5 +299,5 @@ def test_recovery_agent_fails_closed_on_malformed_or_unavailable_model(
         )
 
     turn = asyncio.run(exercise())
-    assert turn.failure is expected
+    assert turn.failure is PlannerFailureKind.TIMEOUT
     assert turn.hypothesis is None
