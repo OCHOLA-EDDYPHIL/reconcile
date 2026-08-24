@@ -469,7 +469,7 @@ def test_reprovision_rejects_a_wider_plan_before_apply(
     assert reader.calls == []
 
 
-def test_reprovision_accepts_only_cloud_run_empty_collection_drift(
+def test_reprovision_accepts_only_bounded_provider_normalization_drift(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -490,7 +490,36 @@ def test_reprovision_accepts_only_cloud_run_empty_collection_drift(
             "mode": "managed",
             "provider_name": "registry.terraform.io/hashicorp/google",
             "type": "google_cloud_run_v2_service",
-        }
+        },
+        {
+            "address": "google_cloud_run_v2_service_iam_member.canary_mutator",
+            "change": {
+                "actions": ["update"],
+                "before": {
+                    "condition": [],
+                    "etag": "etag-before=",
+                    "id": "fixed-binding",
+                    "location": "us-central1",
+                    "member": f"serviceAccount:rec-p5-fault@{PROJECT}.iam.gserviceaccount.com",
+                    "name": f"projects/{PROJECT}/locations/us-central1/services/reconcile-p5-canary",
+                    "project": PROJECT,
+                    "role": f"projects/{PROJECT}/roles/reconcileP5CanaryMutator",
+                },
+                "after": {
+                    "condition": [],
+                    "etag": "etag-after=",
+                    "id": "fixed-binding",
+                    "location": "us-central1",
+                    "member": f"serviceAccount:rec-p5-fault@{PROJECT}.iam.gserviceaccount.com",
+                    "name": f"projects/{PROJECT}/locations/us-central1/services/reconcile-p5-canary",
+                    "project": PROJECT,
+                    "role": f"projects/{PROJECT}/roles/reconcileP5CanaryMutator",
+                },
+            },
+            "mode": "managed",
+            "provider_name": "registry.terraform.io/hashicorp/google",
+            "type": "google_cloud_run_v2_service_iam_member",
+        },
     ]
 
     acceptance_module._validate_canary_reprovision_plan(
