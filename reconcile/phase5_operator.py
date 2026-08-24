@@ -4435,6 +4435,7 @@ class Phase5StateStore:
             else:
                 prior = continuations[0]
                 prior_actions = tuple(item.action for item in prior.carried_successes)
+                preserve_prior_carried = False
                 if (
                     prior_actions == _INITIAL_CONTINUATION_ACTIONS
                     and prior.terminal_action.action is Phase5Action.IMAGE_PUSH
@@ -4444,6 +4445,18 @@ class Phase5StateStore:
                         len(_INITIAL_CONTINUATION_ACTIONS) :
                     ]
                     terminal_action = Phase5Action.STATE_PROTECTION_CHANGE
+                elif (
+                    prior_actions == _INITIAL_CONTINUATION_ACTIONS
+                    and prior.terminal_action.action
+                    is Phase5Action.PROVIDER_ACCEPTANCE
+                    and prior.terminal_action.status is OutcomeStatus.FAILED
+                ):
+                    direct_carried_actions = (
+                        Phase5Action.IMAGE_PUSH,
+                        Phase5Action.RUNTIME_APPLY,
+                    )
+                    terminal_action = Phase5Action.PROVIDER_ACCEPTANCE
+                    preserve_prior_carried = True
                 elif (
                     prior_actions == _TEARDOWN_CONTINUATION_ACTIONS
                     and prior.terminal_action.action
@@ -4495,7 +4508,9 @@ class Phase5StateStore:
                             manifest.record_sha256,
                             action,
                         )
-                        for action in direct_carried_actions
+                        for action in (
+                            () if preserve_prior_carried else direct_carried_actions
+                        )
                     ),
                 )
             if (
