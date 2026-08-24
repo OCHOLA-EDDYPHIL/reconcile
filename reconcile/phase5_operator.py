@@ -5090,6 +5090,7 @@ def _default_runner(
         check=False,
         capture_output=True,
         shell=False,
+        umask=0o077,
     )
 
 
