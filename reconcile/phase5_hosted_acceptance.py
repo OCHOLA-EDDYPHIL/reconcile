@@ -91,6 +91,7 @@ PHASE5_ACCEPTANCE_ARTIFACT_VERSION = "reconcile/phase5-acceptance-artifact/v1"
 _PROJECT_ID = "reconcile-dev-260813-14fa6d"
 _REGION = "us-central1"
 _API_AUDIENCE = f"https://reconcile.invalid/phase5/{_PROJECT_ID}/api"
+_CANARY_AUDIENCE = f"https://reconcile.invalid/phase5/{_PROJECT_ID}/canary"
 _CONTROLLER_AUDIENCE = f"https://reconcile.invalid/phase5/{_PROJECT_ID}/controller"
 _FAULT_PROXY_AUDIENCE = f"https://reconcile.invalid/phase5/{_PROJECT_ID}/fault-proxy"
 _SANDBOX_AUDIENCE = f"https://reconcile.invalid/phase5/{_PROJECT_ID}/sandbox"
@@ -141,6 +142,7 @@ class AcceptanceMode(StrEnum):
 
 class ServiceComponent(StrEnum):
     API = "api"
+    CANARY = "canary"
     CONTROLLER = "controller"
     FAULT_PROXY = "fault-proxy"
     SANDBOX = "sandbox"
@@ -464,7 +466,7 @@ class ProviderAcceptanceRecord(StrictModel):
     record_type: Literal["provider-acceptance"]
     candidate: CandidateIdentity
     deployments: tuple[ServiceDeploymentObservation, ...] = Field(
-        min_length=4, max_length=4
+        min_length=5, max_length=5
     )
     scenario: ScenarioAcceptanceObservation
     diagnostics: LifecycleDiagnostics
@@ -511,7 +513,7 @@ class HostedAcceptanceRecord(StrictModel):
     candidate: CandidateIdentity
     provider_artifact: AcceptanceArtifactBinding
     deployments: tuple[ServiceDeploymentObservation, ...] = Field(
-        min_length=4, max_length=4
+        min_length=5, max_length=5
     )
     scenarios: tuple[ScenarioAcceptanceObservation, ...] = Field(
         min_length=3, max_length=3
@@ -673,12 +675,14 @@ type CommandRunner = Callable[
 
 _SERVICE_NAMES = {
     ServiceComponent.API: "reconcile-p5-api",
+    ServiceComponent.CANARY: "reconcile-p5-canary",
     ServiceComponent.CONTROLLER: "reconcile-p5-controller",
     ServiceComponent.FAULT_PROXY: "reconcile-p5-fault-proxy",
     ServiceComponent.SANDBOX: "reconcile-p5-sandbox",
 }
 _SERVICE_ACCOUNTS = {
     ServiceComponent.API: f"rec-p5-api@{_PROJECT_ID}.iam.gserviceaccount.com",
+    ServiceComponent.CANARY: (f"rec-p5-canary@{_PROJECT_ID}.iam.gserviceaccount.com"),
     ServiceComponent.CONTROLLER: (
         f"rec-p5-controller@{_PROJECT_ID}.iam.gserviceaccount.com"
     ),
@@ -689,6 +693,7 @@ _SERVICE_ACCOUNTS = {
 }
 _SERVICE_AUDIENCES = {
     ServiceComponent.API: _API_AUDIENCE,
+    ServiceComponent.CANARY: _CANARY_AUDIENCE,
     ServiceComponent.CONTROLLER: _CONTROLLER_AUDIENCE,
     ServiceComponent.FAULT_PROXY: _FAULT_PROXY_AUDIENCE,
     ServiceComponent.SANDBOX: _SANDBOX_AUDIENCE,
@@ -700,6 +705,16 @@ def _required_service_environment(
     candidate: CandidateIdentity,
     service_uris: Mapping[ServiceComponent, str],
 ) -> dict[str, str]:
+    if component is ServiceComponent.CANARY:
+        return {
+            "GOOGLE_CLOUD_PROJECT": _PROJECT_ID,
+            "RECONCILE_CANARY_CONFIGURATION_SHA256": (candidate.semantic_config_sha256),
+            "RECONCILE_CANARY_RELEASE_ID": "baseline",
+            "RECONCILE_IMAGE_DIGEST": candidate.image_digest,
+            "RECONCILE_INFRA_REVISION": candidate.infrastructure_revision,
+            "RECONCILE_SEMANTIC_CONFIG_SHA256": candidate.semantic_config_sha256,
+            "RECONCILE_SOURCE_REVISION": candidate.source_revision,
+        }
     required = {
         "GOOGLE_CLOUD_PROJECT": _PROJECT_ID,
         "RECONCILE_AUTH_AUDIENCE": _SERVICE_AUDIENCES[component],

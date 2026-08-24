@@ -640,6 +640,7 @@ def _deployments(
 ) -> tuple[ServiceDeploymentObservation, ...]:
     accounts = {
         ServiceComponent.API: f"rec-p5-api@{PROJECT}.iam.gserviceaccount.com",
+        ServiceComponent.CANARY: f"rec-p5-canary@{PROJECT}.iam.gserviceaccount.com",
         ServiceComponent.CONTROLLER: (
             f"rec-p5-controller@{PROJECT}.iam.gserviceaccount.com"
         ),
@@ -648,12 +649,14 @@ def _deployments(
     }
     names = {
         ServiceComponent.API: "reconcile-p5-api",
+        ServiceComponent.CANARY: "reconcile-p5-canary",
         ServiceComponent.CONTROLLER: "reconcile-p5-controller",
         ServiceComponent.FAULT_PROXY: "reconcile-p5-fault-proxy",
         ServiceComponent.SANDBOX: "reconcile-p5-sandbox",
     }
     audiences = {
         ServiceComponent.API: f"https://reconcile.invalid/phase5/{PROJECT}/api",
+        ServiceComponent.CANARY: (f"https://reconcile.invalid/phase5/{PROJECT}/canary"),
         ServiceComponent.CONTROLLER: (
             f"https://reconcile.invalid/phase5/{PROJECT}/controller"
         ),
@@ -1276,16 +1279,27 @@ def _description(component: str, account: str) -> bytes:
         service = "reconcile-p5-fault-proxy"
     image = f"us-central1-docker.pkg.dev/{PROJECT}/reconcile-p5/reconcile@{IMAGE}"
     audience = f"https://reconcile.invalid/phase5/{PROJECT}/{component}"
-    environment = {
-        "GOOGLE_CLOUD_PROJECT": PROJECT,
-        "RECONCILE_AUTH_AUDIENCE": audience,
-        "RECONCILE_COMPONENT": component,
-        "RECONCILE_SOURCE_REVISION": SOURCE,
-        "RECONCILE_IMAGE_DIGEST": IMAGE,
-        "RECONCILE_INFRA_REVISION": SHA_A,
-        "RECONCILE_RUNTIME_DATABASE": "reconcile-p5-runtime",
-        "RECONCILE_SEMANTIC_CONFIG_SHA256": SHA_C,
-    }
+    if component == "canary":
+        environment = {
+            "GOOGLE_CLOUD_PROJECT": PROJECT,
+            "RECONCILE_CANARY_CONFIGURATION_SHA256": SHA_C,
+            "RECONCILE_CANARY_RELEASE_ID": "baseline",
+            "RECONCILE_IMAGE_DIGEST": IMAGE,
+            "RECONCILE_INFRA_REVISION": SHA_A,
+            "RECONCILE_SEMANTIC_CONFIG_SHA256": SHA_C,
+            "RECONCILE_SOURCE_REVISION": SOURCE,
+        }
+    else:
+        environment = {
+            "GOOGLE_CLOUD_PROJECT": PROJECT,
+            "RECONCILE_AUTH_AUDIENCE": audience,
+            "RECONCILE_COMPONENT": component,
+            "RECONCILE_SOURCE_REVISION": SOURCE,
+            "RECONCILE_IMAGE_DIGEST": IMAGE,
+            "RECONCILE_INFRA_REVISION": SHA_A,
+            "RECONCILE_RUNTIME_DATABASE": "reconcile-p5-runtime",
+            "RECONCILE_SEMANTIC_CONFIG_SHA256": SHA_C,
+        }
     if component == "api":
         environment.update(
             {
@@ -1346,7 +1360,7 @@ def _description(component: str, account: str) -> bytes:
                 "RECONCILE_TARGET_DATABASE": "reconcile-p5-target",
             }
         )
-    else:
+    elif component == "sandbox":
         environment.update(
             {
                 "RECONCILE_SANDBOX_MUTATION_CALLER_EMAIL": (
@@ -1456,6 +1470,7 @@ def test_gcloud_inspector_uses_only_exact_read_only_commands(tmp_path: Path) -> 
     calls: list[tuple[tuple[str, ...], Path, dict[str, str], int]] = []
     accounts = {
         "reconcile-p5-api": f"rec-p5-api@{PROJECT}.iam.gserviceaccount.com",
+        "reconcile-p5-canary": f"rec-p5-canary@{PROJECT}.iam.gserviceaccount.com",
         "reconcile-p5-controller": (
             f"rec-p5-controller@{PROJECT}.iam.gserviceaccount.com"
         ),
@@ -1524,10 +1539,10 @@ def test_gcloud_inspector_uses_only_exact_read_only_commands(tmp_path: Path) -> 
     assert diagnostics.available
     assert diagnostics.diagnostic_only
     assert diagnostics.revision_names == ("reconcile-p5-api-00007",)
-    assert len(calls) == 10
+    assert len(calls) == 12
     command_kinds = tuple(item[0][1:4] for item in calls)
-    assert command_kinds.count(("run", "services", "describe")) == 4
-    assert command_kinds.count(("run", "revisions", "describe")) == 4
+    assert command_kinds.count(("run", "services", "describe")) == 5
+    assert command_kinds.count(("run", "revisions", "describe")) == 5
     assert command_kinds.count(("run", "services", "get-iam-policy")) == 1
     assert sum(item[0][1:3] == ("logging", "read") for item in calls) == 1
     assert all(item[0][0] == "/usr/bin/gcloud" for item in calls)
@@ -1559,6 +1574,7 @@ def test_gcloud_inspector_rejects_full_environment_drift(
 ) -> None:
     accounts = {
         "reconcile-p5-api": f"rec-p5-api@{PROJECT}.iam.gserviceaccount.com",
+        "reconcile-p5-canary": f"rec-p5-canary@{PROJECT}.iam.gserviceaccount.com",
         "reconcile-p5-controller": (
             f"rec-p5-controller@{PROJECT}.iam.gserviceaccount.com"
         ),
@@ -1624,6 +1640,7 @@ def test_gcloud_inspector_requires_current_ready_single_revision_and_iam_check(
 ) -> None:
     accounts = {
         "reconcile-p5-api": f"rec-p5-api@{PROJECT}.iam.gserviceaccount.com",
+        "reconcile-p5-canary": f"rec-p5-canary@{PROJECT}.iam.gserviceaccount.com",
         "reconcile-p5-controller": (
             f"rec-p5-controller@{PROJECT}.iam.gserviceaccount.com"
         ),
@@ -1691,6 +1708,7 @@ def test_gcloud_inspector_requires_current_ready_single_revision_and_iam_check(
 def test_gcloud_inspector_rejects_public_api_invoker_policy(tmp_path: Path) -> None:
     accounts = {
         "reconcile-p5-api": f"rec-p5-api@{PROJECT}.iam.gserviceaccount.com",
+        "reconcile-p5-canary": f"rec-p5-canary@{PROJECT}.iam.gserviceaccount.com",
         "reconcile-p5-controller": (
             f"rec-p5-controller@{PROJECT}.iam.gserviceaccount.com"
         ),
@@ -1727,6 +1745,7 @@ def test_gcloud_inspector_rejects_public_api_invoker_policy(tmp_path: Path) -> N
 def test_gcloud_inspector_rejects_unready_serving_revision(tmp_path: Path) -> None:
     accounts = {
         "reconcile-p5-api": f"rec-p5-api@{PROJECT}.iam.gserviceaccount.com",
+        "reconcile-p5-canary": f"rec-p5-canary@{PROJECT}.iam.gserviceaccount.com",
         "reconcile-p5-controller": (
             f"rec-p5-controller@{PROJECT}.iam.gserviceaccount.com"
         ),
