@@ -1004,7 +1004,10 @@ def create_runtime_component_app(
     candidate = build_hosted_candidate(config)
     cas = _cas(config)
     scenario_store = FirestoreScenarioStore(cas, candidate)
-    selected_transport = transport or HostedHttpTransport()
+    selected_transport = transport or HostedHttpTransport(
+        request_timeout_seconds=(265.0 if config.component is Component.API else None),
+        total_timeout_seconds=(270.0 if config.component is Component.API else None),
+    )
 
     if config.component is Component.API:
         target_bucket = _required(config.target_bucket, "target bucket")

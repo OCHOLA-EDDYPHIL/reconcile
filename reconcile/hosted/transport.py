@@ -234,9 +234,31 @@ class HostedHttpTransport:
         self,
         token_supplier: DestinationTokenSupplier | None = None,
         http_client: AsyncHttpClient | None = None,
+        *,
+        request_timeout_seconds: float | None = None,
+        total_timeout_seconds: float | None = None,
     ) -> None:
+        request_timeout = (
+            _REQUEST_TIMEOUT_SECONDS
+            if request_timeout_seconds is None
+            else request_timeout_seconds
+        )
+        total_timeout = (
+            _TOTAL_TIMEOUT_SECONDS
+            if total_timeout_seconds is None
+            else total_timeout_seconds
+        )
+        if (
+            type(request_timeout) not in {int, float}
+            or type(total_timeout) not in {int, float}
+            or not 1 <= float(request_timeout) <= 290
+            or not 0 < float(total_timeout) <= 295
+        ):
+            raise _request_error() from None
         self._token_supplier = token_supplier or _default_token_supplier
         self._http_client = http_client
+        self._request_timeout_seconds = float(request_timeout)
+        self._total_timeout_seconds = float(total_timeout)
 
     async def request(
         self,
@@ -254,7 +276,7 @@ class HostedHttpTransport:
         validated_content = _validated_body(content, method=validated_method)
 
         try:
-            async with asyncio.timeout(_TOTAL_TIMEOUT_SECONDS):
+            async with asyncio.timeout(self._total_timeout_seconds):
                 token = await _supply_token(self._token_supplier, validated_audience)
                 authorization = _authorization_header(token)
                 headers = {
@@ -297,7 +319,7 @@ class HostedHttpTransport:
 
             async with httpx.AsyncClient(
                 follow_redirects=False,
-                timeout=_REQUEST_TIMEOUT_SECONDS,
+                timeout=self._request_timeout_seconds,
                 trust_env=False,
             ) as client:
                 return await self._request_with_client(
@@ -328,7 +350,7 @@ class HostedHttpTransport:
                 headers=headers,
                 content=content,
                 follow_redirects=False,
-                timeout=_REQUEST_TIMEOUT_SECONDS,
+                timeout=self._request_timeout_seconds,
             ) as response:
                 return await _bounded_response(response)
         except HostedTransportError:
