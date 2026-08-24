@@ -960,10 +960,15 @@ class CloudRunCanaryReader(_ClientBoundary):
 
         selected = _revision(revision)
         service = self._get_service()
-        return any(
-            _same_revision(getattr(status, "revision", ""), selected)
-            for status in getattr(service, "traffic_statuses", ())
+        references = (
+            getattr(service, "latest_created_revision", ""),
+            getattr(service, "latest_ready_revision", ""),
+            *(
+                getattr(status, "revision", "")
+                for status in getattr(service, "traffic_statuses", ())
+            ),
         )
+        return any(_same_revision(reference, selected) for reference in references)
 
     def discover_revision(
         self,

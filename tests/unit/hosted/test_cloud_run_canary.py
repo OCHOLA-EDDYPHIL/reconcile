@@ -354,6 +354,14 @@ def test_stage_discovery_is_exact_and_never_selects_unrelated_or_ambiguous() -> 
         )
 
 
+def test_zero_traffic_latest_created_revision_is_still_referenced() -> None:
+    service = _service()
+    service.latest_created_revision = REVISION
+    reader = _reader(_Services(service), _Revisions(()))
+
+    assert reader.is_revision_referenced(revision=REVISION) is True
+
+
 def test_operation_is_read_only_when_its_exact_name_is_known() -> None:
     services = _Services(_service())
     reader = _reader(services, _Revisions((_revision(),)))
