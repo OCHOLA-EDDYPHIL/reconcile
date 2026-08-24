@@ -117,7 +117,6 @@ string. Use {} when the capability has no arguments. It may contain only the
 fully bound scalar or scalar-array arguments allowed by the supplied capability.
 Use the empty string for an explanation category exactly when its citation
 array is empty. Never emit private reasoning or fields outside the schema.
-Always provide a non-empty stop_reason, including when stop is false.
 """
 _ASSEMBLED_SYSTEM_INSTRUCTION = (
     _PLANNER_INSTRUCTION
