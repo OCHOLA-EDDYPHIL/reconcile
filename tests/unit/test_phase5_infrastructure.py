@@ -809,6 +809,10 @@ def test_apply_identity_and_runtime_iam_graph_are_closed_world() -> None:
             service = google_cloud_run_v2_service.fault_proxy.name
             member  = var.service_account_emails.api
           }
+          controller_to_fault_proxy = {
+            service = google_cloud_run_v2_service.fault_proxy.name
+            member  = var.service_account_emails.controller
+          }
           controller_to_sandbox = {
             service = google_cloud_run_v2_service.sandbox.name
             member  = var.service_account_emails.controller
