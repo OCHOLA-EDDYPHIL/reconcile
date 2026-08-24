@@ -163,7 +163,8 @@ from reconcile.scenarios.storage import execute_cloud_storage_baseline
 _SANDBOX_MUTATION_PATH = "/internal/v1/mutations"
 _SANDBOX_CLEANUP_PATH = "/internal/v1/cleanup"
 _PLANNER_ESTIMATED_COST_MICROUNITS = 1
-_HOSTED_PROVIDER_TIMEOUT_SECONDS = 30.0
+_HOSTED_PROVIDER_TIMEOUT_SECONDS = 3.0
+_HOSTED_RECOVERY_PROVIDER_TIMEOUT_SECONDS = 20.0
 
 if (
     _HOSTED_PROVIDER_TIMEOUT_SECONDS * 1_000
@@ -1070,13 +1071,15 @@ def create_runtime_component_app(
         recovery_store = FirestoreRecoveryRunStore(cas)
         permit_authority = PermitAuthority(FirestoreActionPermitStore(cas))
 
-        def planner_factory() -> AdvisoryPlanner:
+        def planner_factory(
+            timeout_seconds: float = _HOSTED_PROVIDER_TIMEOUT_SECONDS,
+        ) -> AdvisoryPlanner:
             planner = AdkGeminiPlanner.from_vertex_adc_guarded(
                 VertexAdcPlannerConfig(
                     project=candidate.project_id,
                     location=candidate.vertex_location,
                     model=candidate.configured_model,
-                    timeout_seconds=_HOSTED_PROVIDER_TIMEOUT_SECONDS,
+                    timeout_seconds=timeout_seconds,
                     max_output_tokens=candidate.maximum_output_tokens,
                     prompt_version=candidate.prompt_version,
                 )
@@ -1124,7 +1127,9 @@ def create_runtime_component_app(
                 invoked_at=recovery_invoked_at,
                 store=recovery_store,
                 permit_authority=permit_authority,
-                recovery_agent=RecoveryAgent(planner_factory()),
+                recovery_agent=RecoveryAgent(
+                    planner_factory(_HOSTED_RECOVERY_PROVIDER_TIMEOUT_SECONDS)
+                ),
                 cloud_action=None,
                 cloud_reader=recovery_cloud_reader,
                 firestore=recovery_firestore,
