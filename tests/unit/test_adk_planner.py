@@ -1034,6 +1034,7 @@ def test_hosted_actual_guard_maps_over_limit_count_without_generation(
 @pytest.mark.parametrize(
     "reported",
     (
+        "gemini-3.5-flash",
         "gemini-3.5-flash-001",
         "gemini-3.5-flash-999@default",
         "models/gemini-3.5-flash-002",
@@ -1044,7 +1045,7 @@ def test_hosted_actual_guard_maps_over_limit_count_without_generation(
         ),
     ),
 )
-def test_qualification_model_revision_accepts_only_concrete_vertex_forms(
+def test_qualification_model_revision_accepts_exact_alias_or_concrete_vertex_forms(
     reported: str,
 ) -> None:
     config = VertexAdcPlannerConfig(
@@ -1056,15 +1057,16 @@ def test_qualification_model_revision_accepts_only_concrete_vertex_forms(
     normalized = _qualification_reported_model_revision(reported, config)
 
     assert normalized is not None
-    assert normalized[0].startswith("gemini-3.5-flash-")
-    assert normalized[0][-3:].isdigit()
+    assert normalized[0] == "gemini-3.5-flash" or (
+        normalized[0].startswith("gemini-3.5-flash-")
+        and normalized[0][-3:].isdigit()
+    )
     assert normalized[1] == hashlib.sha256(reported.encode()).hexdigest()
 
 
 @pytest.mark.parametrize(
     "reported",
     (
-        "gemini-3.5-flash",
         "gemini-3.5-flash@default",
         "gemini-3.5-flash-latest",
         "gemini-3.5-flash-preview",
