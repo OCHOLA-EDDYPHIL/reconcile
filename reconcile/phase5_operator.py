@@ -55,6 +55,7 @@ _TERRAFORM_VERSION = "1.15.8"
 _GCLOUD_VERSION = "580.0.0"
 _GOOGLE_PROVIDER_SOURCE = "registry.terraform.io/hashicorp/google"
 _GOOGLE_PROVIDER_VERSION = "7.44.0"
+_TERRAFORM_BUILTIN_PROVIDER_SOURCE = "terraform.io/builtin/terraform"
 _GEMINI_MODEL = "gemini-3.5-flash"
 _VERTEX_LOCATION = "us"
 _AUTHORIZATION_ESTIMATE = "3.892942"
@@ -2338,7 +2339,13 @@ def _parse_plan_json(
                 item not in {"create", "delete", "no-op", "read", "update"}
                 for item in actions
             )
-            or provider_name != _GOOGLE_PROVIDER_SOURCE
+            or not (
+                provider_name == _GOOGLE_PROVIDER_SOURCE
+                or (
+                    resource_type == "terraform_data"
+                    and provider_name == _TERRAFORM_BUILTIN_PROVIDER_SOURCE
+                )
+            )
         ):
             raise OperatorError("TERRAFORM_PLAN_INVALID")
         before_unknown = change.get("reconcile_before_unknown")
