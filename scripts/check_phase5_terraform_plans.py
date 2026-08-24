@@ -251,7 +251,7 @@ _FOUNDATION_ADDRESSES = frozenset(
         'google_firestore_database.phase5["target"]',
         'google_project_iam_member.runtime_database_user["api"]',
         'google_project_iam_member.runtime_database_user["controller"]',
-        'google_project_iam_member.runtime_database_viewer["fault_proxy"]',
+        'google_project_iam_member.runtime_database_user["fault_proxy"]',
         'google_project_iam_member.runtime_database_viewer["sandbox"]',
         'google_project_iam_member.target_database_user["fault_proxy"]',
         "google_project_iam_member.sandbox_database_user",
@@ -278,6 +278,7 @@ _RUNTIME_ADDRESSES = frozenset(
         f'google_cloud_run_v2_service_iam_member.api_operator["{_OPERATOR_MEMBER}"]',
         'google_cloud_run_v2_service_iam_member.internal["api_to_controller"]',
         'google_cloud_run_v2_service_iam_member.internal["api_to_fault_proxy"]',
+        'google_cloud_run_v2_service_iam_member.internal["controller_to_fault_proxy"]',
         'google_cloud_run_v2_service_iam_member.internal["controller_to_sandbox"]',
         'google_cloud_run_v2_service_iam_member.internal["fault_proxy_to_sandbox"]',
         "google_cloud_run_v2_service_iam_member.canary_invoker",
@@ -384,10 +385,10 @@ def _iam_expectations() -> dict[str, dict[str, Any]]:
                 f'resource.name == "projects/{_PROJECT}/databases/reconcile-p5-runtime"'
             ),
         },
-        'google_project_iam_member.runtime_database_viewer["fault_proxy"]': {
+        'google_project_iam_member.runtime_database_user["fault_proxy"]': {
             "member": f"serviceAccount:{_RUNTIME_EMAILS['fault_proxy']}",
             "project": _PROJECT,
-            "role": "roles/datastore.viewer",
+            "role": "roles/datastore.user",
             "condition_expression": (
                 f'resource.name == "projects/{_PROJECT}/databases/reconcile-p5-runtime"'
             ),
@@ -502,6 +503,7 @@ def _iam_expectations() -> dict[str, dict[str, Any]]:
     invocations = {
         "api_to_controller": ("controller", "api"),
         "api_to_fault_proxy": ("fault-proxy", "api"),
+        "controller_to_fault_proxy": ("fault-proxy", "controller"),
         "controller_to_sandbox": ("sandbox", "controller"),
         "fault_proxy_to_sandbox": ("sandbox", "fault_proxy"),
     }
