@@ -462,6 +462,27 @@ def _live_teardown_plan(qualification: dict[str, Any]) -> dict[str, Any]:
     return rendered
 
 
+def test_plan_parser_accepts_only_the_builtin_terraform_data_resource() -> None:
+    rendered = json.loads(_plan_json("runtime-create", set()))
+    resource = rendered["resource_changes"][0]
+    resource["address"] = "terraform_data.canary_baseline"
+    resource["type"] = "terraform_data"
+    resource["provider_name"] = "terraform.io/builtin/terraform"
+
+    _, resources, _, _, _ = operator._parse_plan_json(
+        json.dumps(rendered, separators=(",", ":"), sort_keys=True).encode()
+    )
+
+    assert next(
+        item for item in resources if item.address == "terraform_data.canary_baseline"
+    ).provider_name == "terraform.io/builtin/terraform"
+    resource["type"] = "google_cloud_run_v2_service"
+    with pytest.raises(operator.OperatorError, match="TERRAFORM_PLAN_INVALID"):
+        operator._parse_plan_json(
+            json.dumps(rendered, separators=(",", ":"), sort_keys=True).encode()
+        )
+
+
 def _materialize_unknowns(value: Any, mask: Any) -> Any:
     if mask is True:
         return "provider-computed"
