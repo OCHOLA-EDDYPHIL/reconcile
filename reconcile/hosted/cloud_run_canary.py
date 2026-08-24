@@ -944,6 +944,16 @@ class CloudRunCanaryReader(_ClientBoundary):
             raise _map_provider_error(error) from None
         return tuple(sorted(set(matches)))
 
+    def is_revision_referenced(self, *, revision: str | None) -> bool:
+        """Return whether the exact Service status already names the revision."""
+
+        selected = _revision(revision)
+        service = self._get_service()
+        return any(
+            _same_revision(getattr(status, "revision", ""), selected)
+            for status in getattr(service, "traffic_statuses", ())
+        )
+
     def discover_revision(
         self,
         *,
@@ -983,11 +993,14 @@ class CloudRunCanaryReader(_ClientBoundary):
             or observed < 0
         ):
             raise CloudRunCanaryError(CloudRunCanaryErrorCode.PROVIDER_UNAVAILABLE)
-        percent = sum(
-            int(getattr(status, "percent", 0))
+        matching_traffic = tuple(
+            status
             for status in getattr(service, "traffic_statuses", ())
             if _same_revision(getattr(status, "revision", ""), selected)
         )
+        if not matching_traffic:
+            raise CloudRunCanaryError(CloudRunCanaryErrorCode.REVISION_NOT_FOUND)
+        percent = sum(int(getattr(status, "percent", 0)) for status in matching_traffic)
         if not 0 <= percent <= 100:
             raise CloudRunCanaryError(CloudRunCanaryErrorCode.PROVIDER_UNAVAILABLE)
         return CloudRunServiceSnapshot(

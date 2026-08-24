@@ -63,6 +63,7 @@ from reconcile.evidence.recovery_rules import (
 from reconcile.hosted.cloud_run_canary import (
     CloudRunCanaryAction,
     CloudRunCanaryError,
+    CloudRunCanaryErrorCode,
     CloudRunCanaryReader,
     CloudRunHealthSnapshot,
     CloudRunOperationSnapshot,
@@ -90,7 +91,8 @@ _TARGET_SCOPE_KEYS = frozenset({"project", "location"})
 _TARGET_RESOURCE_KEYS = frozenset({"service"})
 _ARGUMENT_BYTE_CEILING = 2
 _RESULT_BYTE_CEILING = 8_192
-_TIMEOUT_MS = 5_000
+_TIMEOUT_MS = 12_000
+_REVISION_VISIBILITY_POLL_SECONDS = 0.5
 _REVISION_NAME = re.compile(r"[a-z][a-z0-9-]{0,62}")
 _RELEASE_ID = re.compile(r"[a-z][a-z0-9_-]{0,62}")
 _IMAGE_DIGEST = re.compile(r"sha256:[0-9a-f]{64}")
@@ -490,10 +492,43 @@ class _CloudRunReadHandler:
             or probe.arguments != {}
         ):
             raise CapabilityUnavailable
-        try:
-            snapshot = await asyncio.to_thread(self._read)
-        except (CloudRunCanaryError, ValueError, TypeError):
-            raise CapabilityUnavailable from None
+        loop = asyncio.get_running_loop()
+        visibility_deadline = loop.time() + probe.timeout_ms / 1_000
+        while True:
+            try:
+                snapshot = await asyncio.to_thread(self._read)
+                break
+            except CloudRunCanaryError as error:
+                if (
+                    self.capability_name == CLOUD_RUN_SERVICE_CAPABILITY
+                    and error.code is CloudRunCanaryErrorCode.REVISION_NOT_FOUND
+                ):
+                    snapshot = None
+                    break
+                if (
+                    self.capability_name == CLOUD_RUN_REVISION_CAPABILITY
+                    and error.code is CloudRunCanaryErrorCode.REVISION_NOT_FOUND
+                ):
+                    try:
+                        referenced = await asyncio.to_thread(
+                            self.reader.is_revision_referenced,
+                            revision=self.binding.expected_revision,
+                        )
+                    except (CloudRunCanaryError, ValueError, TypeError):
+                        raise CapabilityUnavailable from None
+                    if not referenced:
+                        snapshot = None
+                        break
+                    if (
+                        loop.time() + _REVISION_VISIBILITY_POLL_SECONDS
+                        >= visibility_deadline
+                    ):
+                        raise CapabilityUnavailable from None
+                    await asyncio.sleep(_REVISION_VISIBILITY_POLL_SECONDS)
+                    continue
+                raise CapabilityUnavailable from None
+            except (ValueError, TypeError):
+                raise CapabilityUnavailable from None
         if snapshot is None:
             observed_at = self.clock()
             if not isinstance(observed_at, datetime) or observed_at.tzinfo is None:
