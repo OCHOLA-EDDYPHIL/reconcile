@@ -930,8 +930,10 @@ class ReleaseChainEvidenceSource:
         # round here would turn PENDING into a permanent cached state.
         session = await self._session(run_id, node, envelope, refresh=True)
         primary = (
-            CLOUD_RUN_SERVICE_CAPABILITY
-            if node.node_id in {"stage", "promote"}
+            CLOUD_RUN_REVISION_CAPABILITY
+            if node.node_id == "stage"
+            else CLOUD_RUN_SERVICE_CAPABILITY
+            if node.node_id == "promote"
             else FIRESTORE_RELEASE_CAPABILITY
         )
         if primary not in session.executed_capabilities:

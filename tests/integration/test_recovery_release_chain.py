@@ -415,6 +415,7 @@ def _provider(settings: ReleaseChainSettings):
         revisions_factory=lambda: revisions,
         health_client=_Health(settings, state),
         clock=lambda: NOW + timedelta(seconds=1),
+        revision_settle_delay_seconds=0.0,
     )
     firestore_client = _FirestoreClient()
     firestore = GoogleFirestoreReleaseTarget(
@@ -555,7 +556,6 @@ def test_evidence_source_repolls_pending_provider_state_in_a_new_bounded_round()
         pending = await source.fixed(request.run_id, node, envelope)
         staged.conditions = (_ready(),)
         staged.reconciling = False
-        state.health_ready = True
         await source.current(request.run_id, node, envelope)
         terminal = await source.fixed(request.run_id, node, envelope)
         return pending, terminal
@@ -589,6 +589,14 @@ def test_evidence_source_repolls_pending_provider_state_in_a_new_bounded_round()
     assert isinstance(terminal_artifact, VerifiedCertificate)
     assert terminal_artifact.classification is Classification.COMMITTED
     assert terminal_artifact.transition is not None
+    bound_ids = {item.evidence_id for item in terminal_artifact.evidence}
+    bound_capabilities = {
+        item.capability_name
+        for item in terminal.report.evidence
+        if item.evidence_id in bound_ids
+    }
+    assert "cloud-run-revision-get" in bound_capabilities
+    assert "cloud-run-revision-health" not in bound_capabilities
     assert len(pending.report.probe_audit) == 3
     assert len(terminal.report.probe_audit) == 3
     assert state.revision_read_count == 2

@@ -634,17 +634,16 @@ def test_stage_rejects_mismatched_or_unsettled_observations(
         )
 
 
-def test_stage_requires_successful_exact_revision_health() -> None:
+def test_stage_accepts_readiness_from_authoritative_revision_without_health() -> None:
     action, effects, evidence = _stage_proof()
 
-    with pytest.raises(RecoveryRuleViolation, match="service, revision, and health"):
-        validate_recovery_proof(
-            STAGE_CLOUD_RUN_REVISION_PROFILE,
-            action,
-            effects,
-            Classification.COMMITTED,
-            evidence[:2],
-        )
+    validate_recovery_proof(
+        STAGE_CLOUD_RUN_REVISION_PROFILE,
+        action,
+        effects,
+        Classification.COMMITTED,
+        evidence[:2],
+    )
 
 
 def test_stage_requires_sealed_expected_effect_predicates() -> None:
