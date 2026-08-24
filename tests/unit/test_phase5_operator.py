@@ -473,9 +473,14 @@ def test_plan_parser_accepts_only_the_builtin_terraform_data_resource() -> None:
         json.dumps(rendered, separators=(",", ":"), sort_keys=True).encode()
     )
 
-    assert next(
-        item for item in resources if item.address == "terraform_data.canary_baseline"
-    ).provider_name == "terraform.io/builtin/terraform"
+    assert (
+        next(
+            item
+            for item in resources
+            if item.address == "terraform_data.canary_baseline"
+        ).provider_name
+        == "terraform.io/builtin/terraform"
+    )
     resource["type"] = "google_cloud_run_v2_service"
     with pytest.raises(operator.OperatorError, match="TERRAFORM_PLAN_INVALID"):
         operator._parse_plan_json(
@@ -1868,6 +1873,74 @@ def test_continuation_carries_only_verified_successes_without_replaying_them(
         admitted_at=_NOW + timedelta(minutes=4),
     )
     assert image_admission.action is operator.Phase5Action.IMAGE_PUSH
+
+
+def test_continuation_restarts_candidate_after_provider_acceptance_failure(
+    tmp_path: Path,
+) -> None:
+    predecessor_root = tmp_path / "provider-predecessor"
+    predecessor_root.mkdir()
+    predecessor, predecessor_manifest, predecessor_approval, _ = _records(
+        predecessor_root
+    )
+    success = subprocess.CompletedProcess(["fixed"], 0, b"", b"")
+    for minute, action in enumerate(
+        (
+            operator.Phase5Action.BOOTSTRAP_APPLY,
+            operator.Phase5Action.FOUNDATION_APPLY,
+            operator.Phase5Action.IMAGE_PUSH,
+            operator.Phase5Action.RUNTIME_APPLY,
+        ),
+        start=2,
+    ):
+        _record_action(
+            predecessor,
+            predecessor_manifest,
+            predecessor_approval,
+            action,
+            at=_NOW + timedelta(minutes=minute),
+            result=success,
+        )
+    _record_action(
+        predecessor,
+        predecessor_manifest,
+        predecessor_approval,
+        operator.Phase5Action.PROVIDER_ACCEPTANCE,
+        at=_NOW + timedelta(minutes=6),
+        result=subprocess.CompletedProcess(["fixed"], 1, b"", b"failed"),
+    )
+    bootstrap_state = predecessor.root / "state" / "bootstrap.tfstate"
+    bootstrap_state.write_bytes(b'{"lineage":"phase5","serial":1}')
+    bootstrap_state.chmod(0o600)
+    repo_root, successor, manifest, approval, runner = _continuation_successor(tmp_path)
+
+    continuation = operator.prepare_phase5_continuation(
+        predecessor_state_root=predecessor.root,
+        predecessor_manifest_sha256=predecessor_manifest.record_sha256,
+        predecessor_approval_sha256=predecessor_approval.record_sha256,
+        successor_state_root=successor.root,
+        successor_manifest_sha256=manifest.record_sha256,
+        successor_approval_sha256=approval.record_sha256,
+        repo_root=repo_root,
+        prepared_at=_NOW + timedelta(minutes=7),
+        runner=runner,
+    )
+
+    assert tuple(item.action for item in continuation.carried_successes) == (
+        operator.Phase5Action.BOOTSTRAP_APPLY,
+        operator.Phase5Action.FOUNDATION_APPLY,
+    )
+    assert (
+        continuation.terminal_action.action is operator.Phase5Action.PROVIDER_ACCEPTANCE
+    )
+    assert continuation.terminal_action.status is operator.OutcomeStatus.FAILED
+    image = successor.admit(
+        manifest=manifest,
+        approval=approval,
+        action=operator.Phase5Action.IMAGE_PUSH,
+        admitted_at=_NOW + timedelta(minutes=8),
+    )
+    assert image.action is operator.Phase5Action.IMAGE_PUSH
 
 
 def test_continuation_carries_verified_teardown_chain_after_protection_unknown(
