@@ -1996,6 +1996,86 @@ def test_continuation_restarts_candidate_after_provider_acceptance_failure(
     assert image.action is operator.Phase5Action.IMAGE_PUSH
 
 
+def test_continuation_can_restart_a_chained_provider_failure(tmp_path: Path) -> None:
+    initial_root = tmp_path / "initial"
+    initial_root.mkdir()
+    initial, initial_manifest, initial_approval, _ = _records(initial_root)
+    success = subprocess.CompletedProcess(["fixed"], 0, b"", b"")
+    for minute, action in enumerate(
+        (
+            operator.Phase5Action.BOOTSTRAP_APPLY,
+            operator.Phase5Action.FOUNDATION_APPLY,
+            operator.Phase5Action.IMAGE_PUSH,
+            operator.Phase5Action.RUNTIME_APPLY,
+        ),
+        start=2,
+    ):
+        _record_action(
+            initial,
+            initial_manifest,
+            initial_approval,
+            action,
+            at=_NOW + timedelta(minutes=minute),
+            result=success,
+        )
+    _record_action(
+        initial,
+        initial_manifest,
+        initial_approval,
+        operator.Phase5Action.PROVIDER_ACCEPTANCE,
+        at=_NOW + timedelta(minutes=6),
+        result=subprocess.CompletedProcess(["fixed"], 1, b"", b"failed"),
+    )
+    bootstrap_state = initial.root / "state" / "bootstrap.tfstate"
+    bootstrap_state.write_bytes(b'{"lineage":"phase5","serial":1}')
+    bootstrap_state.chmod(0o600)
+
+    repo_root, successor, manifest, approval, runner = _continuation_successor(tmp_path)
+    operator.prepare_phase5_continuation(
+        predecessor_state_root=initial.root,
+        predecessor_manifest_sha256=initial_manifest.record_sha256,
+        predecessor_approval_sha256=initial_approval.record_sha256,
+        successor_state_root=successor.root,
+        successor_manifest_sha256=manifest.record_sha256,
+        successor_approval_sha256=approval.record_sha256,
+        repo_root=repo_root,
+        prepared_at=_NOW + timedelta(minutes=7),
+        runner=runner,
+    )
+    for minute, action in enumerate(
+        (operator.Phase5Action.IMAGE_PUSH, operator.Phase5Action.RUNTIME_APPLY),
+        start=8,
+    ):
+        _record_action(
+            successor,
+            manifest,
+            approval,
+            action,
+            at=_NOW + timedelta(minutes=minute),
+            result=success,
+        )
+    _record_action(
+        successor,
+        manifest,
+        approval,
+        operator.Phase5Action.PROVIDER_ACCEPTANCE,
+        at=_NOW + timedelta(minutes=10),
+        result=subprocess.CompletedProcess(["fixed"], 1, b"", b"failed"),
+    )
+
+    _, _, carried, terminal = successor.continuation_source(
+        manifest_sha256=manifest.record_sha256,
+        approval_sha256=approval.record_sha256,
+    )
+
+    assert (
+        tuple(item.action for item in carried)
+        == operator._INITIAL_CONTINUATION_ACTIONS
+    )
+    assert terminal.action is operator.Phase5Action.PROVIDER_ACCEPTANCE
+    assert terminal.status is operator.OutcomeStatus.FAILED
+
+
 def test_continuation_carries_verified_teardown_chain_after_protection_unknown(
     tmp_path: Path,
 ) -> None:
