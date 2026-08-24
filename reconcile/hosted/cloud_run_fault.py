@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from http import HTTPStatus
@@ -220,16 +220,26 @@ def cloud_run_action_request_payload(
     """Return provider-relevant fields without transport or authority metadata."""
     if type(request) is not CloudRunCanaryActionRequest:
         raise TypeError("canary request payload requires an exact request")
-    return {
+    common: dict[str, JsonValue] = {
         "action": request.action.value,
-        "configuration_sha256": request.configuration_sha256,
         "fault_mode": request.fault_mode.value,
-        "image_digest": request.image_digest,
-        "operation_id": request.operation_id,
-        "release_id": request.release_id,
-        "revision": request.revision,
-        "service_etag": request.service_etag,
     }
+    if request.action is CloudRunCanaryAction.STAGE:
+        return {
+            **common,
+            "configuration_sha256": request.configuration_sha256,
+            "image_digest": request.image_digest,
+            "operation_id": request.operation_id,
+            "release_id": request.release_id,
+        }
+    if request.action is CloudRunCanaryAction.PROMOTE:
+        return {
+            **common,
+            "release_id": request.release_id,
+            "revision": request.revision,
+            "service_etag": request.service_etag,
+        }
+    return common
 
 
 def cloud_run_action_request_sha256(request: CloudRunCanaryActionRequest) -> str:
@@ -614,6 +624,22 @@ def _invoke(
     return proxy.reset(mode=request.fault_mode)
 
 
+async def _finish_before_cancellation[T](operation: Awaitable[T]) -> T:
+    """Finish one claimed-authority transition before propagating cancellation."""
+
+    task = asyncio.create_task(operation)
+    interrupted: asyncio.CancelledError | None = None
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError as error:
+            interrupted = error
+    result = task.result()
+    if interrupted is not None:
+        raise interrupted
+    return result
+
+
 def install_cloud_run_canary_fault_route(
     application: FastAPI,
     *,
@@ -694,7 +720,7 @@ def install_cloud_run_canary_fault_route(
         except CloudRunAcceptanceAmbiguity:
             if lease is not None:
                 try:
-                    await asyncio.shield(
+                    await _finish_before_cancellation(
                         action_authorizer.complete(  # type: ignore[union-attr]
                             lease,
                             RecoveryDispatchOutcome.OUTCOME_UNKNOWN,
@@ -709,7 +735,7 @@ def install_cloud_run_canary_fault_route(
         except CloudRunCanaryError as error:
             if lease is not None:
                 try:
-                    await asyncio.shield(
+                    await _finish_before_cancellation(
                         action_authorizer.complete(  # type: ignore[union-attr]
                             lease,
                             RecoveryDispatchOutcome.REJECTED,
@@ -735,7 +761,7 @@ def install_cloud_run_canary_fault_route(
             # restart in reconciliation and can never redispatch this request.
             if lease is not None:
                 try:
-                    await asyncio.shield(
+                    await _finish_before_cancellation(
                         action_authorizer.complete(  # type: ignore[union-attr]
                             lease,
                             RecoveryDispatchOutcome.OUTCOME_UNKNOWN,
@@ -747,7 +773,7 @@ def install_cloud_run_canary_fault_route(
         except Exception:
             if lease is not None:
                 try:
-                    await asyncio.shield(
+                    await _finish_before_cancellation(
                         action_authorizer.complete(  # type: ignore[union-attr]
                             lease,
                             RecoveryDispatchOutcome.OUTCOME_UNKNOWN,
@@ -761,7 +787,7 @@ def install_cloud_run_canary_fault_route(
             )
         if lease is not None:
             try:
-                await asyncio.shield(
+                await _finish_before_cancellation(
                     action_authorizer.complete(  # type: ignore[union-attr]
                         lease,
                         RecoveryDispatchOutcome.SUCCEEDED,

@@ -49,6 +49,7 @@ from reconcile.hosted.cloud_run_fault import (
     install_cloud_run_canary_fault_route,
 )
 from reconcile.persistence import InMemoryRecoveryRunStore, SqliteDurableRuntimeStore
+from reconcile.persistence.permits import PermitClaimDenied
 from tests.unit.evidence.test_recovery_verification import (
     CONFIGURATION_SHA256,
     IMAGE_DIGEST,
@@ -400,6 +401,52 @@ def test_certificate_bound_promotion_rejects_tampering_before_claim(tmp_path) ->
     completed = asyncio.run(exercise())
     assert completed.state.value == "COMPLETED"
     assert completed.claim_id == "claim-7"
+
+
+def test_expired_promotion_permit_is_rejected_before_provider_authority(
+    tmp_path,
+) -> None:
+    certificate, _evaluation, report, chain, _envelope = _verify(
+        node_id="stage",
+        kind="committed",
+    )
+    request = _run_request("recovery-expired-promotion-7")
+    store = InMemoryRecoveryRunStore()
+    permit_store = SqliteDurableRuntimeStore(tmp_path / "expired-promotion.sqlite3")
+    issuing_authority = PermitAuthority(
+        permit_store,
+        clock=lambda: NOW + timedelta(seconds=7),
+    )
+    permit = asyncio.run(issuing_authority.issue_permit(certificate))
+    assert permit is not None
+    action = _promotion_action(request, chain, certificate, permit)
+    expired_authority = PermitAuthority(
+        permit_store,
+        clock=lambda: certificate.expires_at,
+    )
+    authorizer = RecoveryCloudRunCanaryActionAuthorizer(
+        recovery_store=store,
+        permit_authority=expired_authority,
+        target=canary_target(),
+        clock=lambda: certificate.expires_at,
+    )
+
+    async def exercise():
+        await _record_dispatchable_promotion(
+            store,
+            request,
+            chain,
+            report,
+            certificate,
+            permit,
+        )
+        with pytest.raises(PermitClaimDenied, match="expired"):
+            await authorizer.claim(action)
+        return await expired_authority.get_permit(permit.permit_id)
+
+    retained = asyncio.run(exercise())
+    assert retained.state is ActionPermitState.EXPIRED
+    assert retained.claim_id is None
 
 
 @pytest.mark.parametrize(

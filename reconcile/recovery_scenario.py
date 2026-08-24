@@ -525,9 +525,10 @@ def build_release_chain_workflow(
     store: RecoveryRunStore,
     permit_authority: PermitAuthority,
     recovery_agent: object,
-    cloud_action: object,
+    cloud_action: object | None,
     cloud_reader: CloudRunCanaryReader,
     firestore: GoogleFirestoreReleaseTarget,
+    dispatch_gateway: object | None = None,
     clock: Callable[[], datetime] | None = None,
 ):
     """Assemble fixed/adaptive lanes over the exact same production boundaries."""
@@ -537,10 +538,17 @@ def build_release_chain_workflow(
 
     if type(recovery_agent) is not RecoveryAgent:
         raise TypeError("release workflow requires an exact RecoveryAgent")
-    if _require_cloud_target(settings, cloud_action) != _require_cloud_target(
-        settings, cloud_reader
+    reader_target = _require_cloud_target(settings, cloud_reader)
+    if (cloud_action is None) == (dispatch_gateway is None):
+        raise ValueError("release workflow requires exactly one dispatch boundary")
+    if cloud_action is not None and (
+        _require_cloud_target(settings, cloud_action) != reader_target
     ):
         raise ValueError("Cloud Run action and evidence targets differ")
+    if dispatch_gateway is not None and not callable(
+        getattr(dispatch_gateway, "dispatch", None)
+    ):
+        raise TypeError("hosted release workflow dispatch gateway is invalid")
     _require_firestore_target(settings, firestore)
     definition = build_release_chain_definition(settings, invoked_at=invoked_at)
     evidence = ReleaseChainEvidenceSource(
@@ -551,13 +559,17 @@ def build_release_chain_workflow(
         firestore=firestore,
         clock=clock,
     )
-    gateway = ReleaseChainDispatchGateway(
-        settings=settings,
-        store=store,
-        permit_authority=permit_authority,
-        cloud_run=cloud_action,  # type: ignore[arg-type]
-        firestore=firestore,
-        clock=clock,
+    gateway = (
+        dispatch_gateway
+        if dispatch_gateway is not None
+        else ReleaseChainDispatchGateway(
+            settings=settings,
+            store=store,
+            permit_authority=permit_authority,
+            cloud_run=cloud_action,  # type: ignore[arg-type]
+            firestore=firestore,
+            clock=clock,
+        )
     )
     return ProofToPermitWorkflow(
         store=store,
