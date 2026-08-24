@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import re
-from collections.abc import Collection, Mapping
+from collections.abc import AsyncIterator, Collection, Mapping
+from contextlib import asynccontextmanager
 from http import HTTPStatus
 from typing import Protocol
 
@@ -164,6 +165,13 @@ def _allowed_callers(
             for allowed_method, pattern in _API_PATHS
         ):
             return config.allowed_caller_emails
+        return ()
+    if config.component is Component.FAULT_PROXY and raw_path in {
+        CLOUD_RUN_CANARY_ACTION_PATH.encode("ascii"),
+        FIRESTORE_RELEASE_ACTION_PATH.encode("ascii"),
+    }:
+        if method == "POST" and config.recovery_action_caller_email is not None:
+            return (config.recovery_action_caller_email,)
         return ()
     if config.component in _INTERNAL_PATHS:
         if (method, raw_path) in _INTERNAL_PATHS[config.component]:
@@ -501,8 +509,23 @@ def _internal_app(
     ),
     recovery_action_caller_email: str | None,
 ) -> FastAPI:
+    @asynccontextmanager
+    async def lifespan(_application: FastAPI) -> AsyncIterator[None]:
+        try:
+            yield
+        finally:
+            closed: set[int] = set()
+            for handler in handlers.values():
+                if id(handler) in closed:
+                    continue
+                closed.add(id(handler))
+                closer = getattr(handler, "aclose", None)
+                if callable(closer):
+                    await closer()
+
     application = FastAPI(
         title=f"RECONCILE {config.component.value}",
+        lifespan=lifespan,
         docs_url=None,
         redoc_url=None,
         openapi_url=None,

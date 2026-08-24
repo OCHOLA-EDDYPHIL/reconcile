@@ -129,6 +129,8 @@ class HostedRecoveryService(Protocol):
         request: RecoveryRunRequest,
     ) -> RecoveryRunLaunchResult: ...
 
+    async def aclose(self) -> None: ...
+
 
 class HostedOperationScopeAuthorizer(Protocol):
     async def __call__(self, scope: HostedOperationScope) -> None: ...
@@ -478,6 +480,11 @@ class HostedRecoveryHandler:
             return _response(request, receipt.model_dump(mode="json"))
         except (TypeError, ValueError):
             raise HostedRecoveryGatewayError from None
+
+    async def aclose(self) -> None:
+        closer = getattr(self._service, "aclose", None)
+        if callable(closer):
+            await closer()
 
 
 class HostedHttpWorkflowGateway(HostedWorkflowGateway):
