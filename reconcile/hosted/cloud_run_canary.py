@@ -622,10 +622,9 @@ class _ClientBoundary:
             raise
         except Exception as error:
             raise _map_provider_error(error) from None
-        if (
-            getattr(candidate, "name", None) != expected_name
-            or getattr(candidate, "service", None) != self._target.service_name
-        ):
+        if getattr(candidate, "name", None) != expected_name or getattr(
+            candidate, "service", None
+        ) not in {self._target.service, self._target.service_name}:
             raise CloudRunCanaryError(CloudRunCanaryErrorCode.PROVIDER_UNAVAILABLE)
         return candidate
 
@@ -919,7 +918,8 @@ class CloudRunCanaryReader(_ClientBoundary):
                 if (
                     type(name) is not str
                     or not name.startswith(f"{self._target.service_name}/revisions/")
-                    or getattr(candidate, "service", None) != self._target.service_name
+                    or getattr(candidate, "service", None)
+                    not in {self._target.service, self._target.service_name}
                 ):
                     raise CloudRunCanaryError(
                         CloudRunCanaryErrorCode.PROVIDER_UNAVAILABLE
