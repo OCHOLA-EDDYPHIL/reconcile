@@ -2396,6 +2396,7 @@ def _default_command_runner(
         check=False,
         capture_output=True,
         timeout=timeout_seconds,
+        umask=0o077,
     )
 
 

@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 
 import reconcile.phase5_hosted_acceptance as acceptance_module
+from reconcile import phase5_operator as operator_module
 from reconcile.phase5_hosted_acceptance import (
     CanaryReprovisionBinding,
     HostedAcceptanceError,
@@ -27,6 +28,25 @@ INFRASTRUCTURE = "3" * 64
 SEMANTIC = "4" * 64
 RELEASE = f"p5-release-{SOURCE[:24]}"
 TERRAFORM_BYTES = b"pinned terraform fixture"
+
+
+def test_phase5_command_runners_force_private_file_creation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[dict[str, object]] = []
+
+    def run(*args: object, **kwargs: object) -> subprocess.CompletedProcess[bytes]:
+        calls.append(kwargs)
+        return subprocess.CompletedProcess(args, 0, b"", b"")
+
+    monkeypatch.setattr(subprocess, "run", run)
+    operator_module._default_runner(
+        ("fixed",), cwd=tmp_path, environment={}, timeout_seconds=1
+    )
+    acceptance_module._default_command_runner(("fixed",), tmp_path, {}, 1)
+
+    assert [call["umask"] for call in calls] == [0o077, 0o077]
 
 
 class _ReleaseReader:
