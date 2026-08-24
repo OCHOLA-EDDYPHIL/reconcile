@@ -101,13 +101,61 @@ _GEMINI_MODEL = "gemini-3.5-flash"
 _PROMPT_VERSION = "adaptive-planner-v3"
 _PROMPT_SHA256 = "a18ac5bbd22570562acc6dfbc49437a82f0db6a265a4de737c1371b6ef2ca2d3"
 _GCLOUD = "/usr/bin/gcloud"
+_TERRAFORM = "/usr/local/libexec/reconcile/terraform-1.15.8"
+_TERRAFORM_SHA256 = "8b6cb96cd46080ee1287baf646c70078715a99123b9b3a6ce2a7fe3892ec703a"
 _APPLY_SERVICE_ACCOUNT = (
     "rec-p5-apply@reconcile-dev-260813-14fa6d.iam.gserviceaccount.com"
 )
 _MAX_COMMAND_BYTES = 1_048_576
+_MAX_TERRAFORM_PLAN_BYTES = 16 * 1_048_576
 _MAX_RECORD_BYTES = 8 * 1_048_576
 _MAX_LOG_ENTRIES = 100
 _REPO_ROOT = Path(__file__).parents[1]
+
+_CANARY_SERVICE = "reconcile-p5-canary"
+_CANARY_SERVICE_ACCOUNT = f"rec-p5-canary@{_PROJECT_ID}.iam.gserviceaccount.com"
+_CANARY_REPROVISION_ADDRESSES = (
+    "google_cloud_run_v2_service.canary",
+    "google_cloud_run_v2_service_iam_member.canary_invoker",
+    "google_cloud_run_v2_service_iam_member.canary_mutator",
+    "google_cloud_run_v2_service_iam_member.canary_reader",
+)
+_CANARY_REPROVISION_TYPES = {
+    "google_cloud_run_v2_service.canary": "google_cloud_run_v2_service",
+    "google_cloud_run_v2_service_iam_member.canary_invoker": (
+        "google_cloud_run_v2_service_iam_member"
+    ),
+    "google_cloud_run_v2_service_iam_member.canary_mutator": (
+        "google_cloud_run_v2_service_iam_member"
+    ),
+    "google_cloud_run_v2_service_iam_member.canary_reader": (
+        "google_cloud_run_v2_service_iam_member"
+    ),
+}
+_CANARY_REPROVISION_IAM = {
+    "google_cloud_run_v2_service_iam_member.canary_invoker": (
+        "roles/run.invoker",
+        f"serviceAccount:rec-p5-controller@{_PROJECT_ID}.iam.gserviceaccount.com",
+    ),
+    "google_cloud_run_v2_service_iam_member.canary_mutator": (
+        f"projects/{_PROJECT_ID}/roles/reconcileP5CanaryMutator",
+        f"serviceAccount:rec-p5-fault@{_PROJECT_ID}.iam.gserviceaccount.com",
+    ),
+    "google_cloud_run_v2_service_iam_member.canary_reader": (
+        "roles/run.viewer",
+        f"serviceAccount:rec-p5-controller@{_PROJECT_ID}.iam.gserviceaccount.com",
+    ),
+}
+_RUNTIME_SOURCE_FILES = (
+    ".terraform.lock.hcl",
+    "cloud_run.tf",
+    "invocation_iam.tf",
+    "locals.tf",
+    "outputs.tf",
+    "providers.tf",
+    "variables.tf",
+    "versions.tf",
+)
 
 ImageDigest = Annotated[
     str,
@@ -634,6 +682,55 @@ class HostedAcceptanceRecord(StrictModel):
         if self.record_sha256 != _model_hash(self, exclude={"record_sha256"}):
             raise ValueError("hosted acceptance record hash mismatch")
         return self
+
+
+class CanaryReprovisionBinding(StrictModel):
+    """Approved hashes and private state root for one runtime reprovision."""
+
+    state_root: str
+    runtime_source_sha256: Sha256Digest
+    runtime_variables_sha256: Sha256Digest
+
+    @model_validator(mode="after")
+    def validate_binding(self) -> CanaryReprovisionBinding:
+        path = Path(self.state_root)
+        if not path.is_absolute() or path != Path(os.path.abspath(path)):
+            raise ValueError("canary reprovision state root must be canonical")
+        return self
+
+
+class CanaryReprovisionObservation(StrictModel):
+    """Sanitized proof that one lane received a physically new clean canary."""
+
+    previous_service_uid: Identifier
+    service_uid: Identifier
+    baseline_revision: Identifier
+    revision_names: tuple[Identifier, ...] = Field(min_length=1, max_length=1)
+    traffic_percent: Literal[100] = 100
+    release_id: Identifier
+    release_record_absent: Literal[True] = True
+    changed_resource_addresses: tuple[str, ...] = Field(min_length=4, max_length=4)
+    execution_plan_sha256: Sha256Digest
+    normalized_plan_sha256: Sha256Digest
+    observed_at: AwareDatetime
+
+    @model_validator(mode="after")
+    def validate_reprovision(self) -> CanaryReprovisionObservation:
+        if (
+            self.previous_service_uid == self.service_uid
+            or self.revision_names != (self.baseline_revision,)
+            or self.changed_resource_addresses != _CANARY_REPROVISION_ADDRESSES
+        ):
+            raise ValueError("canary was not physically reprovisioned to baseline")
+        return self
+
+
+class RecoveryReleaseRecordReader(Protocol):
+    async def read(self, release_id: str) -> object | None: ...
+
+
+class CanaryReprovisionBackend(Protocol):
+    async def reprovision(self) -> CanaryReprovisionObservation: ...
 
 
 class HostedAcceptanceBackend(Protocol):
@@ -1810,6 +1907,286 @@ def _checked_command_bytes(result: object) -> bytes:
     return result.stdout
 
 
+def _private_directory(path: Path, *, writable: bool) -> Path:
+    try:
+        resolved = path.resolve(strict=True)
+        metadata = path.lstat()
+    except OSError as error:
+        raise HostedAcceptanceError("CANARY_REPROVISION_BINDING_INVALID") from error
+    mode = stat.S_IMODE(metadata.st_mode)
+    if (
+        resolved != path
+        or not stat.S_ISDIR(metadata.st_mode)
+        or stat.S_ISLNK(metadata.st_mode)
+        or metadata.st_uid != os.getuid()
+        or mode & 0o077
+        or (writable and not mode & stat.S_IWUSR)
+    ):
+        raise HostedAcceptanceError("CANARY_REPROVISION_BINDING_INVALID")
+    return resolved
+
+
+def _read_owner_file(
+    path: Path,
+    *,
+    maximum: int,
+    exact_mode: int | None,
+    failure: str = "CANARY_REPROVISION_BINDING_INVALID",
+) -> bytes:
+    try:
+        descriptor = os.open(path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
+    except OSError as error:
+        raise HostedAcceptanceError(failure) from error
+    try:
+        metadata = os.fstat(descriptor)
+        mode = stat.S_IMODE(metadata.st_mode)
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_uid != os.getuid()
+            or metadata.st_nlink != 1
+            or metadata.st_size < 0
+            or metadata.st_size > maximum
+            or (exact_mode is not None and mode != exact_mode)
+            or (exact_mode is None and mode & 0o022)
+        ):
+            raise HostedAcceptanceError(failure)
+        chunks: list[bytes] = []
+        remaining = maximum + 1
+        while remaining > 0:
+            chunk = os.read(descriptor, min(1_048_576, remaining))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        payload = b"".join(chunks)
+        if len(payload) != metadata.st_size:
+            raise HostedAcceptanceError(failure)
+        return payload
+    finally:
+        os.close(descriptor)
+
+
+def _reject_duplicate_json_pairs(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    result: dict[str, object] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate JSON key")
+        result[key] = value
+    return result
+
+
+def _json_object(payload: bytes, *, canonical: bool, failure: str) -> dict[str, object]:
+    try:
+        value = json.loads(payload, object_pairs_hook=_reject_duplicate_json_pairs)
+        if type(value) is not dict:
+            raise ValueError
+        if (
+            canonical
+            and json.dumps(
+                value,
+                allow_nan=False,
+                ensure_ascii=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            ).encode("utf-8")
+            != payload
+        ):
+            raise ValueError
+    except (TypeError, UnicodeError, ValueError) as error:
+        raise HostedAcceptanceError(failure) from error
+    return value
+
+
+def _runtime_source_sha256(source_root: Path) -> str:
+    runtime = source_root / "infra" / "environments" / "dev" / "runtime"
+    _private_directory(source_root, writable=False)
+    _private_directory(runtime, writable=False)
+    try:
+        names = tuple(sorted(item.name for item in runtime.iterdir()))
+    except OSError as error:
+        raise HostedAcceptanceError("CANARY_REPROVISION_BINDING_INVALID") from error
+    if names != _RUNTIME_SOURCE_FILES:
+        raise HostedAcceptanceError("CANARY_REPROVISION_BINDING_INVALID")
+    values = []
+    for name in names:
+        payload = _read_owner_file(
+            runtime / name,
+            maximum=1_048_576,
+            exact_mode=0o400,
+        )
+        values.append(
+            {
+                "path": f"infra/environments/dev/runtime/{name}",
+                "sha256": hashlib.sha256(payload).hexdigest(),
+            }
+        )
+    return _json_hash(values)
+
+
+def _expected_canary_revision(
+    candidate: CandidateIdentity,
+    variables: Mapping[str, object],
+) -> str:
+    service_accounts = variables.get("service_account_emails")
+    timeouts = variables.get("request_timeout_seconds")
+    if type(service_accounts) is not dict or type(timeouts) is not dict:
+        raise HostedAcceptanceError("CANARY_REPROVISION_INPUT_INVALID")
+    if (
+        variables.get("project_id") != candidate.project_id
+        or variables.get("region") != candidate.region
+        or variables.get("source_revision") != candidate.source_revision
+        or variables.get("image_digest") != candidate.image_digest
+        or variables.get("infrastructure_revision") != candidate.infrastructure_revision
+        or variables.get("semantic_config_sha256") != candidate.semantic_config_sha256
+        or service_accounts.get("canary") != _CANARY_SERVICE_ACCOUNT
+        or type(timeouts.get("canary")) is not int
+        or not 1 <= timeouts["canary"] <= 3_600
+    ):
+        raise HostedAcceptanceError("CANARY_REPROVISION_INPUT_INVALID")
+    identity = {
+        "image_digest": candidate.image_digest,
+        "infrastructure_revision": candidate.infrastructure_revision,
+        "project_id": candidate.project_id,
+        "region": candidate.region,
+        "request_timeout_seconds": timeouts["canary"],
+        "semantic_config_sha256": candidate.semantic_config_sha256,
+        "service_account_email": _CANARY_SERVICE_ACCOUNT,
+        "source_revision": candidate.source_revision,
+    }
+    return f"{_CANARY_SERVICE}-b-{_json_hash(identity)[:16]}"
+
+
+def _verify_runtime_backend(data_directory: Path) -> None:
+    _private_directory(data_directory, writable=True)
+    payload = _read_owner_file(
+        data_directory / "terraform.tfstate",
+        maximum=1_048_576,
+        exact_mode=None,
+    )
+    value = _json_object(
+        payload,
+        canonical=False,
+        failure="CANARY_REPROVISION_BACKEND_INVALID",
+    )
+    backend = value.get("backend")
+    if type(backend) is not dict or backend.get("type") != "gcs":
+        raise HostedAcceptanceError("CANARY_REPROVISION_BACKEND_INVALID")
+    config = backend.get("config")
+    if (
+        type(config) is not dict
+        or config.get("bucket") != f"{_PROJECT_ID}-p5-state"
+        or config.get("prefix") != "phase5/runtime"
+        or config.get("impersonate_service_account") != _APPLY_SERVICE_ACCOUNT
+    ):
+        raise HostedAcceptanceError("CANARY_REPROVISION_BACKEND_INVALID")
+
+
+def _terraform_binary_sha256() -> str:
+    path = Path(_TERRAFORM)
+    try:
+        descriptor = os.open(path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
+    except OSError as error:
+        raise HostedAcceptanceError("CANARY_REPROVISION_TERRAFORM_INVALID") from error
+    digest = hashlib.sha256()
+    try:
+        metadata = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_uid not in {0, os.getuid()}
+            or metadata.st_nlink != 1
+            or stat.S_IMODE(metadata.st_mode) & 0o022
+            or metadata.st_size < 1
+            or metadata.st_size > 256 * 1_048_576
+        ):
+            raise HostedAcceptanceError("CANARY_REPROVISION_TERRAFORM_INVALID")
+        while True:
+            chunk = os.read(descriptor, 1_048_576)
+            if not chunk:
+                break
+            digest.update(chunk)
+    finally:
+        os.close(descriptor)
+    return digest.hexdigest()
+
+
+def _plan_mapping(value: object) -> dict[str, object]:
+    if type(value) is not dict or any(type(key) is not str for key in value):
+        raise HostedAcceptanceError("CANARY_REPROVISION_PLAN_INVALID")
+    return value
+
+
+def _validate_canary_reprovision_plan(
+    payload: bytes,
+    *,
+    candidate: CandidateIdentity,
+    variables: Mapping[str, object],
+) -> None:
+    plan = _json_object(
+        payload,
+        canonical=False,
+        failure="CANARY_REPROVISION_PLAN_INVALID",
+    )
+    if plan.get("format_version") != "1.2" or plan.get("terraform_version") != "1.15.8":
+        raise HostedAcceptanceError("CANARY_REPROVISION_PLAN_INVALID")
+    if any(
+        plan.get(name) not in (None, [])
+        for name in ("resource_drift", "deferred_changes")
+    ):
+        raise HostedAcceptanceError("CANARY_REPROVISION_PLAN_WIDE")
+
+    rendered = _plan_mapping(plan.get("variables"))
+    rendered_values: dict[str, object] = {}
+    for name, item in rendered.items():
+        projected = _plan_mapping(item)
+        if set(projected) != {"value"}:
+            raise HostedAcceptanceError("CANARY_REPROVISION_PLAN_INVALID")
+        rendered_values[name] = projected["value"]
+    if rendered_values != dict(variables):
+        raise HostedAcceptanceError("CANARY_REPROVISION_INPUT_CHANGED")
+
+    changes = plan.get("resource_changes")
+    if type(changes) is not list:
+        raise HostedAcceptanceError("CANARY_REPROVISION_PLAN_INVALID")
+    changed: dict[str, dict[str, object]] = {}
+    for item in changes:
+        resource = _plan_mapping(item)
+        address = resource.get("address")
+        change = _plan_mapping(resource.get("change"))
+        actions = change.get("actions")
+        if actions == ["no-op"]:
+            continue
+        if (
+            type(address) is not str
+            or address not in _CANARY_REPROVISION_ADDRESSES
+            or address in changed
+            or resource.get("mode") != "managed"
+            or resource.get("type") != _CANARY_REPROVISION_TYPES[address]
+            or resource.get("provider_name") != _PROVIDER_SOURCE
+            or actions != ["delete", "create"]
+            or resource.get("action_reason") != "replace_by_request"
+        ):
+            raise HostedAcceptanceError("CANARY_REPROVISION_PLAN_WIDE")
+        before = _plan_mapping(change.get("before"))
+        after = _plan_mapping(change.get("after"))
+        for projection in (before, after):
+            if (
+                projection.get("project") != candidate.project_id
+                or projection.get("location") != candidate.region
+                or projection.get("name") != _CANARY_SERVICE
+            ):
+                raise HostedAcceptanceError("CANARY_REPROVISION_TARGET_CHANGED")
+        if address in _CANARY_REPROVISION_IAM:
+            role, member = _CANARY_REPROVISION_IAM[address]
+            if any(
+                projection.get("role") != role or projection.get("member") != member
+                for projection in (before, after)
+            ):
+                raise HostedAcceptanceError("CANARY_REPROVISION_TARGET_CHANGED")
+        changed[address] = resource
+    if tuple(sorted(changed)) != tuple(sorted(_CANARY_REPROVISION_ADDRESSES)):
+        raise HostedAcceptanceError("CANARY_REPROVISION_PLAN_INCOMPLETE")
+
+
 class GcloudReadOnlyInspector:
     """Closed read-only Cloud Run and Cloud Logging observation boundary."""
 
@@ -2206,6 +2583,457 @@ def _normalize_log_diagnostics(
     )
 
 
+class TerraformCanaryReprovisioner:
+    """Replace only the isolated canary and prove a clean physical boundary."""
+
+    def __init__(
+        self,
+        candidate: CandidateIdentity,
+        *,
+        binding: CanaryReprovisionBinding,
+        release_id: str,
+        release_reader: RecoveryReleaseRecordReader,
+        command_runner: CommandRunner = _default_command_runner,
+        environ: Mapping[str, str] | None = None,
+        clock: Callable[[], datetime] = _utc_now,
+    ) -> None:
+        if type(candidate) is not CandidateIdentity:
+            raise TypeError("canary reprovision requires an exact candidate")
+        expected_release_id = f"p5-release-{candidate.source_revision[:24]}"
+        if type(binding) is not CanaryReprovisionBinding:
+            raise TypeError("canary reprovision requires an exact sealed binding")
+        if release_id != expected_release_id:
+            raise ValueError("canary reprovision release identity changed")
+        if not callable(getattr(release_reader, "read", None)):
+            raise TypeError("canary reprovision requires a release reader")
+        if not callable(command_runner) or not callable(clock):
+            raise TypeError("canary reprovision dependencies are invalid")
+        self._candidate = candidate
+        self._binding = binding
+        self._release_id = release_id
+        self._release_reader = release_reader
+        self._runner = command_runner
+        self._environment = _minimal_environment(
+            os.environ if environ is None else environ
+        )
+        self._clock = clock
+
+    @staticmethod
+    def _command_output(
+        result: object,
+        *,
+        maximum: int,
+        failure: str,
+    ) -> bytes:
+        if (
+            not isinstance(result, subprocess.CompletedProcess)
+            or result.returncode != 0
+            or type(result.stdout) is not bytes
+            or type(result.stderr) is not bytes
+            or len(result.stdout) > maximum
+            or len(result.stderr) > _MAX_COMMAND_BYTES
+        ):
+            raise HostedAcceptanceError(failure)
+        return result.stdout
+
+    def _run(
+        self,
+        argv: tuple[str, ...],
+        *,
+        cwd: Path,
+        environment: Mapping[str, str],
+        timeout: int,
+        maximum: int = _MAX_COMMAND_BYTES,
+        failure: str = "CANARY_REPROVISION_COMMAND_FAILED",
+    ) -> bytes:
+        try:
+            result = self._runner(argv, cwd, environment, timeout)
+        except (OSError, subprocess.SubprocessError) as error:
+            raise HostedAcceptanceError(failure) from error
+        return self._command_output(result, maximum=maximum, failure=failure)
+
+    def _sealed_paths(self) -> tuple[Path, Path, Path, Path, dict[str, object]]:
+        root = _private_directory(Path(self._binding.state_root), writable=True)
+        source = _private_directory(root / "source", writable=False)
+        execution = _private_directory(root / "execution", writable=True)
+        data = _private_directory(root / "terraform-data" / "runtime", writable=True)
+        plans = _private_directory(root / "plans", writable=False)
+        variables_path = plans / "runtime-create.tfvars.json"
+        variables_payload = _read_owner_file(
+            variables_path,
+            maximum=1_048_576,
+            exact_mode=0o400,
+        )
+        if (
+            hashlib.sha256(variables_payload).hexdigest()
+            != self._binding.runtime_variables_sha256
+            or _runtime_source_sha256(source) != self._binding.runtime_source_sha256
+        ):
+            raise HostedAcceptanceError("CANARY_REPROVISION_BINDING_CHANGED")
+        variables = _json_object(
+            variables_payload,
+            canonical=True,
+            failure="CANARY_REPROVISION_INPUT_INVALID",
+        )
+        _expected_canary_revision(self._candidate, variables)
+        cli_config = root / "terraform.rc"
+        if _read_owner_file(
+            cli_config,
+            maximum=1,
+            exact_mode=0o400,
+        ):
+            raise HostedAcceptanceError("CANARY_REPROVISION_BINDING_INVALID")
+        _verify_runtime_backend(data)
+        if _terraform_binary_sha256() != _TERRAFORM_SHA256:
+            raise HostedAcceptanceError("CANARY_REPROVISION_TERRAFORM_INVALID")
+        return source, execution, data, cli_config, variables
+
+    def _terraform_environment(self, data: Path, cli_config: Path) -> dict[str, str]:
+        environment = dict(self._environment)
+        environment["TF_CLI_CONFIG_FILE"] = str(cli_config)
+        environment["TF_DATA_DIR"] = str(data)
+        return environment
+
+    def _gcloud(self, source: Path, *arguments: str) -> bytes:
+        return self._run(
+            (
+                _GCLOUD,
+                *arguments,
+                f"--project={self._candidate.project_id}",
+                f"--region={self._candidate.region}",
+                f"--impersonate-service-account={_APPLY_SERVICE_ACCOUNT}",
+                "--format=json",
+                "--quiet",
+            ),
+            cwd=source,
+            environment=self._environment,
+            timeout=30,
+            failure="CANARY_REPROVISION_OBSERVATION_FAILED",
+        )
+
+    def _service_description(self, source: Path) -> bytes:
+        return self._gcloud(
+            source,
+            "run",
+            "services",
+            "describe",
+            _CANARY_SERVICE,
+        )
+
+    @staticmethod
+    def _service_uid(payload: bytes) -> str:
+        try:
+            value = _decode_json_object(payload)
+            metadata = _mapping(value.get("metadata"))
+            if _text(metadata.get("name")) != _CANARY_SERVICE:
+                raise HostedAcceptanceError("READ_ONLY_RESPONSE_INVALID")
+            uid = _text(metadata.get("uid"))
+            if (
+                len(uid) > 128
+                or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]*", uid) is None
+            ):
+                raise HostedAcceptanceError("READ_ONLY_RESPONSE_INVALID")
+            return uid
+        except HostedAcceptanceError as error:
+            raise HostedAcceptanceError(
+                "CANARY_REPROVISION_OBSERVATION_FAILED"
+            ) from error
+
+    def _verify_clean_service(self, payload: bytes, baseline_revision: str) -> str:
+        try:
+            value = _decode_json_object(payload)
+            metadata = _mapping(value.get("metadata"))
+            status = _mapping(value.get("status"))
+            if _text(metadata.get("name")) != _CANARY_SERVICE:
+                raise HostedAcceptanceError("READ_ONLY_RESPONSE_INVALID")
+            generation = _integer(metadata.get("generation"))
+            if _integer(status.get("observedGeneration")) != generation:
+                raise HostedAcceptanceError("DEPLOYMENT_NOT_READY")
+            _require_ready_condition(status)
+            if (
+                _text(status.get("latestCreatedRevisionName")) != baseline_revision
+                or _text(status.get("latestReadyRevisionName")) != baseline_revision
+            ):
+                raise HostedAcceptanceError("DEPLOYMENT_REVISION_MISMATCH")
+            traffic = _sequence(status.get("traffic"))
+            if len(traffic) != 1:
+                raise HostedAcceptanceError("DEPLOYMENT_TRAFFIC_INVALID")
+            target = _mapping(traffic[0])
+            if (
+                _text(target.get("revisionName")) != baseline_revision
+                or _integer(target.get("percent")) != 100
+            ):
+                raise HostedAcceptanceError("DEPLOYMENT_TRAFFIC_INVALID")
+            return self._service_uid(payload)
+        except HostedAcceptanceError as error:
+            raise HostedAcceptanceError("CANARY_REPROVISION_NOT_CLEAN") from error
+
+    def _verify_clean_revisions(
+        self,
+        payload: bytes,
+        baseline_revision: str,
+    ) -> tuple[str, ...]:
+        try:
+            value = json.loads(payload, object_pairs_hook=_reject_duplicate_json_pairs)
+            revisions = _sequence(value)
+            if len(revisions) != 1:
+                raise HostedAcceptanceError("READ_ONLY_RESPONSE_INVALID")
+            revision = _mapping(revisions[0])
+            metadata = _mapping(revision.get("metadata"))
+            status = _mapping(revision.get("status"))
+            spec = _mapping(revision.get("spec"))
+            name = _text(metadata.get("name"))
+            if (
+                name != baseline_revision
+                or metadata.get("deletionTimestamp") is not None
+                or _integer(status.get("observedGeneration"))
+                != _integer(metadata.get("generation"))
+            ):
+                raise HostedAcceptanceError("READ_ONLY_RESPONSE_INVALID")
+            _require_ready_condition(status)
+            labels = _mapping(metadata.get("labels"))
+            annotations = _mapping(metadata.get("annotations"))
+            containers = _sequence(spec.get("containers"))
+            if len(containers) != 1:
+                raise HostedAcceptanceError("READ_ONLY_RESPONSE_INVALID")
+            container = _mapping(containers[0])
+            expected_image = (
+                f"{self._candidate.region}-docker.pkg.dev/"
+                f"{self._candidate.project_id}/reconcile-p5/reconcile@"
+                f"{self._candidate.image_digest}"
+            )
+            if (
+                labels.get("reconcile-release") != "baseline"
+                or annotations.get("reconcile.dev/configuration-sha256")
+                != self._candidate.semantic_config_sha256
+                or container.get("image") != expected_image
+            ):
+                raise HostedAcceptanceError("READ_ONLY_RESPONSE_INVALID")
+            return (name,)
+        except (TypeError, UnicodeError, ValueError, HostedAcceptanceError) as error:
+            raise HostedAcceptanceError("CANARY_REPROVISION_NOT_CLEAN") from error
+
+    @staticmethod
+    def _seal_execution_plan(path: Path) -> str:
+        try:
+            descriptor = os.open(path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
+        except OSError as error:
+            raise HostedAcceptanceError("CANARY_REPROVISION_PLAN_INVALID") from error
+        digest = hashlib.sha256()
+        try:
+            metadata = os.fstat(descriptor)
+            if (
+                not stat.S_ISREG(metadata.st_mode)
+                or metadata.st_uid != os.getuid()
+                or metadata.st_nlink != 1
+                or not 1 <= metadata.st_size <= _MAX_TERRAFORM_PLAN_BYTES
+                or stat.S_IMODE(metadata.st_mode) & 0o022
+            ):
+                raise HostedAcceptanceError("CANARY_REPROVISION_PLAN_INVALID")
+            os.fchmod(descriptor, 0o400)
+            while True:
+                chunk = os.read(descriptor, 1_048_576)
+                if not chunk:
+                    break
+                digest.update(chunk)
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+        return digest.hexdigest()
+
+    def _execute(self) -> tuple[str, str, str, str, tuple[str, ...]]:
+        source, execution, data, cli_config, variables = self._sealed_paths()
+        environment = self._terraform_environment(data, cli_config)
+        version = self._run(
+            (_TERRAFORM, "version", "-json"),
+            cwd=source,
+            environment=environment,
+            timeout=15,
+            failure="CANARY_REPROVISION_TERRAFORM_INVALID",
+        )
+        if (
+            _json_object(
+                version,
+                canonical=False,
+                failure="CANARY_REPROVISION_TERRAFORM_INVALID",
+            ).get("terraform_version")
+            != "1.15.8"
+        ):
+            raise HostedAcceptanceError("CANARY_REPROVISION_TERRAFORM_INVALID")
+
+        previous_uid = self._service_uid(self._service_description(source))
+        baseline_revision = _expected_canary_revision(self._candidate, variables)
+        root = Path(self._binding.state_root)
+        variable_path = root / "plans" / "runtime-create.tfvars.json"
+        plan_path = (
+            execution / f"canary-reprovision-{self._candidate.candidate_sha256}.tfplan"
+        )
+        lock_path = execution / "canary-reprovision.lock"
+        try:
+            lock_descriptor = os.open(
+                lock_path,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC | os.O_NOFOLLOW,
+                0o600,
+            )
+        except OSError as error:
+            raise HostedAcceptanceError("CANARY_REPROVISION_BUSY") from error
+        try:
+            try:
+                plan_path.lstat()
+            except FileNotFoundError:
+                pass
+            except OSError as error:
+                raise HostedAcceptanceError(
+                    "CANARY_REPROVISION_PLAN_INVALID"
+                ) from error
+            else:
+                raise HostedAcceptanceError("CANARY_REPROVISION_PLAN_INVALID")
+
+            selector_arguments = tuple(
+                argument
+                for address in _CANARY_REPROVISION_ADDRESSES
+                for argument in (f"-replace={address}", f"-target={address}")
+            )
+            self._run(
+                (
+                    _TERRAFORM,
+                    "-chdir=infra/environments/dev/runtime",
+                    "plan",
+                    "-input=false",
+                    "-lock=true",
+                    "-lock-timeout=60s",
+                    "-no-color",
+                    f"-out={plan_path}",
+                    f"-var-file={variable_path}",
+                    *selector_arguments,
+                ),
+                cwd=source,
+                environment=environment,
+                timeout=1_800,
+            )
+            normalized = self._run(
+                (
+                    _TERRAFORM,
+                    "-chdir=infra/environments/dev/runtime",
+                    "show",
+                    "-json",
+                    str(plan_path),
+                ),
+                cwd=source,
+                environment=environment,
+                timeout=60,
+                maximum=_MAX_TERRAFORM_PLAN_BYTES,
+                failure="CANARY_REPROVISION_PLAN_INVALID",
+            )
+            _validate_canary_reprovision_plan(
+                normalized,
+                candidate=self._candidate,
+                variables=variables,
+            )
+            plan_sha256 = self._seal_execution_plan(plan_path)
+            if (
+                hashlib.sha256(
+                    _read_owner_file(
+                        plan_path,
+                        maximum=_MAX_TERRAFORM_PLAN_BYTES,
+                        exact_mode=0o400,
+                        failure="CANARY_REPROVISION_PLAN_INVALID",
+                    )
+                ).hexdigest()
+                != plan_sha256
+            ):
+                raise HostedAcceptanceError("CANARY_REPROVISION_PLAN_CHANGED")
+            self._run(
+                (
+                    _TERRAFORM,
+                    "-chdir=infra/environments/dev/runtime",
+                    "apply",
+                    "-input=false",
+                    "-no-color",
+                    str(plan_path),
+                ),
+                cwd=source,
+                environment=environment,
+                timeout=1_800,
+            )
+            current_payload = self._service_description(source)
+            current_uid = self._verify_clean_service(
+                current_payload,
+                baseline_revision,
+            )
+            revisions = self._verify_clean_revisions(
+                self._gcloud(
+                    source,
+                    "run",
+                    "revisions",
+                    "list",
+                    f"--service={_CANARY_SERVICE}",
+                ),
+                baseline_revision,
+            )
+            if current_uid == previous_uid:
+                raise HostedAcceptanceError("CANARY_REPROVISION_UID_UNCHANGED")
+            return (
+                previous_uid,
+                current_uid,
+                plan_sha256,
+                hashlib.sha256(normalized).hexdigest(),
+                revisions,
+            )
+        finally:
+            os.close(lock_descriptor)
+            try:
+                plan_path.unlink(missing_ok=True)
+            finally:
+                lock_path.unlink(missing_ok=True)
+
+    async def reprovision(self) -> CanaryReprovisionObservation:
+        """Apply one closed replacement plan and prove the resulting clean state."""
+
+        operation = asyncio.create_task(asyncio.to_thread(self._execute))
+        interrupted: asyncio.CancelledError | None = None
+        while not operation.done():
+            try:
+                await asyncio.shield(operation)
+            except asyncio.CancelledError as error:
+                interrupted = error
+        result = operation.result()
+        if interrupted is not None:
+            raise interrupted
+        previous_uid, current_uid, plan_sha256, normalized_sha256, revisions = result
+        try:
+            release_record = await self._release_reader.read(self._release_id)
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            raise HostedAcceptanceError("CANARY_RELEASE_READ_FAILED") from error
+        if release_record is not None:
+            raise HostedAcceptanceError("CANARY_RELEASE_RECORD_PRESENT")
+        try:
+            observed_at = self._clock()
+            if (
+                not isinstance(observed_at, datetime)
+                or observed_at.tzinfo is None
+                or observed_at.utcoffset() is None
+            ):
+                raise ValueError
+            return CanaryReprovisionObservation(
+                previous_service_uid=previous_uid,
+                service_uid=current_uid,
+                baseline_revision=revisions[0],
+                revision_names=revisions,
+                release_id=self._release_id,
+                changed_resource_addresses=_CANARY_REPROVISION_ADDRESSES,
+                execution_plan_sha256=plan_sha256,
+                normalized_plan_sha256=normalized_sha256,
+                observed_at=observed_at,
+            )
+        except (TypeError, ValueError) as error:
+            raise HostedAcceptanceError(
+                "CANARY_REPROVISION_OBSERVATION_FAILED"
+            ) from error
+
+
 class CloudRunAcceptanceBackend:
     """Authenticated remote acceptance over the frozen public API only."""
 
@@ -2551,6 +3379,9 @@ __all__ = [
     "AcceptanceArtifactBinding",
     "AcceptanceLimitation",
     "AcceptanceMode",
+    "CanaryReprovisionBackend",
+    "CanaryReprovisionBinding",
+    "CanaryReprovisionObservation",
     "CandidateIdentity",
     "CloudRunAcceptanceBackend",
     "CursorResumeObservation",
@@ -2565,9 +3396,11 @@ __all__ = [
     "InterfaceParityObservation",
     "LifecycleDiagnostics",
     "ProviderAcceptanceRecord",
+    "RecoveryReleaseRecordReader",
     "ScenarioAcceptanceObservation",
     "ServiceComponent",
     "ServiceDeploymentObservation",
+    "TerraformCanaryReprovisioner",
     "build_candidate_identity",
     "load_artifact_binding",
     "read_acceptance_record",
