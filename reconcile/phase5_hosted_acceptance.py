@@ -2640,6 +2640,39 @@ def _plan_mapping(value: object) -> dict[str, object]:
     return value
 
 
+def _is_canary_empty_collection_normalization(value: object) -> bool:
+    """Accept only Cloud Run provider null-to-empty normalization drift."""
+
+    resource = _plan_mapping(value)
+    change = _plan_mapping(resource.get("change"))
+    before = _plan_mapping(change.get("before"))
+    after = _plan_mapping(change.get("after"))
+    if (
+        resource.get("address") != "google_cloud_run_v2_service.canary"
+        or resource.get("mode") != "managed"
+        or resource.get("type") != "google_cloud_run_v2_service"
+        or resource.get("provider_name") != _PROVIDER_SOURCE
+        or change.get("actions") != ["update"]
+        or before == after
+    ):
+        return False
+
+    normalized: list[dict[str, object]] = []
+    for projection in (before, after):
+        current = json.loads(json.dumps(projection))
+        if current.get("annotations") is None:
+            current["annotations"] = {}
+        templates = current.get("template")
+        if type(templates) is list and len(templates) == 1:
+            containers = _plan_mapping(templates[0]).get("containers")
+            if type(containers) is list and len(containers) == 1:
+                container = _plan_mapping(containers[0])
+                if container.get("depends_on") is None:
+                    container["depends_on"] = []
+        normalized.append(current)
+    return normalized[0] == normalized[1]
+
+
 def _validate_canary_reprovision_plan(
     payload: bytes,
     *,
@@ -2653,9 +2686,17 @@ def _validate_canary_reprovision_plan(
     )
     if plan.get("format_version") != "1.2" or plan.get("terraform_version") != "1.15.8":
         raise HostedAcceptanceError("CANARY_REPROVISION_PLAN_INVALID")
-    if any(
-        plan.get(name) not in (None, [])
-        for name in ("resource_drift", "deferred_changes")
+    resource_drift = plan.get("resource_drift")
+    if (
+        plan.get("deferred_changes") not in (None, [])
+        or type(resource_drift) is not list
+        or (
+            resource_drift
+            and (
+                len(resource_drift) != 1
+                or not _is_canary_empty_collection_normalization(resource_drift[0])
+            )
+        )
     ):
         raise HostedAcceptanceError("CANARY_REPROVISION_PLAN_WIDE")
 
