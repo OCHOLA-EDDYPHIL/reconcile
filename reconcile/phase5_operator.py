@@ -6001,10 +6001,13 @@ def _verify_runtime_update_plan(
                 != _canonical_value_bytes(approved_change.get("after_unknown"))
             )
             or (not reprovisioned and live_after_unknown not in (None, {}))
-            or not _matches_approved_before(
-                live_change.get("after"),
-                approved_change.get("after"),
-                approved_change.get("after_unknown"),
+            or (
+                not iam_resource
+                and not _matches_approved_before(
+                    live_change.get("after"),
+                    approved_change.get("after"),
+                    approved_change.get("after_unknown"),
+                )
             )
             or (
                 expected_actions == ("no-op",)
