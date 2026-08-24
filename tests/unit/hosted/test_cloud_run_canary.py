@@ -108,7 +108,7 @@ def _revision(
 ) -> run_v2.Revision:
     return run_v2.Revision(
         name=_target().revision_name(name),
-        service=_target().service_name,
+        service=SERVICE,
         generation=1,
         observed_generation=1,
         labels={CLOUD_RUN_RELEASE_LABEL: release},
