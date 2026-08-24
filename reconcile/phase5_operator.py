@@ -895,6 +895,11 @@ class Phase5Continuation(_HasRecordHash):
                 and self.terminal_action.status is OutcomeStatus.UNKNOWN
             )
             or (
+                carried_actions == _INITIAL_CONTINUATION_ACTIONS
+                and self.terminal_action.action is Phase5Action.PROVIDER_ACCEPTANCE
+                and self.terminal_action.status is OutcomeStatus.FAILED
+            )
+            or (
                 carried_actions == _TEARDOWN_CONTINUATION_ACTIONS
                 and self.terminal_action.action is Phase5Action.STATE_PROTECTION_CHANGE
                 and self.terminal_action.status is OutcomeStatus.UNKNOWN
@@ -4364,13 +4369,29 @@ class Phase5StateStore:
                 manifest.record_sha256,
             )
             if not continuations:
-                expected_attempted = {
+                image_attempted = {
                     *_INITIAL_CONTINUATION_ACTIONS,
                     Phase5Action.IMAGE_PUSH,
                 }
-                if direct_attempted != expected_attempted or direct_successful != set(
+                provider_attempted = {
+                    *image_attempted,
+                    Phase5Action.RUNTIME_APPLY,
+                    Phase5Action.PROVIDER_ACCEPTANCE,
+                }
+                provider_successful = {
+                    *image_attempted,
+                    Phase5Action.RUNTIME_APPLY,
+                }
+                if direct_attempted == image_attempted and direct_successful == set(
                     _INITIAL_CONTINUATION_ACTIONS
                 ):
+                    terminal_action = Phase5Action.IMAGE_PUSH
+                elif (
+                    direct_attempted == provider_attempted
+                    and direct_successful == provider_successful
+                ):
+                    terminal_action = Phase5Action.PROVIDER_ACCEPTANCE
+                else:
                     raise OperatorError("CONTINUATION_PREDECESSOR_HISTORY_INVALID")
                 carried = tuple(
                     self._action_binding(directory, manifest.record_sha256, action)
@@ -4379,7 +4400,7 @@ class Phase5StateStore:
                 terminal = self._action_binding(
                     directory,
                     manifest.record_sha256,
-                    Phase5Action.IMAGE_PUSH,
+                    terminal_action,
                 )
             else:
                 prior = continuations[0]
@@ -4454,7 +4475,15 @@ class Phase5StateStore:
                     and terminal.status is not OutcomeStatus.FAILED
                 )
                 or (
-                    terminal.action is not Phase5Action.BOOTSTRAP_TEARDOWN
+                    terminal.action is Phase5Action.PROVIDER_ACCEPTANCE
+                    and terminal.status is not OutcomeStatus.FAILED
+                )
+                or (
+                    terminal.action
+                    not in {
+                        Phase5Action.BOOTSTRAP_TEARDOWN,
+                        Phase5Action.PROVIDER_ACCEPTANCE,
+                    }
                     and terminal.status is not OutcomeStatus.UNKNOWN
                 )
             ):
