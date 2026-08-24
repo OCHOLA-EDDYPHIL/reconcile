@@ -460,13 +460,6 @@ class RecoveryAgent:
                 output_sha256=turn.output_sha256,
             )
         output = turn.output
-        if len(output.probe_proposals) > 1:
-            return RecoveryAgentTurn(
-                hypothesis=None,
-                failure=PlannerFailureKind.SCHEMA_INVALID,
-                input_sha256=input_sha256,
-                output_sha256=turn.output_sha256,
-            )
         citations = tuple(
             dict.fromkeys(
                 (
