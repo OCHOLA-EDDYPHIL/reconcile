@@ -5957,6 +5957,13 @@ def _verify_runtime_update_plan(
     live_iam_by_address = {item.address: item for item in iam_edges}
     approved_changes = _plan_changes_by_address(qualification)
     live_changes = _plan_changes_by_address(rendered)
+    reprovisioned_addresses = {
+        "google_cloud_run_v2_service.canary",
+        "google_cloud_run_v2_service_iam_member.canary_invoker",
+        "google_cloud_run_v2_service_iam_member.canary_mutator",
+        "google_cloud_run_v2_service_iam_member.canary_reader",
+        "terraform_data.canary_baseline",
+    }
     if (
         set(live_changes) != set(approved_changes)
         or {item.address for item in resources} != set(approved_by_address)
@@ -5971,38 +5978,63 @@ def _verify_runtime_update_plan(
         approved_change = approved_changes[item.address]
         live_change = live_changes[item.address]
         live_after_unknown = live_change.get("after_unknown")
+        reprovisioned = item.address in reprovisioned_addresses
+        iam_resource = item.address in approved_iam_by_address
+        expected_actions = (
+            ("delete", "create")
+            if reprovisioned
+            else (
+                ("update",)
+                if item.resource_type == "google_cloud_run_v2_service"
+                else ("no-op",)
+            )
+        )
         if (
             item.resource_type != approved.resource_type
             or item.provider_name != approved.provider_name
             or item.before_projection is None
             or item.before_unknown is not None
-            or live_after_unknown not in (None, {})
-        ):
-            raise OperatorError("EXECUTION_PLAN_DRIFT")
-        if item.resource_type == "google_cloud_run_v2_service":
-            service_updates += 1
-            if item.actions != ("update",) or not _matches_approved_before(
+            or item.actions != expected_actions
+            or (
+                reprovisioned
+                and _canonical_value_bytes(live_after_unknown)
+                != _canonical_value_bytes(approved_change.get("after_unknown"))
+            )
+            or (not reprovisioned and live_after_unknown not in (None, {}))
+            or not _matches_approved_before(
                 live_change.get("after"),
                 approved_change.get("after"),
                 approved_change.get("after_unknown"),
-            ):
-                raise OperatorError("EXECUTION_PLAN_DRIFT")
+            )
+            or (
+                expected_actions == ("no-op",)
+                and _canonical_value_bytes(live_change.get("before"))
+                != _canonical_value_bytes(live_change.get("after"))
+            )
+        ):
+            raise OperatorError("EXECUTION_PLAN_DRIFT")
+        if item.resource_type == "google_cloud_run_v2_service":
+            if not reprovisioned:
+                service_updates += 1
             continue
-        if item.resource_type != "google_cloud_run_v2_service_iam_member":
+        if not iam_resource and not reprovisioned:
             raise OperatorError("EXECUTION_PLAN_DRIFT")
         approved_iam = approved_iam_by_address.get(item.address)
         live_iam = live_iam_by_address.get(item.address)
+        if not iam_resource:
+            continue
+        if approved_iam is None or live_iam is None:  # pragma: no cover - mapped above
+            raise OperatorError("EXECUTION_PLAN_DRIFT")
+        expected_authority_unknown = (
+            approved_iam.authority_unknown if reprovisioned else None
+        )
         if (
-            item.actions != ("no-op",)
-            or _canonical_value_bytes(live_change.get("before"))
-            != _canonical_value_bytes(live_change.get("after"))
-            or approved_iam is None
-            or live_iam is None
-            or live_iam.resource_type != approved_iam.resource_type
-            or live_iam.actions != ("no-op",)
+            live_iam.resource_type != approved_iam.resource_type
+            or live_iam.actions != expected_actions
             or live_iam.role != approved_iam.role
             or live_iam.member != approved_iam.member
-            or live_iam.authority_unknown is not None
+            or _canonical_value_bytes(live_iam.authority_unknown)
+            != _canonical_value_bytes(expected_authority_unknown)
             or not _matches_approved_before(
                 live_iam.authority_projection,
                 approved_iam.authority_projection,

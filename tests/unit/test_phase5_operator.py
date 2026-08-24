@@ -3253,6 +3253,71 @@ def test_runtime_update_verifier_accepts_exact_service_updates_and_iam_noops(
     )
 
 
+def test_runtime_update_verifier_accepts_exact_canary_reprovision(
+    tmp_path: Path,
+) -> None:
+    records = tmp_path / "records"
+    records.mkdir()
+    _, manifest, _, _ = _records(records)
+    original = manifest.terraform_plan_for(operator.Phase5Action.RUNTIME_APPLY)
+    assert original is not None
+    qualification = json.loads(Path(original.qualification_path).read_bytes())
+    api, api_iam = qualification["resource_changes"]
+    canary = json.loads(json.dumps(api))
+    canary["address"] = "google_cloud_run_v2_service.canary"
+    canary["change"]["after"]["name"] = "reconcile-p5-canary"
+    canary_iam = json.loads(json.dumps(api_iam))
+    canary_iam["address"] = "google_cloud_run_v2_service_iam_member.canary_invoker"
+    baseline = {
+        "address": "terraform_data.canary_baseline",
+        "change": {
+            "actions": ["create"],
+            "after": {"id": None, "input": "candidate"},
+            "after_unknown": {"id": True},
+            "before": None,
+        },
+        "provider_name": "terraform.io/builtin/terraform",
+        "type": "terraform_data",
+    }
+    qualification["resource_changes"].extend((canary, canary_iam, baseline))
+    plan_root = tmp_path / "reprovision"
+    plans = plan_root / "plans"
+    plans.mkdir(parents=True)
+    qualification_path = plans / "runtime-create.tfplan.json"
+    qualification_path.write_bytes(operator._canonical_value_bytes(qualification))
+    qualification_path.chmod(0o400)
+    variables_path = plans / "runtime-create.tfvars.json"
+    variables_path.write_bytes(Path(original.variables_path).read_bytes())
+    variables_path.chmod(0o400)
+    binding = operator._capture_plan(
+        action=operator.Phase5Action.RUNTIME_APPLY,
+        state_root=plan_root,
+        required_runtime_values=set(),
+    )
+    rendered = _live_runtime_update_plan(qualification)
+    approved_by_address = {
+        item["address"]: item for item in qualification["resource_changes"]
+    }
+    for item in rendered["resource_changes"]:
+        if item["address"] not in {
+            "google_cloud_run_v2_service.canary",
+            "google_cloud_run_v2_service_iam_member.canary_invoker",
+            "terraform_data.canary_baseline",
+        }:
+            continue
+        approved_change = approved_by_address[item["address"]]["change"]
+        item["change"]["actions"] = ["delete", "create"]
+        item["change"]["after"] = json.loads(json.dumps(approved_change["after"]))
+        item["change"]["after_unknown"] = json.loads(
+            json.dumps(approved_change["after_unknown"])
+        )
+
+    operator._verify_rendered_plan(
+        operator._canonical_value_bytes(rendered),
+        binding,
+    )
+
+
 @pytest.mark.parametrize(
     "drift",
     (
