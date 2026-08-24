@@ -444,6 +444,41 @@ def test_reprovision_rejects_a_wider_plan_before_apply(
     assert reader.calls == []
 
 
+def test_reprovision_accepts_only_cloud_run_empty_collection_drift(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _binding, variables = _state(tmp_path)
+    plan = json.loads(_plan(variables))
+    before = {
+        "annotations": None,
+        "template": [{"containers": [{"depends_on": None}]}],
+    }
+    after = {
+        "annotations": {},
+        "template": [{"containers": [{"depends_on": []}]}],
+    }
+    plan["resource_drift"] = [
+        {
+            "address": "google_cloud_run_v2_service.canary",
+            "change": {"actions": ["update"], "before": before, "after": after},
+            "mode": "managed",
+            "provider_name": "registry.terraform.io/hashicorp/google",
+            "type": "google_cloud_run_v2_service",
+        }
+    ]
+
+    acceptance_module._validate_canary_reprovision_plan(
+        _canonical(plan), candidate=_candidate(), variables=variables
+    )
+
+    plan["resource_drift"][0]["change"]["after"]["ingress"] = "internal"
+    with pytest.raises(HostedAcceptanceError, match="CANARY_REPROVISION_PLAN_WIDE"):
+        acceptance_module._validate_canary_reprovision_plan(
+            _canonical(plan), candidate=_candidate(), variables=variables
+        )
+
+
 def test_reprovision_requires_every_directly_coupled_iam_replacement(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
