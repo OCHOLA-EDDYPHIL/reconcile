@@ -1,0 +1,104 @@
+{
+  "$defs": {
+    "RecoveryQualificationArtifactIdentity": {
+      "additionalProperties": false,
+      "properties": {
+        "byte_count": {
+          "maximum": 9223372036854775807,
+          "minimum": 1,
+          "title": "Byte Count",
+          "type": "integer"
+        },
+        "filename": {
+          "enum": [
+            "manifest.json",
+            "environment.json",
+            "results.json",
+            "contention.json",
+            "comparison.json",
+            "claim-authorization.json"
+          ],
+          "title": "Filename",
+          "type": "string"
+        },
+        "sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Sha256",
+          "type": "string"
+        }
+      },
+      "required": [
+        "filename",
+        "sha256",
+        "byte_count"
+      ],
+      "title": "RecoveryQualificationArtifactIdentity",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "adaptive_efficiency_claim_authorized": {
+      "title": "Adaptive Efficiency Claim Authorized",
+      "type": "boolean"
+    },
+    "artifacts": {
+      "items": {
+        "$ref": "#/$defs/RecoveryQualificationArtifactIdentity"
+      },
+      "maxItems": 6,
+      "minItems": 6,
+      "title": "Artifacts",
+      "type": "array"
+    },
+    "bundle_format": {
+      "const": "proof-to-permit-qualification-v1",
+      "title": "Bundle Format",
+      "type": "string"
+    },
+    "created_at": {
+      "format": "date-time",
+      "title": "Created At",
+      "type": "string"
+    },
+    "safety_claim_authorized": {
+      "title": "Safety Claim Authorized",
+      "type": "boolean"
+    },
+    "schema_version": {
+      "const": "reconcile/recovery-qualification-index/v1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "source_revision": {
+      "maxLength": 128,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+      "title": "Source Revision",
+      "type": "string"
+    },
+    "source_tree_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Source Tree Sha256",
+      "type": "string"
+    },
+    "suite_id": {
+      "const": "proof-to-permit-qualification-v1",
+      "title": "Suite Id",
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema_version",
+    "bundle_format",
+    "suite_id",
+    "source_revision",
+    "source_tree_sha256",
+    "artifacts",
+    "safety_claim_authorized",
+    "adaptive_efficiency_claim_authorized",
+    "created_at"
+  ],
+  "title": "RecoveryQualificationIndex",
+  "type": "object"
+}

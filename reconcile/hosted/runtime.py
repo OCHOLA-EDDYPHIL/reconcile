@@ -122,6 +122,7 @@ from reconcile.scenarios.firestore_business import (
 from reconcile.scenarios.local_order import HiddenOrderOutcome
 from reconcile.scenarios.sandbox_order import (
     SANDBOX_ORDER_CONDITIONAL_POLICY,
+    SandboxOrderInvestigationClock,
     execute_hosted_sandbox_order_fixed,
     execute_sandbox_order_conditional,
 )
@@ -654,9 +655,11 @@ class HostedHybridExecutor:
         *,
         fixed: HostedFixedExecutor,
         planner_factory: Callable[[], AdvisoryPlanner],
+        clock: SandboxOrderInvestigationClock | None = None,
     ) -> None:
         self._fixed = fixed
         self._planner_factory = planner_factory
+        self._clock = clock
 
     async def _fixed_fallback(
         self,
@@ -674,6 +677,7 @@ class HostedHybridExecutor:
             revision=revision,
             cancellation_event=cancellation_event,
             durability_observer=runtime,
+            clock=self._clock,
         )
         report = mark_bounded_hybrid_fixed_fallback(
             result.report,
@@ -728,6 +732,7 @@ class HostedHybridExecutor:
                 revision=revision,
                 cancellation_event=cancellation_event,
                 durability_observer=runtime,
+                clock=self._clock,
             )
         finally:
             close_failed = not await _close_planner(planner)

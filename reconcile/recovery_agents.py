@@ -61,6 +61,32 @@ class RecoveryAgentTurn:
     def __post_init__(self) -> None:
         if (self.hypothesis is None) == (self.failure is None):
             raise ValueError("a recovery turn requires one hypothesis or failure")
+        if self.hypothesis is not None:
+            if type(self.hypothesis) is not GeminiHypothesis:
+                raise TypeError(
+                    "successful recovery output requires an exact hypothesis"
+                )
+            if self.output_sha256 != canonical_sha256(self.hypothesis):
+                raise ValueError(
+                    "successful recovery output must identify its hypothesis"
+                )
+
+
+class RecoveryHypothesisAgent(Protocol):
+    """Narrow advisory boundary consumed by the deterministic workflow."""
+
+    async def hypothesize(
+        self,
+        *,
+        chain: RecoveryChain,
+        node: RecoveryActionNode,
+        envelope: object,
+        report: InvestigationReport,
+        capabilities: tuple[ObservationCapability, ...],
+        prior_probe_sha256s: tuple[str, ...] = (),
+    ) -> RecoveryAgentTurn: ...
+
+    async def aclose(self) -> None: ...
 
 
 def _evidence_views(
@@ -262,44 +288,55 @@ def _alternative_histories(report: InvestigationReport) -> tuple[PossibleHistory
     )
     if not unresolved:
         return ()
-    return tuple(
-        PossibleHistory(
-            history_id=history_id,
-            classification=classification,
-            effect_states=tuple(
-                HypothesizedEffect(
-                    effect_id=finding.effect_id,
-                    state=(
-                        finding.state
-                        if finding.state is not EffectAssertionState.UNVERIFIED
-                        else state
-                    ),
-                    cited_evidence_ids=(
-                        finding.evidence_ids
-                        if finding.state is not EffectAssertionState.UNVERIFIED
-                        else ()
-                    ),
-                )
-                for finding in report.proof.effect_findings
-            ),
-            compatible_evidence_ids=citations,
-            summary=summary,
+    histories = []
+    for history_id, unresolved_state, summary in (
+        (
+            "model-history-effects-occurred",
+            EffectAssertionState.ESTABLISHED,
+            "The unresolved effects may already have occurred.",
+        ),
+        (
+            "model-history-effects-not-occurred",
+            EffectAssertionState.NOT_ESTABLISHED,
+            "The unresolved effects may not have occurred.",
+        ),
+    ):
+        effect_states = tuple(
+            HypothesizedEffect(
+                effect_id=finding.effect_id,
+                state=(
+                    finding.state
+                    if finding.state is not EffectAssertionState.UNVERIFIED
+                    else unresolved_state
+                ),
+                cited_evidence_ids=(
+                    finding.evidence_ids
+                    if finding.state is not EffectAssertionState.UNVERIFIED
+                    else ()
+                ),
+            )
+            for finding in report.proof.effect_findings
         )
-        for history_id, classification, state, summary in (
-            (
-                "model-history-effects-occurred",
-                Classification.COMMITTED,
-                EffectAssertionState.ESTABLISHED,
-                "The unresolved effects may already have occurred.",
-            ),
-            (
-                "model-history-effects-not-occurred",
-                Classification.NOT_COMMITTED,
-                EffectAssertionState.NOT_ESTABLISHED,
-                "The unresolved effects may not have occurred.",
-            ),
+        states = {effect.state for effect in effect_states}
+        classification = (
+            Classification.COMMITTED
+            if states == {EffectAssertionState.ESTABLISHED}
+            else (
+                Classification.NOT_COMMITTED
+                if states == {EffectAssertionState.NOT_ESTABLISHED}
+                else Classification.PARTIAL
+            )
         )
-    )
+        histories.append(
+            PossibleHistory(
+                history_id=history_id,
+                classification=classification,
+                effect_states=effect_states,
+                compatible_evidence_ids=citations,
+                summary=summary,
+            )
+        )
+    return tuple(histories)
 
 
 class RecoveryAgent:
@@ -560,6 +597,7 @@ __all__ = [
     "RecoveryAgentTurn",
     "RecoveryDispatchGateway",
     "RecoveryDispatchReceipt",
+    "RecoveryHypothesisAgent",
     "RolloutAgent",
     "probe_request_sha256",
     "recovery_remaining_budget",

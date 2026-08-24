@@ -104,7 +104,7 @@ from reconcile.contracts.base import (
     reject_sensitive_keys,
     reject_sensitive_values,
 )
-from reconcile.controller import CapabilityRegistry, ProbeController
+from reconcile.controller import CapabilityRegistry, ControllerClock, ProbeController
 from reconcile.controller.permits import PermitAuthority
 from reconcile.evidence import EvidenceEngine, ProbeRun, TargetRuleRegistry
 from reconcile.evidence.recovery_rules import (
@@ -737,6 +737,7 @@ class ReleaseChainEvidenceSource:
         cloud_run: CloudRunCanaryReader,
         firestore: GoogleFirestoreReleaseTarget,
         clock: Callable[[], datetime] | None = None,
+        controller_clock: ControllerClock | None = None,
     ) -> None:
         from reconcile.recovery_workflow import RecoveryRunDefinition
 
@@ -759,6 +760,7 @@ class ReleaseChainEvidenceSource:
         self._firestore = firestore
         self._receipts = RecoveryRunReceiptReader(store)
         self._clock = clock or (lambda: datetime.now(UTC))
+        self._controller_clock = controller_clock
         self._sessions: dict[tuple[str, str, int], _EvidenceSession] = {}
 
     def _now(self) -> datetime:
@@ -845,7 +847,7 @@ class ReleaseChainEvidenceSource:
             controller=ProbeController(
                 envelope,
                 capabilities,
-                clock=_WallClock(self._clock),
+                clock=self._controller_clock or _WallClock(self._clock),
             ),
             engine=EvidenceEngine(envelope, rules),
             created_at=self._now(),
@@ -859,20 +861,34 @@ class ReleaseChainEvidenceSource:
         session: _EvidenceSession,
         envelope: ExecutionEnvelope,
         capability_name: str,
-    ) -> None:
-        request = ProbeRequest(
-            schema_version=PROBE_REQUEST_VERSION,
-            capability_name=capability_name,
-            capability_version="1.0.0",
-            relevant_effect_ids=tuple(
-                effect.effect_id for effect in envelope.expected_effects
+    ) -> bool:
+        return await self._execute_request(
+            session,
+            ProbeRequest(
+                schema_version=PROBE_REQUEST_VERSION,
+                capability_name=capability_name,
+                capability_version="1.0.0",
+                relevant_effect_ids=tuple(
+                    effect.effect_id for effect in envelope.expected_effects
+                ),
+                arguments={},
+                rationale="Read exact target-bound provider state for recovery.",
             ),
-            arguments={},
-            rationale="Read exact target-bound provider state for recovery.",
         )
+
+    @staticmethod
+    async def _execute_request(
+        session: _EvidenceSession,
+        request: ProbeRequest,
+    ) -> bool:
+        """Normalize a new controller result once; terminal results are reusable."""
+
         execution = await session.controller.execute(request)
+        if execution.audit.sequence <= len(session.engine.attempts):
+            return False
         session.engine.process(ProbeRun(request=request, execution=execution))
-        session.executed_capabilities.add(capability_name)
+        session.executed_capabilities.add(request.capability_name)
+        return True
 
     def _state(
         self,
@@ -920,9 +936,7 @@ class ReleaseChainEvidenceSource:
         if type(request) is not ProbeRequest:
             raise TypeError("release evidence probe must be exact")
         session = await self._session(run_id, node, envelope)
-        execution = await session.controller.execute(request)
-        session.engine.process(ProbeRun(request=request, execution=execution))
-        session.executed_capabilities.add(request.capability_name)
+        await self._execute_request(session, request)
         return self._state(session, envelope)
 
     async def fixed(
@@ -946,7 +960,8 @@ class ReleaseChainEvidenceSource:
         }[node.node_id]
         for capability_name in sequence:
             if capability_name not in session.executed_capabilities:
-                await self._execute(session, envelope, capability_name)
+                if not await self._execute(session, envelope, capability_name):
+                    break
         return self._state(session, envelope)
 
 

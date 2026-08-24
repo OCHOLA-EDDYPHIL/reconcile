@@ -5,10 +5,13 @@ from __future__ import annotations
 import asyncio
 import os
 import sqlite3
+from collections import OrderedDict
 from collections.abc import Iterator
 from contextlib import contextmanager
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from threading import Lock
 from typing import Literal, Protocol, runtime_checkable
 
 from pydantic import Field, model_validator
@@ -38,13 +41,14 @@ from reconcile.contracts import (
     canonical_sha256,
     decode_contract,
 )
-from reconcile.contracts.base import Identifier, StrictModel
+from reconcile.contracts.base import Identifier, StrictModel, canonical_json_value_bytes
 from reconcile.persistence.permits import same_action_permit_authority
 
 RECOVERY_RUN_AGGREGATE_VERSION = "reconcile/recovery-run-aggregate/v1"
 RECOVERY_RUN_EVENT_SNAPSHOT_VERSION = "reconcile/recovery-event-snapshot/v1"
 
 _BUSY_TIMEOUT_MS = 5_000
+_RECOVERY_RUN_AGGREGATE_CACHE_CAPACITY = 32
 
 
 class RecoveryRunStoreError(RuntimeError):
@@ -132,6 +136,75 @@ class RecoveryRunAggregate(StrictModel):
         if replayed != self.snapshot:
             raise ValueError("recovery event history does not reproduce its snapshot")
         return self
+
+
+def _canonical_verified_recovery_aggregate_bytes(
+    aggregate: RecoveryRunAggregate,
+) -> bytes:
+    """Serialize an exact aggregate already validated by the store mutation path."""
+
+    if type(aggregate) is not RecoveryRunAggregate:
+        raise TypeError("verified recovery aggregate must be exact")
+    return canonical_json_value_bytes(aggregate.model_dump(mode="json"))
+
+
+@dataclass(frozen=True, slots=True)
+class _RecoveryRunAggregateCacheEntry:
+    identity: tuple[str | int, ...]
+    payload: bytes
+    aggregate: RecoveryRunAggregate
+
+
+class _RecoveryRunAggregateCache:
+    """Bounded exact-payload cache for immutable validated aggregates."""
+
+    def __init__(self) -> None:
+        self._entries: OrderedDict[str, _RecoveryRunAggregateCacheEntry] = OrderedDict()
+        self._lock = Lock()
+
+    def get(
+        self,
+        run_id: str,
+        *,
+        identity: tuple[str | int, ...],
+        payload: bytes,
+    ) -> RecoveryRunAggregate | None:
+        with self._lock:
+            cached = self._entries.get(run_id)
+            if cached is None:
+                return None
+            if cached.identity != identity or cached.payload != payload:
+                del self._entries[run_id]
+                return None
+            self._entries.move_to_end(run_id)
+            # StrictModel prevents attribute assignment, but JSON-valued fields
+            # can still contain mutable containers.  Never let a store caller
+            # alias the cache's trusted object graph.
+            return cached.aggregate.model_copy(deep=True)
+
+    def put(
+        self,
+        run_id: str,
+        *,
+        identity: tuple[str | int, ...],
+        payload: bytes,
+        aggregate: RecoveryRunAggregate,
+    ) -> None:
+        if (
+            type(aggregate) is not RecoveryRunAggregate
+            or aggregate.snapshot.request.run_id != run_id
+        ):
+            raise RecoveryRunCorruptState(run_id)
+        entry = _RecoveryRunAggregateCacheEntry(
+            identity=identity,
+            payload=payload,
+            aggregate=aggregate.model_copy(deep=True),
+        )
+        with self._lock:
+            self._entries[run_id] = entry
+            self._entries.move_to_end(run_id)
+            while len(self._entries) > _RECOVERY_RUN_AGGREGATE_CACHE_CAPACITY:
+                self._entries.popitem(last=False)
 
 
 def _aware(value: datetime) -> datetime:
@@ -518,6 +591,51 @@ def append_recovery_event(
     )
 
 
+def _append_decoded_recovery_event(
+    aggregate: RecoveryRunAggregate,
+    *,
+    event_type: RecoveryRunEventType,
+    payload: RecoveryRunEventPayload,
+    occurred_at: datetime,
+) -> RecoveryRunAggregate:
+    """Append to an aggregate that was decoded and verified in this transaction.
+
+    The durable stores have already run the complete aggregate validator while
+    decoding their current CAS value.  Replaying the same immutable prefix once
+    more when adding one event is redundant and makes a sequence of appends
+    quadratic.  The new event and derived snapshot still pass their normal exact
+    contract validation; only the already-verified prefix replay is skipped.
+
+    Keep this helper private and call it only with an aggregate returned by the
+    store's decoder.  Caller-supplied aggregates must continue through
+    :func:`append_recovery_event`, which replays their full history.
+    """
+
+    if type(aggregate) is not RecoveryRunAggregate:
+        raise TypeError("decoded recovery aggregate must be exact")
+    event = RecoveryRunEvent(
+        schema_version=RECOVERY_RUN_EVENT_VERSION,
+        run_id=aggregate.snapshot.request.run_id,
+        cursor=aggregate.snapshot.event_cursor + 1,
+        type=event_type,
+        occurred_at=_aware(occurred_at),
+        payload=payload,
+    )
+    snapshot = apply_recovery_event(aggregate.snapshot, event)
+    events = (*aggregate.events, event)
+    if (
+        event.cursor != len(events)
+        or snapshot.event_cursor != len(events)
+        or snapshot.request.run_id != event.run_id
+    ):
+        raise RecoveryRunCorruptState(event.run_id)
+    return RecoveryRunAggregate.model_construct(
+        schema_version=RECOVERY_RUN_AGGREGATE_VERSION,
+        snapshot=snapshot,
+        events=events,
+    )
+
+
 @runtime_checkable
 class RecoveryRunStore(Protocol):
     async def create(
@@ -776,6 +894,7 @@ class SqliteRecoveryRunStore:
         if candidate.exists() and not candidate.is_file():
             raise ValueError("SQLite recovery-run path must name a file")
         self._path = candidate
+        self._aggregate_cache = _RecoveryRunAggregateCache()
         self._initialize()
         os.chmod(candidate, 0o600)
 
@@ -830,19 +949,54 @@ class SqliteRecoveryRunStore:
             raise RecoveryRunCorruptState from error
 
     @staticmethod
-    def _decode(payload: object, run_id: str) -> RecoveryRunAggregate:
+    def _payload_bytes(payload: object, run_id: str) -> bytes:
         try:
             if isinstance(payload, bytes):
-                raw = payload
-            elif isinstance(payload, memoryview):
-                raw = payload.tobytes()
-            elif isinstance(payload, str):
-                raw = payload.encode()
-            else:
-                raise TypeError
-            return decode_contract(raw, RecoveryRunAggregate)
+                return payload
+            if isinstance(payload, memoryview):
+                return payload.tobytes()
+            if isinstance(payload, str):
+                return payload.encode()
+            raise TypeError
         except Exception as error:
             raise RecoveryRunCorruptState(run_id) from error
+
+    @staticmethod
+    def _decode(payload: object, run_id: str) -> RecoveryRunAggregate:
+        try:
+            return decode_contract(
+                SqliteRecoveryRunStore._payload_bytes(payload, run_id),
+                RecoveryRunAggregate,
+            )
+        except RecoveryRunStoreError:
+            raise
+        except Exception as error:
+            raise RecoveryRunCorruptState(run_id) from error
+
+    @staticmethod
+    def _cache_identity(
+        run_id: str,
+        request_sha256: str,
+        revision: int,
+    ) -> tuple[str | int, ...]:
+        return (run_id, request_sha256, revision)
+
+    def _cache_committed(
+        self,
+        aggregate: RecoveryRunAggregate,
+        payload: bytes,
+    ) -> None:
+        snapshot = aggregate.snapshot
+        self._aggregate_cache.put(
+            snapshot.request.run_id,
+            identity=self._cache_identity(
+                snapshot.request.run_id,
+                snapshot.request_sha256,
+                snapshot.revision,
+            ),
+            payload=payload,
+            aggregate=aggregate,
+        )
 
     def _load_locked(
         self,
@@ -855,12 +1009,31 @@ class SqliteRecoveryRunStore:
         ).fetchone()
         if row is None:
             raise RecoveryRunNotFound(run_id)
-        aggregate = self._decode(row["payload"], run_id)
+        request_sha256 = row["request_sha256"]
+        revision = row["revision"]
+        if type(request_sha256) is not str or type(revision) is not int:
+            raise RecoveryRunCorruptState(run_id)
+        payload = self._payload_bytes(row["payload"], run_id)
+        identity = self._cache_identity(run_id, request_sha256, revision)
+        cached = self._aggregate_cache.get(
+            run_id,
+            identity=identity,
+            payload=payload,
+        )
+        if cached is not None:
+            return cached
+        aggregate = self._decode(payload, run_id)
         if (
-            row["request_sha256"] != aggregate.snapshot.request_sha256
-            or row["revision"] != aggregate.snapshot.revision
+            request_sha256 != aggregate.snapshot.request_sha256
+            or revision != aggregate.snapshot.revision
         ):
             raise RecoveryRunCorruptState(run_id)
+        self._aggregate_cache.put(
+            run_id,
+            identity=identity,
+            payload=payload,
+            aggregate=aggregate,
+        )
         return aggregate
 
     @staticmethod
@@ -868,13 +1041,14 @@ class SqliteRecoveryRunStore:
         connection: sqlite3.Connection,
         current: RecoveryRunAggregate,
         replacement: RecoveryRunAggregate,
-    ) -> None:
+    ) -> bytes:
         event = replacement.events[-1]
+        payload = _canonical_verified_recovery_aggregate_bytes(replacement)
         cursor = connection.execute(
             "UPDATE recovery_run_aggregates SET revision = ?, payload = ? WHERE run_id = ? AND revision = ?",
             (
                 replacement.snapshot.revision,
-                canonical_json_bytes(replacement),
+                payload,
                 replacement.snapshot.request.run_id,
                 current.snapshot.revision,
             ),
@@ -889,6 +1063,7 @@ class SqliteRecoveryRunStore:
                 canonical_json_bytes(event),
             ),
         )
+        return payload
 
     async def create(
         self,
@@ -898,6 +1073,7 @@ class SqliteRecoveryRunStore:
         created_at: datetime,
     ) -> tuple[RecoveryRunSnapshot, bool]:
         aggregate = create_recovery_run_aggregate(request, chain, created_at=created_at)
+        payload = canonical_json_bytes(aggregate)
         try:
             with self._write() as connection:
                 current = connection.execute(
@@ -905,7 +1081,7 @@ class SqliteRecoveryRunStore:
                     (request.run_id,),
                 ).fetchone()
                 if current is not None:
-                    existing = self._decode(current["payload"], request.run_id)
+                    existing = self._load_locked(connection, request.run_id)
                     if (
                         existing.snapshot.request != request
                         or existing.snapshot.chain != chain
@@ -918,7 +1094,7 @@ class SqliteRecoveryRunStore:
                         request.run_id,
                         aggregate.snapshot.request_sha256,
                         aggregate.snapshot.revision,
-                        canonical_json_bytes(aggregate),
+                        payload,
                     ),
                 )
                 connection.executemany(
@@ -928,6 +1104,7 @@ class SqliteRecoveryRunStore:
                         for event in aggregate.events
                     ),
                 )
+            self._cache_committed(aggregate, payload)
             return aggregate.snapshot, True
         except RecoveryRunStoreError:
             raise
@@ -975,13 +1152,14 @@ class SqliteRecoveryRunStore:
                 current = self._load_locked(connection, run_id)
                 if current.snapshot.revision != expected_revision:
                     raise RecoveryRunConflict(run_id)
-                replacement = append_recovery_event(
+                replacement = _append_decoded_recovery_event(
                     current,
                     event_type=event_type,
                     payload=payload,
                     occurred_at=occurred_at,
                 )
-                self._replace_locked(connection, current, replacement)
+                payload = self._replace_locked(connection, current, replacement)
+            self._cache_committed(replacement, payload)
             return replacement.snapshot
         except RecoveryRunStoreError:
             raise
@@ -1007,7 +1185,8 @@ class SqliteRecoveryRunStore:
                     action_request_sha256=action_request_sha256,
                     claimed_at=claimed_at,
                 )
-                self._replace_locked(connection, current, replacement)
+                payload = self._replace_locked(connection, current, replacement)
+            self._cache_committed(replacement, payload)
             return permit
         except RecoveryRunStoreError:
             raise
@@ -1033,7 +1212,8 @@ class SqliteRecoveryRunStore:
                     outcome=outcome,
                     completed_at=completed_at,
                 )
-                self._replace_locked(connection, current, replacement)
+                payload = self._replace_locked(connection, current, replacement)
+            self._cache_committed(replacement, payload)
             return permit
         except RecoveryRunStoreError:
             raise

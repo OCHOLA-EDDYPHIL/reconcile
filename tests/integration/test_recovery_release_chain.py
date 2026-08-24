@@ -82,6 +82,20 @@ BASELINE = "reconcile-canary-baseline"
 SERVICE_URI = "https://reconcile-canary-demo-hash-uc.a.run.app"
 
 
+def test_release_workflow_rejects_a_non_production_hypothesis_agent() -> None:
+    with pytest.raises(TypeError, match="exact RecoveryAgent"):
+        build_release_chain_workflow(
+            settings=object(),  # type: ignore[arg-type]
+            invoked_at=NOW,
+            store=object(),  # type: ignore[arg-type]
+            permit_authority=object(),  # type: ignore[arg-type]
+            recovery_agent=object(),
+            cloud_action=object(),
+            cloud_reader=object(),  # type: ignore[arg-type]
+            firestore=object(),  # type: ignore[arg-type]
+        )
+
+
 def _ready() -> run_v2.Condition:
     return run_v2.Condition(
         type_="Ready",
@@ -578,6 +592,67 @@ def test_evidence_source_repolls_pending_provider_state_in_a_new_bounded_round()
     assert len(pending.report.probe_audit) == 3
     assert len(terminal.report.probe_audit) == 3
     assert state.revision_read_count == 2
+
+
+def test_evidence_source_does_not_renormalize_cached_terminal_probe() -> None:
+    class _ExpiredControllerClock:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def monotonic(self) -> float:
+            self.calls += 1
+            return 0.0 if self.calls == 1 else 31.0
+
+        def now(self) -> datetime:
+            return NOW + timedelta(seconds=2)
+
+    settings = _settings()
+    state, _adapter, _action, reader, firestore, _client = _provider(settings)
+    definition = build_release_chain_definition(settings, invoked_at=NOW)
+    node = definition.chain.nodes[0]
+    envelope = definition.envelopes[node.node_id]
+    store = InMemoryRecoveryRunStore()
+    source = ReleaseChainEvidenceSource(
+        store=store,
+        definition=definition,
+        settings=settings,
+        cloud_run=reader,
+        firestore=firestore,
+        clock=lambda: NOW + timedelta(seconds=2),
+        controller_clock=_ExpiredControllerClock(),
+    )
+    request = RecoveryRunRequest(
+        schema_version=RECOVERY_RUN_REQUEST_VERSION,
+        run_id="cached-terminal-probe-run",
+        scenario="cloud-run-rollout",
+        policy=RecoveryRunPolicy.FIXED,
+        fault=RecoveryRunFault.NO_FAULT,
+    )
+    follow_up = ProbeRequest(
+        schema_version=PROBE_REQUEST_VERSION,
+        capability_name="cloud-run-revision-get",
+        capability_version="1.0.0",
+        relevant_effect_ids=tuple(
+            effect.effect_id for effect in envelope.expected_effects
+        ),
+        arguments={},
+        rationale="Confirm terminal probe reuse is idempotent.",
+    )
+
+    async def exercise():
+        await store.create(request, definition.chain, created_at=NOW)
+        current = await source.current(request.run_id, node, envelope)
+        fixed = await source.fixed(request.run_id, node, envelope)
+        probed = await source.probe(request.run_id, node, envelope, follow_up)
+        return current, fixed, probed
+
+    current, fixed, probed = asyncio.run(exercise())
+
+    assert len(current.report.probe_audit) == 1
+    assert current.report.probe_audit[0].stop_reason == "elapsed_budget_exhausted"
+    assert fixed.report == current.report
+    assert probed.report == current.report
+    assert state.service_read_count == 0
 
 
 def test_fixed_workflow_observes_pending_then_resumes_on_terminal_evidence(

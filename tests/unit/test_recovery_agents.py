@@ -18,13 +18,19 @@ from reconcile.contracts import (
     ADAPTIVE_PLANNER_OUTPUT_VERSION,
     AdaptivePlannerOutput,
     Classification,
+    EffectAssertionState,
     PlannerAcquisitionAdvice,
     PlannerCitationRefs,
     PlannerExplanation,
     PlannerStopAdvice,
     canonical_sha256,
 )
-from reconcile.recovery_agents import RecoveryAgent, recovery_remaining_budget
+from reconcile.recovery_agents import (
+    RecoveryAgent,
+    RecoveryAgentTurn,
+    _alternative_histories,
+    recovery_remaining_budget,
+)
 from tests.contract._factories import (
     make_capability,
     make_envelope,
@@ -134,6 +140,7 @@ def test_recovery_agent_builds_evidence_cited_non_authoritative_hypothesis() -> 
     assert turn.hypothesis.proposed_probe == make_probe()
     assert turn.hypothesis.proposed_transition is None
     assert turn.hypothesis.proposed_classification is Classification.UNKNOWN
+    assert turn.output_sha256 == canonical_sha256(turn.hypothesis)
     assert planner.inputs[0].envelope == make_envelope()
     assert planner.inputs[0].remaining_budget.probes == 2
     assert planner.inputs[0].remaining_budget.elapsed_ms == 0
@@ -141,6 +148,38 @@ def test_recovery_agent_builds_evidence_cited_non_authoritative_hypothesis() -> 
     assert planner.inputs[0].remaining_budget.cost_units == 2
     assert planner.inputs[0].remaining_budget.deadline_at == report.updated_at
     assert planner.inputs[0].capabilities[0].remaining_invocations == 2
+
+
+def test_successful_recovery_turn_rejects_a_stale_hypothesis_digest() -> None:
+    planner = _Planner(output=_output())
+    report = make_report(Classification.COMMITTED)
+    chain = make_recovery_examples()[0]
+    turn = asyncio.run(
+        RecoveryAgent(planner, clock=lambda: report.updated_at).hypothesize(
+            chain=chain,
+            node=chain.nodes[0],
+            envelope=make_envelope(),
+            report=report,
+            capabilities=(make_capability(),),
+        )
+    )
+    assert turn.hypothesis is not None
+
+    with pytest.raises(ValueError, match="identify its hypothesis"):
+        RecoveryAgentTurn(
+            hypothesis=turn.hypothesis,
+            failure=None,
+            input_sha256=turn.input_sha256,
+            output_sha256="0" * 64,
+        )
+
+
+def test_recovery_agent_has_no_post_planner_hypothesis_mutation_hook() -> None:
+    with pytest.raises(TypeError, match="unexpected keyword"):
+        RecoveryAgent(
+            _Planner(output=_output()),
+            **{"hypothesis_transformer": lambda hypothesis, _report: hypothesis},
+        )
 
 
 def test_recovery_agent_uses_one_stable_cumulative_budget_deadline() -> None:
@@ -165,6 +204,24 @@ def test_recovery_agent_uses_one_stable_cumulative_budget_deadline() -> None:
         milliseconds=envelope.context.evidence_budget.max_elapsed_ms
     )
     assert long_after_deadline == at_deadline
+
+
+def test_alternative_histories_classify_mixed_known_and_unresolved_effects() -> None:
+    report = make_report(Classification.UNKNOWN)
+    findings = list(report.proof.effect_findings)
+    findings[0] = findings[0].model_copy(
+        update={"state": EffectAssertionState.ESTABLISHED}
+    )
+    report = report.model_copy(
+        update={"proof": report.proof.model_copy(update={"effect_findings": findings})}
+    )
+
+    histories = _alternative_histories(report)
+
+    assert tuple(item.classification for item in histories) == (
+        Classification.COMMITTED,
+        Classification.PARTIAL,
+    )
 
 
 @pytest.mark.parametrize(

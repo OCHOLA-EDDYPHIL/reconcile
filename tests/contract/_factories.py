@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 from datetime import UTC, datetime, timedelta
+from functools import lru_cache
 
 from reconcile.contracts import (
     ACTION_GATE_RESULT_VERSION,
@@ -28,6 +29,9 @@ from reconcile.contracts import (
     RECOVERY_LAUNCH_PERMIT_VERSION,
     RECOVERY_POLICY_COMPARISON_VERSION,
     RECOVERY_POLICY_RESULT_VERSION,
+    RECOVERY_QUALIFICATION_CONTENTION_VERSION,
+    RECOVERY_QUALIFICATION_INDEX_VERSION,
+    RECOVERY_QUALIFICATION_RESULTS_VERSION,
     RECOVERY_RESET_RESULT_VERSION,
     RECOVERY_RUN_EVENT_VERSION,
     RECOVERY_RUN_REQUEST_VERSION,
@@ -93,6 +97,7 @@ from reconcile.contracts import (
     OperationStatus,
     OriginalInvocation,
     PermitAction,
+    PermitCompletionOutcome,
     PlannerAcquisitionAdvice,
     PlannerAdmittedEvidence,
     PlannerCapability,
@@ -129,6 +134,7 @@ from reconcile.contracts import (
     RecoveryDispatchReceipt,
     RecoveryEvidenceBinding,
     RecoveryFirestoreObservation,
+    RecoveryHypothesisDisposition,
     RecoveryLaunchPermit,
     RecoveryLaunchPermitState,
     RecoveryMutationCounters,
@@ -136,6 +142,28 @@ from reconcile.contracts import (
     RecoveryNodeState,
     RecoveryPolicyComparison,
     RecoveryPolicyResult,
+    RecoveryQualificationArtifactIdentity,
+    RecoveryQualificationArtifactKind,
+    RecoveryQualificationCaseProof,
+    RecoveryQualificationClaimAuthorization,
+    RecoveryQualificationComparison,
+    RecoveryQualificationContention,
+    RecoveryQualificationContentionTrial,
+    RecoveryQualificationEnvironment,
+    RecoveryQualificationHypothesisReplay,
+    RecoveryQualificationHypothesisWrongnessKind,
+    RecoveryQualificationIndex,
+    RecoveryQualificationLaneResult,
+    RecoveryQualificationManifest,
+    RecoveryQualificationModelUsage,
+    RecoveryQualificationModelUsageStatus,
+    RecoveryQualificationPermitCoverage,
+    RecoveryQualificationPolicy,
+    RecoveryQualificationProviderMutations,
+    RecoveryQualificationResolution,
+    RecoveryQualificationResults,
+    RecoveryQualificationStorageBackend,
+    RecoveryQualificationWitnessReplayKind,
     RecoveryReceiptOutcome,
     RecoveryResetResult,
     RecoveryRunEvent,
@@ -178,6 +206,16 @@ from reconcile.qualification import (
     build_result_set,
     derive_disposition,
     summarize_qualification,
+)
+from reconcile.recovery_qualification import (
+    _CONTENTION_NOW,
+    _derive_recovery_qualification_claims,
+    build_recovery_qualification_environment,
+    build_recovery_qualification_manifest,
+    compare_recovery_qualification,
+)
+from reconcile.recovery_qualification_fixtures import (
+    build_recovery_qualification_fixtures,
 )
 
 NOW = datetime(2026, 8, 13, 12, 0, tzinfo=UTC)
@@ -1487,6 +1525,572 @@ def make_recovery_scenario_examples() -> tuple[
     return receipt, comparison
 
 
+@lru_cache(maxsize=1)
+def make_recovery_qualification_examples() -> tuple[
+    RecoveryQualificationManifest,
+    RecoveryQualificationEnvironment,
+    RecoveryQualificationResults,
+    RecoveryQualificationContention,
+    RecoveryQualificationComparison,
+    RecoveryQualificationClaimAuthorization,
+    RecoveryQualificationIndex,
+]:
+    manifest = build_recovery_qualification_manifest(
+        source_revision="d403db32b7507a8e04008d34484e8ba8a51bc657",
+        source_tree_sha256="a" * 64,
+        created_at=NOW,
+    )
+    environment = build_recovery_qualification_environment(
+        manifest,
+        repository_clean=True,
+        dependency_lock_sha256="b" * 64,
+        generated_at=NOW,
+        python_version="3.12.13",
+        platform_name="contract-test",
+    )
+
+    def digest(*parts: object) -> str:
+        return hashlib.sha256("\0".join(map(str, parts)).encode()).hexdigest()
+
+    no_usage = RecoveryQualificationModelUsage(
+        status=RecoveryQualificationModelUsageStatus.NOT_APPLICABLE,
+        provider_name=None,
+        model_name=None,
+        model_call_count=0,
+        input_token_count=0,
+        output_token_count=0,
+        total_token_count=0,
+        input_cost_nano_units_per_token=0,
+        output_cost_nano_units_per_token=0,
+        model_cost_nano_units=0,
+        live_vertex_backed=False,
+    )
+    scripted_usage = no_usage.model_copy(
+        update={
+            "status": RecoveryQualificationModelUsageStatus.SCRIPTED,
+            "model_call_count": 1,
+        }
+    )
+    no_mutations = RecoveryQualificationProviderMutations(
+        stage_calls=0,
+        promote_calls=0,
+        record_calls=0,
+        outbound_call_count=0,
+    )
+    completed_blind_mutations = RecoveryQualificationProviderMutations(
+        stage_calls=1,
+        promote_calls=1,
+        record_calls=1,
+        outbound_call_count=3,
+    )
+    aborted_blind_mutations = RecoveryQualificationProviderMutations(
+        stage_calls=1,
+        promote_calls=0,
+        record_calls=0,
+        outbound_call_count=1,
+    )
+    lane_results: list[RecoveryQualificationLaneResult] = []
+    case_proofs: list[RecoveryQualificationCaseProof] = []
+    fixtures = build_recovery_qualification_fixtures()
+    for case_sequence, fixture in enumerate(fixtures, 1):
+        archetype = fixture.archetype
+        first_lane = (case_sequence - 1) * 4 + 1
+        evidence_sha256 = digest("evidence", fixture.case_id)
+        artifact_sha256 = digest("artifact", fixture.case_id)
+        decision_sha256 = digest(
+            "decision",
+            fixture.case_id,
+            archetype.expected_resolution.value,
+        )
+        permit_sha256 = (
+            None
+            if archetype.expected_permit_action is None
+            else digest(
+                "permit",
+                fixture.case_id,
+                archetype.expected_permit_action.value,
+            )
+        )
+        permit_record_sha256 = (
+            None if permit_sha256 is None else digest("permit-record", fixture.case_id)
+        )
+        artifact_kind = (
+            RecoveryQualificationArtifactKind.AMBIGUITY_WITNESS
+            if archetype.ambiguity_witness_required
+            else RecoveryQualificationArtifactKind.VERIFIED_CERTIFICATE
+        )
+
+        for offset, policy in enumerate(
+            (
+                RecoveryQualificationPolicy.BLIND_RETRY,
+                RecoveryQualificationPolicy.BLIND_ABORT,
+            )
+        ):
+            blind_resolution = (
+                RecoveryQualificationResolution.COMPLETED
+                if policy is RecoveryQualificationPolicy.BLIND_RETRY
+                else RecoveryQualificationResolution.ABORT
+            )
+            blind_mutations = (
+                completed_blind_mutations
+                if policy is RecoveryQualificationPolicy.BLIND_RETRY
+                else aborted_blind_mutations
+            )
+            lane_results.append(
+                RecoveryQualificationLaneResult(
+                    sequence=first_lane + offset,
+                    case_id=fixture.case_id,
+                    archetype_id=archetype.archetype_id,
+                    seed=fixture.seed,
+                    policy=policy,
+                    storage_backend=fixture.storage_backend,
+                    fault_class=archetype.fault_class,
+                    admitted_evidence_sha256=digest(
+                        "blind-evidence", fixture.case_id, policy.value
+                    ),
+                    deterministic_artifact_kind=(
+                        RecoveryQualificationArtifactKind.NONE
+                    ),
+                    demonstrated_evidence_profile=(),
+                    deterministic_artifact_sha256=None,
+                    decision_sha256=digest(
+                        "blind-decision", fixture.case_id, policy.value
+                    ),
+                    resolution=blind_resolution,
+                    expected_permit_action=archetype.expected_permit_action,
+                    issued_permit_action=None,
+                    issued_permit_record_sha256=None,
+                    permit_sha256=None,
+                    false_permit=False,
+                    probe_count=0,
+                    time_to_sufficient_evidence_ms=None,
+                    unsupported_probe_count=0,
+                    resolved=(
+                        blind_resolution
+                        in {
+                            RecoveryQualificationResolution.RETRY,
+                            RecoveryQualificationResolution.COMPLETED,
+                        }
+                    ),
+                    provider_mutations=blind_mutations,
+                    model_usage=no_usage,
+                    ambiguity_witness_sha256=None,
+                )
+            )
+
+        for offset, policy, probe_count, unsupported_count, usage in (
+            (
+                2,
+                RecoveryQualificationPolicy.FIXED,
+                archetype.fixed_probe_count,
+                archetype.fixed_unsupported_probe_count,
+                no_usage,
+            ),
+            (
+                3,
+                RecoveryQualificationPolicy.ADAPTIVE,
+                archetype.adaptive_probe_count,
+                archetype.adaptive_unsupported_probe_count,
+                scripted_usage,
+            ),
+        ):
+            lane_results.append(
+                RecoveryQualificationLaneResult(
+                    sequence=first_lane + offset,
+                    case_id=fixture.case_id,
+                    archetype_id=archetype.archetype_id,
+                    seed=fixture.seed,
+                    policy=policy,
+                    storage_backend=fixture.storage_backend,
+                    fault_class=archetype.fault_class,
+                    admitted_evidence_sha256=evidence_sha256,
+                    demonstrated_evidence_profile=archetype.evidence_profile,
+                    deterministic_artifact_kind=artifact_kind,
+                    deterministic_artifact_sha256=artifact_sha256,
+                    decision_sha256=decision_sha256,
+                    resolution=archetype.expected_resolution,
+                    expected_permit_action=archetype.expected_permit_action,
+                    issued_permit_action=archetype.expected_permit_action,
+                    issued_permit_record_sha256=permit_record_sha256,
+                    permit_sha256=permit_sha256,
+                    false_permit=False,
+                    probe_count=probe_count,
+                    time_to_sufficient_evidence_ms=(
+                        probe_count * 10 + fixture.seed % 7
+                    ),
+                    unsupported_probe_count=unsupported_count,
+                    resolved=archetype.expected_resolution
+                    in {
+                        RecoveryQualificationResolution.CONTINUE,
+                        RecoveryQualificationResolution.RETRY,
+                        RecoveryQualificationResolution.COMPLETED,
+                    },
+                    provider_mutations=no_mutations,
+                    model_usage=usage,
+                    ambiguity_witness_sha256=(
+                        artifact_sha256
+                        if archetype.ambiguity_witness_required
+                        else None
+                    ),
+                )
+            )
+
+        restart_exercised = fixture.seed == manifest.seeds[0]
+        witness_sha256 = (
+            artifact_sha256 if archetype.ambiguity_witness_required else None
+        )
+        witness_replay_kind = (
+            RecoveryQualificationWitnessReplayKind.ZERO_EVIDENCE_REPLAY
+            if archetype.ambiguity_witness_required
+            and (
+                "unavailable" in archetype.archetype_id
+                or archetype.archetype_id in {"stage-absence", "stage-stale"}
+            )
+            else (
+                RecoveryQualificationWitnessReplayKind.EVIDENCE_DUPLICATION
+                if archetype.ambiguity_witness_required
+                else None
+            )
+        )
+        recovery_chain, template_hypothesis, *_ = make_recovery_examples()
+        report = make_report(Classification.COMMITTED).model_copy(
+            update={
+                "investigation_id": f"investigation-{digest(fixture.case_id)[:24]}",
+            }
+        )
+        expected_effects = tuple(
+            HypothesizedEffect(
+                effect_id=finding.effect_id,
+                state=finding.state,
+                cited_evidence_ids=finding.evidence_ids,
+            )
+            for finding in report.proof.effect_findings  # type: ignore[union-attr]
+        )
+        expected_hypothesis = GeminiHypothesis.model_validate(
+            template_hypothesis.model_copy(
+                update={
+                    "hypothesis_id": f"expected-{digest(fixture.case_id)[:24]}",
+                    "chain_id": recovery_chain.chain_id,
+                    "node_id": archetype.stage.value,
+                    "report_sha256": canonical_sha256(report),
+                    "proposed_classification": report.classification,
+                    "effect_hypotheses": expected_effects,
+                    "cited_evidence_ids": tuple(
+                        item.evidence_id for item in report.evidence
+                    ),
+                    "alternative_histories": (),
+                    "missing_evidence": (),
+                    "proposed_probe": None,
+                    "proposed_transition": None,
+                }
+            ).model_dump(mode="python")
+        )
+        wrong_effects = list(expected_hypothesis.effect_hypotheses)
+        wrong_effects[0] = wrong_effects[0].model_copy(
+            update={"state": EffectAssertionState.NOT_ESTABLISHED}
+        )
+        wrong_history_effects = tuple(
+            item.model_copy(update={"state": EffectAssertionState.NOT_ESTABLISHED})
+            for item in expected_hypothesis.effect_hypotheses
+        )
+        wrong_histories = (
+            PossibleHistory(
+                history_id="qualification-wrong-alternative",
+                classification=Classification.NOT_COMMITTED,
+                effect_states=wrong_history_effects,
+                compatible_evidence_ids=expected_hypothesis.cited_evidence_ids,
+                summary="A schema-valid but factually incorrect history.",
+            ),
+        )
+        wrong_values = (
+            (
+                "wrong-classification",
+                RecoveryQualificationHypothesisWrongnessKind.CLASSIFICATION,
+                {"proposed_classification": Classification.NOT_COMMITTED},
+            ),
+            (
+                "wrong-effect-state",
+                RecoveryQualificationHypothesisWrongnessKind.EFFECT_STATE,
+                {"effect_hypotheses": tuple(wrong_effects)},
+            ),
+            (
+                "wrong-alternative-history",
+                RecoveryQualificationHypothesisWrongnessKind.ALTERNATIVE_HISTORIES,
+                {"alternative_histories": wrong_histories},
+            ),
+        )
+        wrong_hypotheses = tuple(
+            RecoveryQualificationHypothesisReplay(
+                variant_id=variant_id,
+                wrongness_kind=wrongness_kind,
+                generation_source="scripted-adversarial",
+                report=report,
+                expected_hypothesis=expected_hypothesis,
+                expected_hypothesis_sha256=canonical_sha256(expected_hypothesis),
+                persisted_hypothesis=(
+                    hypothesis := GeminiHypothesis.model_validate(
+                        expected_hypothesis.model_copy(
+                            update={
+                                **updates,
+                            }
+                        ).model_dump(mode="python")
+                    )
+                ),
+                persisted_hypothesis_sha256=canonical_sha256(hypothesis),
+                agent_output_sha256=canonical_sha256(hypothesis),
+                disposition=RecoveryHypothesisDisposition.NO_PROBE,
+                observed_decision_sha256=decision_sha256,
+                observed_permit_sha256=permit_sha256,
+                decision_diverged=False,
+                permit_diverged=False,
+            )
+            for variant_id, wrongness_kind, updates in wrong_values
+        )
+        case_proofs.append(
+            RecoveryQualificationCaseProof(
+                sequence=case_sequence,
+                case_id=fixture.case_id,
+                archetype_id=archetype.archetype_id,
+                seed=fixture.seed,
+                storage_backend=fixture.storage_backend,
+                admitted_evidence_sha256=evidence_sha256,
+                deterministic_resolution=archetype.expected_resolution,
+                deterministic_permit_action=archetype.expected_permit_action,
+                fixed_artifact_kind=artifact_kind,
+                adaptive_artifact_kind=artifact_kind,
+                fixed_artifact_sha256=artifact_sha256,
+                adaptive_artifact_sha256=artifact_sha256,
+                fixed_decision_sha256=decision_sha256,
+                adaptive_decision_sha256=decision_sha256,
+                fixed_permit_sha256=permit_sha256,
+                adaptive_permit_sha256=permit_sha256,
+                decision_replay_parity=True,
+                permit_replay_parity=True,
+                wrong_hypothesis_replays=wrong_hypotheses,
+                witness_exercised=archetype.ambiguity_witness_required,
+                witness_sha256=witness_sha256,
+                reordered_witness_sha256=witness_sha256,
+                replayed_witness_sha256=witness_sha256,
+                witness_replay_kind=witness_replay_kind,
+                witness_reorder_valid=True,
+                witness_replay_valid=True,
+                restart_exercised=restart_exercised,
+                restart_lane_sha256=(
+                    digest("restart-lane", fixture.case_id)
+                    if restart_exercised
+                    else None
+                ),
+                restarted_decision_sha256=(
+                    decision_sha256 if restart_exercised else None
+                ),
+                restarted_permit_sha256=(permit_sha256 if restart_exercised else None),
+                restarted_provider_mutations=(
+                    no_mutations if restart_exercised else None
+                ),
+                restart_decision_valid=True,
+                restart_permit_valid=True,
+                restart_provider_mutations_valid=True,
+            )
+        )
+
+    actions = tuple(fixture.archetype.expected_permit_action for fixture in fixtures)
+    witness_case_count = sum(item.witness_exercised for item in case_proofs)
+    non_authorizing_certificate_case_count = sum(
+        item.policy is RecoveryQualificationPolicy.FIXED
+        and item.resolution is RecoveryQualificationResolution.ESCALATE
+        and item.deterministic_artifact_kind
+        is RecoveryQualificationArtifactKind.VERIFIED_CERTIFICATE
+        for item in lane_results
+    )
+    sqlite_case_count = sum(
+        fixture.storage_backend is RecoveryQualificationStorageBackend.SQLITE
+        for fixture in fixtures
+    )
+    results = RecoveryQualificationResults(
+        schema_version=RECOVERY_QUALIFICATION_RESULTS_VERSION,
+        bundle_format=manifest.bundle_format,
+        suite_id=manifest.suite_id,
+        manifest_sha256=canonical_sha256(manifest),
+        environment_sha256=canonical_sha256(environment),
+        lane_results=tuple(lane_results),
+        case_proofs=tuple(case_proofs),
+        case_count=len(fixtures),
+        lane_result_count=len(lane_results),
+        false_permit_count=0,
+        replay_parity_case_count=len(case_proofs),
+        wrong_hypothesis_replay_count=len(case_proofs) * 3,
+        wrong_hypothesis_decision_divergence_count=0,
+        wrong_hypothesis_permit_divergence_count=0,
+        witness_case_count=witness_case_count,
+        witness_replay_valid_count=witness_case_count,
+        witness_evidence_duplication_case_count=sum(
+            item.witness_replay_kind
+            is RecoveryQualificationWitnessReplayKind.EVIDENCE_DUPLICATION
+            for item in case_proofs
+        ),
+        witness_zero_evidence_replay_case_count=sum(
+            item.witness_replay_kind
+            is RecoveryQualificationWitnessReplayKind.ZERO_EVIDENCE_REPLAY
+            for item in case_proofs
+        ),
+        non_authorizing_certificate_case_count=(non_authorizing_certificate_case_count),
+        restart_case_count=len(manifest.archetypes),
+        restart_valid_count=len(manifest.archetypes),
+        permit_coverage=RecoveryQualificationPermitCoverage(
+            continue_case_count=actions.count(PermitAction.CONTINUE),
+            retry_case_count=actions.count(PermitAction.RETRY),
+            no_permit_case_count=actions.count(None),
+        ),
+        sqlite_case_count=sqlite_case_count,
+        firestore_case_count=len(fixtures) - sqlite_case_count,
+        safety_passed=True,
+    )
+
+    def completed_permit(backend, action):
+        suffix = f"{backend.value}-{action.value.lower()}"
+        digest_value = hashlib.sha256(suffix.encode()).hexdigest()
+        source_node_id, target_node_id, tool_name, action_profile_version = {
+            PermitAction.CONTINUE: (
+                "stage",
+                "promote",
+                "promote-cloud-run-traffic",
+                "promote-cloud-run-traffic-profile-v1",
+            ),
+            PermitAction.RETRY: (
+                "record",
+                "record",
+                "create-firestore-release-record",
+                "create-firestore-release-record-profile-v1",
+            ),
+        }[action]
+        return ActionPermit(
+            schema_version=ACTION_PERMIT_VERSION,
+            permit_id=f"permit-{digest_value[:32]}",
+            certificate_id=f"certificate-{digest_value[:32]}",
+            certificate_sha256=digest_value,
+            chain_id="qualification-chain",
+            source_node_id=source_node_id,
+            target_node_id=target_node_id,
+            semantic_action_sha256=digest_value,
+            action=action,
+            action_profile_version=action_profile_version,
+            action_policy_version="recovery-action-v1",
+            tool_name=tool_name,
+            tool_version="1.0.0",
+            arguments_sha256=digest_value,
+            target_sha256=digest_value,
+            precondition_sha256=digest_value,
+            issued_at=_CONTENTION_NOW,
+            expires_at=_CONTENTION_NOW + timedelta(hours=1),
+            max_uses=1,
+            state=ActionPermitState.COMPLETED,
+            revision=2,
+            claim_id="qualification-claim-00",
+            claimed_at=_CONTENTION_NOW + timedelta(seconds=1),
+            completed_at=_CONTENTION_NOW + timedelta(seconds=2),
+            completion_outcome=PermitCompletionOutcome.SUCCEEDED,
+        )
+
+    trials = tuple(
+        RecoveryQualificationContentionTrial(
+            backend=backend,
+            permit_action=action,
+            contender_count=32,
+            winner_count=1,
+            denied_count=31,
+            outbound_call_count=1,
+            provider_mutations=RecoveryQualificationProviderMutations(
+                stage_calls=0,
+                promote_calls=1 if action is PermitAction.CONTINUE else 0,
+                record_calls=1 if action is PermitAction.RETRY else 0,
+                outbound_call_count=1,
+            ),
+            dispatch_target_node_id=(
+                "promote" if action is PermitAction.CONTINUE else "record"
+            ),
+            cas_overlap_count=(
+                32 if backend is RecoveryQualificationStorageBackend.FIRESTORE else 0
+            ),
+            cas_conflict_count=(
+                31 if backend is RecoveryQualificationStorageBackend.FIRESTORE else 0
+            ),
+            contender_claim_ids=tuple(
+                f"qualification-claim-{index:02}" for index in range(32)
+            ),
+            winner_claim_id="qualification-claim-00",
+            denied_claim_ids=tuple(
+                f"qualification-claim-{index:02}" for index in range(1, 32)
+            ),
+            provider_call_receipt_ids=(
+                "dispatch-"
+                + hashlib.sha256(
+                    (
+                        f"{completed_permit(backend, action).permit_id}\0"
+                        "qualification-claim-00"
+                    ).encode()
+                ).hexdigest()[:32],
+            ),
+            final_permit=completed_permit(backend, action),
+            final_permit_sha256=canonical_sha256(completed_permit(backend, action)),
+            passed=True,
+        )
+        for backend, action in (
+            (RecoveryQualificationStorageBackend.SQLITE, PermitAction.CONTINUE),
+            (RecoveryQualificationStorageBackend.SQLITE, PermitAction.RETRY),
+            (RecoveryQualificationStorageBackend.FIRESTORE, PermitAction.CONTINUE),
+            (RecoveryQualificationStorageBackend.FIRESTORE, PermitAction.RETRY),
+        )
+    )
+    contention = RecoveryQualificationContention(
+        schema_version=RECOVERY_QUALIFICATION_CONTENTION_VERSION,
+        bundle_format="proof-to-permit-qualification-v1",
+        suite_id=manifest.suite_id,
+        manifest_sha256=canonical_sha256(manifest),
+        results_sha256=canonical_sha256(results),
+        trials=trials,
+        passed=True,
+    )
+    comparison = compare_recovery_qualification(manifest, environment, results)
+    claims = _derive_recovery_qualification_claims(
+        manifest,
+        environment,
+        results,
+        contention,
+        comparison,
+        source_exact=True,
+    )
+    documents = (
+        ("manifest.json", manifest),
+        ("environment.json", environment),
+        ("results.json", results),
+        ("contention.json", contention),
+        ("comparison.json", comparison),
+        ("claim-authorization.json", claims),
+    )
+    identities = tuple(
+        RecoveryQualificationArtifactIdentity(
+            filename=filename,
+            sha256=hashlib.sha256(canonical_json_bytes(document)).hexdigest(),
+            byte_count=len(canonical_json_bytes(document)),
+        )
+        for filename, document in documents
+    )
+    index = RecoveryQualificationIndex(
+        schema_version=RECOVERY_QUALIFICATION_INDEX_VERSION,
+        bundle_format="proof-to-permit-qualification-v1",
+        suite_id=manifest.suite_id,
+        source_revision=manifest.source_revision,
+        source_tree_sha256=manifest.source_tree_sha256,
+        artifacts=identities,
+        safety_claim_authorized=claims.safety_claim_authorized,
+        adaptive_efficiency_claim_authorized=(
+            claims.adaptive_efficiency_claim_authorized
+        ),
+        created_at=NOW,
+    )
+    return manifest, environment, results, contention, comparison, claims, index
+
+
 def public_examples() -> tuple[object, ...]:
     envelope = make_envelope()
     capability = make_capability()
@@ -1516,6 +2120,7 @@ def public_examples() -> tuple[object, ...]:
         *make_recovery_examples(),
         *make_recovery_run_examples(),
         *make_recovery_scenario_examples(),
+        *make_recovery_qualification_examples(),
     )
 
 

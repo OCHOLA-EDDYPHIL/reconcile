@@ -1,0 +1,2267 @@
+{
+  "$defs": {
+    "ActionGateReason": {
+      "enum": [
+        "all_effects_established",
+        "operation_not_committed",
+        "duplicate_effect_risk",
+        "compensation_out_of_scope_v1",
+        "explicit_retry_policy_required",
+        "operator_review_available",
+        "incomplete_effect_set",
+        "operator_intervention_required",
+        "operation_active",
+        "read_only_follow_up",
+        "insufficient_authoritative_evidence",
+        "ambiguous_duplicate_risk"
+      ],
+      "title": "ActionGateReason",
+      "type": "string"
+    },
+    "ActionGateResult": {
+      "additionalProperties": false,
+      "properties": {
+        "action_policy_version": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Action Policy Version",
+          "type": "string"
+        },
+        "allowed": {
+          "title": "Allowed",
+          "type": "boolean"
+        },
+        "classification": {
+          "$ref": "#/$defs/Classification"
+        },
+        "classification_policy_version": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Classification Policy Version",
+          "type": "string"
+        },
+        "escalation_required": {
+          "title": "Escalation Required",
+          "type": "boolean"
+        },
+        "reason": {
+          "$ref": "#/$defs/ActionGateReason"
+        },
+        "requested_action": {
+          "$ref": "#/$defs/RequestedAction"
+        },
+        "schema_version": {
+          "const": "reconcile/action-gate-result/v1",
+          "title": "Schema Version",
+          "type": "string"
+        }
+      },
+      "required": [
+        "schema_version",
+        "requested_action",
+        "allowed",
+        "reason",
+        "classification",
+        "classification_policy_version",
+        "action_policy_version",
+        "escalation_required"
+      ],
+      "title": "ActionGateResult",
+      "type": "object"
+    },
+    "AdvisoryExplanation": {
+      "additionalProperties": false,
+      "properties": {
+        "cited_evidence_ids": {
+          "items": {
+            "maxLength": 128,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+            "type": "string"
+          },
+          "maxItems": 64,
+          "minItems": 1,
+          "title": "Cited Evidence Ids",
+          "type": "array"
+        },
+        "text": {
+          "maxLength": 4096,
+          "minLength": 1,
+          "title": "Text",
+          "type": "string"
+        }
+      },
+      "required": [
+        "text",
+        "cited_evidence_ids"
+      ],
+      "title": "AdvisoryExplanation",
+      "type": "object"
+    },
+    "ArgumentsObject": {
+      "additionalProperties": {
+        "$ref": "#/$defs/JsonValue"
+      },
+      "maxProperties": 64,
+      "type": "object"
+    },
+    "Classification": {
+      "enum": [
+        "COMMITTED",
+        "NOT_COMMITTED",
+        "PARTIAL",
+        "PENDING",
+        "UNKNOWN"
+      ],
+      "title": "Classification",
+      "type": "string"
+    },
+    "DeterministicProof": {
+      "additionalProperties": false,
+      "properties": {
+        "admitted_evidence_ids": {
+          "items": {
+            "maxLength": 128,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+            "type": "string"
+          },
+          "maxItems": 64,
+          "title": "Admitted Evidence Ids",
+          "type": "array"
+        },
+        "conflicting_authority": {
+          "default": false,
+          "title": "Conflicting Authority",
+          "type": "boolean"
+        },
+        "effect_findings": {
+          "items": {
+            "$ref": "#/$defs/EffectFinding"
+          },
+          "maxItems": 64,
+          "minItems": 1,
+          "title": "Effect Findings",
+          "type": "array"
+        },
+        "operation_status": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/OperationStatus"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "effect_findings"
+      ],
+      "title": "DeterministicProof",
+      "type": "object"
+    },
+    "EffectAssertion": {
+      "additionalProperties": false,
+      "properties": {
+        "effect_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Effect Id",
+          "type": "string"
+        },
+        "state": {
+          "$ref": "#/$defs/EffectAssertionState"
+        }
+      },
+      "required": [
+        "effect_id",
+        "state"
+      ],
+      "title": "EffectAssertion",
+      "type": "object"
+    },
+    "EffectAssertionState": {
+      "enum": [
+        "ESTABLISHED",
+        "NOT_ESTABLISHED",
+        "UNVERIFIED"
+      ],
+      "title": "EffectAssertionState",
+      "type": "string"
+    },
+    "EffectFinding": {
+      "additionalProperties": false,
+      "properties": {
+        "commit_scope": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Commit Scope",
+          "type": "string"
+        },
+        "effect_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Effect Id",
+          "type": "string"
+        },
+        "evidence_ids": {
+          "items": {
+            "maxLength": 128,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+            "type": "string"
+          },
+          "maxItems": 64,
+          "title": "Evidence Ids",
+          "type": "array"
+        },
+        "state": {
+          "$ref": "#/$defs/EffectAssertionState"
+        }
+      },
+      "required": [
+        "effect_id",
+        "commit_scope",
+        "state"
+      ],
+      "title": "EffectFinding",
+      "type": "object"
+    },
+    "EvidenceAuthority": {
+      "enum": [
+        "TARGET_STATE",
+        "SUPPLEMENTARY",
+        "WEAK"
+      ],
+      "title": "EvidenceAuthority",
+      "type": "string"
+    },
+    "EvidenceDecision": {
+      "additionalProperties": false,
+      "properties": {
+        "disposition": {
+          "$ref": "#/$defs/EvidenceDisposition"
+        },
+        "evidence_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Evidence Id",
+          "type": "string"
+        },
+        "reason": {
+          "$ref": "#/$defs/EvidenceReason"
+        },
+        "schema_version": {
+          "const": "reconcile/evidence-decision/v1",
+          "title": "Schema Version",
+          "type": "string"
+        }
+      },
+      "required": [
+        "schema_version",
+        "evidence_id",
+        "disposition",
+        "reason"
+      ],
+      "title": "EvidenceDecision",
+      "type": "object"
+    },
+    "EvidenceDisposition": {
+      "enum": [
+        "ADMITTED",
+        "WEAK",
+        "REJECTED"
+      ],
+      "title": "EvidenceDisposition",
+      "type": "string"
+    },
+    "EvidenceProvenance": {
+      "additionalProperties": false,
+      "properties": {
+        "adapter_version": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Adapter Version",
+          "type": "string"
+        },
+        "retrieved_at": {
+          "format": "date-time",
+          "title": "Retrieved At",
+          "type": "string"
+        },
+        "source": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Source",
+          "type": "string"
+        },
+        "source_record": {
+          "maxLength": 4096,
+          "minLength": 1,
+          "title": "Source Record",
+          "type": "string"
+        }
+      },
+      "required": [
+        "source",
+        "source_record",
+        "adapter_version",
+        "retrieved_at"
+      ],
+      "title": "EvidenceProvenance",
+      "type": "object"
+    },
+    "EvidenceReason": {
+      "enum": [
+        "authoritative_exact_correlation",
+        "authoritative_affirmative_non_execution",
+        "authoritative_active_status",
+        "non_authoritative_log_only",
+        "not_found_absence_only",
+        "stale_observation",
+        "correlation_mismatch",
+        "scope_mismatch",
+        "unsupported_capability",
+        "malformed_observation",
+        "unverifiable_authority",
+        "conflicting_authority",
+        "budget_exhausted",
+        "probe_timeout",
+        "result_too_large",
+        "duplicate_candidates",
+        "clock_ambiguity",
+        "expected_effect_mismatch"
+      ],
+      "title": "EvidenceReason",
+      "type": "string"
+    },
+    "FreshnessWindow": {
+      "additionalProperties": false,
+      "properties": {
+        "valid_from": {
+          "format": "date-time",
+          "title": "Valid From",
+          "type": "string"
+        },
+        "valid_until": {
+          "format": "date-time",
+          "title": "Valid Until",
+          "type": "string"
+        }
+      },
+      "required": [
+        "valid_from",
+        "valid_until"
+      ],
+      "title": "FreshnessWindow",
+      "type": "object"
+    },
+    "GeminiHypothesis": {
+      "additionalProperties": false,
+      "properties": {
+        "alternative_histories": {
+          "items": {
+            "$ref": "#/$defs/PossibleHistory"
+          },
+          "maxItems": 8,
+          "title": "Alternative Histories",
+          "type": "array"
+        },
+        "chain_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Chain Id",
+          "type": "string"
+        },
+        "cited_evidence_ids": {
+          "items": {
+            "maxLength": 128,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+            "type": "string"
+          },
+          "maxItems": 64,
+          "title": "Cited Evidence Ids",
+          "type": "array"
+        },
+        "confidence_basis_points": {
+          "maximum": 10000,
+          "minimum": 0,
+          "title": "Confidence Basis Points",
+          "type": "integer"
+        },
+        "created_at": {
+          "format": "date-time",
+          "title": "Created At",
+          "type": "string"
+        },
+        "effect_hypotheses": {
+          "items": {
+            "$ref": "#/$defs/HypothesizedEffect"
+          },
+          "maxItems": 64,
+          "minItems": 1,
+          "title": "Effect Hypotheses",
+          "type": "array"
+        },
+        "explanation": {
+          "maxLength": 4096,
+          "minLength": 1,
+          "title": "Explanation",
+          "type": "string"
+        },
+        "hypothesis_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Hypothesis Id",
+          "type": "string"
+        },
+        "missing_evidence": {
+          "items": {
+            "$ref": "#/$defs/HypothesisMissingEvidence"
+          },
+          "maxItems": 64,
+          "title": "Missing Evidence",
+          "type": "array"
+        },
+        "node_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Node Id",
+          "type": "string"
+        },
+        "proposed_classification": {
+          "$ref": "#/$defs/Classification"
+        },
+        "proposed_probe": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProbeRequest"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "proposed_transition": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProposedTransition"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "report_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Report Sha256",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": "reconcile/gemini-hypothesis/v1",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "semantic_action_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Semantic Action Sha256",
+          "type": "string"
+        }
+      },
+      "required": [
+        "schema_version",
+        "hypothesis_id",
+        "chain_id",
+        "node_id",
+        "semantic_action_sha256",
+        "report_sha256",
+        "proposed_classification",
+        "effect_hypotheses",
+        "confidence_basis_points",
+        "explanation",
+        "created_at"
+      ],
+      "title": "GeminiHypothesis",
+      "type": "object"
+    },
+    "HypothesisMissingEvidence": {
+      "additionalProperties": false,
+      "properties": {
+        "effect_ids": {
+          "items": {
+            "maxLength": 128,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+            "type": "string"
+          },
+          "maxItems": 64,
+          "minItems": 1,
+          "title": "Effect Ids",
+          "type": "array"
+        },
+        "reason": {
+          "maxLength": 4096,
+          "minLength": 1,
+          "title": "Reason",
+          "type": "string"
+        }
+      },
+      "required": [
+        "effect_ids",
+        "reason"
+      ],
+      "title": "HypothesisMissingEvidence",
+      "type": "object"
+    },
+    "HypothesizedEffect": {
+      "additionalProperties": false,
+      "properties": {
+        "cited_evidence_ids": {
+          "items": {
+            "maxLength": 128,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+            "type": "string"
+          },
+          "maxItems": 64,
+          "title": "Cited Evidence Ids",
+          "type": "array"
+        },
+        "effect_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Effect Id",
+          "type": "string"
+        },
+        "state": {
+          "$ref": "#/$defs/EffectAssertionState"
+        }
+      },
+      "required": [
+        "effect_id",
+        "state"
+      ],
+      "title": "HypothesizedEffect",
+      "type": "object"
+    },
+    "InvestigationReport": {
+      "additionalProperties": false,
+      "properties": {
+        "action_gate": {
+          "anyOf": [
+            {
+              "items": {
+                "$ref": "#/$defs/ActionGateResult"
+              },
+              "maxItems": 0,
+              "type": "array"
+            },
+            {
+              "items": {
+                "$ref": "#/$defs/ActionGateResult"
+              },
+              "maxItems": 5,
+              "minItems": 5,
+              "type": "array"
+            }
+          ],
+          "title": "Action Gate"
+        },
+        "advisory_explanation": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AdvisoryExplanation"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "classification": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Classification"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "created_at": {
+          "format": "date-time",
+          "title": "Created At",
+          "type": "string"
+        },
+        "envelope_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Envelope Sha256",
+          "type": "string"
+        },
+        "evidence": {
+          "items": {
+            "$ref": "#/$defs/NormalizedEvidence"
+          },
+          "maxItems": 64,
+          "title": "Evidence",
+          "type": "array"
+        },
+        "evidence_decisions": {
+          "items": {
+            "$ref": "#/$defs/EvidenceDecision"
+          },
+          "maxItems": 64,
+          "title": "Evidence Decisions",
+          "type": "array"
+        },
+        "investigation_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Investigation Id",
+          "type": "string"
+        },
+        "limitations": {
+          "items": {
+            "maxLength": 4096,
+            "minLength": 1,
+            "type": "string"
+          },
+          "maxItems": 64,
+          "title": "Limitations",
+          "type": "array"
+        },
+        "missing_evidence": {
+          "items": {
+            "$ref": "#/$defs/MissingEvidence"
+          },
+          "maxItems": 64,
+          "title": "Missing Evidence",
+          "type": "array"
+        },
+        "probe_audit": {
+          "items": {
+            "$ref": "#/$defs/ProbeAuditRecord"
+          },
+          "maxItems": 64,
+          "title": "Probe Audit",
+          "type": "array"
+        },
+        "proof": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DeterministicProof"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "revision": {
+          "maximum": 9223372036854775807,
+          "minimum": 0,
+          "title": "Revision",
+          "type": "integer"
+        },
+        "schema_version": {
+          "const": "reconcile/investigation-report/v1",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "status": {
+          "$ref": "#/$defs/InvestigationStatus"
+        },
+        "updated_at": {
+          "format": "date-time",
+          "title": "Updated At",
+          "type": "string"
+        }
+      },
+      "required": [
+        "schema_version",
+        "investigation_id",
+        "envelope_sha256",
+        "status",
+        "created_at",
+        "updated_at",
+        "revision"
+      ],
+      "title": "InvestigationReport",
+      "type": "object"
+    },
+    "InvestigationStatus": {
+      "enum": [
+        "CREATED",
+        "INVESTIGATING",
+        "COMPLETED"
+      ],
+      "title": "InvestigationStatus",
+      "type": "string"
+    },
+    "JsonValue": {},
+    "MissingEvidence": {
+      "additionalProperties": false,
+      "properties": {
+        "effect_ids": {
+          "items": {
+            "maxLength": 128,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+            "type": "string"
+          },
+          "maxItems": 64,
+          "title": "Effect Ids",
+          "type": "array"
+        },
+        "reason": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Reason",
+          "type": "string"
+        }
+      },
+      "required": [
+        "reason"
+      ],
+      "title": "MissingEvidence",
+      "type": "object"
+    },
+    "NonEmptySmallJsonObject": {
+      "additionalProperties": {
+        "$ref": "#/$defs/JsonValue"
+      },
+      "maxProperties": 32,
+      "minProperties": 1,
+      "type": "object"
+    },
+    "NormalizedEvidence": {
+      "additionalProperties": false,
+      "properties": {
+        "authority": {
+          "$ref": "#/$defs/EvidenceAuthority"
+        },
+        "authority_policy_version": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Authority Policy Version",
+          "type": "string"
+        },
+        "capability_name": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Capability Name",
+          "type": "string"
+        },
+        "capability_version": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Capability Version",
+          "type": "string"
+        },
+        "correlation": {
+          "maxProperties": 32,
+          "patternProperties": {
+            "^[A-Za-z0-9][A-Za-z0-9._:-]*$": {
+              "maxLength": 4096,
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          "propertyNames": {
+            "maxLength": 128,
+            "minLength": 1
+          },
+          "title": "Correlation",
+          "type": "object"
+        },
+        "effect_assertions": {
+          "items": {
+            "$ref": "#/$defs/EffectAssertion"
+          },
+          "maxItems": 64,
+          "title": "Effect Assertions",
+          "type": "array"
+        },
+        "evidence_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Evidence Id",
+          "type": "string"
+        },
+        "freshness": {
+          "$ref": "#/$defs/FreshnessWindow"
+        },
+        "observed_at": {
+          "format": "date-time",
+          "title": "Observed At",
+          "type": "string"
+        },
+        "operation_status": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/OperationStatus"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "provenance": {
+          "$ref": "#/$defs/EvidenceProvenance"
+        },
+        "raw_observation": {
+          "$ref": "#/$defs/RawObservationReference"
+        },
+        "schema_version": {
+          "const": "reconcile/normalized-evidence/v1",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "target": {
+          "$ref": "#/$defs/TargetBinding"
+        }
+      },
+      "required": [
+        "schema_version",
+        "evidence_id",
+        "capability_name",
+        "capability_version",
+        "target",
+        "provenance",
+        "observed_at",
+        "freshness",
+        "authority",
+        "authority_policy_version",
+        "raw_observation"
+      ],
+      "title": "NormalizedEvidence",
+      "type": "object"
+    },
+    "OperationStatus": {
+      "enum": [
+        "ACTIVE",
+        "UNRESOLVED",
+        "TERMINAL_COMMITTED",
+        "TERMINAL_NOT_COMMITTED"
+      ],
+      "title": "OperationStatus",
+      "type": "string"
+    },
+    "PermitAction": {
+      "enum": [
+        "CONTINUE",
+        "RETRY"
+      ],
+      "title": "PermitAction",
+      "type": "string"
+    },
+    "PossibleHistory": {
+      "additionalProperties": false,
+      "properties": {
+        "classification": {
+          "$ref": "#/$defs/Classification"
+        },
+        "compatible_evidence_ids": {
+          "items": {
+            "maxLength": 128,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+            "type": "string"
+          },
+          "maxItems": 64,
+          "title": "Compatible Evidence Ids",
+          "type": "array"
+        },
+        "effect_states": {
+          "items": {
+            "$ref": "#/$defs/HypothesizedEffect"
+          },
+          "maxItems": 64,
+          "minItems": 1,
+          "title": "Effect States",
+          "type": "array"
+        },
+        "history_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "History Id",
+          "type": "string"
+        },
+        "summary": {
+          "maxLength": 4096,
+          "minLength": 1,
+          "title": "Summary",
+          "type": "string"
+        }
+      },
+      "required": [
+        "history_id",
+        "classification",
+        "effect_states",
+        "summary"
+      ],
+      "title": "PossibleHistory",
+      "type": "object"
+    },
+    "ProbeAuditRecord": {
+      "additionalProperties": false,
+      "properties": {
+        "capability_name": {
+          "anyOf": [
+            {
+              "maxLength": 128,
+              "minLength": 1,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Capability Name"
+        },
+        "capability_version": {
+          "anyOf": [
+            {
+              "maxLength": 128,
+              "minLength": 1,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Capability Version"
+        },
+        "completed_at": {
+          "format": "date-time",
+          "title": "Completed At",
+          "type": "string"
+        },
+        "cost_units_used": {
+          "maximum": 9223372036854775807,
+          "minimum": 0,
+          "title": "Cost Units Used",
+          "type": "integer"
+        },
+        "evidence_ids": {
+          "items": {
+            "maxLength": 128,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+            "type": "string"
+          },
+          "maxItems": 1,
+          "minItems": 1,
+          "title": "Evidence Ids",
+          "type": "array"
+        },
+        "outcome": {
+          "$ref": "#/$defs/ProbeOutcome"
+        },
+        "probe_count_used": {
+          "maximum": 9223372036854775807,
+          "minimum": 0,
+          "title": "Probe Count Used",
+          "type": "integer"
+        },
+        "probe_sequence": {
+          "maximum": 9223372036854775807,
+          "minimum": 1,
+          "title": "Probe Sequence",
+          "type": "integer"
+        },
+        "request_sha256": {
+          "anyOf": [
+            {
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Request Sha256"
+        },
+        "result_byte_count": {
+          "anyOf": [
+            {
+              "maximum": 9223372036854775807,
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Result Byte Count"
+        },
+        "result_bytes_acquired": {
+          "maximum": 9223372036854775807,
+          "minimum": 0,
+          "title": "Result Bytes Acquired",
+          "type": "integer"
+        },
+        "result_sha256": {
+          "anyOf": [
+            {
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Result Sha256"
+        },
+        "session_elapsed_ms": {
+          "maximum": 9223372036854775807,
+          "minimum": 0,
+          "title": "Session Elapsed Ms",
+          "type": "integer"
+        },
+        "started_at": {
+          "format": "date-time",
+          "title": "Started At",
+          "type": "string"
+        },
+        "stop_reason": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Stop Reason",
+          "type": "string"
+        },
+        "target_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Target Sha256",
+          "type": "string"
+        }
+      },
+      "required": [
+        "probe_sequence",
+        "target_sha256",
+        "outcome",
+        "stop_reason",
+        "started_at",
+        "completed_at",
+        "session_elapsed_ms",
+        "probe_count_used",
+        "cost_units_used",
+        "result_bytes_acquired",
+        "evidence_ids"
+      ],
+      "title": "ProbeAuditRecord",
+      "type": "object"
+    },
+    "ProbeOutcome": {
+      "enum": [
+        "COMPLETED",
+        "REJECTED",
+        "TIMED_OUT",
+        "UNAVAILABLE",
+        "CANCELLED",
+        "MALFORMED",
+        "BUDGET_EXHAUSTED"
+      ],
+      "title": "ProbeOutcome",
+      "type": "string"
+    },
+    "ProbeRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "arguments": {
+          "$ref": "#/$defs/ArgumentsObject"
+        },
+        "capability_name": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Capability Name",
+          "type": "string"
+        },
+        "capability_version": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Capability Version",
+          "type": "string"
+        },
+        "rationale": {
+          "maxLength": 4096,
+          "minLength": 1,
+          "title": "Rationale",
+          "type": "string"
+        },
+        "relevant_effect_ids": {
+          "items": {
+            "maxLength": 128,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+            "type": "string"
+          },
+          "maxItems": 64,
+          "minItems": 1,
+          "title": "Relevant Effect Ids",
+          "type": "array"
+        },
+        "schema_version": {
+          "const": "reconcile/probe-request/v1",
+          "title": "Schema Version",
+          "type": "string"
+        }
+      },
+      "required": [
+        "schema_version",
+        "capability_name",
+        "capability_version",
+        "relevant_effect_ids",
+        "rationale"
+      ],
+      "title": "ProbeRequest",
+      "type": "object"
+    },
+    "ProposedTransition": {
+      "additionalProperties": false,
+      "properties": {
+        "action": {
+          "$ref": "#/$defs/PermitAction"
+        },
+        "rationale": {
+          "maxLength": 4096,
+          "minLength": 1,
+          "title": "Rationale",
+          "type": "string"
+        },
+        "source_node_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Source Node Id",
+          "type": "string"
+        },
+        "target_node_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Target Node Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "action",
+        "source_node_id",
+        "target_node_id",
+        "rationale"
+      ],
+      "title": "ProposedTransition",
+      "type": "object"
+    },
+    "RawObservationReference": {
+      "additionalProperties": false,
+      "properties": {
+        "byte_count": {
+          "maximum": 9223372036854775807,
+          "minimum": 0,
+          "title": "Byte Count",
+          "type": "integer"
+        },
+        "reference": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Reference",
+          "type": "string"
+        },
+        "sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Sha256",
+          "type": "string"
+        }
+      },
+      "required": [
+        "sha256",
+        "reference",
+        "byte_count"
+      ],
+      "title": "RawObservationReference",
+      "type": "object"
+    },
+    "RecoveryHypothesisDisposition": {
+      "enum": [
+        "SELECTED",
+        "NO_PROBE",
+        "DUPLICATE_PROBE",
+        "BUDGET_EXHAUSTED",
+        "UNSUPPORTED_PROBE",
+        "UNSUPPORTED_ACTION",
+        "INVALID_BINDING",
+        "MODEL_UNAVAILABLE",
+        "MODEL_TIMEOUT",
+        "MALFORMED_MODEL_OUTPUT",
+        "FIXED_FALLBACK"
+      ],
+      "title": "RecoveryHypothesisDisposition",
+      "type": "string"
+    },
+    "RecoveryQualificationArtifactKind": {
+      "enum": [
+        "NONE",
+        "VERIFIED_CERTIFICATE",
+        "AMBIGUITY_WITNESS"
+      ],
+      "title": "RecoveryQualificationArtifactKind",
+      "type": "string"
+    },
+    "RecoveryQualificationCaseProof": {
+      "additionalProperties": false,
+      "properties": {
+        "adaptive_artifact_kind": {
+          "$ref": "#/$defs/RecoveryQualificationArtifactKind"
+        },
+        "adaptive_artifact_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Adaptive Artifact Sha256",
+          "type": "string"
+        },
+        "adaptive_decision_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Adaptive Decision Sha256",
+          "type": "string"
+        },
+        "adaptive_permit_sha256": {
+          "anyOf": [
+            {
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Adaptive Permit Sha256"
+        },
+        "admitted_evidence_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Admitted Evidence Sha256",
+          "type": "string"
+        },
+        "archetype_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Archetype Id",
+          "type": "string"
+        },
+        "case_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Case Id",
+          "type": "string"
+        },
+        "decision_replay_parity": {
+          "title": "Decision Replay Parity",
+          "type": "boolean"
+        },
+        "deterministic_permit_action": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PermitAction"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "deterministic_resolution": {
+          "$ref": "#/$defs/RecoveryQualificationResolution"
+        },
+        "fixed_artifact_kind": {
+          "$ref": "#/$defs/RecoveryQualificationArtifactKind"
+        },
+        "fixed_artifact_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Fixed Artifact Sha256",
+          "type": "string"
+        },
+        "fixed_decision_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Fixed Decision Sha256",
+          "type": "string"
+        },
+        "fixed_permit_sha256": {
+          "anyOf": [
+            {
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Fixed Permit Sha256"
+        },
+        "permit_replay_parity": {
+          "title": "Permit Replay Parity",
+          "type": "boolean"
+        },
+        "reordered_witness_sha256": {
+          "anyOf": [
+            {
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Reordered Witness Sha256"
+        },
+        "replayed_witness_sha256": {
+          "anyOf": [
+            {
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Replayed Witness Sha256"
+        },
+        "restart_decision_valid": {
+          "title": "Restart Decision Valid",
+          "type": "boolean"
+        },
+        "restart_exercised": {
+          "title": "Restart Exercised",
+          "type": "boolean"
+        },
+        "restart_lane_sha256": {
+          "anyOf": [
+            {
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Restart Lane Sha256"
+        },
+        "restart_permit_valid": {
+          "title": "Restart Permit Valid",
+          "type": "boolean"
+        },
+        "restart_provider_mutations_valid": {
+          "title": "Restart Provider Mutations Valid",
+          "type": "boolean"
+        },
+        "restarted_decision_sha256": {
+          "anyOf": [
+            {
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Restarted Decision Sha256"
+        },
+        "restarted_permit_sha256": {
+          "anyOf": [
+            {
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Restarted Permit Sha256"
+        },
+        "restarted_provider_mutations": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RecoveryQualificationProviderMutations"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "seed": {
+          "maximum": 9223372036854775807,
+          "minimum": 0,
+          "title": "Seed",
+          "type": "integer"
+        },
+        "sequence": {
+          "maximum": 100,
+          "minimum": 1,
+          "title": "Sequence",
+          "type": "integer"
+        },
+        "storage_backend": {
+          "$ref": "#/$defs/RecoveryQualificationStorageBackend"
+        },
+        "witness_exercised": {
+          "title": "Witness Exercised",
+          "type": "boolean"
+        },
+        "witness_reorder_valid": {
+          "title": "Witness Reorder Valid",
+          "type": "boolean"
+        },
+        "witness_replay_kind": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RecoveryQualificationWitnessReplayKind"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "witness_replay_valid": {
+          "title": "Witness Replay Valid",
+          "type": "boolean"
+        },
+        "witness_sha256": {
+          "anyOf": [
+            {
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Witness Sha256"
+        },
+        "wrong_hypothesis_replays": {
+          "items": {
+            "$ref": "#/$defs/RecoveryQualificationHypothesisReplay"
+          },
+          "maxItems": 3,
+          "minItems": 3,
+          "title": "Wrong Hypothesis Replays",
+          "type": "array"
+        }
+      },
+      "required": [
+        "sequence",
+        "case_id",
+        "archetype_id",
+        "seed",
+        "storage_backend",
+        "admitted_evidence_sha256",
+        "deterministic_resolution",
+        "deterministic_permit_action",
+        "fixed_artifact_kind",
+        "adaptive_artifact_kind",
+        "fixed_artifact_sha256",
+        "adaptive_artifact_sha256",
+        "fixed_decision_sha256",
+        "adaptive_decision_sha256",
+        "fixed_permit_sha256",
+        "adaptive_permit_sha256",
+        "decision_replay_parity",
+        "permit_replay_parity",
+        "wrong_hypothesis_replays",
+        "witness_exercised",
+        "witness_sha256",
+        "reordered_witness_sha256",
+        "replayed_witness_sha256",
+        "witness_replay_kind",
+        "witness_reorder_valid",
+        "witness_replay_valid",
+        "restart_exercised",
+        "restart_lane_sha256",
+        "restarted_decision_sha256",
+        "restarted_permit_sha256",
+        "restarted_provider_mutations",
+        "restart_decision_valid",
+        "restart_permit_valid",
+        "restart_provider_mutations_valid"
+      ],
+      "title": "RecoveryQualificationCaseProof",
+      "type": "object"
+    },
+    "RecoveryQualificationFaultClass": {
+      "enum": [
+        "no-fault",
+        "drop-after-accept",
+        "pending",
+        "terminal-partial",
+        "conflict",
+        "absence",
+        "provider-unavailable",
+        "freshness",
+        "suppress-before-dispatch"
+      ],
+      "title": "RecoveryQualificationFaultClass",
+      "type": "string"
+    },
+    "RecoveryQualificationHypothesisReplay": {
+      "additionalProperties": false,
+      "properties": {
+        "agent_output_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Agent Output Sha256",
+          "type": "string"
+        },
+        "decision_diverged": {
+          "title": "Decision Diverged",
+          "type": "boolean"
+        },
+        "disposition": {
+          "$ref": "#/$defs/RecoveryHypothesisDisposition"
+        },
+        "expected_hypothesis": {
+          "$ref": "#/$defs/GeminiHypothesis"
+        },
+        "expected_hypothesis_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Expected Hypothesis Sha256",
+          "type": "string"
+        },
+        "generation_source": {
+          "const": "scripted-adversarial",
+          "title": "Generation Source",
+          "type": "string"
+        },
+        "observed_decision_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Observed Decision Sha256",
+          "type": "string"
+        },
+        "observed_permit_sha256": {
+          "anyOf": [
+            {
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Observed Permit Sha256"
+        },
+        "permit_diverged": {
+          "title": "Permit Diverged",
+          "type": "boolean"
+        },
+        "persisted_hypothesis": {
+          "$ref": "#/$defs/GeminiHypothesis"
+        },
+        "persisted_hypothesis_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Persisted Hypothesis Sha256",
+          "type": "string"
+        },
+        "report": {
+          "$ref": "#/$defs/InvestigationReport"
+        },
+        "variant_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Variant Id",
+          "type": "string"
+        },
+        "wrongness_kind": {
+          "$ref": "#/$defs/RecoveryQualificationHypothesisWrongnessKind"
+        }
+      },
+      "required": [
+        "variant_id",
+        "wrongness_kind",
+        "generation_source",
+        "agent_output_sha256",
+        "report",
+        "expected_hypothesis",
+        "expected_hypothesis_sha256",
+        "persisted_hypothesis",
+        "persisted_hypothesis_sha256",
+        "disposition",
+        "observed_decision_sha256",
+        "observed_permit_sha256",
+        "decision_diverged",
+        "permit_diverged"
+      ],
+      "title": "RecoveryQualificationHypothesisReplay",
+      "type": "object"
+    },
+    "RecoveryQualificationHypothesisWrongnessKind": {
+      "enum": [
+        "CLASSIFICATION",
+        "EFFECT_STATE",
+        "ALTERNATIVE_HISTORIES"
+      ],
+      "title": "RecoveryQualificationHypothesisWrongnessKind",
+      "type": "string"
+    },
+    "RecoveryQualificationLaneResult": {
+      "additionalProperties": false,
+      "properties": {
+        "admitted_evidence_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Admitted Evidence Sha256",
+          "type": "string"
+        },
+        "ambiguity_witness_sha256": {
+          "anyOf": [
+            {
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Ambiguity Witness Sha256"
+        },
+        "archetype_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Archetype Id",
+          "type": "string"
+        },
+        "case_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Case Id",
+          "type": "string"
+        },
+        "decision_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Decision Sha256",
+          "type": "string"
+        },
+        "demonstrated_evidence_profile": {
+          "description": "Preregistered archetype facts demonstrated by runtime evidence.",
+          "items": {
+            "maxLength": 128,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+            "type": "string"
+          },
+          "maxItems": 32,
+          "title": "Demonstrated Evidence Profile",
+          "type": "array"
+        },
+        "deterministic_artifact_kind": {
+          "$ref": "#/$defs/RecoveryQualificationArtifactKind"
+        },
+        "deterministic_artifact_sha256": {
+          "anyOf": [
+            {
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Deterministic Artifact Sha256"
+        },
+        "expected_permit_action": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PermitAction"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "false_permit": {
+          "title": "False Permit",
+          "type": "boolean"
+        },
+        "fault_class": {
+          "$ref": "#/$defs/RecoveryQualificationFaultClass"
+        },
+        "issued_permit_action": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PermitAction"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "issued_permit_record_sha256": {
+          "anyOf": [
+            {
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Issued Permit Record Sha256"
+        },
+        "model_usage": {
+          "$ref": "#/$defs/RecoveryQualificationModelUsage"
+        },
+        "permit_sha256": {
+          "anyOf": [
+            {
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Permit Sha256"
+        },
+        "policy": {
+          "$ref": "#/$defs/RecoveryQualificationPolicy"
+        },
+        "probe_count": {
+          "maximum": 64,
+          "minimum": 0,
+          "title": "Probe Count",
+          "type": "integer"
+        },
+        "provider_mutations": {
+          "$ref": "#/$defs/RecoveryQualificationProviderMutations"
+        },
+        "resolution": {
+          "$ref": "#/$defs/RecoveryQualificationResolution"
+        },
+        "resolved": {
+          "title": "Resolved",
+          "type": "boolean"
+        },
+        "seed": {
+          "maximum": 9223372036854775807,
+          "minimum": 0,
+          "title": "Seed",
+          "type": "integer"
+        },
+        "sequence": {
+          "maximum": 400,
+          "minimum": 1,
+          "title": "Sequence",
+          "type": "integer"
+        },
+        "storage_backend": {
+          "$ref": "#/$defs/RecoveryQualificationStorageBackend"
+        },
+        "time_to_sufficient_evidence_ms": {
+          "anyOf": [
+            {
+              "maximum": 9223372036854775807,
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Time To Sufficient Evidence Ms"
+        },
+        "unsupported_probe_count": {
+          "maximum": 64,
+          "minimum": 0,
+          "title": "Unsupported Probe Count",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "sequence",
+        "case_id",
+        "archetype_id",
+        "seed",
+        "policy",
+        "storage_backend",
+        "fault_class",
+        "admitted_evidence_sha256",
+        "demonstrated_evidence_profile",
+        "deterministic_artifact_kind",
+        "deterministic_artifact_sha256",
+        "decision_sha256",
+        "resolution",
+        "expected_permit_action",
+        "issued_permit_action",
+        "issued_permit_record_sha256",
+        "permit_sha256",
+        "false_permit",
+        "probe_count",
+        "unsupported_probe_count",
+        "resolved",
+        "provider_mutations",
+        "model_usage",
+        "ambiguity_witness_sha256"
+      ],
+      "title": "RecoveryQualificationLaneResult",
+      "type": "object"
+    },
+    "RecoveryQualificationModelUsage": {
+      "additionalProperties": false,
+      "properties": {
+        "input_cost_nano_units_per_token": {
+          "maximum": 9223372036854775807,
+          "minimum": 0,
+          "title": "Input Cost Nano Units Per Token",
+          "type": "integer"
+        },
+        "input_token_count": {
+          "maximum": 9223372036854775807,
+          "minimum": 0,
+          "title": "Input Token Count",
+          "type": "integer"
+        },
+        "live_vertex_backed": {
+          "title": "Live Vertex Backed",
+          "type": "boolean"
+        },
+        "model_call_count": {
+          "maximum": 9223372036854775807,
+          "minimum": 0,
+          "title": "Model Call Count",
+          "type": "integer"
+        },
+        "model_cost_nano_units": {
+          "maximum": 9223372036854775807,
+          "minimum": 0,
+          "title": "Model Cost Nano Units",
+          "type": "integer"
+        },
+        "model_name": {
+          "anyOf": [
+            {
+              "maxLength": 128,
+              "minLength": 1,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Model Name"
+        },
+        "output_cost_nano_units_per_token": {
+          "maximum": 9223372036854775807,
+          "minimum": 0,
+          "title": "Output Cost Nano Units Per Token",
+          "type": "integer"
+        },
+        "output_token_count": {
+          "maximum": 9223372036854775807,
+          "minimum": 0,
+          "title": "Output Token Count",
+          "type": "integer"
+        },
+        "provider_name": {
+          "anyOf": [
+            {
+              "maxLength": 128,
+              "minLength": 1,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Provider Name"
+        },
+        "status": {
+          "$ref": "#/$defs/RecoveryQualificationModelUsageStatus"
+        },
+        "total_token_count": {
+          "maximum": 9223372036854775807,
+          "minimum": 0,
+          "title": "Total Token Count",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "status",
+        "model_call_count",
+        "input_token_count",
+        "output_token_count",
+        "total_token_count",
+        "input_cost_nano_units_per_token",
+        "output_cost_nano_units_per_token",
+        "model_cost_nano_units",
+        "live_vertex_backed"
+      ],
+      "title": "RecoveryQualificationModelUsage",
+      "type": "object"
+    },
+    "RecoveryQualificationModelUsageStatus": {
+      "enum": [
+        "NOT_APPLICABLE",
+        "SCRIPTED",
+        "MEASURED",
+        "UNAVAILABLE"
+      ],
+      "title": "RecoveryQualificationModelUsageStatus",
+      "type": "string"
+    },
+    "RecoveryQualificationPermitCoverage": {
+      "additionalProperties": false,
+      "properties": {
+        "continue_case_count": {
+          "maximum": 100,
+          "minimum": 1,
+          "title": "Continue Case Count",
+          "type": "integer"
+        },
+        "no_permit_case_count": {
+          "maximum": 100,
+          "minimum": 1,
+          "title": "No Permit Case Count",
+          "type": "integer"
+        },
+        "retry_case_count": {
+          "maximum": 100,
+          "minimum": 1,
+          "title": "Retry Case Count",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "continue_case_count",
+        "retry_case_count",
+        "no_permit_case_count"
+      ],
+      "title": "RecoveryQualificationPermitCoverage",
+      "type": "object"
+    },
+    "RecoveryQualificationPolicy": {
+      "enum": [
+        "blind-retry",
+        "blind-abort",
+        "fixed",
+        "adaptive"
+      ],
+      "title": "RecoveryQualificationPolicy",
+      "type": "string"
+    },
+    "RecoveryQualificationProviderMutations": {
+      "additionalProperties": false,
+      "properties": {
+        "outbound_call_count": {
+          "maximum": 48,
+          "minimum": 0,
+          "title": "Outbound Call Count",
+          "type": "integer"
+        },
+        "promote_calls": {
+          "maximum": 16,
+          "minimum": 0,
+          "title": "Promote Calls",
+          "type": "integer"
+        },
+        "record_calls": {
+          "maximum": 16,
+          "minimum": 0,
+          "title": "Record Calls",
+          "type": "integer"
+        },
+        "stage_calls": {
+          "maximum": 16,
+          "minimum": 0,
+          "title": "Stage Calls",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "stage_calls",
+        "promote_calls",
+        "record_calls",
+        "outbound_call_count"
+      ],
+      "title": "RecoveryQualificationProviderMutations",
+      "type": "object"
+    },
+    "RecoveryQualificationResolution": {
+      "enum": [
+        "CONTINUE",
+        "RETRY",
+        "COMPLETED",
+        "ESCALATE",
+        "ABORT"
+      ],
+      "title": "RecoveryQualificationResolution",
+      "type": "string"
+    },
+    "RecoveryQualificationStorageBackend": {
+      "enum": [
+        "sqlite",
+        "firestore"
+      ],
+      "title": "RecoveryQualificationStorageBackend",
+      "type": "string"
+    },
+    "RecoveryQualificationWitnessReplayKind": {
+      "enum": [
+        "EVIDENCE_DUPLICATION",
+        "ZERO_EVIDENCE_REPLAY"
+      ],
+      "title": "RecoveryQualificationWitnessReplayKind",
+      "type": "string"
+    },
+    "RequestedAction": {
+      "enum": [
+        "CONTINUE",
+        "RETRY",
+        "COMPENSATE",
+        "ESCALATE",
+        "OBSERVE"
+      ],
+      "title": "RequestedAction",
+      "type": "string"
+    },
+    "TargetBinding": {
+      "additionalProperties": false,
+      "properties": {
+        "resource": {
+          "$ref": "#/$defs/NonEmptySmallJsonObject"
+        },
+        "scope": {
+          "$ref": "#/$defs/NonEmptySmallJsonObject"
+        },
+        "target_kind": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Target Kind",
+          "type": "string"
+        }
+      },
+      "required": [
+        "target_kind",
+        "scope",
+        "resource"
+      ],
+      "title": "TargetBinding",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "bundle_format": {
+      "const": "proof-to-permit-qualification-v1",
+      "title": "Bundle Format",
+      "type": "string"
+    },
+    "case_count": {
+      "const": 100,
+      "title": "Case Count",
+      "type": "integer"
+    },
+    "case_proofs": {
+      "items": {
+        "$ref": "#/$defs/RecoveryQualificationCaseProof"
+      },
+      "maxItems": 100,
+      "minItems": 100,
+      "title": "Case Proofs",
+      "type": "array"
+    },
+    "environment_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Environment Sha256",
+      "type": "string"
+    },
+    "false_permit_count": {
+      "maximum": 400,
+      "minimum": 0,
+      "title": "False Permit Count",
+      "type": "integer"
+    },
+    "firestore_case_count": {
+      "maximum": 100,
+      "minimum": 1,
+      "title": "Firestore Case Count",
+      "type": "integer"
+    },
+    "lane_result_count": {
+      "const": 400,
+      "title": "Lane Result Count",
+      "type": "integer"
+    },
+    "lane_results": {
+      "items": {
+        "$ref": "#/$defs/RecoveryQualificationLaneResult"
+      },
+      "maxItems": 400,
+      "minItems": 400,
+      "title": "Lane Results",
+      "type": "array"
+    },
+    "manifest_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Manifest Sha256",
+      "type": "string"
+    },
+    "non_authorizing_certificate_case_count": {
+      "maximum": 100,
+      "minimum": 1,
+      "title": "Non Authorizing Certificate Case Count",
+      "type": "integer"
+    },
+    "permit_coverage": {
+      "$ref": "#/$defs/RecoveryQualificationPermitCoverage"
+    },
+    "replay_parity_case_count": {
+      "maximum": 100,
+      "minimum": 0,
+      "title": "Replay Parity Case Count",
+      "type": "integer"
+    },
+    "restart_case_count": {
+      "maximum": 20,
+      "minimum": 0,
+      "title": "Restart Case Count",
+      "type": "integer"
+    },
+    "restart_valid_count": {
+      "maximum": 20,
+      "minimum": 0,
+      "title": "Restart Valid Count",
+      "type": "integer"
+    },
+    "safety_passed": {
+      "title": "Safety Passed",
+      "type": "boolean"
+    },
+    "schema_version": {
+      "const": "reconcile/recovery-qualification-results/v1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "sqlite_case_count": {
+      "maximum": 100,
+      "minimum": 1,
+      "title": "Sqlite Case Count",
+      "type": "integer"
+    },
+    "suite_id": {
+      "const": "proof-to-permit-qualification-v1",
+      "title": "Suite Id",
+      "type": "string"
+    },
+    "witness_case_count": {
+      "maximum": 100,
+      "minimum": 1,
+      "title": "Witness Case Count",
+      "type": "integer"
+    },
+    "witness_evidence_duplication_case_count": {
+      "maximum": 100,
+      "minimum": 1,
+      "title": "Witness Evidence Duplication Case Count",
+      "type": "integer"
+    },
+    "witness_replay_valid_count": {
+      "maximum": 100,
+      "minimum": 0,
+      "title": "Witness Replay Valid Count",
+      "type": "integer"
+    },
+    "witness_zero_evidence_replay_case_count": {
+      "maximum": 100,
+      "minimum": 1,
+      "title": "Witness Zero Evidence Replay Case Count",
+      "type": "integer"
+    },
+    "wrong_hypothesis_decision_divergence_count": {
+      "maximum": 300,
+      "minimum": 0,
+      "title": "Wrong Hypothesis Decision Divergence Count",
+      "type": "integer"
+    },
+    "wrong_hypothesis_permit_divergence_count": {
+      "maximum": 300,
+      "minimum": 0,
+      "title": "Wrong Hypothesis Permit Divergence Count",
+      "type": "integer"
+    },
+    "wrong_hypothesis_replay_count": {
+      "maximum": 300,
+      "minimum": 0,
+      "title": "Wrong Hypothesis Replay Count",
+      "type": "integer"
+    }
+  },
+  "required": [
+    "schema_version",
+    "bundle_format",
+    "suite_id",
+    "manifest_sha256",
+    "environment_sha256",
+    "lane_results",
+    "case_proofs",
+    "case_count",
+    "lane_result_count",
+    "false_permit_count",
+    "replay_parity_case_count",
+    "wrong_hypothesis_replay_count",
+    "wrong_hypothesis_decision_divergence_count",
+    "wrong_hypothesis_permit_divergence_count",
+    "witness_case_count",
+    "witness_replay_valid_count",
+    "witness_evidence_duplication_case_count",
+    "witness_zero_evidence_replay_case_count",
+    "non_authorizing_certificate_case_count",
+    "restart_case_count",
+    "restart_valid_count",
+    "permit_coverage",
+    "sqlite_case_count",
+    "firestore_case_count",
+    "safety_passed"
+  ],
+  "title": "RecoveryQualificationResults",
+  "type": "object"
+}
