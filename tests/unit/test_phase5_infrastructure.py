@@ -643,12 +643,12 @@ def test_apply_identity_and_runtime_iam_graph_are_closed_world() -> None:
         "runtime_database_user": (
             '"roles/datastore.user"',
             '"serviceAccount:${google_service_account.runtime[each.value].email}"',
-            'toset(["api", "controller"])',
+            'toset(["api", "controller", "fault_proxy"])',
         ),
         "runtime_database_viewer": (
             '"roles/datastore.viewer"',
             '"serviceAccount:${google_service_account.runtime[each.value].email}"',
-            'toset(["fault_proxy", "sandbox"])',
+            'toset(["sandbox"])',
         ),
         "sandbox_database_user": (
             '"roles/datastore.user"',
