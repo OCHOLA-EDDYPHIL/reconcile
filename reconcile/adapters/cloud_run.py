@@ -498,16 +498,28 @@ class _CloudRunReadHandler:
             try:
                 snapshot = await asyncio.to_thread(self._read)
             except CloudRunCanaryError as error:
+                if self.capability_name == CLOUD_RUN_SERVICE_CAPABILITY:
+                    if error.code is CloudRunCanaryErrorCode.REVISION_NOT_FOUND:
+                        snapshot = None
+                        break
+                    raise CapabilityUnavailable from None
+                retryable_revision_error = error.code in {
+                    CloudRunCanaryErrorCode.REVISION_NOT_FOUND,
+                    CloudRunCanaryErrorCode.PROVIDER_UNAVAILABLE,
+                    CloudRunCanaryErrorCode.INVALID_CONFIGURATION,
+                }
                 if (
-                    self.capability_name == CLOUD_RUN_SERVICE_CAPABILITY
-                    and error.code is CloudRunCanaryErrorCode.REVISION_NOT_FOUND
+                    self.capability_name != CLOUD_RUN_REVISION_CAPABILITY
+                    or not retryable_revision_error
                 ):
-                    snapshot = None
-                    break
+                    raise CapabilityUnavailable from None
                 if (
-                    self.capability_name == CLOUD_RUN_REVISION_CAPABILITY
-                    and error.code is CloudRunCanaryErrorCode.REVISION_NOT_FOUND
+                    loop.time() + _REVISION_VISIBILITY_POLL_SECONDS
+                    < visibility_deadline
                 ):
+                    await asyncio.sleep(_REVISION_VISIBILITY_POLL_SECONDS)
+                    continue
+                if error.code is CloudRunCanaryErrorCode.REVISION_NOT_FOUND:
                     try:
                         referenced = await asyncio.to_thread(
                             self.reader.is_revision_referenced,
@@ -518,13 +530,6 @@ class _CloudRunReadHandler:
                     if not referenced:
                         snapshot = None
                         break
-                    if (
-                        loop.time() + _REVISION_VISIBILITY_POLL_SECONDS
-                        >= visibility_deadline
-                    ):
-                        raise CapabilityUnavailable from None
-                    await asyncio.sleep(_REVISION_VISIBILITY_POLL_SECONDS)
-                    continue
                 raise CapabilityUnavailable from None
             except (ValueError, TypeError):
                 raise CapabilityUnavailable from None
