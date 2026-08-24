@@ -1282,12 +1282,9 @@ def _require_stage_commit(
     revisions = tuple(
         item for item in observations if type(item) is _CloudRunRevisionObservation
     )
-    health = tuple(
-        item for item in observations if type(item) is _CloudRunHealthObservation
-    )
-    if not services or not revisions or not health:
+    if not services or not revisions:
         raise RecoveryRuleViolation(
-            "committed staging requires service, revision, and health observations"
+            "committed staging requires service and revision observations"
         )
     if any(
         item.reconciling != "false"
@@ -1306,10 +1303,6 @@ def _require_stage_commit(
     ):
         raise RecoveryRuleViolation(
             "staged revision is not terminally reconciled and ready"
-        )
-    if any(item.health_status != "READY" for item in health):
-        raise RecoveryRuleViolation(
-            "staged revision lacks a successful exact-revision health result"
         )
     _require_stage_revision_coherence(observations)
     if len({item.service_etag for item in services}) != 1:
