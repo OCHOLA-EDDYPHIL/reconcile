@@ -883,7 +883,13 @@ class CloudRunCanaryReader(_ClientBoundary):
         revisions_factory: RevisionsClientFactory | None = None,
         health_client: RevisionHealthClient | None = None,
         clock: Clock | None = None,
+        revision_settle_delay_seconds: float = 0.5,
     ) -> None:
+        if (
+            type(revision_settle_delay_seconds) is not float
+            or not 0 <= revision_settle_delay_seconds <= 5
+        ):
+            raise TypeError("revision settle delay must be a bounded float")
         super().__init__(
             target=target,
             services_factory=services_factory,
@@ -891,6 +897,11 @@ class CloudRunCanaryReader(_ClientBoundary):
             clock=clock,
         )
         self._health_client = health_client or _GoogleRevisionHealthClient()
+        self._revision_settle_delay_seconds = revision_settle_delay_seconds
+
+    @property
+    def revision_settle_delay_seconds(self) -> float:
+        return self._revision_settle_delay_seconds
 
     def list_release_revisions(
         self,

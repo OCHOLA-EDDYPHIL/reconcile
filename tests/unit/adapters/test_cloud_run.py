@@ -639,7 +639,7 @@ def test_expected_revision_waits_while_service_status_references_it() -> None:
                 name=request.name,
                 service="reconcile-canary",
                 generation=1,
-                observed_generation=1,
+                observed_generation=0 if self.calls == 2 else 1,
                 labels={"reconcile-release": RELEASE},
                 annotations={"reconcile.dev/configuration-sha256": CONFIGURATION},
                 containers=(
@@ -653,9 +653,14 @@ def test_expected_revision_waits_while_service_status_references_it() -> None:
                 conditions=(
                     run_v2.Condition(
                         type_="Ready",
-                        state=run_v2.Condition.State.CONDITION_SUCCEEDED,
+                        state=(
+                            run_v2.Condition.State.CONDITION_RECONCILING
+                            if self.calls == 2
+                            else run_v2.Condition.State.CONDITION_SUCCEEDED
+                        ),
                     ),
                 ),
+                reconciling=self.calls == 2,
             )
 
     revisions = Revisions()
@@ -700,7 +705,7 @@ def test_expected_revision_waits_while_service_status_references_it() -> None:
 
     assert registration.handler is not None
     raw = asyncio.run(registration.handler(probe))
-    assert revisions.calls == 2
+    assert revisions.calls == 3
     result = build_cloud_run_rule_registration(
         capability_name=CLOUD_RUN_REVISION_CAPABILITY,
         binding=_binding(),
