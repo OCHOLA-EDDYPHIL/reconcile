@@ -206,6 +206,7 @@ class CandidateIdentity(StrictModel):
 class ServiceDeploymentObservation(StrictModel):
     component: ServiceComponent
     service_name: Identifier
+    service_uid: Identifier
     uri: str
     custom_audience: str
     generation: int = Field(ge=1, le=2**63 - 1)
@@ -2118,6 +2119,7 @@ def _normalize_service_description(
     return ServiceDeploymentObservation(
         component=component,
         service_name=_text(metadata.get("name")),
+        service_uid=_text(metadata.get("uid")),
         uri=uri,
         custom_audience=custom_audiences[0],
         generation=generation,

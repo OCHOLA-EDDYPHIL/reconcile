@@ -672,6 +672,7 @@ def _deployments(
         ServiceDeploymentObservation(
             component=component,
             service_name=names[component],
+            service_uid=f"{names[component]}-uid",
             uri=f"https://{names[component]}.example.test",
             custom_audience=audiences[component],
             generation=1,
@@ -1381,6 +1382,7 @@ def _description(component: str, account: str) -> bytes:
                 },
                 "generation": 7,
                 "name": service,
+                "uid": f"{service}-uid",
             },
             "spec": {
                 "template": {
