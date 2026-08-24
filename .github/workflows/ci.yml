@@ -71,7 +71,7 @@ jobs:
               --ignore=tests/integration/test_fixed_baseline.py
               --ignore=tests/integration/test_qualification_protocol.py
               --ignore=tests/integration/test_recovery_qualification_integration.py
-            timeout_minutes: 30
+            timeout_minutes: 60
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:

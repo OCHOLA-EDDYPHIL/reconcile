@@ -38,6 +38,7 @@ from reconcile.contracts import (
     ScenarioRef,
     ScenarioRunRequest,
     canonical_json_bytes,
+    decode_contract,
 )
 from reconcile.contracts.base import canonical_json_value_bytes
 from reconcile.scenarios.firestore_business import (
@@ -46,7 +47,11 @@ from reconcile.scenarios.firestore_business import (
     FIRESTORE_BUSINESS_SCENARIO,
     FirestoreBusinessScenarioDefinition,
 )
-from reconcile.scenarios.local_order import HiddenOrderOutcome, LocalOrderHarness
+from reconcile.scenarios.local_order import (
+    HiddenOrderOutcome,
+    LocalOrderHarness,
+    LocalOrderMutationTarget,
+)
 from reconcile.scenarios.runner import ScenarioRunner
 from reconcile.scenarios.sandbox_order import (
     SANDBOX_ORDER_ADAPTIVE_POLICY,
@@ -326,12 +331,25 @@ def _sandbox_run(
         invoked_at=NOW,
         target_clock=ConstantClock(NOW + timedelta(seconds=1)),
     )
-    result = ScenarioRunner(clock=_StepClock(NOW + timedelta(seconds=2))).run(
+    LocalOrderMutationTarget(
+        private_path,
+        observation_path,
+        hidden_outcome=outcome,
+        clock=lambda: NOW + timedelta(seconds=1),
+    ).submit_order(
+        owner_token=f"adaptive-fixture-owner-{name}",
+        item_code=SANDBOX_ORDER_ITEM_CODE,
+        quantity=SANDBOX_ORDER_QUANTITY,
+    )
+    prepared = ScenarioRunner(clock=_StepClock(NOW + timedelta(seconds=2))).prepare(
         request,
         definition,
     )
-    assert result.execution_envelope is not None
-    return definition, result.execution_envelope, private_path
+    envelope = decode_contract(
+        prepared.execution_envelope_bytes,
+        ExecutionEnvelope,
+    )
+    return definition, envelope, private_path
 
 
 def _sandbox_adaptive(
@@ -366,6 +384,9 @@ def test_sandbox_adaptive_inputs_and_outputs_hide_private_outcomes(
         name="discarded",
         outcome=HiddenOrderOutcome.DISCARD,
         request=request,
+    )
+    assert canonical_json_bytes(committed_envelope) == canonical_json_bytes(
+        discarded_envelope
     )
 
     committed, committed_planner = _sandbox_adaptive(
