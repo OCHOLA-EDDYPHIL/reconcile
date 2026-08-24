@@ -33,7 +33,7 @@ class HostedCandidateIdentity(StrictModel):
     prompt_version: Identifier
     prompt_sha256: Sha256Digest
     maximum_input_tokens: Literal[12_000]
-    maximum_output_tokens: Literal[1_024]
+    maximum_output_tokens: Literal[1_024, 4_096]
     thinking_level: Literal["MINIMAL"]
     maximum_count_tokens_attempts: Literal[1]
     maximum_generation_attempts: Literal[1]

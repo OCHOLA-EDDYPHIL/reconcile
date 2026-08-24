@@ -266,7 +266,7 @@ resource "google_cloud_run_v2_service" "controller" {
           RECONCILE_VERTEX_MAX_COUNT_TOKENS_ATTEMPTS   = "1"
           RECONCILE_VERTEX_MAX_GENERATION_ATTEMPTS     = "1"
           RECONCILE_VERTEX_MAX_INPUT_TOKENS            = "12000"
-          RECONCILE_VERTEX_MAX_OUTPUT_TOKENS           = "1024"
+          RECONCILE_VERTEX_MAX_OUTPUT_TOKENS           = "4096"
           RECONCILE_VERTEX_MODEL                       = var.vertex_model
           RECONCILE_VERTEX_PROMPT_SHA256               = var.vertex_prompt_sha256
           RECONCILE_VERTEX_PROMPT_VERSION              = var.vertex_prompt_version

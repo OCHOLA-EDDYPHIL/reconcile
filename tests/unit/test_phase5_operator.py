@@ -1748,6 +1748,59 @@ def test_continuation_accepts_exact_bound_python_repairs(tmp_path: Path) -> None
     operator._validate_continuation_bounds(predecessor, successor)
 
 
+def test_continuation_accepts_exact_failed_provider_output_budget_migration(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    python_paths = tuple(sorted(operator._OUTPUT_BUDGET_MIGRATION_PYTHON_PATHS))
+    changed_paths = tuple(
+        sorted(
+            operator._OUTPUT_BUDGET_MIGRATION_PYTHON_PATHS
+            | operator._OUTPUT_BUDGET_MIGRATION_EXTERNAL_PATHS
+        )
+    )
+    predecessor_root = tmp_path / "predecessor"
+    predecessor_root.mkdir()
+    _, current_predecessor, _, _ = _records(
+        predecessor_root,
+        project_dependency_paths=python_paths,
+    )
+    predecessor_values = {
+        name: getattr(current_predecessor, name)
+        for name in type(current_predecessor).model_fields
+        if name != "record_sha256"
+    }
+    predecessor_values["output_token_limit"] = 1_024
+    predecessor = operator._seal(
+        operator.Phase5ApprovalManifest,
+        **predecessor_values,
+    )
+    _, _, successor, _, _ = _continuation_successor(
+        tmp_path,
+        changed_paths=changed_paths,
+        project_dependency_paths=python_paths,
+    )
+    terminal = operator.Phase5ActionEvidenceBinding(
+        action=operator.Phase5Action.PROVIDER_ACCEPTANCE,
+        admission_sha256="a" * 64,
+        outcome_sha256="b" * 64,
+        evidence_sha256="c" * 64,
+        status=operator.OutcomeStatus.FAILED,
+    )
+    monkeypatch.setattr(
+        operator,
+        "_OUTPUT_BUDGET_MIGRATION_PREDECESSOR_MANIFEST_SHA256",
+        predecessor.record_sha256,
+    )
+    monkeypatch.setattr(
+        operator,
+        "_OUTPUT_BUDGET_MIGRATION_PREDECESSOR_SOURCE_REVISION",
+        predecessor.source_revision,
+    )
+
+    operator._validate_continuation_bounds(predecessor, successor, terminal)
+
+
 def test_continuation_rejects_mismatched_semantic_repairs(tmp_path: Path) -> None:
     changed_paths = (
         "reconcile/durable_application.py",

@@ -614,6 +614,32 @@ def test_structured_success_uses_one_stateless_tool_free_adk_turn() -> None:
     asyncio.run(scenario())
 
 
+def test_structured_success_accepts_bounded_provider_thought_signature() -> None:
+    async def scenario() -> None:
+        model = _FakeLlm(
+            model="fake-model",
+            responses=(
+                _response(
+                    parts=[
+                        types.Part(
+                            text=_valid_text(),
+                            thought_signature=b"opaque-provider-signature",
+                        )
+                    ]
+                ),
+            ),
+        )
+        planner = _planner(model)
+
+        async with planner:
+            turn = await planner.plan(_planner_input(planner))
+
+        assert turn.failure is None
+        assert turn.output == make_planner_output()
+
+    asyncio.run(scenario())
+
+
 def test_qualification_facade_intercepts_and_seals_the_final_sdk_request(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

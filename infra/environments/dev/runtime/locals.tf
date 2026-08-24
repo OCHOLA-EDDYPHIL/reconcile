@@ -31,7 +31,7 @@ locals {
     maximum_count_tokens_attempts = 1
     maximum_generation_attempts   = 1
     maximum_input_tokens          = 12000
-    maximum_output_tokens         = 1024
+    maximum_output_tokens         = 4096
     project_id                    = var.project_id
     prompt_sha256                 = var.vertex_prompt_sha256
     prompt_version                = var.vertex_prompt_version

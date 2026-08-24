@@ -99,6 +99,36 @@ _LEGACY_STATE_BUCKET_CLEANUP_SOURCE_REVISIONS = frozenset(
 _LEGACY_BOOTSTRAP_PROTECTION_UPDATE_SOURCE_REVISIONS = frozenset(
     {"33954ba1f117ad49b01b0c7de7d2a8da025f2144"}
 )
+_OUTPUT_BUDGET_MIGRATION_PREDECESSOR_MANIFEST_SHA256 = (
+    "06f5c2af8e26fe9b23944949270c8a9dc99ce09ba80636cbca1e34f7e9230f04"
+)
+_OUTPUT_BUDGET_MIGRATION_PREDECESSOR_SOURCE_REVISION = (
+    "8b757de0d0087ea79c66714575949b0d0a1a9b03"
+)
+_OUTPUT_BUDGET_MIGRATION_PYTHON_PATHS = frozenset(
+    {
+        "reconcile/adk_planner.py",
+        "reconcile/hosted/config.py",
+        "reconcile/hosted/provider.py",
+        "reconcile/hosted/runtime.py",
+        "reconcile/phase5_hosted_acceptance.py",
+        "reconcile/phase5_operator.py",
+    }
+)
+_OUTPUT_BUDGET_MIGRATION_EXTERNAL_PATHS = frozenset(
+    {
+        "infra/environments/dev/runtime/cloud_run.tf",
+        "infra/environments/dev/runtime/locals.tf",
+        "scripts/check_phase5_container.py",
+        "scripts/check_phase5_terraform_plans.py",
+    }
+)
+_OUTPUT_BUDGET_MIGRATION_TERRAFORM_PATHS = frozenset(
+    {
+        "infra/environments/dev/runtime/cloud_run.tf",
+        "infra/environments/dev/runtime/locals.tf",
+    }
+)
 _PROJECT_DEPENDENCY_RECORD_PATH = "reconcile-0.1.0.dist-info/RECORD"
 
 _EXECUTION_ROOT_FILES = frozenset(
@@ -562,7 +592,7 @@ class Phase5ApprovalManifest(_HasRecordHash):
     count_tokens_attempt_limit: Literal[1]
     billed_generation_limit: Literal[1]
     input_token_limit: Literal[12000]
-    output_token_limit: Literal[1024]
+    output_token_limit: Literal[1024, 4096]
     thinking_level: Literal["MINIMAL"]
     authorization_estimate_usd: Literal["3.892942"]
     contingency_authorization_estimate_usd: Literal["4.866178"]
@@ -3542,7 +3572,7 @@ def build_manifest(
         count_tokens_attempt_limit=1,
         billed_generation_limit=1,
         input_token_limit=12_000,
-        output_token_limit=1_024,
+        output_token_limit=4_096,
         thinking_level="MINIMAL",
         authorization_estimate_usd=_AUTHORIZATION_ESTIMATE,
         contingency_authorization_estimate_usd=(_CONTINGENCY_AUTHORIZATION_ESTIMATE),
@@ -4797,7 +4827,19 @@ def _validate_project_dependency_drift(
 def _validate_continuation_bounds(
     predecessor: Phase5ApprovalManifest,
     successor: Phase5ApprovalManifest,
+    terminal_action: Phase5ActionEvidenceBinding | None = None,
 ) -> None:
+    output_budget_migration = (
+        predecessor.record_sha256
+        == _OUTPUT_BUDGET_MIGRATION_PREDECESSOR_MANIFEST_SHA256
+        and predecessor.source_revision
+        == _OUTPUT_BUDGET_MIGRATION_PREDECESSOR_SOURCE_REVISION
+        and predecessor.output_token_limit == 1_024
+        and successor.output_token_limit == 4_096
+        and terminal_action is not None
+        and terminal_action.action is Phase5Action.PROVIDER_ACCEPTANCE
+        and terminal_action.status is OutcomeStatus.FAILED
+    )
     fixed_fields = (
         "origin_url",
         "project_id",
@@ -4823,18 +4865,21 @@ def _validate_continuation_bounds(
         "count_tokens_attempt_limit",
         "billed_generation_limit",
         "input_token_limit",
-        "output_token_limit",
         "thinking_level",
         "authorization_estimate_usd",
         "contingency_authorization_estimate_usd",
         "estimate_kind",
-        "infrastructure_revision",
-        "terraform_stacks",
         "python_project_sha256",
         "python_lock_sha256",
         "prompt_sha256",
         "prompt_version",
     )
+    if not output_budget_migration:
+        fixed_fields += (
+            "output_token_limit",
+            "infrastructure_revision",
+            "terraform_stacks",
+        )
     if any(
         getattr(predecessor, field) != getattr(successor, field)
         for field in fixed_fields
@@ -4848,7 +4893,40 @@ def _validate_continuation_bounds(
         predecessor.semantic_sources,
         successor.semantic_sources,
     )
-    if (
+    if output_budget_migration:
+        if (
+            semantic_changes != _OUTPUT_BUDGET_MIGRATION_PYTHON_PATHS
+            or execution_changes
+            != (
+                _OUTPUT_BUDGET_MIGRATION_PYTHON_PATHS
+                | _OUTPUT_BUDGET_MIGRATION_EXTERNAL_PATHS
+            )
+        ):
+            raise OperatorError("CONTINUATION_SOURCE_SCOPE_DRIFT")
+        predecessor_stacks = {
+            item.stack: item for item in predecessor.terraform_stacks
+        }
+        successor_stacks = {item.stack: item for item in successor.terraform_stacks}
+        if (
+            predecessor_stacks.keys() != successor_stacks.keys()
+            or predecessor_stacks["bootstrap"] != successor_stacks["bootstrap"]
+            or predecessor_stacks["foundation"] != successor_stacks["foundation"]
+        ):
+            raise OperatorError("CONTINUATION_BOUND_DRIFT")
+        predecessor_runtime = predecessor_stacks["runtime"]
+        successor_runtime = successor_stacks["runtime"]
+        if (
+            predecessor_runtime.stack != successor_runtime.stack
+            or predecessor_runtime.source_root != successor_runtime.source_root
+            or predecessor_runtime.lock_sha256 != successor_runtime.lock_sha256
+            or _source_changes(
+                predecessor_runtime.sources,
+                successor_runtime.sources,
+            )
+            != _OUTPUT_BUDGET_MIGRATION_TERRAFORM_PATHS
+        ):
+            raise OperatorError("CONTINUATION_BOUND_DRIFT")
+    elif (
         not execution_changes
         or execution_changes != semantic_changes
         or any(
@@ -4860,7 +4938,7 @@ def _validate_continuation_bounds(
     _validate_project_dependency_drift(
         predecessor,
         successor,
-        execution_changes,
+        semantic_changes,
     )
     for action in (
         Phase5Action.BOOTSTRAP_APPLY,
@@ -4924,7 +5002,11 @@ def _verify_continuation_record(
         or terminal != continuation.terminal_action
     ):
         raise OperatorError("CONTINUATION_PREDECESSOR_BINDING_INVALID")
-    _validate_continuation_bounds(predecessor_manifest, successor_manifest)
+    _validate_continuation_bounds(
+        predecessor_manifest,
+        successor_manifest,
+        terminal,
+    )
     predecessor_identity = _bootstrap_state_identity(
         predecessor_root / "state" / "bootstrap.tfstate"
     )
@@ -4986,7 +5068,11 @@ def prepare_phase5_continuation(
         manifest_sha256=predecessor_manifest_sha256,
         approval_sha256=predecessor_approval_sha256,
     )
-    _validate_continuation_bounds(predecessor_manifest, successor_manifest)
+    _validate_continuation_bounds(
+        predecessor_manifest,
+        successor_manifest,
+        terminal,
+    )
     source_state = predecessor_state.root / "state" / "bootstrap.tfstate"
     source_digest, source_size, _, _ = _bootstrap_state_identity(source_state)
     continuation = _seal(

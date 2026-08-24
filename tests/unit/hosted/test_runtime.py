@@ -108,7 +108,7 @@ def _config(component: Component) -> HostedConfig:
             "vertex_max_count_tokens_attempts": 1,
             "vertex_max_generation_attempts": 1,
             "vertex_max_input_tokens": 12_000,
-            "vertex_max_output_tokens": 1_024,
+            "vertex_max_output_tokens": 4_096,
             "vertex_thinking_level": "MINIMAL",
         }
     elif component is Component.FAULT_PROXY:

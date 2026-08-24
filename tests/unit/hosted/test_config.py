@@ -53,7 +53,7 @@ def _candidate_sha256() -> str:
         prompt_version="adaptive-planner-v3",
         prompt_sha256=_PROMPT_SHA256,
         maximum_input_tokens=12_000,
-        maximum_output_tokens=1_024,
+        maximum_output_tokens=4_096,
         thinking_level="MINIMAL",
         maximum_count_tokens_attempts=1,
         maximum_generation_attempts=1,
@@ -119,7 +119,7 @@ def _environment(component: Component) -> dict[str, str]:
                 "RECONCILE_VERTEX_MAX_COUNT_TOKENS_ATTEMPTS": "1",
                 "RECONCILE_VERTEX_MAX_GENERATION_ATTEMPTS": "1",
                 "RECONCILE_VERTEX_MAX_INPUT_TOKENS": "12000",
-                "RECONCILE_VERTEX_MAX_OUTPUT_TOKENS": "1024",
+                "RECONCILE_VERTEX_MAX_OUTPUT_TOKENS": "4096",
                 "RECONCILE_VERTEX_THINKING_LEVEL": "MINIMAL",
             }
         )

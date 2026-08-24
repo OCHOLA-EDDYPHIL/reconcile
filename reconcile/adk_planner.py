@@ -51,6 +51,7 @@ _AGENT_NAME = "reconcile_advisory_planner_agent"
 _USER_ID = "reconcile-advisory-planner"
 _MAX_INPUT_BYTES = 1_000_000
 _MAX_OUTPUT_BYTES = 262_144
+_MAX_THOUGHT_SIGNATURE_BYTES = 65_536
 _MAX_TIMEOUT_SECONDS = 300.0
 _MAX_OUTPUT_TOKENS = 8_192
 _MAX_PROVIDER_COLLECTION = 8
@@ -1141,7 +1142,15 @@ def _extract_final_text(event: Event) -> str | None:
     part = content.parts[0]
     if part.thought is True or type(part.text) is not str or not part.text.strip():
         return None
-    if set(part.model_dump(exclude_none=True)) - {"text", "thought"}:
+    part_values = part.model_dump(exclude_none=True)
+    if set(part_values) - {"text", "thought", "thought_signature"}:
+        return None
+    thought_signature = part_values.get("thought_signature")
+    if thought_signature is not None and (
+        type(thought_signature) is not bytes
+        or not thought_signature
+        or len(thought_signature) > _MAX_THOUGHT_SIGNATURE_BYTES
+    ):
         return None
     encoded = part.text.encode("utf-8")
     if len(encoded) > _MAX_OUTPUT_BYTES:

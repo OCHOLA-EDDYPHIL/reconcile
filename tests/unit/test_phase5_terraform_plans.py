@@ -32,7 +32,7 @@ def test_recovery_payload_hash_is_the_canonical_hosted_candidate_identity() -> N
         prompt_version=plans._VERTEX_PROMPT_VERSION,
         prompt_sha256=plans._VERTEX_PROMPT_SHA256,
         maximum_input_tokens=12_000,
-        maximum_output_tokens=1_024,
+        maximum_output_tokens=4_096,
         thinking_level="MINIMAL",
         maximum_count_tokens_attempts=1,
         maximum_generation_attempts=1,

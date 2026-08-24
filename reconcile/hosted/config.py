@@ -287,7 +287,7 @@ def _expected_recovery_payload_sha256(
         "maximum_count_tokens_attempts": 1,
         "maximum_generation_attempts": 1,
         "maximum_input_tokens": 12_000,
-        "maximum_output_tokens": 1_024,
+        "maximum_output_tokens": 4_096,
         "project_id": project_id,
         "prompt_sha256": _APPROVED_VERTEX_PROMPT_SHA256,
         "prompt_version": _APPROVED_VERTEX_PROMPT_VERSION,
@@ -589,8 +589,8 @@ def _load_config(environment: Mapping[str, str]) -> HostedConfig:
             "vertex_max_output_tokens": _integer(
                 managed,
                 _VERTEX_MAX_OUTPUT_TOKENS,
-                minimum=1_024,
-                maximum=1_024,
+                minimum=4_096,
+                maximum=4_096,
             ),
             "vertex_thinking_level": _exact(managed, _VERTEX_THINKING_LEVEL, "MINIMAL"),
         }
