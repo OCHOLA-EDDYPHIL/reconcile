@@ -328,12 +328,25 @@ def recovery_remaining_budget(
     )
 
 
-def _alternative_histories(report: InvestigationReport) -> tuple[PossibleHistory, ...]:
-    citations = tuple(
+def _alternative_histories(
+    report: InvestigationReport,
+    *,
+    compatible_evidence_ids: tuple[str, ...] | None = None,
+) -> tuple[PossibleHistory, ...]:
+    admitted_citations = tuple(
         sorted(
             decision.evidence_id
             for decision in report.evidence_decisions
             if decision.disposition is EvidenceDisposition.ADMITTED
+        )
+    )
+    citations = (
+        admitted_citations
+        if compatible_evidence_ids is None
+        else tuple(
+            evidence_id
+            for evidence_id in admitted_citations
+            if evidence_id in compatible_evidence_ids
         )
     )
     unresolved = any(
@@ -364,7 +377,11 @@ def _alternative_histories(report: InvestigationReport) -> tuple[PossibleHistory
                     else unresolved_state
                 ),
                 cited_evidence_ids=(
-                    finding.evidence_ids
+                    tuple(
+                        evidence_id
+                        for evidence_id in finding.evidence_ids
+                        if evidence_id in citations
+                    )
                     if finding.state is not EffectAssertionState.UNVERIFIED
                     else ()
                 ),
@@ -460,23 +477,46 @@ class RecoveryAgent:
                 output_sha256=turn.output_sha256,
             )
         output = turn.output
-        citations = tuple(
-            dict.fromkeys(
-                (
-                    *output.explanation.citations.admitted_evidence_ids,
-                    *output.explanation.citations.weak_evidence_ids,
-                    *output.explanation.citations.rejected_evidence_ids,
-                )
-            )
+        citation_refs = output.explanation.citations
+        category_bindings = (
+            (
+                citation_refs.admitted_evidence_ids,
+                {item.evidence_id for item in planner_input.admitted_evidence},
+            ),
+            (
+                citation_refs.weak_evidence_ids,
+                {item.evidence_id for item in planner_input.weak_evidence},
+            ),
+            (
+                citation_refs.rejected_evidence_ids,
+                {item.evidence_id for item in planner_input.rejected_evidence},
+            ),
+            (
+                citation_refs.missing_effect_ids,
+                {item.effect_id for item in planner_input.missing_evidence},
+            ),
         )
-        known_evidence = {item.evidence_id for item in report.evidence}
-        if not set(citations) <= known_evidence:
+        if any(
+            not set(cited_ids) <= supplied_ids
+            for cited_ids, supplied_ids in category_bindings
+        ):
             return RecoveryAgentTurn(
                 hypothesis=None,
                 failure=PlannerFailureKind.SCHEMA_INVALID,
                 input_sha256=input_sha256,
                 output_sha256=turn.output_sha256,
             )
+        retained_evidence_ids = {item.evidence_id for item in report.evidence}
+        citations = tuple(
+            evidence_id
+            for evidence_id in dict.fromkeys(
+                (
+                    *citation_refs.admitted_evidence_ids,
+                    *citation_refs.weak_evidence_ids,
+                )
+            )
+            if evidence_id in retained_evidence_ids
+        )
         classification = (
             report.classification
             if output.stop_advice.recommend_stop and report.classification is not None
@@ -539,7 +579,10 @@ class RecoveryAgent:
                 confidence_basis_points=(
                     9_000 if output.stop_advice.recommend_stop else 5_000
                 ),
-                alternative_histories=_alternative_histories(report),
+                alternative_histories=_alternative_histories(
+                    report,
+                    compatible_evidence_ids=citations,
+                ),
                 missing_evidence=missing,
                 proposed_probe=(
                     output.probe_proposals[0] if output.probe_proposals else None
