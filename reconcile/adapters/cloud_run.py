@@ -534,8 +534,12 @@ class _CloudRunReadHandler:
             except (ValueError, TypeError):
                 raise CapabilityUnavailable from None
             if (
-                self.capability_name == CLOUD_RUN_REVISION_CAPABILITY
-                and isinstance(snapshot, CloudRunRevisionSnapshot)
+                self.capability_name
+                in {CLOUD_RUN_SERVICE_CAPABILITY, CLOUD_RUN_REVISION_CAPABILITY}
+                and isinstance(
+                    snapshot,
+                    (CloudRunServiceSnapshot, CloudRunRevisionSnapshot),
+                )
                 and snapshot.reconciling
                 and self.reader.revision_settle_delay_seconds > 0
                 and loop.time() + self.reader.revision_settle_delay_seconds
