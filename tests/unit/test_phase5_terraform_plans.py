@@ -165,6 +165,25 @@ def test_expanded_iam_edges_are_closed_world(stack: plans._Stack) -> None:
             plans._verify_iam(changed)
 
 
+def test_runtime_revision_reader_inventory_is_exact() -> None:
+    addresses = {
+        address
+        for address in plans._RUNTIME_ADDRESSES
+        if address.startswith("google_project_iam_member.canary_revision_reader")
+    }
+    expected = {
+        f'google_project_iam_member.canary_revision_reader["{component}"]': (
+            f"serviceAccount:{plans._RUNTIME_EMAILS[component]}"
+        )
+        for component in ("controller", "fault_proxy")
+    }
+
+    assert addresses == set(expected)
+    assert {
+        address: plans._IAM_EXPECTED[address]["member"] for address in addresses
+    } == expected
+
+
 def _runtime_service_resources() -> dict[str, dict[str, Any]]:
     resources: dict[str, dict[str, Any]] = {
         "terraform_data.canary_baseline": _resource(
