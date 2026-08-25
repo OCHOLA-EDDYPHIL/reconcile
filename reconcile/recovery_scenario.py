@@ -1852,17 +1852,24 @@ class RecoveryPolicyResultRecorder:
             configuration_sha256=self._settings.configuration_sha256,
         )
         candidates = tuple(dict.fromkeys((self._baseline_revision, *revisions)))
-        services = tuple(
-            await asyncio.gather(
-                *(
-                    asyncio.to_thread(
-                        self._cloud_reader.read_service,
-                        release_id=self._settings.release_id,
-                        revision=revision,
-                    )
-                    for revision in candidates
+        async def read_current_traffic(revision: str):
+            try:
+                return await asyncio.to_thread(
+                    self._cloud_reader.read_service,
+                    release_id=self._settings.release_id,
+                    revision=revision,
                 )
+            except CloudRunCanaryError as error:
+                if error.code is CloudRunCanaryErrorCode.REVISION_NOT_FOUND:
+                    return None
+                raise
+
+        services = tuple(
+            item
+            for item in await asyncio.gather(
+                *(read_current_traffic(revision) for revision in candidates)
             )
+            if item is not None
         )
         serving = tuple(
             item for item in services if item.revision_traffic_percent == 100
@@ -2764,11 +2771,21 @@ class ReleaseChainResetter:
             image_digest=self._settings.image_digest,
             configuration_sha256=self._settings.configuration_sha256,
         )
-        previous = await asyncio.to_thread(
-            self._cloud_reader.read_service,
-            release_id=self._settings.release_id,
-            revision=self._baseline,
-        )
+        previous = None
+        for revision in (self._settings.staged_revision, self._baseline):
+            try:
+                previous = await asyncio.to_thread(
+                    self._cloud_reader.read_service,
+                    release_id=self._settings.release_id,
+                    revision=revision,
+                )
+            except CloudRunCanaryError as error:
+                if error.code is CloudRunCanaryErrorCode.REVISION_NOT_FOUND:
+                    continue
+                raise
+            break
+        if previous is None:
+            raise ReleaseChainError("Cloud Run reset has no referenced revision")
         accepted = await self._reset_cloud_run()
         operation_name = getattr(accepted, "operation_name", None)
         accepted_revision = getattr(accepted, "revision", None)

@@ -1281,6 +1281,42 @@ def test_policy_observation_preserves_a_drifted_firestore_identity() -> None:
     assert observed.semantic_action_sha256 == "e" * 64
 
 
+def test_policy_observation_accepts_promoted_only_traffic_status() -> None:
+    settings = _settings()
+    state, _adapter, action, reader, firestore, _client = _provider(settings)
+    action.stage_revision(
+        mode=CloudRunFaultMode.PASS_THROUGH,
+        operation_id=settings.stage_operation_id,
+        release_id=settings.release_id,
+        image_digest=settings.image_digest,
+        configuration_sha256=settings.configuration_sha256,
+    )
+    action.promote_revision(
+        mode=CloudRunFaultMode.PASS_THROUGH,
+        release_id=settings.release_id,
+        revision=settings.staged_revision,
+        service_etag=state.service.etag,
+    )
+    recorder = RecoveryPolicyResultRecorder(
+        settings=settings,
+        baseline_revision=BASELINE,
+        cloud_reader=reader,
+        firestore=firestore,
+    )
+
+    cloud, _record, revisions, promotions, records = asyncio.run(
+        recorder._observe_provider(RecoveryLaneBaseline(release_revisions=()))
+    )
+
+    assert tuple(item.revision for item in state.service.traffic_statuses) == (
+        settings.staged_revision,
+    )
+    assert cloud.serving_revision == settings.staged_revision
+    assert revisions == 1
+    assert promotions == 1
+    assert records == 0
+
+
 def test_reset_waits_for_settled_baseline_and_supports_the_fault_proxy() -> None:
     settings = _settings()
     state, _adapter, action, reader, firestore, _client = _provider(settings)
