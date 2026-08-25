@@ -92,6 +92,12 @@ resource "google_project_iam_member" "canary_operation_reader" {
   member  = "serviceAccount:${var.service_account_emails.controller}"
 }
 
+resource "google_project_iam_member" "canary_revision_reader" {
+  project = var.project_id
+  role    = "projects/${var.project_id}/roles/reconcileP5CanaryRevisionReader"
+  member  = "serviceAccount:${var.service_account_emails.fault_proxy}"
+}
+
 resource "google_artifact_registry_repository_iam_member" "canary_mutator_image_reader" {
   project    = var.project_id
   location   = var.region

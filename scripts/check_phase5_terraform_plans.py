@@ -290,6 +290,7 @@ _BOOTSTRAP_ADDRESSES = frozenset(
         "google_billing_account_iam_member.phase5_apply",
         "google_project_iam_custom_role.canary_mutator",
         "google_project_iam_custom_role.canary_operation_reader",
+        "google_project_iam_custom_role.canary_revision_reader",
         "google_service_account.phase5_apply",
         "google_service_account_iam_member.owner_impersonation",
         "google_storage_bucket.terraform_state",
@@ -340,6 +341,7 @@ _RUNTIME_ADDRESSES = frozenset(
         "google_cloud_run_v2_service_iam_member.canary_mutator",
         "google_cloud_run_v2_service_iam_member.canary_reader",
         "google_project_iam_member.canary_operation_reader",
+        "google_project_iam_member.canary_revision_reader",
         "google_artifact_registry_repository_iam_member.canary_mutator_image_reader",
         "google_service_account_iam_member.canary_mutator_act_as",
     }
@@ -530,6 +532,11 @@ def _iam_expectations() -> dict[str, dict[str, Any]]:
             "project": _PROJECT,
             "role": (f"projects/{_PROJECT}/roles/reconcileP5CanaryOperationReader"),
         },
+        "google_project_iam_member.canary_revision_reader": {
+            "member": f"serviceAccount:{_RUNTIME_EMAILS['fault_proxy']}",
+            "project": _PROJECT,
+            "role": (f"projects/{_PROJECT}/roles/reconcileP5CanaryRevisionReader"),
+        },
         "google_artifact_registry_repository_iam_member.canary_mutator_image_reader": {
             "location": _REGION,
             "member": f"serviceAccount:{_RUNTIME_EMAILS['fault_proxy']}",
@@ -586,12 +593,17 @@ _CUSTOM_ROLE_EXPECTED = {
     },
     "google_project_iam_custom_role.canary_mutator": {
         "permissions": [
-            "run.revisions.get",
             "run.services.get",
             "run.services.update",
         ],
         "project": _PROJECT,
         "role_id": "reconcileP5CanaryMutator",
+        "stage": "GA",
+    },
+    "google_project_iam_custom_role.canary_revision_reader": {
+        "permissions": ["run.revisions.get"],
+        "project": _PROJECT,
+        "role_id": "reconcileP5CanaryRevisionReader",
         "stage": "GA",
     },
 }

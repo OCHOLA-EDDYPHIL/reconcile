@@ -53,6 +53,7 @@ _EXPECTED_RESOURCE_BLOCKS = {
     ("google_firestore_database", "phase5"),
     ("google_project_iam_member", "phase5_apply"),
     ("google_project_iam_member", "canary_operation_reader"),
+    ("google_project_iam_member", "canary_revision_reader"),
     ("google_project_iam_member", "runtime_database_user"),
     ("google_project_iam_member", "runtime_database_viewer"),
     ("google_project_iam_member", "sandbox_database_user"),
@@ -60,6 +61,7 @@ _EXPECTED_RESOURCE_BLOCKS = {
     ("google_project_iam_member", "target_database_viewer"),
     ("google_project_iam_member", "vertex_user"),
     ("google_project_iam_custom_role", "canary_operation_reader"),
+    ("google_project_iam_custom_role", "canary_revision_reader"),
     ("google_project_iam_custom_role", "canary_mutator"),
     ("google_project_service", "bootstrap_required"),
     ("google_project_service", "required"),
@@ -619,6 +621,7 @@ def test_apply_identity_and_runtime_iam_graph_are_closed_world() -> None:
     assert set(project_iam) == {
         "phase5_apply",
         "canary_operation_reader",
+        "canary_revision_reader",
         "runtime_database_user",
         "runtime_database_viewer",
         "sandbox_database_user",
@@ -680,6 +683,11 @@ def test_apply_identity_and_runtime_iam_graph_are_closed_world() -> None:
             '"serviceAccount:${var.service_account_emails.controller}"',
             None,
         ),
+        "canary_revision_reader": (
+            '"projects/${var.project_id}/roles/reconcileP5CanaryRevisionReader"',
+            '"serviceAccount:${var.service_account_emails.fault_proxy}"',
+            None,
+        ),
     }
     for name, (role, member, for_each) in expected_project_bindings.items():
         body = project_iam[name].body
@@ -692,18 +700,29 @@ def test_apply_identity_and_runtime_iam_graph_are_closed_world() -> None:
 
     operation_reader = project_iam["canary_operation_reader"].body
     assert re.search(r"(?m)^\s*condition\s*\{", operation_reader) is None
+    revision_reader_binding = project_iam["canary_revision_reader"].body
+    assert re.search(r"(?m)^\s*condition\s*\{", revision_reader_binding) is None
 
-    assert set(custom_roles) == {"canary_mutator", "canary_operation_reader"}
+    assert set(custom_roles) == {
+        "canary_mutator",
+        "canary_operation_reader",
+        "canary_revision_reader",
+    }
     operation_role = custom_roles["canary_operation_reader"].body
     assert _attribute(operation_role, "role_id") == (
         '"reconcileP5CanaryOperationReader"'
     )
     assert _attribute(operation_role, "permissions") == '["run.operations.get"]'
     assert _attribute(operation_role, "stage") == '"GA"'
+    revision_role = custom_roles["canary_revision_reader"].body
+    assert _attribute(revision_role, "role_id") == (
+        '"reconcileP5CanaryRevisionReader"'
+    )
+    assert _attribute(revision_role, "permissions") == '["run.revisions.get"]'
+    assert _attribute(revision_role, "stage") == '"GA"'
     mutator_role = custom_roles["canary_mutator"].body
     assert _attribute(mutator_role, "role_id") == '"reconcileP5CanaryMutator"'
     assert set(re.findall(r'"(run\.[a-z.]+)"', mutator_role)) == {
-        "run.revisions.get",
         "run.services.get",
         "run.services.update",
     }
