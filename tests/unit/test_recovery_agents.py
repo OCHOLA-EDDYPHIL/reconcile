@@ -16,13 +16,19 @@ from reconcile.adaptive import (
 from reconcile.contracts import (
     ADAPTIVE_PLANNER_INPUT_VERSION,
     ADAPTIVE_PLANNER_OUTPUT_VERSION,
+    EVIDENCE_DECISION_VERSION,
     AdaptivePlannerOutput,
     Classification,
     EffectAssertionState,
+    EvidenceDecision,
+    EvidenceDisposition,
+    EvidenceReason,
+    InvestigationReport,
     PlannerAcquisitionAdvice,
     PlannerCitationRefs,
     PlannerExplanation,
     PlannerStopAdvice,
+    ProbeOutcome,
     canonical_sha256,
 )
 from reconcile.recovery_agents import (
@@ -80,7 +86,17 @@ def test_recovery_hypothesis_identity_binds_all_provider_inputs() -> None:
     )
 
 
-def _output(*, probe_count: int = 1) -> AdaptivePlannerOutput:
+def _output(
+    *,
+    probe_count: int = 1,
+    citations: PlannerCitationRefs | None = None,
+) -> AdaptivePlannerOutput:
+    citation_refs = citations or PlannerCitationRefs(
+        admitted_evidence_ids=("evidence-7",),
+        weak_evidence_ids=(),
+        rejected_evidence_ids=(),
+        missing_effect_ids=(),
+    )
     return AdaptivePlannerOutput(
         schema_version=ADAPTIVE_PLANNER_OUTPUT_VERSION,
         probe_proposals=tuple(make_probe() for _ in range(probe_count)),
@@ -94,16 +110,27 @@ def _output(*, probe_count: int = 1) -> AdaptivePlannerOutput:
         missing_evidence_notes=(),
         explanation=PlannerExplanation(
             summary="The admitted observation supports the current hypothesis.",
-            admitted_evidence="The exact target read is authoritative.",
-            weak_evidence=None,
-            rejected_evidence=None,
-            missing_evidence=None,
-            citations=PlannerCitationRefs(
-                admitted_evidence_ids=("evidence-7",),
-                weak_evidence_ids=(),
-                rejected_evidence_ids=(),
-                missing_effect_ids=(),
+            admitted_evidence=(
+                "The exact target read is authoritative."
+                if citation_refs.admitted_evidence_ids
+                else None
             ),
+            weak_evidence=(
+                "The retained observation is supplementary."
+                if citation_refs.weak_evidence_ids
+                else None
+            ),
+            rejected_evidence=(
+                "The unavailable observation cannot prove the effect."
+                if citation_refs.rejected_evidence_ids
+                else None
+            ),
+            missing_evidence=(
+                "The effect still requires authoritative proof."
+                if citation_refs.missing_effect_ids
+                else None
+            ),
+            citations=citation_refs,
         ),
     )
 
@@ -178,6 +205,119 @@ def test_recovery_agent_builds_evidence_cited_non_authoritative_hypothesis() -> 
     assert turn.hypothesis.proposed_probe == make_probe()
     assert turn.hypothesis.proposed_transition is None
     assert turn.hypothesis.proposed_classification is Classification.UNKNOWN
+
+
+def _report_with_rejected_probe() -> InvestigationReport:
+    report = make_report(Classification.UNKNOWN)
+    rejected_evidence_id = "evidence-revision-unavailable"
+    rejected = EvidenceDecision(
+        schema_version=EVIDENCE_DECISION_VERSION,
+        evidence_id=rejected_evidence_id,
+        disposition=EvidenceDisposition.REJECTED,
+        reason=EvidenceReason.PROBE_TIMEOUT,
+    )
+    rejected_audit = report.probe_audit[0].model_copy(
+        update={
+            "probe_sequence": 2,
+            "outcome": ProbeOutcome.REJECTED,
+            "stop_reason": "probe_timeout",
+            "started_at": report.probe_audit[0].completed_at,
+            "completed_at": report.probe_audit[0].completed_at,
+            "result_bytes_acquired": 0,
+            "result_sha256": None,
+            "result_byte_count": None,
+            "evidence_ids": (rejected_evidence_id,),
+        }
+    )
+    return InvestigationReport.model_validate(
+        report.model_copy(
+            update={
+                "probe_audit": (*report.probe_audit, rejected_audit),
+                "evidence_decisions": (*report.evidence_decisions, rejected),
+            }
+        )
+    )
+
+
+def test_recovery_agent_keeps_rejected_probe_citations_out_of_hypothesis() -> None:
+    report = _report_with_rejected_probe()
+    planner = _Planner(
+        output=_output(
+            citations=PlannerCitationRefs(
+                admitted_evidence_ids=(),
+                weak_evidence_ids=("evidence-7",),
+                rejected_evidence_ids=("evidence-revision-unavailable",),
+                missing_effect_ids=("business-record", "audit-record"),
+            )
+        )
+    )
+    chain = make_recovery_examples()[0]
+
+    turn = asyncio.run(
+        RecoveryAgent(planner, clock=lambda: report.updated_at).hypothesize(
+            chain=chain,
+            node=chain.nodes[0],
+            envelope=make_envelope(),
+            report=report,
+            capabilities=(make_capability(),),
+        )
+    )
+
+    assert turn.failure is None
+    assert turn.hypothesis is not None
+    assert turn.hypothesis.cited_evidence_ids == ("evidence-7",)
+    assert "evidence-revision-unavailable" not in {
+        evidence_id
+        for effect in turn.hypothesis.effect_hypotheses
+        for evidence_id in effect.cited_evidence_ids
+    }
+    assert set(turn.hypothesis.cited_evidence_ids) <= {
+        item.evidence_id for item in report.evidence
+    }
+
+
+@pytest.mark.parametrize(
+    "citations",
+    (
+        PlannerCitationRefs(
+            admitted_evidence_ids=("evidence-7",),
+            weak_evidence_ids=(),
+            rejected_evidence_ids=(),
+            missing_effect_ids=(),
+        ),
+        PlannerCitationRefs(
+            admitted_evidence_ids=(),
+            weak_evidence_ids=(),
+            rejected_evidence_ids=("evidence-not-supplied",),
+            missing_effect_ids=(),
+        ),
+        PlannerCitationRefs(
+            admitted_evidence_ids=(),
+            weak_evidence_ids=(),
+            rejected_evidence_ids=(),
+            missing_effect_ids=("effect-not-supplied",),
+        ),
+    ),
+)
+def test_recovery_agent_rejects_citations_outside_the_supplied_category(
+    citations: PlannerCitationRefs,
+) -> None:
+    report = _report_with_rejected_probe()
+    planner = _Planner(output=_output(citations=citations))
+    chain = make_recovery_examples()[0]
+
+    turn = asyncio.run(
+        RecoveryAgent(planner, clock=lambda: report.updated_at).hypothesize(
+            chain=chain,
+            node=chain.nodes[0],
+            envelope=make_envelope(),
+            report=report,
+            capabilities=(make_capability(),),
+        )
+    )
+
+    assert turn.hypothesis is None
+    assert turn.failure is PlannerFailureKind.SCHEMA_INVALID
 
 
 def test_recovery_agent_considers_only_first_of_multiple_advisory_probes() -> None:
