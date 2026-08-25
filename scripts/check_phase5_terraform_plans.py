@@ -341,7 +341,10 @@ _RUNTIME_ADDRESSES = frozenset(
         "google_cloud_run_v2_service_iam_member.canary_mutator",
         "google_cloud_run_v2_service_iam_member.canary_reader",
         "google_project_iam_member.canary_operation_reader",
-        "google_project_iam_member.canary_revision_reader",
+        *_quoted(
+            "google_project_iam_member.canary_revision_reader",
+            {"controller", "fault_proxy"},
+        ),
         "google_artifact_registry_repository_iam_member.canary_mutator_image_reader",
         "google_service_account_iam_member.canary_mutator_act_as",
     }
@@ -532,11 +535,6 @@ def _iam_expectations() -> dict[str, dict[str, Any]]:
             "project": _PROJECT,
             "role": (f"projects/{_PROJECT}/roles/reconcileP5CanaryOperationReader"),
         },
-        "google_project_iam_member.canary_revision_reader": {
-            "member": f"serviceAccount:{_RUNTIME_EMAILS['fault_proxy']}",
-            "project": _PROJECT,
-            "role": (f"projects/{_PROJECT}/roles/reconcileP5CanaryRevisionReader"),
-        },
         "google_artifact_registry_repository_iam_member.canary_mutator_image_reader": {
             "location": _REGION,
             "member": f"serviceAccount:{_RUNTIME_EMAILS['fault_proxy']}",
@@ -563,6 +561,12 @@ def _iam_expectations() -> dict[str, dict[str, Any]]:
             "member": _APPLY_MEMBER,
             "role": "roles/iam.serviceAccountUser",
             "service_account_id": f"projects/{_PROJECT}/serviceAccounts/{email}",
+        }
+    for component in ("controller", "fault_proxy"):
+        expected[f'google_project_iam_member.canary_revision_reader["{component}"]'] = {
+            "member": f"serviceAccount:{_RUNTIME_EMAILS[component]}",
+            "project": _PROJECT,
+            "role": f"projects/{_PROJECT}/roles/reconcileP5CanaryRevisionReader",
         }
     invocations = {
         "api_to_controller": ("controller", "api"),
