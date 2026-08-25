@@ -198,6 +198,33 @@ def test_every_component_assembles_one_identical_candidate_without_io(
         assert application.state.hosted_config is config
 
 
+def test_runtime_transport_timeouts_are_component_scoped() -> None:
+    transports = {
+        component: create_runtime_component_app(
+            _config(component)
+        ).state.hosted_transport
+        for component in (
+            Component.API,
+            Component.CONTROLLER,
+            Component.FAULT_PROXY,
+            Component.SANDBOX,
+        )
+    }
+
+    assert {
+        component: (
+            transport._request_timeout_seconds,
+            transport._total_timeout_seconds,
+        )
+        for component, transport in transports.items()
+    } == {
+        Component.API: (265.0, 270.0),
+        Component.CONTROLLER: (265.0, 270.0),
+        Component.FAULT_PROXY: (10.0, 15.0),
+        Component.SANDBOX: (10.0, 15.0),
+    }
+
+
 def test_fault_proxy_recovery_actions_use_durable_authorizers(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

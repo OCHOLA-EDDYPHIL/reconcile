@@ -1006,8 +1006,12 @@ def create_runtime_component_app(
     cas = _cas(config)
     scenario_store = FirestoreScenarioStore(cas, candidate)
     selected_transport = transport or HostedHttpTransport(
-        request_timeout_seconds=(265.0 if config.component is Component.API else None),
-        total_timeout_seconds=(270.0 if config.component is Component.API else None),
+        request_timeout_seconds=(
+            265.0 if config.component in {Component.API, Component.CONTROLLER} else None
+        ),
+        total_timeout_seconds=(
+            270.0 if config.component in {Component.API, Component.CONTROLLER} else None
+        ),
     )
 
     if config.component is Component.API:
