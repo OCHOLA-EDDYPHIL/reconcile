@@ -685,8 +685,8 @@ def test_apply_identity_and_runtime_iam_graph_are_closed_world() -> None:
         ),
         "canary_revision_reader": (
             '"projects/${var.project_id}/roles/reconcileP5CanaryRevisionReader"',
-            '"serviceAccount:${var.service_account_emails.fault_proxy}"',
-            None,
+            '"serviceAccount:${var.service_account_emails[each.value]}"',
+            'toset(["controller", "fault_proxy"])',
         ),
     }
     for name, (role, member, for_each) in expected_project_bindings.items():

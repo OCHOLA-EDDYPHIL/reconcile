@@ -93,9 +93,11 @@ resource "google_project_iam_member" "canary_operation_reader" {
 }
 
 resource "google_project_iam_member" "canary_revision_reader" {
+  for_each = toset(["controller", "fault_proxy"])
+
   project = var.project_id
   role    = "projects/${var.project_id}/roles/reconcileP5CanaryRevisionReader"
-  member  = "serviceAccount:${var.service_account_emails.fault_proxy}"
+  member  = "serviceAccount:${var.service_account_emails[each.value]}"
 }
 
 resource "google_artifact_registry_repository_iam_member" "canary_mutator_image_reader" {
