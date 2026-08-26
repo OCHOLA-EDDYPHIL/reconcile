@@ -34,6 +34,7 @@ from pydantic import Field, JsonValue, StringConstraints, model_validator
 
 from reconcile import phase5_hosted_acceptance as _acceptance
 from reconcile.contracts.base import AwareDatetime, Sha256Digest, StrictModel
+from reconcile.evidence.recovery_rules import deterministic_stage_revision
 
 _SCHEMA = "reconcile/phase5-operator/v1"
 _PROJECT_ID = "reconcile-dev-260813-14fa6d"
@@ -5922,6 +5923,105 @@ def _normalize_observed_teardown_resource(
                     and expected_conditions[0].get("older_than") == "1d"
                 ):
                     conditions[0]["older_than"] = "1d"
+
+    if resource_type == "google_artifact_registry_repository_iam_member":
+        project = expected.get("project")
+        location = expected.get("location")
+        repository = expected.get("repository")
+        if all(
+            isinstance(item, str) and item and "/" not in item
+            for item in (project, location, repository)
+        ):
+            canonical_repository = (
+                f"projects/{project}/locations/{location}/repositories/{repository}"
+            )
+            if normalized.get("repository") == canonical_repository:
+                normalized["repository"] = repository
+
+    if (
+        resource_type == "google_cloud_run_v2_service"
+        and action is Phase5Action.RUNTIME_TEARDOWN
+        and expected.get("name") == "reconcile-p5-canary"
+    ):
+        expected_templates = expected.get("template")
+        observed_templates = normalized.get("template")
+        if (
+            isinstance(expected_templates, list)
+            and isinstance(observed_templates, list)
+            and len(expected_templates) == len(observed_templates) == 1
+            and isinstance(expected_templates[0], dict)
+            and isinstance(observed_templates[0], dict)
+        ):
+            expected_template = expected_templates[0]
+            observed_template = observed_templates[0]
+            expected_containers = expected_template.get("containers")
+            observed_containers = observed_template.get("containers")
+            expected_labels = expected_template.get("labels")
+            observed_labels = observed_template.get("labels")
+            if (
+                isinstance(expected_containers, list)
+                and isinstance(observed_containers, list)
+                and len(expected_containers) == len(observed_containers) == 1
+                and isinstance(expected_containers[0], dict)
+                and isinstance(observed_containers[0], dict)
+                and isinstance(expected_labels, dict)
+                and isinstance(observed_labels, dict)
+            ):
+                expected_environment = expected_containers[0].get("env")
+                observed_environment = observed_containers[0].get("env")
+                if isinstance(expected_environment, list) and isinstance(
+                    observed_environment, list
+                ):
+                    expected_by_name = {
+                        item.get("name"): item
+                        for item in expected_environment
+                        if isinstance(item, dict) and isinstance(item.get("name"), str)
+                    }
+                    observed_by_name = {
+                        item.get("name"): item
+                        for item in observed_environment
+                        if isinstance(item, dict) and isinstance(item.get("name"), str)
+                    }
+                    source = expected_by_name.get("RECONCILE_SOURCE_REVISION")
+                    expected_release = expected_by_name.get(
+                        "RECONCILE_CANARY_RELEASE_ID"
+                    )
+                    observed_release = observed_by_name.get(
+                        "RECONCILE_CANARY_RELEASE_ID"
+                    )
+                    source_revision = (
+                        source.get("value") if isinstance(source, dict) else None
+                    )
+                    release_id = (
+                        f"p5-release-{source_revision[:24]}"
+                        if isinstance(source_revision, str)
+                        and re.fullmatch(r"[0-9a-f]{40}", source_revision)
+                        else None
+                    )
+                    staged_revision = (
+                        deterministic_stage_revision(
+                            service="reconcile-p5-canary",
+                            release_id=release_id,
+                        )
+                        if release_id is not None
+                        else None
+                    )
+                    if (
+                        len(expected_by_name) == len(expected_environment)
+                        and len(observed_by_name) == len(observed_environment)
+                        and isinstance(expected_release, dict)
+                        and isinstance(observed_release, dict)
+                        and expected_release.get("value") == "baseline"
+                        and observed_release.get("value") == release_id
+                        and expected_labels.get("reconcile-release") == "baseline"
+                        and observed_labels.get("reconcile-release") == release_id
+                        and observed_template.get("revision") == staged_revision
+                    ):
+                        observed_release["value"] = "baseline"
+                        observed_labels["reconcile-release"] = "baseline"
+                        observed_template["revision"] = expected_template.get(
+                            "revision"
+                        )
 
     if resource_type == "google_billing_budget":
         amounts = normalized.get("amount")
