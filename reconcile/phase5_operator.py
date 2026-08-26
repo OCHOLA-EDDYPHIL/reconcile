@@ -20,6 +20,7 @@ import stat
 import subprocess
 import sys
 import tarfile
+import time
 import zlib
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
@@ -179,6 +180,15 @@ _STACK_ROOTS = {
     "foundation": "infra/environments/dev/foundation",
     "runtime": "infra/environments/dev/runtime",
 }
+_FOUNDATION_INIT_COMMAND = (
+    _TERRAFORM,
+    f"-chdir={_STACK_ROOTS['foundation']}",
+    "init",
+    "-input=false",
+    "-lockfile=readonly",
+    "-no-color",
+)
+_FOUNDATION_INIT_RETRY_DELAYS_SECONDS = (5, 10, 20, 30, 45, 60, 60)
 _PLAN_FILES = {
     "bootstrap-apply": ("bootstrap", "bootstrap-create"),
     "foundation-apply": ("foundation", "foundation-create"),
@@ -6331,6 +6341,7 @@ def _run_descriptor_once(
     terraform_plan: TerraformPlanBinding | None,
     deadline: datetime,
     clock: Callable[[], datetime],
+    sleeper: Callable[[float], None] = time.sleep,
 ) -> object:
     source_root = _canonical_absolute_path(
         Path(execution_source.root), require_exists=True
@@ -6369,72 +6380,105 @@ def _run_descriptor_once(
     show_by_index = {stage[1]: stage for stage in plan_stages}
     apply_by_index = {stage[2]: stage for stage in plan_stages}
     for index, command in enumerate(descriptor.commands):
-        remaining_seconds = int((_utc(deadline) - _utc(clock())).total_seconds())
-        if remaining_seconds < 1:
-            return object()
         if (apply_stage := apply_by_index.get(index)) is not None:
             execution_path = apply_stage[3]
             execution_identity = execution_identities.get(execution_path)
             if execution_identity is None:
                 return object()
             _verify_execution_plan(execution_path, execution_identity)
-        _verify_execution_source_binding(execution_source)
-        if command[0] == _TERRAFORM:
-            cli_config = environment.get("TF_CLI_CONFIG_FILE")
-            if cli_config is None:
-                return object()
-            _verify_terraform_binary(
-                source_root,
-                runner,
-                cli_config=Path(cli_config),
-                timeout_seconds=min(15, remaining_seconds),
-            )
-        if descriptor.action in {
-            Phase5Action.PROVIDER_ACCEPTANCE,
-            Phase5Action.HOSTED_ACCEPTANCE,
-        }:
-            _verify_python_interpreter()
-            if python_dependencies is None:
-                return object()
-            _verify_python_dependency_binding(python_dependencies)
-            expected_pythonpath = f"{source_root}:{python_dependencies.root}"
-            if environment.get("PYTHONPATH") != expected_pythonpath:
-                return object()
-        remaining_seconds = int((_utc(deadline) - _utc(clock())).total_seconds())
-        if remaining_seconds < 1:
-            return object()
-        result = runner(
-            command,
-            cwd=source_root,
-            environment=environment,
-            timeout_seconds=min(descriptor.timeout_seconds, remaining_seconds),
-        )
-        if _utc(clock()) >= _utc(deadline):
-            return object()
-        if (
-            not isinstance(result, subprocess.CompletedProcess)
-            or type(result.returncode) is not int
-            or type(result.stdout) is not bytes
-            or type(result.stderr) is not bytes
-            or len(result.stdout)
-            > (_MAX_PLAN_JSON_BYTES if index in show_by_index else _MAX_OUTPUT_BYTES)
-            or len(result.stderr) > _MAX_OUTPUT_BYTES
-        ):
-            return object()
-        recorded_stdout = result.stdout
-        if index in show_by_index:
-            recorded_stdout = hashlib.sha256(result.stdout).hexdigest().encode("ascii")
-        stdout_parts.append(len(recorded_stdout).to_bytes(8, "big") + recorded_stdout)
-        stderr_parts.append(len(result.stderr).to_bytes(8, "big") + result.stderr)
-        cleanup_already_empty = (
-            descriptor.action is Phase5Action.BOOTSTRAP_TEARDOWN
+        retry_delays = (
+            iter(_FOUNDATION_INIT_RETRY_DELAYS_SECONDS)
+            if descriptor.action is Phase5Action.FOUNDATION_APPLY
             and index == 0
-            and command == _state_bucket_cleanup_command()
-            and result.returncode == 1
-            and result.stdout == b""
-            and result.stderr == _EMPTY_STATE_BUCKET_CLEANUP_STDERR
+            and command == _FOUNDATION_INIT_COMMAND
+            else iter(())
         )
-        final_code = 0 if cleanup_already_empty else result.returncode
+        while True:
+            remaining_seconds = int((_utc(deadline) - _utc(clock())).total_seconds())
+            if remaining_seconds < 1:
+                return object()
+            _verify_execution_source_binding(execution_source)
+            if command[0] == _TERRAFORM:
+                cli_config = environment.get("TF_CLI_CONFIG_FILE")
+                if cli_config is None:
+                    return object()
+                _verify_terraform_binary(
+                    source_root,
+                    runner,
+                    cli_config=Path(cli_config),
+                    timeout_seconds=min(15, remaining_seconds),
+                )
+            if descriptor.action in {
+                Phase5Action.PROVIDER_ACCEPTANCE,
+                Phase5Action.HOSTED_ACCEPTANCE,
+            }:
+                _verify_python_interpreter()
+                if python_dependencies is None:
+                    return object()
+                _verify_python_dependency_binding(python_dependencies)
+                expected_pythonpath = f"{source_root}:{python_dependencies.root}"
+                if environment.get("PYTHONPATH") != expected_pythonpath:
+                    return object()
+            remaining_seconds = int((_utc(deadline) - _utc(clock())).total_seconds())
+            if remaining_seconds < 1:
+                return object()
+            result = runner(
+                command,
+                cwd=source_root,
+                environment=environment,
+                timeout_seconds=min(descriptor.timeout_seconds, remaining_seconds),
+            )
+            if _utc(clock()) >= _utc(deadline):
+                return object()
+            if (
+                not isinstance(result, subprocess.CompletedProcess)
+                or type(result.returncode) is not int
+                or type(result.stdout) is not bytes
+                or type(result.stderr) is not bytes
+                or len(result.stdout)
+                > (
+                    _MAX_PLAN_JSON_BYTES
+                    if index in show_by_index
+                    else _MAX_OUTPUT_BYTES
+                )
+                or len(result.stderr) > _MAX_OUTPUT_BYTES
+            ):
+                return object()
+            recorded_stdout = result.stdout
+            if index in show_by_index:
+                recorded_stdout = (
+                    hashlib.sha256(result.stdout).hexdigest().encode("ascii")
+                )
+            stdout_parts.append(
+                len(recorded_stdout).to_bytes(8, "big") + recorded_stdout
+            )
+            stderr_parts.append(len(result.stderr).to_bytes(8, "big") + result.stderr)
+            if (
+                sum(map(len, stdout_parts)) > _MAX_OUTPUT_BYTES
+                or sum(map(len, stderr_parts)) > _MAX_OUTPUT_BYTES
+            ):
+                return object()
+            cleanup_already_empty = (
+                descriptor.action is Phase5Action.BOOTSTRAP_TEARDOWN
+                and index == 0
+                and command == _state_bucket_cleanup_command()
+                and result.returncode == 1
+                and result.stdout == b""
+                and result.stderr == _EMPTY_STATE_BUCKET_CLEANUP_STDERR
+            )
+            final_code = 0 if cleanup_already_empty else result.returncode
+            if final_code == 0:
+                break
+            if final_code != 1:
+                break
+            try:
+                retry_delay = next(retry_delays)
+            except StopIteration:
+                break
+            remaining_seconds = int((_utc(deadline) - _utc(clock())).total_seconds())
+            if remaining_seconds <= retry_delay:
+                return object()
+            sleeper(retry_delay)
         if final_code != 0:
             break
         if (plan_stage := plan_by_index.get(index)) is not None:
@@ -6477,11 +6521,6 @@ def _run_descriptor_once(
             descriptor.action is Phase5Action.IMAGE_PUSH
             and index == 4
             and result.stdout != f"{image_artifact.manifest_digest}\n".encode()
-        ):
-            return object()
-        if (
-            sum(map(len, stdout_parts)) > _MAX_OUTPUT_BYTES
-            or sum(map(len, stderr_parts)) > _MAX_OUTPUT_BYTES
         ):
             return object()
     return subprocess.CompletedProcess(
