@@ -4692,6 +4692,179 @@ def test_cloud_resource_manager_enable_failure_prevents_terraform_apply(
     assert not any(call[0] == operator._TERRAFORM for call in observed)
 
 
+def _run_foundation_retry_case(
+    tmp_path: Path,
+    *,
+    responses: tuple[object | None, ...],
+    action: operator.Phase5Action = operator.Phase5Action.FOUNDATION_APPLY,
+    target_index: int = 0,
+    clock: Any = None,
+    before_run: Any = None,
+) -> tuple[object, operator.CommandDescriptor, tuple[str, ...], _Runner, list[float]]:
+    _, manifest, _, _ = _records(tmp_path)
+    descriptor = manifest.command_for(action)
+    target = descriptor.commands[target_index]
+    base_runner = _Runner().bind_source(Path(manifest.execution_source.root))
+    observed_delays: list[float] = []
+    attempts = 0
+    if before_run is not None:
+        before_run()
+
+    def runner(
+        argv: tuple[str, ...],
+        *,
+        cwd: Path,
+        environment: dict[str, str] | Any,
+        timeout_seconds: int,
+    ) -> object:
+        nonlocal attempts
+        result = base_runner(
+            argv,
+            cwd=cwd,
+            environment=environment,
+            timeout_seconds=timeout_seconds,
+        )
+        if argv != target:
+            return result
+        response = responses[min(attempts, len(responses) - 1)]
+        attempts += 1
+        if isinstance(response, BaseException):
+            raise response
+        return result if response is None else response
+
+    result = operator._run_descriptor_once(
+        descriptor,
+        repo_root=Path(manifest.execution_source.root),
+        execution_source=manifest.execution_source,
+        runner=runner,
+        image_artifact=manifest.image_artifact,
+        terraform_plan=manifest.terraform_plan_for(action),
+        python_dependencies=manifest.python_dependencies,
+        deadline=manifest.work_deadline,
+        clock=clock or (lambda: _NOW + timedelta(minutes=3)),
+        sleeper=observed_delays.append,
+    )
+    return result, descriptor, target, base_runner, observed_delays
+
+
+def test_foundation_init_retry_is_bounded_revalidated_and_hash_framed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source_checks = 0
+    verify_source = operator._verify_execution_source_binding
+
+    def prepare() -> None:
+        def count(binding: operator.ExecutionSourceBinding) -> None:
+            nonlocal source_checks
+            source_checks += 1
+            verify_source(binding)
+
+        monkeypatch.setattr(operator, "_verify_execution_source_binding", count)
+
+    failed = subprocess.CompletedProcess(
+        ["init"], 1, b"initializing\n", b"backend unavailable"
+    )
+    result, descriptor, init, runner, delays = _run_foundation_retry_case(
+        tmp_path, responses=(failed, None), before_run=prepare
+    )
+
+    assert isinstance(result, subprocess.CompletedProcess) and result.returncode == 0
+    assert delays == [5] and runner.calls.count(init) == 2
+    assert source_checks == len(descriptor.commands) + 1
+    assert runner.calls.count((operator._TERRAFORM, "version", "-json")) == (
+        len(descriptor.commands) + 1
+    )
+    environments = [
+        value
+        for call, value in zip(runner.calls, runner.environments, strict=True)
+        if call == init
+    ]
+    assert environments == [environments[0], environments[0]]
+    assert all(runner.calls.count(command) == 1 for command in descriptor.commands[1:])
+    assert result.stdout.startswith(
+        len(failed.stdout).to_bytes(8, "big") + failed.stdout
+    )
+    assert result.stderr.startswith(
+        len(failed.stderr).to_bytes(8, "big") + failed.stderr
+    )
+
+
+@pytest.mark.parametrize("case", ("exhausted", "output-budget", "deadline"))
+def test_foundation_init_retry_stops_before_plan(tmp_path: Path, case: str) -> None:
+    output = (
+        b"x" * (operator._MAX_OUTPUT_BYTES // 2)
+        if case == "output-budget"
+        else b"initializing\n"
+    )
+    failure = subprocess.CompletedProcess(["init"], 1, output, b"unavailable")
+    result, descriptor, init, runner, delays = _run_foundation_retry_case(
+        tmp_path,
+        responses=(failure,),
+        clock=(
+            (lambda: _NOW + timedelta(hours=8) - timedelta(seconds=4))
+            if case == "deadline"
+            else None
+        ),
+    )
+
+    assert all(command not in runner.calls for command in descriptor.commands[1:])
+    if case == "exhausted":
+        assert (
+            isinstance(result, subprocess.CompletedProcess) and result.returncode == 1
+        )
+        assert delays == list(operator._FOUNDATION_INIT_RETRY_DELAYS_SECONDS)
+        assert runner.calls.count(init) == len(delays) + 1
+    else:
+        assert not isinstance(result, subprocess.CompletedProcess)
+        assert delays == ([] if case == "deadline" else [5])
+
+
+@pytest.mark.parametrize(
+    ("case", "action", "target_index"),
+    (
+        ("other-init", operator.Phase5Action.BOOTSTRAP_APPLY, 1),
+        ("teardown", operator.Phase5Action.FOUNDATION_TEARDOWN, 0),
+        ("plan", operator.Phase5Action.FOUNDATION_APPLY, 1),
+        ("invalid", operator.Phase5Action.FOUNDATION_APPLY, 0),
+        ("non-one", operator.Phase5Action.FOUNDATION_APPLY, 0),
+        ("exception", operator.Phase5Action.FOUNDATION_APPLY, 0),
+        ("timeout", operator.Phase5Action.FOUNDATION_APPLY, 0),
+    ),
+)
+def test_foundation_retry_excludes_other_failures(
+    tmp_path: Path,
+    case: str,
+    action: operator.Phase5Action,
+    target_index: int,
+) -> None:
+    response: object = subprocess.CompletedProcess(["command"], 1, b"", b"failed")
+    if case == "invalid":
+        response = object()
+    elif case == "non-one":
+        response = subprocess.CompletedProcess(["init"], 2, b"", b"invalid")
+    elif case == "exception":
+        response = RuntimeError("unavailable")
+    elif case == "timeout":
+        response = subprocess.TimeoutExpired(["init"], 1)
+
+    try:
+        result, _, target, runner, delays = _run_foundation_retry_case(
+            tmp_path,
+            responses=(response,),
+            action=action,
+            target_index=target_index,
+        )
+    except (RuntimeError, subprocess.TimeoutExpired):
+        assert case in {"exception", "timeout"}
+        return
+    assert delays == [] and runner.calls.count(target) == 1
+    if case == "invalid":
+        assert not isinstance(result, subprocess.CompletedProcess)
+    else:
+        assert isinstance(result, subprocess.CompletedProcess)
+        assert result.returncode == (2 if case == "non-one" else 1)
+
+
 def test_loaded_image_descriptor_mismatch_prevents_push(tmp_path: Path) -> None:
     _, manifest, _, _ = _records(tmp_path)
     assert manifest.image_artifact.config_digest != manifest.image_digest
