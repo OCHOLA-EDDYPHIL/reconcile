@@ -2069,8 +2069,7 @@ def test_continuation_can_restart_a_chained_provider_failure(tmp_path: Path) -> 
     )
 
     assert (
-        tuple(item.action for item in carried)
-        == operator._INITIAL_CONTINUATION_ACTIONS
+        tuple(item.action for item in carried) == operator._INITIAL_CONTINUATION_ACTIONS
     )
     assert terminal.action is operator.Phase5Action.PROVIDER_ACCEPTANCE
     assert terminal.status is operator.OutcomeStatus.FAILED

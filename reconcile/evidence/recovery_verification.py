@@ -1101,15 +1101,13 @@ def _witness(
         )
     except RecoveryRuleViolation:
         provider_conflicts = ()
-    conflict_candidates = {
-        pair
-        for pair in (
-            *provider_conflicts,
-            *((generic_conflict,) if generic_conflict else ()),
-        )
-        if len(pair) == 2
-    }
-    conflict_ids = min(conflict_candidates) if conflict_candidates else ()
+    # Prefer a direct authority contradiction over a provider-coherence
+    # contradiction. Evidence identifiers include acquisition-specific fields,
+    # so comparing the identifiers across both classes can otherwise change
+    # which semantic conflict witnesses the same replayed evidence set.
+    conflict_ids = generic_conflict or (
+        provider_conflicts[0] if provider_conflicts else ()
+    )
     all_conflict_pairs = tuple(sorted({*provider_conflicts, *generic_conflicts}))
     if evaluation.proof.conflicting_authority and len(conflict_ids) != 2:
         raise RecoveryVerificationError(

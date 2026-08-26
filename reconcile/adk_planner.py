@@ -1131,9 +1131,10 @@ def _qualification_reported_model_revision(
         if leaf_with_alias.endswith("@default")
         else leaf_with_alias
     )
-    if value != config.model and re.fullmatch(
-        rf"{re.escape(config.model)}-[0-9]{{3}}", leaf
-    ) is None:
+    if (
+        value != config.model
+        and re.fullmatch(rf"{re.escape(config.model)}-[0-9]{{3}}", leaf) is None
+    ):
         return None
     return leaf, hashlib.sha256(value.encode("utf-8")).hexdigest()
 

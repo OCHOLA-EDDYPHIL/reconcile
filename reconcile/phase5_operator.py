@@ -4457,8 +4457,7 @@ class Phase5StateStore:
                     terminal_action = Phase5Action.STATE_PROTECTION_CHANGE
                 elif (
                     prior_actions == _INITIAL_CONTINUATION_ACTIONS
-                    and prior.terminal_action.action
-                    is Phase5Action.PROVIDER_ACCEPTANCE
+                    and prior.terminal_action.action is Phase5Action.PROVIDER_ACCEPTANCE
                     and prior.terminal_action.status is OutcomeStatus.FAILED
                 ):
                     direct_carried_actions = (
@@ -4928,9 +4927,7 @@ def _validate_continuation_bounds(
             )
         ):
             raise OperatorError("CONTINUATION_SOURCE_SCOPE_DRIFT")
-        predecessor_stacks = {
-            item.stack: item for item in predecessor.terraform_stacks
-        }
+        predecessor_stacks = {item.stack: item for item in predecessor.terraform_stacks}
         successor_stacks = {item.stack: item for item in successor.terraform_stacks}
         if (
             predecessor_stacks.keys() != successor_stacks.keys()

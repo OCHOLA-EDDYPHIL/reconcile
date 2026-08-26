@@ -36,7 +36,7 @@
 <g id="node2" class="node">
 <title>gate</title>
 <path fill="#172554" stroke="#818cf8" d="M284,-366.34C284,-366.34 128,-366.34 128,-366.34 122,-366.34 116,-360.34 116,-354.34 116,-354.34 116,-340.34 116,-340.34 116,-334.34 122,-328.34 128,-328.34 128,-328.34 284,-328.34 284,-328.34 290,-328.34 296,-334.34 296,-340.34 296,-340.34 296,-354.34 296,-354.34 296,-360.34 290,-366.34 284,-366.34"/>
-<text text-anchor="middle" x="206" y="-350.54" font-family="Arial" font-size="11.00" fill="#e2e8f0">2 / 8 &#160;ADK dispatch gate</text>
+<text text-anchor="middle" x="206" y="-350.54" font-family="Arial" font-size="11.00" fill="#e2e8f0">2 / 8 &#160;deterministic dispatch gate</text>
 <text text-anchor="middle" x="206" y="-338.54" font-family="Arial" font-size="11.00" fill="#e2e8f0">requires matching unspent permit</text>
 </g>
 <!-- rollout&#45;&gt;gate -->
@@ -126,15 +126,15 @@
 <!-- recovery -->
 <g id="node6" class="node">
 <title>recovery</title>
-<path fill="#2e1065" stroke="#c4b5fd" d="M457,-1164.34C457,-1164.34 335,-1164.34 335,-1164.34 329,-1164.34 323,-1158.34 323,-1152.34 323,-1152.34 323,-1138.34 323,-1138.34 323,-1132.34 329,-1126.34 335,-1126.34 335,-1126.34 457,-1126.34 457,-1126.34 463,-1126.34 469,-1132.34 469,-1138.34 469,-1138.34 469,-1152.34 469,-1152.34 469,-1158.34 463,-1164.34 457,-1164.34"/>
-<text text-anchor="middle" x="396" y="-1148.54" font-family="Arial" font-size="11.00" fill="#e2e8f0">4 &#160;RecoveryAgent</text>
-<text text-anchor="middle" x="396" y="-1136.54" font-family="Arial" font-size="11.00" fill="#e2e8f0">Google ADK orchestration</text>
+<path fill="#2e1065" stroke="#c4b5fd" d="M458,-1164.34C458,-1164.34 324,-1164.34 324,-1164.34 318,-1164.34 312,-1158.34 312,-1152.34 312,-1152.34 312,-1138.34 312,-1138.34 312,-1132.34 318,-1126.34 324,-1126.34 324,-1126.34 458,-1126.34 458,-1126.34 464,-1126.34 470,-1132.34 470,-1138.34 470,-1138.34 470,-1152.34 470,-1152.34 470,-1158.34 464,-1164.34 458,-1164.34"/>
+<text text-anchor="middle" x="391" y="-1148.54" font-family="Arial" font-size="11.00" fill="#e2e8f0">4 &#160;RecoveryAgent</text>
+<text text-anchor="middle" x="391" y="-1136.54" font-family="Arial" font-size="11.00" fill="#e2e8f0">ADK&#45;backed Gemini planner</text>
 </g>
 <!-- lost&#45;&gt;recovery -->
 <g id="edge11" class="edge">
 <title>lost&#45;&gt;recovery</title>
-<path fill="none" stroke="#fbbf24" d="M356.22,-56.75C414.29,-87.59 502,-134.17 502,-134.17 502,-1050.34 502,-1050.34 502,-1050.34 502,-1050.34 449,-1102.34 449,-1102.34 449,-1102.34 437.29,-1111.61 424.88,-1121.45"/>
-<polygon fill="#fbbf24" stroke="#fbbf24" points="423.03,-1119.56 418.78,-1126.28 426.29,-1123.68 423.03,-1119.56"/>
+<path fill="none" stroke="#fbbf24" d="M356.22,-56.75C414.29,-87.59 502,-134.17 502,-134.17 502,-1050.34 502,-1050.34 502,-1050.34 502,-1050.34 446,-1102.34 446,-1102.34 446,-1102.34 433.63,-1111.78 420.62,-1121.71"/>
+<polygon fill="#fbbf24" stroke="#fbbf24" points="419.01,-1119.64 414.64,-1126.28 422.2,-1123.81 419.01,-1119.64"/>
 <text text-anchor="middle" x="549.5" y="-585.14" font-family="Arial" font-size="9.00" fill="#cbd5e1">reconcile; do not guess</text>
 </g>
 <!-- gemini -->
@@ -147,9 +147,9 @@
 <!-- recovery&#45;&gt;gemini -->
 <g id="edge1" class="edge">
 <title>recovery&#45;&gt;gemini</title>
-<path fill="none" stroke="#a78bfa" d="M387.13,-1126.21C380.07,-1111.78 370.1,-1091.41 362.27,-1075.41"/>
-<polygon fill="#a78bfa" stroke="#a78bfa" points="364.5,-1073.99 358.84,-1068.4 359.78,-1076.29 364.5,-1073.99"/>
-<text text-anchor="middle" x="408.5" y="-1095.14" font-family="Arial" font-size="9.00" fill="#cbd5e1">bounded context</text>
+<path fill="none" stroke="#a78bfa" d="M383.09,-1126.21C376.8,-1111.78 367.92,-1091.41 360.94,-1075.41"/>
+<polygon fill="#a78bfa" stroke="#a78bfa" points="363.29,-1074.23 357.88,-1068.4 358.47,-1076.33 363.29,-1074.23"/>
+<text text-anchor="middle" x="405.5" y="-1095.14" font-family="Arial" font-size="9.00" fill="#cbd5e1">bounded context</text>
 </g>
 <!-- allowlist -->
 <g id="node8" class="node">

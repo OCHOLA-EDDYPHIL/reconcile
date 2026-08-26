@@ -715,9 +715,7 @@ def test_apply_identity_and_runtime_iam_graph_are_closed_world() -> None:
     assert _attribute(operation_role, "permissions") == '["run.operations.get"]'
     assert _attribute(operation_role, "stage") == '"GA"'
     revision_role = custom_roles["canary_revision_reader"].body
-    assert _attribute(revision_role, "role_id") == (
-        '"reconcileP5CanaryRevisionReader"'
-    )
+    assert _attribute(revision_role, "role_id") == ('"reconcileP5CanaryRevisionReader"')
     assert _attribute(revision_role, "permissions") == '["run.revisions.get"]'
     assert _attribute(revision_role, "stage") == '"GA"'
     mutator_role = custom_roles["canary_mutator"].body

@@ -105,7 +105,10 @@ from reconcile.scenarios.service import (
     is_bounded_hybrid_explicit_unknown,
     is_bounded_hybrid_fixed_fallback,
 )
-from reconcile.scenarios.storage import STORAGE_FIXED_PROBE_PLAN
+from reconcile.scenarios.storage import (
+    STORAGE_FIXED_PROBE_PLAN,
+    StorageScenarioDefinition,
+)
 from tests.contract._factories import make_comparison_record, make_envelope, make_report
 from tests.integration.test_adaptive_scenarios import _ScriptedPlanner
 
@@ -153,6 +156,32 @@ def sandbox_durable_runtime_budget(monkeypatch: pytest.MonkeyPatch) -> None:
         )
 
     monkeypatch.setattr(SandboxOrderScenarioDefinition, "prepare", prepare)
+
+
+@pytest.fixture
+def storage_durable_runtime_budget(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep durable behavior tests independent of runner scheduling latency.
+
+    The production scenario budget remains asserted here; these tests retain
+    their own 20-second completion bounds while exercising post-setup behavior.
+    """
+
+    original_prepare = StorageScenarioDefinition.prepare
+
+    def prepare(definition, plan):
+        prepared = original_prepare(definition, plan)
+        envelope = prepared.execution_envelope
+        assert envelope.context.evidence_budget.max_elapsed_ms == 5_000
+        budget = envelope.context.evidence_budget.model_copy(
+            update={"max_elapsed_ms": _DURABLE_TEST_MAX_ELAPSED_MS}
+        )
+        context = envelope.context.model_copy(update={"evidence_budget": budget})
+        return replace(
+            prepared,
+            execution_envelope=envelope.model_copy(update={"context": context}),
+        )
+
+    monkeypatch.setattr(StorageScenarioDefinition, "prepare", prepare)
 
 
 async def _bind(
@@ -3809,6 +3838,7 @@ def test_escalated_comparison_retains_valid_partial_lane_authority(
 
 def test_terminal_comparison_startup_reaudits_canonical_lane_rows(
     tmp_path: Path,
+    storage_durable_runtime_budget: None,
 ) -> None:
     async def exercise() -> None:
         os.chmod(tmp_path, 0o700)

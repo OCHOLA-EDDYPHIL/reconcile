@@ -1,11 +1,11 @@
 # Proof-to-Permit demo script
 
-<!-- duration-seconds: 225 -->
+<!-- duration-seconds: 210 -->
 
-Target recording length: 3 minutes 45 seconds. Keep the terminal at a readable
+Target recording length: 3 minutes 30 seconds. Keep the terminal at a readable
 font size and use the exact commands shown here.
 
-## 0:00–0:25 — The lost acknowledgement
+## 0:00–0:22 — The lost acknowledgement
 
 **Screen:** Open `demo/proof.svg`, centered on the left-hand fault.
 
@@ -16,7 +16,7 @@ response disappears. A timeout cannot tell the agent whether the change happened
 Retrying may duplicate the revision. Aborting may strand a real change. RECONCILE
 does neither. Gemini investigates; deterministic evidence decides.”
 
-## 0:25–0:55 — Make both baselines lose
+## 0:22–0:45 — Make both baselines lose
 
 **Screen:** Highlight the red scripted-baseline panel.
 
@@ -27,7 +27,7 @@ chain but created two release-labelled revisions. Blind abort made one revision,
 then left it staged with zero promotions and zero release records. These are
 scripted qualification results, not live-cloud comparison claims.”
 
-## 0:55–1:30 — Fail closed first
+## 0:45–1:15 — Fail closed first
 
 **Screen:** Run:
 
@@ -43,20 +43,21 @@ The classifier returns UNKNOWN. CONTINUE is denied for insufficient evidence.
 RETRY is denied because it risks a duplicate. No permit, promotion, or Firestore
 record exists. The safe answer is allowed to be ‘I do not know yet.’”
 
-## 1:30–2:10 — Investigate, prove, permit
+## 1:15–1:50 — Investigate, prove, permit
 
 **Screen:** Open `docs/architecture.svg`; follow steps 4 through 8.
 
 **Narration:**
 
-“RecoveryAgent uses Google ADK and Gemini 3.5 Flash to form one evidence-cited
-hypothesis and propose allowlisted read-only probes. Gemini is not the judge. The
-evidence layer checks source, freshness, and exact release correlation. A
+“RecoveryAgent invokes an ADK-backed Gemini 3.5 Flash planner to form one
+evidence-cited hypothesis and propose allowlisted read-only probes. Gemini is not
+the authority. The evidence layer checks source, freshness, and exact release
+correlation. A
 deterministic verifier alone creates a certificate. That certificate can mint
 only the next exact permit, with an expiry and one use. Firestore arbitrates its
 durable claim before the dispatcher contacts the provider.”
 
-## 2:10–2:50 — Complete exactly the intended chain
+## 1:50–2:25 — Complete exactly the intended chain
 
 **Screen:** Return to the terminal's live-trace section; point to the revision,
 permit, and effect lines.
@@ -70,7 +71,7 @@ permit writes the release record. The final provider counters are one revision,
 one promotion, and one Firestore completion. The revision serves one hundred
 percent of traffic.”
 
-## 2:50–3:15 — Attack the authority boundary
+## 2:25–2:47 — Attack the authority boundary
 
 **Screen:** Point to `REJECTED_BEFORE_PROVIDER_CONTACT`.
 
@@ -81,7 +82,20 @@ before provider contact. Whole-request replay returns the identical durable
 snapshot and creates no new work. A model can suggest an investigation, but it
 cannot spend, widen, or replay a permit.”
 
-## 3:15–3:35 — Show the proof, not a promise
+## 2:47–3:00 — Show the hosted Google Cloud proof
+
+**Screen:** Show a sanitized Google Cloud Logs Explorer capture from the accepted
+run, filtered to `run_id="p5r-adaptive-9b53f92fcb05d60fabe3e1a5301ba402"`.
+Point to the Cloud Run service, revision, and timestamp that match the checked-in
+evidence. Keep project, account, and unrelated log fields hidden.
+
+**Narration:**
+
+“This Logs Explorer record is from the accepted hosted run. Its run and revision
+identifiers match the immutable evidence, tying the replay to backend execution
+on Google Cloud.”
+
+## 3:00–3:20 — Show the proof, not a promise
 
 **Screen:** Run:
 
@@ -91,12 +105,12 @@ uv run --no-sync python scripts/check_release_candidate.py
 
 **Narration:**
 
-“The public fixture validates the frozen counts, classifications, certificate
+“The checked-in fixture validates the frozen counts, classifications, certificate
 hashes, permit limits, replay result, links, and claim boundary. The original
-live record is linked by immutable hashes. After capture, the cloud resources were
-cleaned up, so this is a reproducible evidence replay—not a pretend live endpoint.”
+live record is linked by immutable hashes. The cloud resources were cleaned up
+after capture, so this is a reproducible evidence replay, not an active service.”
 
-## 3:35–3:45 — Close
+## 3:20–3:30 — Close
 
 **Screen:** Return to the title in `README.md`.
 

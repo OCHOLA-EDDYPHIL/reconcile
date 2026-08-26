@@ -658,8 +658,7 @@ def test_structured_success_normalizes_empty_continue_reason() -> None:
         assert turn.output is not None
         assert turn.output.stop_advice.recommend_stop is False
         assert (
-            turn.output.stop_advice.reason
-            == "Continue bounded evidence acquisition."
+            turn.output.stop_advice.reason == "Continue bounded evidence acquisition."
         )
 
     asyncio.run(scenario())
@@ -1109,8 +1108,7 @@ def test_qualification_model_revision_accepts_exact_alias_or_concrete_vertex_for
 
     assert normalized is not None
     assert normalized[0] == "gemini-3.5-flash" or (
-        normalized[0].startswith("gemini-3.5-flash-")
-        and normalized[0][-3:].isdigit()
+        normalized[0].startswith("gemini-3.5-flash-") and normalized[0][-3:].isdigit()
     )
     assert normalized[1] == hashlib.sha256(reported.encode()).hexdigest()
 
