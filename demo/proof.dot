@@ -1,0 +1,49 @@
+digraph ReconcileProof {
+  graph [
+    bgcolor="#07111f",
+    fontname="Arial",
+    label="One lost acknowledgement. Three policies. One safe recovery.",
+    labelloc="t",
+    fontcolor="#f8fafc",
+    fontsize=22,
+    pad=0.35,
+    rankdir=LR,
+    ranksep=0.7,
+    nodesep=0.35,
+    splines=polyline
+  ];
+  node [shape=box, style="rounded,filled", fontname="Arial", fontsize=11, fontcolor="#e2e8f0", color="#475569", fillcolor="#111c2e", margin="0.16,0.12"];
+  edge [fontname="Arial", fontsize=9, fontcolor="#cbd5e1", color="#64748b", arrowsize=0.75];
+
+  fault [label="Cloud Run accepts stage\nresponse disappears", shape=octagon, fillcolor="#451a1a", color="#fb7185"];
+
+  subgraph cluster_retry {
+    label="Accepted scripted baseline";
+    color="#fb7185";
+    fontcolor="#fecdd3";
+    retry [label="BLIND RETRY", fillcolor="#3f1d2e", color="#fb7185"];
+    retry_result [label="2 revisions\n1 promotion\n1 Firestore record", fillcolor="#3f1d2e", color="#fb7185"];
+    abort [label="BLIND ABORT", fillcolor="#3f1d2e", color="#fb7185"];
+    abort_result [label="1 staged revision\n0 promotions\n0 records", fillcolor="#3f1d2e", color="#fb7185"];
+    retry -> retry_result [label="duplicates stage"];
+    abort -> abort_result [label="leaves chain incomplete"];
+  }
+
+  subgraph cluster_live {
+    label="Accepted direct live-cloud Gate G5R";
+    color="#34d399";
+    fontcolor="#a7f3d0";
+    unknown [label="PASS 1  UNKNOWN\nCONTINUE denied\nRETRY denied\n0 permits", fillcolor="#422006", color="#fbbf24"];
+    investigate [label="Gemini hypothesis\n+ allowlisted read-only probes", fillcolor="#2e1065", color="#c4b5fd"];
+    committed [label="PASS 2  COMMITTED\n1 exact correlated revision", fillcolor="#052e2b", color="#34d399"];
+    permit [label="deterministic certificate\nexact max_uses=1 permits", fillcolor="#052e2b", color="#34d399"];
+    live_result [label="1 revision\n1 promotion\n1 Firestore record", fillcolor="#052e2b", color="#34d399"];
+    replay [label="REPLAY DENIED\nbefore provider contact", shape=octagon, fillcolor="#451a1a", color="#fb7185"];
+    unknown -> investigate -> committed -> permit -> live_result;
+    permit -> replay [label="second use", color="#fb7185"];
+  }
+
+  fault -> retry;
+  fault -> abort;
+  fault -> unknown [label="reconcile", color="#34d399"];
+}
