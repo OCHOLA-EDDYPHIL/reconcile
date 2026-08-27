@@ -610,7 +610,7 @@ def build_cloud_run_capability_registration(
             4
             if capability_name == CLOUD_RUN_OPERATION_CAPABILITY
             else 3
-            if capability_name == CLOUD_RUN_SERVICE_CAPABILITY
+            if capability_name == CLOUD_RUN_SERVICE_CAPABILITY and binding.is_stage
             else 2
         ),
         handler=handler,
