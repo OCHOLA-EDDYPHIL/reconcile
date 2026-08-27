@@ -558,6 +558,142 @@ def test_evidence_source_starts_stage_with_service_observation() -> None:
     assert state.revision_read_count == 0
 
 
+def test_fixed_evidence_completes_a_partially_scoped_revision_probe() -> None:
+    settings = _settings()
+    state, _adapter, action, reader, firestore, _client = _provider(settings)
+    action.stage_revision(
+        mode=CloudRunFaultMode.PASS_THROUGH,
+        operation_id=settings.stage_operation_id,
+        release_id=settings.release_id,
+        image_digest=settings.image_digest,
+        configuration_sha256=settings.configuration_sha256,
+    )
+    state.service.traffic_statuses = (
+        run_v2.TrafficTargetStatus(
+            revision=settings.staged_revision,
+            percent=0,
+        ),
+    )
+    definition = build_release_chain_definition(settings, invoked_at=NOW)
+    node = definition.chain.nodes[0]
+    envelope = definition.envelopes[node.node_id]
+    store = InMemoryRecoveryRunStore()
+    source = ReleaseChainEvidenceSource(
+        store=store,
+        definition=definition,
+        settings=settings,
+        cloud_run=reader,
+        firestore=firestore,
+        clock=lambda: NOW + timedelta(seconds=2),
+    )
+    request = RecoveryRunRequest(
+        schema_version=RECOVERY_RUN_REQUEST_VERSION,
+        run_id="partial-revision-then-fixed-run",
+        scenario="cloud-run-rollout",
+        policy=RecoveryRunPolicy.ADAPTIVE,
+        fault=RecoveryRunFault.DROP_AFTER_ACCEPT,
+    )
+    revision_effect_id = next(
+        effect.effect_id
+        for effect in envelope.expected_effects
+        if effect.effect_id == "stage-revision"
+    )
+    partial_revision = ProbeRequest(
+        schema_version=PROBE_REQUEST_VERSION,
+        capability_name="cloud-run-revision-get",
+        capability_version="1.0.0",
+        relevant_effect_ids=(revision_effect_id,),
+        arguments={},
+        rationale="Read only the exact revision identity.",
+    )
+
+    async def exercise():
+        await store.create(request, definition.chain, created_at=NOW)
+        await source.current(request.run_id, node, envelope)
+        await source.probe(request.run_id, node, envelope, partial_revision)
+        return await source.fixed(request.run_id, node, envelope)
+
+    fixed = asyncio.run(exercise())
+    artifact = verify_recovery(
+        chain=definition.chain,
+        node_id=node.node_id,
+        envelope=envelope,
+        report=fixed.report,
+        evaluation=fixed.evaluation,
+        verified_at=fixed.report.updated_at,
+        successor_envelope=definition.envelopes["promote"],
+    )
+    revision_audit = tuple(
+        item
+        for item in fixed.report.probe_audit
+        if item.capability_name == "cloud-run-revision-get"
+    )
+
+    assert state.revision_read_count == 2
+    assert len(revision_audit) == 2
+    assert len({item.request_sha256 for item in revision_audit}) == 2
+    assert fixed.evaluation.classification is Classification.COMMITTED
+    assert isinstance(artifact, VerifiedCertificate)
+    assert artifact.transition is not None
+
+
+def test_fixed_evidence_reuses_an_identical_full_scope_revision_probe() -> None:
+    settings = _settings()
+    state, _adapter, action, reader, firestore, _client = _provider(settings)
+    action.stage_revision(
+        mode=CloudRunFaultMode.PASS_THROUGH,
+        operation_id=settings.stage_operation_id,
+        release_id=settings.release_id,
+        image_digest=settings.image_digest,
+        configuration_sha256=settings.configuration_sha256,
+    )
+    definition = build_release_chain_definition(settings, invoked_at=NOW)
+    node = definition.chain.nodes[0]
+    envelope = definition.envelopes[node.node_id]
+    store = InMemoryRecoveryRunStore()
+    source = ReleaseChainEvidenceSource(
+        store=store,
+        definition=definition,
+        settings=settings,
+        cloud_run=reader,
+        firestore=firestore,
+        clock=lambda: NOW + timedelta(seconds=2),
+    )
+    request = RecoveryRunRequest(
+        schema_version=RECOVERY_RUN_REQUEST_VERSION,
+        run_id="full-revision-then-fixed-run",
+        scenario="cloud-run-rollout",
+        policy=RecoveryRunPolicy.ADAPTIVE,
+        fault=RecoveryRunFault.DROP_AFTER_ACCEPT,
+    )
+    full_revision = ProbeRequest(
+        schema_version=PROBE_REQUEST_VERSION,
+        capability_name="cloud-run-revision-get",
+        capability_version="1.0.0",
+        relevant_effect_ids=tuple(
+            effect.effect_id for effect in envelope.expected_effects
+        ),
+        arguments={},
+        rationale="Use a different rationale for the same executable request.",
+    )
+
+    async def exercise():
+        await store.create(request, definition.chain, created_at=NOW)
+        await source.current(request.run_id, node, envelope)
+        await source.probe(request.run_id, node, envelope, full_revision)
+        return await source.fixed(request.run_id, node, envelope)
+
+    fixed = asyncio.run(exercise())
+    revision_audit = tuple(
+        item
+        for item in fixed.report.probe_audit
+        if item.capability_name == "cloud-run-revision-get"
+    )
+
+    assert state.revision_read_count == 1
+    assert len(revision_audit) == 1
+
+
 def test_evidence_source_repolls_pending_provider_state_in_a_new_bounded_round() -> (
     None
 ):

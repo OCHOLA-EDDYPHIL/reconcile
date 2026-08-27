@@ -500,6 +500,16 @@ class _CloudRunReadHandler:
             except CloudRunCanaryError as error:
                 if self.capability_name == CLOUD_RUN_SERVICE_CAPABILITY:
                     if error.code is CloudRunCanaryErrorCode.REVISION_NOT_FOUND:
+                        visibility_poll_seconds = (
+                            self.reader.revision_settle_delay_seconds
+                        )
+                        if (
+                            visibility_poll_seconds > 0
+                            and loop.time() + visibility_poll_seconds
+                            < visibility_deadline
+                        ):
+                            await asyncio.sleep(visibility_poll_seconds)
+                            continue
                         snapshot = None
                         break
                     raise CapabilityUnavailable from None
