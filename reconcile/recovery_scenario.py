@@ -989,23 +989,27 @@ class ReleaseChainEvidenceSource:
                 and capability_name == CLOUD_RUN_REVISION_CAPABILITY
             ):
                 evaluation = session.engine.evaluate(session.controller.audit_trail)
-                traffic_effect_ids = tuple(
-                    finding.effect_id
+                findings = {
+                    finding.commit_scope: finding
                     for finding in evaluation.proof.effect_findings
-                    if finding.commit_scope == STAGE_TRAFFIC_EFFECT_SCOPE
-                    and finding.state is EffectAssertionState.UNVERIFIED
-                )
-                if traffic_effect_ids:
+                }
+                revision = findings.get(STAGE_REVISION_EFFECT_SCOPE)
+                readiness = findings.get(STAGE_READINESS_EFFECT_SCOPE)
+                traffic = findings.get(STAGE_TRAFFIC_EFFECT_SCOPE)
+                if (
+                    revision is not None
+                    and revision.state is EffectAssertionState.ESTABLISHED
+                    and readiness is not None
+                    and readiness.state is EffectAssertionState.ESTABLISHED
+                    and traffic is not None
+                    and traffic.state is EffectAssertionState.UNVERIFIED
+                ):
                     traffic_request = self._request(
                         envelope,
                         CLOUD_RUN_SERVICE_CAPABILITY,
-                        relevant_effect_ids=traffic_effect_ids,
+                        relevant_effect_ids=(traffic.effect_id,),
                     )
-                    if (
-                        probe_request_sha256(traffic_request)
-                        not in session.executed_request_sha256s
-                        and not await self._execute_request(session, traffic_request)
-                    ):
+                    if not await self._execute_request(session, traffic_request):
                         break
         return self._state(session, envelope)
 

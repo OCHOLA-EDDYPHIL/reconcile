@@ -687,7 +687,7 @@ def test_fixed_evidence_reobserves_unverified_stage_traffic() -> None:
         schema_version=PROBE_REQUEST_VERSION,
         capability_name=CLOUD_RUN_SERVICE_CAPABILITY,
         capability_version="1.0.0",
-        relevant_effect_ids=("stage-revision",),
+        relevant_effect_ids=("stage-traffic",),
         arguments={},
         rationale="Read service state before the provider has settled.",
     )
@@ -719,12 +719,16 @@ def test_fixed_evidence_reobserves_unverified_stage_traffic() -> None:
         item
         for item in fixed.report.evidence
         if item.capability_name == CLOUD_RUN_SERVICE_CAPABILITY
-        and tuple(assertion.effect_id for assertion in item.effect_assertions)
-        == ("stage-traffic",)
+        and any(
+            assertion.effect_id == "stage-traffic"
+            and assertion.state is EffectAssertionState.ESTABLISHED
+            for assertion in item.effect_assertions
+        )
     )
 
     assert len(service_audit) == 3
-    assert len({item.request_sha256 for item in service_audit}) == 3
+    assert len({item.request_sha256 for item in service_audit}) == 2
+    assert service_audit[1].request_sha256 == service_audit[2].request_sha256
     assert len(traffic_evidence) == 1
     assert traffic_evidence[0].effect_assertions[0].state is (
         EffectAssertionState.ESTABLISHED
