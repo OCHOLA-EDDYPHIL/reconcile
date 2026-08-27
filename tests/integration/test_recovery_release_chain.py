@@ -11,10 +11,12 @@ from google.api_core import exceptions as api_exceptions
 from google.cloud import run_v2
 from pydantic import ValidationError
 
+import reconcile.recovery_scenario as recovery_scenario_module
 from reconcile.adapters.cloud_run import (
     CLOUD_RUN_REVISION_CAPABILITY,
     CLOUD_RUN_SERVICE_CAPABILITY,
 )
+from reconcile.adaptive import PlannerFailureKind
 from reconcile.contracts import (
     ADAPTIVE_PLANNER_OUTPUT_VERSION,
     PROBE_REQUEST_VERSION,
@@ -31,6 +33,7 @@ from reconcile.contracts import (
     ProbeRequest,
     RecoveryAuthorityKind,
     RecoveryDecision,
+    RecoveryHypothesisDisposition,
     RecoveryLaunchPermitState,
     RecoveryReceiptOutcome,
     RecoveryRunFault,
@@ -59,6 +62,7 @@ from reconcile.hosted.firestore_release import (
 from reconcile.persistence import InMemoryRecoveryRunStore, SqliteDurableRuntimeStore
 from reconcile.recovery_agents import RecoveryAgent
 from reconcile.recovery_scenario import (
+    RECOVERY_EVIDENCE_BUDGET_MS,
     BlindPolicyExecutor,
     RecoveryLaneBaseline,
     RecoveryPolicyComparisonRunner,
@@ -519,6 +523,117 @@ class _ReleasePlanner(_Planner):
         return await super().plan(planner_input)
 
 
+def test_unavailable_generation_leaves_time_for_deterministic_fixed_fallback(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _SharedClock:
+        def __init__(self) -> None:
+            self.elapsed_seconds = 0.0
+
+        def advance(self, seconds: float) -> None:
+            self.elapsed_seconds += seconds
+
+        def monotonic(self) -> float:
+            return self.elapsed_seconds
+
+        def now(self) -> datetime:
+            return NOW + timedelta(seconds=self.elapsed_seconds)
+
+    class _UnavailablePlanner(_Planner):
+        def __init__(self, clock: _SharedClock) -> None:
+            super().__init__(failure=PlannerFailureKind.UNAVAILABLE)
+            self.clock = clock
+            self.generation_attempts = 0
+
+        async def plan(self, planner_input):
+            if self.generation_attempts == 0:
+                self.generation_attempts += 1
+                self.clock.advance(25)
+            return await super().plan(planner_input)
+
+    clock = _SharedClock()
+    monkeypatch.setattr(
+        recovery_scenario_module,
+        "_WallClock",
+        lambda _now: clock,
+    )
+    original_get_service = _Services.get_service
+    delayed_stage_read = False
+
+    def timed_get_service(client: _Services, **kwargs):
+        nonlocal delayed_stage_read
+        result = original_get_service(client, **kwargs)
+        if client.state.update_count == 1 and not delayed_stage_read:
+            delayed_stage_read = True
+            clock.advance(6)
+        return result
+
+    monkeypatch.setattr(_Services, "get_service", timed_get_service)
+    settings = _settings()
+    state, _adapter, action, reader, firestore, _client = _provider(settings)
+    store = InMemoryRecoveryRunStore()
+    authority = PermitAuthority(
+        SqliteDurableRuntimeStore(tmp_path / "one-generation-fallback.sqlite3"),
+        clock=clock.now,
+    )
+    planner = _UnavailablePlanner(clock)
+    workflow = build_release_chain_workflow(
+        settings=settings,
+        invoked_at=NOW,
+        store=store,
+        permit_authority=authority,
+        recovery_agent=RecoveryAgent(planner, clock=clock.now),
+        cloud_action=action,
+        cloud_reader=reader,
+        firestore=firestore,
+        clock=clock.now,
+    )
+    request = RecoveryRunRequest(
+        schema_version=RECOVERY_RUN_REQUEST_VERSION,
+        run_id="adaptive-one-generation-fixed-fallback",
+        scenario="cloud-run-rollout",
+        policy=RecoveryRunPolicy.ADAPTIVE,
+        fault=RecoveryRunFault.DROP_AFTER_ACCEPT,
+    )
+
+    async def exercise():
+        definition = await workflow.definition(request)
+        await store.create(request, definition.chain, created_at=NOW)
+        completed = await workflow.run(request.run_id)
+        events = await store.events(request.run_id)
+        return definition, completed, events
+
+    definition, completed, events = asyncio.run(exercise())
+    stage_reports = tuple(
+        event.payload.report
+        for event in events.events
+        if event.payload.report is not None
+        and event.payload.report.investigation_id
+        == definition.envelopes["stage"].investigation_id
+    )
+    hypothesis_dispositions = tuple(
+        event.payload.hypothesis_disposition
+        for event in events.events
+        if event.type.value == "HYPOTHESIS"
+    )
+    assert completed.lifecycle is RecoveryRunLifecycle.COMPLETED
+    assert planner.generation_attempts == 1
+    assert completed.hypotheses == ()
+    assert hypothesis_dispositions[0] is (
+        RecoveryHypothesisDisposition.MODEL_UNAVAILABLE
+    )
+    assert clock.elapsed_seconds == 31
+    assert delayed_stage_read is True
+    assert tuple(audit.capability_name for audit in stage_reports[-1].probe_audit) == (
+        CLOUD_RUN_SERVICE_CAPABILITY,
+        CLOUD_RUN_REVISION_CAPABILITY,
+        "cloud-run-revision-health",
+    )
+    assert stage_reports[-1].classification is Classification.COMMITTED
+    assert state.update_count == 2
+
+
 def test_evidence_source_starts_stage_with_service_observation() -> None:
     settings = _settings()
     state, _adapter, action, reader, firestore, _client = _provider(settings)
@@ -890,7 +1005,11 @@ def test_evidence_source_does_not_renormalize_cached_terminal_probe() -> None:
 
         def monotonic(self) -> float:
             self.calls += 1
-            return 0.0 if self.calls == 1 else 31.0
+            return (
+                0.0
+                if self.calls == 1
+                else (RECOVERY_EVIDENCE_BUDGET_MS + 1_000) / 1_000
+            )
 
         def now(self) -> datetime:
             return NOW + timedelta(seconds=2)

@@ -158,6 +158,7 @@ RECOVERY_AUTHORITY_POLICY_VERSION = "recovery-authority-v1"
 RECOVERY_CLASSIFICATION_POLICY_VERSION = "recovery-classification-v1"
 RECOVERY_ACTION_POLICY_VERSION = "recovery-action-v1"
 RECOVERY_FRESHNESS_SECONDS = 60
+RECOVERY_EVIDENCE_BUDGET_MS = 60_000
 
 
 class ReleaseChainError(RuntimeError):
@@ -406,7 +407,7 @@ def _envelope(
             correlation_fields={"release_id": settings.release_id},
             evidence_budget=EvidenceBudget(
                 max_probes=8,
-                max_elapsed_ms=30_000,
+                max_elapsed_ms=RECOVERY_EVIDENCE_BUDGET_MS,
                 max_total_result_bytes=1_000_000,
                 max_cost_units=8,
             ),
@@ -2968,6 +2969,7 @@ class _WallClock:
 
 
 __all__ = [
+    "RECOVERY_EVIDENCE_BUDGET_MS",
     "RECOVERY_SCENARIO_VERSION",
     "BlindPolicyExecutor",
     "BlindPolicyOutcome",
