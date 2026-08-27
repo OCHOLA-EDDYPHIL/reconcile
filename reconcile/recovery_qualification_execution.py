@@ -931,18 +931,88 @@ def _slice_definition(
     )
 
 
+def _qualification_health_is_redundant(
+    evidence: NormalizedEvidence,
+    supporting_evidence: tuple[NormalizedEvidence, ...],
+    artifact: VerifiedCertificate | AmbiguityWitness,
+) -> bool:
+    if (
+        not isinstance(artifact, VerifiedCertificate)
+        or evidence.capability_name != CLOUD_RUN_HEALTH_CAPABILITY
+        or evidence.operation_status is not None
+    ):
+        return False
+    definitive = tuple(
+        assertion
+        for assertion in evidence.effect_assertions
+        if assertion.state is not EffectAssertionState.UNVERIFIED
+    )
+    if len(definitive) != 1:
+        return False
+    health_assertion = definitive[0]
+    health_release = evidence.correlation.get("release_id")
+    health_revision = evidence.correlation.get("revision")
+    if (
+        not isinstance(health_release, str)
+        or not health_release
+        or not isinstance(health_revision, str)
+        or not health_revision
+    ):
+        return False
+    for revision in supporting_evidence:
+        if (
+            revision.capability_name != CLOUD_RUN_REVISION_CAPABILITY
+            or revision.target != evidence.target
+            or revision.correlation.get("release_id") != health_release
+            or revision.correlation.get("revision") != health_revision
+        ):
+            continue
+        revision_assertion = next(
+            (
+                assertion
+                for assertion in revision.effect_assertions
+                if assertion.effect_id == health_assertion.effect_id
+            ),
+            None,
+        )
+        if revision_assertion is None:
+            continue
+        if revision_assertion.state is health_assertion.state:
+            return True
+        if (
+            artifact.classification is Classification.PENDING
+            and health_assertion.state is EffectAssertionState.NOT_ESTABLISHED
+            and revision_assertion.state is EffectAssertionState.UNVERIFIED
+            and revision.operation_status is OperationStatus.ACTIVE
+            and revision.correlation.get("reconciling") == "true"
+            and revision.correlation.get("terminal_condition") == "NONE"
+            and revision.correlation.get("readiness") == "UNKNOWN"
+        ):
+            return True
+    return False
+
+
 def _semantic_evidence_sha256(
     state: RecoveryEvidenceState,
     artifact: VerifiedCertificate | AmbiguityWitness,
 ) -> str:
     decisions = {item.evidence_id: item for item in state.evaluation.decisions}
     supporting = {item.evidence_id for item in artifact.evidence}
+    supporting_evidence = tuple(
+        evidence
+        for evidence in state.evaluation.evidence
+        if evidence.evidence_id in supporting
+        and decisions[evidence.evidence_id].disposition is EvidenceDisposition.ADMITTED
+    )
     values = []
-    for evidence in state.evaluation.evidence:
-        if evidence.evidence_id not in supporting:
-            continue
-        decision = decisions[evidence.evidence_id]
-        if decision.disposition.value != "ADMITTED":
+    for evidence in supporting_evidence:
+        if _qualification_health_is_redundant(
+            evidence,
+            supporting_evidence,
+            artifact,
+        ):
+            # The exact revision already determines the verified outcome. Keep
+            # material health-only or conflicting evidence in the projection.
             continue
         values.append(
             {
