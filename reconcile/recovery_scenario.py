@@ -57,6 +57,7 @@ from reconcile.contracts import (
     AmbiguityKind,
     AmbiguousExecution,
     CapabilityRef,
+    EffectAssertionState,
     EnvelopeContext,
     EvidenceBudget,
     ExecutionEnvelope,
@@ -877,13 +878,17 @@ class ReleaseChainEvidenceSource:
     def _request(
         envelope: ExecutionEnvelope,
         capability_name: str,
+        *,
+        relevant_effect_ids: tuple[str, ...] | None = None,
     ) -> ProbeRequest:
         return ProbeRequest(
             schema_version=PROBE_REQUEST_VERSION,
             capability_name=capability_name,
             capability_version="1.0.0",
-            relevant_effect_ids=tuple(
-                effect.effect_id for effect in envelope.expected_effects
+            relevant_effect_ids=(
+                tuple(effect.effect_id for effect in envelope.expected_effects)
+                if relevant_effect_ids is None
+                else relevant_effect_ids
             ),
             arguments={},
             rationale="Read exact target-bound provider state for recovery.",
@@ -979,6 +984,29 @@ class ReleaseChainEvidenceSource:
             if probe_request_sha256(request) not in session.executed_request_sha256s:
                 if not await self._execute_request(session, request):
                     break
+            if (
+                node.node_id == "stage"
+                and capability_name == CLOUD_RUN_REVISION_CAPABILITY
+            ):
+                evaluation = session.engine.evaluate(session.controller.audit_trail)
+                traffic_effect_ids = tuple(
+                    finding.effect_id
+                    for finding in evaluation.proof.effect_findings
+                    if finding.commit_scope == STAGE_TRAFFIC_EFFECT_SCOPE
+                    and finding.state is EffectAssertionState.UNVERIFIED
+                )
+                if traffic_effect_ids:
+                    traffic_request = self._request(
+                        envelope,
+                        CLOUD_RUN_SERVICE_CAPABILITY,
+                        relevant_effect_ids=traffic_effect_ids,
+                    )
+                    if (
+                        probe_request_sha256(traffic_request)
+                        not in session.executed_request_sha256s
+                        and not await self._execute_request(session, traffic_request)
+                    ):
+                        break
         return self._state(session, envelope)
 
 
