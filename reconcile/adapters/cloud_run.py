@@ -606,7 +606,13 @@ def build_cloud_run_capability_registration(
         semantics=CapabilitySemantics.READ_ONLY,
         enabled=True,
         argument_byte_ceiling=_ARGUMENT_BYTE_CEILING,
-        max_invocations=(4 if capability_name == CLOUD_RUN_OPERATION_CAPABILITY else 2),
+        max_invocations=(
+            4
+            if capability_name == CLOUD_RUN_OPERATION_CAPABILITY
+            else 3
+            if capability_name == CLOUD_RUN_SERVICE_CAPABILITY
+            else 2
+        ),
         handler=handler,
     )
 

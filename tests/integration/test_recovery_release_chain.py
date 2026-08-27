@@ -683,10 +683,19 @@ def test_fixed_evidence_reobserves_unverified_stage_traffic() -> None:
         arguments={},
         rationale="Read only the exact revision identity.",
     )
+    partial_service = ProbeRequest(
+        schema_version=PROBE_REQUEST_VERSION,
+        capability_name=CLOUD_RUN_SERVICE_CAPABILITY,
+        capability_version="1.0.0",
+        relevant_effect_ids=("stage-revision",),
+        arguments={},
+        rationale="Read service state before the provider has settled.",
+    )
 
     async def exercise():
         await store.create(request, definition.chain, created_at=NOW)
         await source.current(request.run_id, node, envelope)
+        await source.probe(request.run_id, node, envelope, partial_service)
         await source.probe(request.run_id, node, envelope, partial_revision)
         state.service.traffic_statuses = staged_traffic
         return await source.fixed(request.run_id, node, envelope)
@@ -714,8 +723,8 @@ def test_fixed_evidence_reobserves_unverified_stage_traffic() -> None:
         == ("stage-traffic",)
     )
 
-    assert len(service_audit) == 2
-    assert len({item.request_sha256 for item in service_audit}) == 2
+    assert len(service_audit) == 3
+    assert len({item.request_sha256 for item in service_audit}) == 3
     assert len(traffic_evidence) == 1
     assert traffic_evidence[0].effect_assertions[0].state is (
         EffectAssertionState.ESTABLISHED
