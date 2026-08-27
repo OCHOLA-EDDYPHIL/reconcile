@@ -41,7 +41,12 @@ from reconcile.contracts import (
     canonical_json_bytes,
 )
 from reconcile.contracts.base import canonical_json_value_bytes
-from reconcile.controller import BoundProbe, CapabilitySemantics, ProbeObservation
+from reconcile.controller import (
+    BoundProbe,
+    CapabilitySemantics,
+    CapabilityUnavailable,
+    ProbeObservation,
+)
 from reconcile.evidence import RuleInput, RuleRejected, RuleVerdict
 from reconcile.evidence.recovery_rules import (
     CLOUD_RUN_HEALTH_ADAPTER_VERSION,
@@ -813,6 +818,226 @@ def test_service_read_waits_for_authoritative_settlement() -> None:
     assert raw.payload["observation"]["reconciling"] == "false"
     assert raw.payload["observation"]["terminal_condition"] == "SUCCEEDED"
     assert raw.payload["observation"]["revision_traffic_percent"] == "0"
+
+
+def test_service_read_waits_for_expected_revision_visibility() -> None:
+    class Services:
+        calls = 0
+
+        def get_service(self, **kwargs: object) -> run_v2.Service:
+            self.calls += 1
+            request = kwargs["request"]
+            visible = self.calls > 1
+            settling = self.calls == 2
+            return run_v2.Service(
+                name=request.name,
+                etag=f"etag-{self.calls}",
+                generation=2,
+                observed_generation=1 if settling else 2,
+                reconciling=settling,
+                conditions=(
+                    run_v2.Condition(
+                        type_="Ready",
+                        state=(
+                            run_v2.Condition.State.CONDITION_RECONCILING
+                            if settling
+                            else run_v2.Condition.State.CONDITION_SUCCEEDED
+                        ),
+                    ),
+                ),
+                traffic_statuses=(
+                    run_v2.TrafficTargetStatus(
+                        revision=REVISION if visible else "reconcile-canary-baseline",
+                        percent=0 if visible else 100,
+                    ),
+                ),
+            )
+
+    class Revisions:
+        pass
+
+    services = Services()
+    target = CloudRunCanaryTarget(
+        project="demo-project",
+        location="us-central1",
+        service="reconcile-canary",
+        image_repository=(
+            "us-central1-docker.pkg.dev/demo-project/reconcile-p5/reconcile"
+        ),
+        baseline_revision="reconcile-canary-baseline",
+        health_audience="https://canary.example.test",
+    )
+    registration = build_cloud_run_capability_registration(
+        reader=CloudRunCanaryReader(
+            target=target,
+            services_factory=lambda: services,
+            revisions_factory=Revisions,
+            clock=lambda: NOW + timedelta(seconds=1),
+            revision_settle_delay_seconds=0.001,
+        ),
+        binding=_binding(),
+        capability_name=CLOUD_RUN_SERVICE_CAPABILITY,
+        target=_target(),
+        clock=lambda: NOW + timedelta(seconds=1),
+    )
+    envelope = _envelope()
+    probe = BoundProbe(
+        investigation_id=envelope.investigation_id,
+        operation_id=envelope.operation_id,
+        capability_name=CLOUD_RUN_SERVICE_CAPABILITY,
+        capability_version="1.0.0",
+        target=envelope.target,
+        relevant_effect_ids=tuple(
+            effect.effect_id for effect in envelope.expected_effects
+        ),
+        arguments={},
+        timeout_ms=1_000,
+        result_byte_ceiling=8_192,
+    )
+
+    import asyncio
+
+    assert registration.handler is not None
+    raw = asyncio.run(registration.handler(probe))
+
+    assert services.calls == 3
+    assert raw.payload["observation"]["revision"] == REVISION
+    assert raw.payload["observation"]["reconciling"] == "false"
+    assert raw.payload["observation"]["terminal_condition"] == "SUCCEEDED"
+    assert raw.payload["observation"]["revision_traffic_percent"] == "0"
+
+
+def test_service_read_visibility_deadline_preserves_authoritative_absence() -> None:
+    class Services:
+        calls = 0
+
+        def get_service(self, **kwargs: object) -> run_v2.Service:
+            self.calls += 1
+            request = kwargs["request"]
+            return run_v2.Service(
+                name=request.name,
+                etag="etag-1",
+                generation=1,
+                observed_generation=1,
+                reconciling=False,
+                conditions=(
+                    run_v2.Condition(
+                        type_="Ready",
+                        state=run_v2.Condition.State.CONDITION_SUCCEEDED,
+                    ),
+                ),
+                traffic_statuses=(
+                    run_v2.TrafficTargetStatus(
+                        revision="reconcile-canary-baseline", percent=100
+                    ),
+                ),
+            )
+
+    class Revisions:
+        pass
+
+    services = Services()
+    target = CloudRunCanaryTarget(
+        project="demo-project",
+        location="us-central1",
+        service="reconcile-canary",
+        image_repository=(
+            "us-central1-docker.pkg.dev/demo-project/reconcile-p5/reconcile"
+        ),
+        baseline_revision="reconcile-canary-baseline",
+        health_audience="https://canary.example.test",
+    )
+    registration = build_cloud_run_capability_registration(
+        reader=CloudRunCanaryReader(
+            target=target,
+            services_factory=lambda: services,
+            revisions_factory=Revisions,
+            clock=lambda: NOW + timedelta(seconds=1),
+        ),
+        binding=_binding(),
+        capability_name=CLOUD_RUN_SERVICE_CAPABILITY,
+        target=_target(),
+        clock=lambda: NOW + timedelta(seconds=1),
+    )
+    envelope = _envelope()
+    probe = BoundProbe(
+        investigation_id=envelope.investigation_id,
+        operation_id=envelope.operation_id,
+        capability_name=CLOUD_RUN_SERVICE_CAPABILITY,
+        capability_version="1.0.0",
+        target=envelope.target,
+        relevant_effect_ids=tuple(
+            effect.effect_id for effect in envelope.expected_effects
+        ),
+        arguments={},
+        timeout_ms=1,
+        result_byte_ceiling=8_192,
+    )
+
+    import asyncio
+
+    assert registration.handler is not None
+    raw = asyncio.run(registration.handler(probe))
+
+    assert services.calls == 1
+    assert raw.payload == {"observation": None}
+
+
+def test_service_read_does_not_retry_non_visibility_errors() -> None:
+    class Services:
+        calls = 0
+
+        def get_service(self, **_: object) -> run_v2.Service:
+            self.calls += 1
+            raise api_exceptions.PermissionDenied("denied")
+
+    class Revisions:
+        pass
+
+    services = Services()
+    target = CloudRunCanaryTarget(
+        project="demo-project",
+        location="us-central1",
+        service="reconcile-canary",
+        image_repository=(
+            "us-central1-docker.pkg.dev/demo-project/reconcile-p5/reconcile"
+        ),
+        baseline_revision="reconcile-canary-baseline",
+        health_audience="https://canary.example.test",
+    )
+    registration = build_cloud_run_capability_registration(
+        reader=CloudRunCanaryReader(
+            target=target,
+            services_factory=lambda: services,
+            revisions_factory=Revisions,
+            clock=lambda: NOW + timedelta(seconds=1),
+        ),
+        binding=_binding(),
+        capability_name=CLOUD_RUN_SERVICE_CAPABILITY,
+        target=_target(),
+        clock=lambda: NOW + timedelta(seconds=1),
+    )
+    envelope = _envelope()
+    probe = BoundProbe(
+        investigation_id=envelope.investigation_id,
+        operation_id=envelope.operation_id,
+        capability_name=CLOUD_RUN_SERVICE_CAPABILITY,
+        capability_version="1.0.0",
+        target=envelope.target,
+        relevant_effect_ids=tuple(
+            effect.effect_id for effect in envelope.expected_effects
+        ),
+        arguments={},
+        timeout_ms=1_000,
+        result_byte_ceiling=8_192,
+    )
+
+    import asyncio
+
+    assert registration.handler is not None
+    with pytest.raises(CapabilityUnavailable):
+        asyncio.run(registration.handler(probe))
+    assert services.calls == 1
 
 
 def test_known_operation_polling_does_not_wait_for_revision_list_visibility() -> None:

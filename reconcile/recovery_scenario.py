@@ -104,7 +104,12 @@ from reconcile.contracts.base import (
     reject_sensitive_keys,
     reject_sensitive_values,
 )
-from reconcile.controller import CapabilityRegistry, ControllerClock, ProbeController
+from reconcile.controller import (
+    CapabilityRegistry,
+    ControllerClock,
+    ProbeController,
+    probe_request_sha256,
+)
 from reconcile.controller.permits import PermitAuthority
 from reconcile.evidence import EvidenceEngine, ProbeRun, TargetRuleRegistry
 from reconcile.evidence.recovery_rules import (
@@ -734,7 +739,7 @@ class _EvidenceSession:
     controller: ProbeController
     engine: EvidenceEngine
     created_at: datetime
-    executed_capabilities: set[str]
+    executed_request_sha256s: set[str]
 
 
 class ReleaseChainEvidenceSource:
@@ -863,29 +868,25 @@ class ReleaseChainEvidenceSource:
             ),
             engine=EvidenceEngine(envelope, rules),
             created_at=self._now(),
-            executed_capabilities=set(),
+            executed_request_sha256s=set(),
         )
         self._sessions[key] = session
         return session
 
-    async def _execute(
-        self,
-        session: _EvidenceSession,
+    @staticmethod
+    def _request(
         envelope: ExecutionEnvelope,
         capability_name: str,
-    ) -> bool:
-        return await self._execute_request(
-            session,
-            ProbeRequest(
-                schema_version=PROBE_REQUEST_VERSION,
-                capability_name=capability_name,
-                capability_version="1.0.0",
-                relevant_effect_ids=tuple(
-                    effect.effect_id for effect in envelope.expected_effects
-                ),
-                arguments={},
-                rationale="Read exact target-bound provider state for recovery.",
+    ) -> ProbeRequest:
+        return ProbeRequest(
+            schema_version=PROBE_REQUEST_VERSION,
+            capability_name=capability_name,
+            capability_version="1.0.0",
+            relevant_effect_ids=tuple(
+                effect.effect_id for effect in envelope.expected_effects
             ),
+            arguments={},
+            rationale="Read exact target-bound provider state for recovery.",
         )
 
     @staticmethod
@@ -899,7 +900,7 @@ class ReleaseChainEvidenceSource:
         if execution.audit.sequence <= len(session.engine.attempts):
             return False
         session.engine.process(ProbeRun(request=request, execution=execution))
-        session.executed_capabilities.add(request.capability_name)
+        session.executed_request_sha256s.add(probe_request_sha256(request))
         return True
 
     def _state(
@@ -936,8 +937,9 @@ class ReleaseChainEvidenceSource:
             if node.node_id == "promote"
             else FIRESTORE_RELEASE_CAPABILITY
         )
-        if primary not in session.executed_capabilities:
-            await self._execute(session, envelope, primary)
+        request = self._request(envelope, primary)
+        if probe_request_sha256(request) not in session.executed_request_sha256s:
+            await self._execute_request(session, request)
         return self._state(session, envelope)
 
     async def probe(
@@ -973,8 +975,9 @@ class ReleaseChainEvidenceSource:
             ),
         }[node.node_id]
         for capability_name in sequence:
-            if capability_name not in session.executed_capabilities:
-                if not await self._execute(session, envelope, capability_name):
+            request = self._request(envelope, capability_name)
+            if probe_request_sha256(request) not in session.executed_request_sha256s:
+                if not await self._execute_request(session, request):
                     break
         return self._state(session, envelope)
 
