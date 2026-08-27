@@ -11,6 +11,10 @@ from google.api_core import exceptions as api_exceptions
 from google.cloud import run_v2
 from pydantic import ValidationError
 
+from reconcile.adapters.cloud_run import (
+    CLOUD_RUN_REVISION_CAPABILITY,
+    CLOUD_RUN_SERVICE_CAPABILITY,
+)
 from reconcile.contracts import (
     ADAPTIVE_PLANNER_OUTPUT_VERSION,
     PROBE_REQUEST_VERSION,
@@ -18,6 +22,7 @@ from reconcile.contracts import (
     ActionPermitState,
     AdaptivePlannerOutput,
     Classification,
+    EffectAssertionState,
     PermitAction,
     PlannerAcquisitionAdvice,
     PlannerCitationRefs,
@@ -635,6 +640,97 @@ def test_fixed_evidence_completes_a_partially_scoped_revision_probe() -> None:
     assert fixed.evaluation.classification is Classification.COMMITTED
     assert isinstance(artifact, VerifiedCertificate)
     assert artifact.transition is not None
+
+
+def test_fixed_evidence_reobserves_unverified_stage_traffic() -> None:
+    settings = _settings()
+    state, _adapter, action, reader, firestore, _client = _provider(settings)
+    action.stage_revision(
+        mode=CloudRunFaultMode.PASS_THROUGH,
+        operation_id=settings.stage_operation_id,
+        release_id=settings.release_id,
+        image_digest=settings.image_digest,
+        configuration_sha256=settings.configuration_sha256,
+    )
+    staged_traffic = tuple(state.service.traffic_statuses)
+    state.service.traffic_statuses = (
+        run_v2.TrafficTargetStatus(revision=BASELINE, percent=100),
+    )
+    definition = build_release_chain_definition(settings, invoked_at=NOW)
+    node = definition.chain.nodes[0]
+    envelope = definition.envelopes[node.node_id]
+    store = InMemoryRecoveryRunStore()
+    source = ReleaseChainEvidenceSource(
+        store=store,
+        definition=definition,
+        settings=settings,
+        cloud_run=reader,
+        firestore=firestore,
+        clock=lambda: NOW + timedelta(seconds=2),
+    )
+    request = RecoveryRunRequest(
+        schema_version=RECOVERY_RUN_REQUEST_VERSION,
+        run_id="settled-traffic-reobservation",
+        scenario="cloud-run-rollout",
+        policy=RecoveryRunPolicy.ADAPTIVE,
+        fault=RecoveryRunFault.DROP_AFTER_ACCEPT,
+    )
+    partial_revision = ProbeRequest(
+        schema_version=PROBE_REQUEST_VERSION,
+        capability_name=CLOUD_RUN_REVISION_CAPABILITY,
+        capability_version="1.0.0",
+        relevant_effect_ids=("stage-revision",),
+        arguments={},
+        rationale="Read only the exact revision identity.",
+    )
+    partial_service = ProbeRequest(
+        schema_version=PROBE_REQUEST_VERSION,
+        capability_name=CLOUD_RUN_SERVICE_CAPABILITY,
+        capability_version="1.0.0",
+        relevant_effect_ids=("stage-revision",),
+        arguments={},
+        rationale="Read service state before the provider has settled.",
+    )
+
+    async def exercise():
+        await store.create(request, definition.chain, created_at=NOW)
+        await source.current(request.run_id, node, envelope)
+        await source.probe(request.run_id, node, envelope, partial_service)
+        await source.probe(request.run_id, node, envelope, partial_revision)
+        state.service.traffic_statuses = staged_traffic
+        return await source.fixed(request.run_id, node, envelope)
+
+    fixed = asyncio.run(exercise())
+    artifact = verify_recovery(
+        chain=definition.chain,
+        node_id=node.node_id,
+        envelope=envelope,
+        report=fixed.report,
+        evaluation=fixed.evaluation,
+        verified_at=fixed.report.updated_at,
+        successor_envelope=definition.envelopes["promote"],
+    )
+    service_audit = tuple(
+        item
+        for item in fixed.report.probe_audit
+        if item.capability_name == CLOUD_RUN_SERVICE_CAPABILITY
+    )
+    traffic_evidence = tuple(
+        item
+        for item in fixed.report.evidence
+        if item.capability_name == CLOUD_RUN_SERVICE_CAPABILITY
+        and tuple(assertion.effect_id for assertion in item.effect_assertions)
+        == ("stage-traffic",)
+    )
+
+    assert len(service_audit) == 3
+    assert len({item.request_sha256 for item in service_audit}) == 3
+    assert len(traffic_evidence) == 1
+    assert traffic_evidence[0].effect_assertions[0].state is (
+        EffectAssertionState.ESTABLISHED
+    )
+    assert fixed.evaluation.classification is Classification.COMMITTED
+    assert isinstance(artifact, VerifiedCertificate)
 
 
 def test_fixed_evidence_reuses_an_identical_full_scope_revision_probe() -> None:

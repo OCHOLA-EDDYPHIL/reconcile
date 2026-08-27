@@ -248,6 +248,38 @@ def test_capability_inventory_is_read_only_empty_argument_and_exact_target() -> 
         }
 
 
+def test_service_reobservation_slot_is_limited_to_stage_recovery() -> None:
+    target = CloudRunCanaryTarget(
+        project="demo-project",
+        location="us-central1",
+        service="reconcile-canary",
+        image_repository=(
+            "us-central1-docker.pkg.dev/demo-project/reconcile-p5/reconcile"
+        ),
+        baseline_revision="reconcile-canary-baseline",
+        health_audience="https://canary.example.test",
+    )
+    reader = CloudRunCanaryReader(target=target)
+    stage = build_cloud_run_capability_registration(
+        reader=reader,
+        binding=_binding(),
+        capability_name=CLOUD_RUN_SERVICE_CAPABILITY,
+        target=_target(),
+    )
+    promotion = build_cloud_run_capability_registration(
+        reader=reader,
+        binding=CloudRunProbeBinding.for_promotion(
+            release_id=RELEASE,
+            revision=REVISION,
+        ),
+        capability_name=CLOUD_RUN_SERVICE_CAPABILITY,
+        target=_target(),
+    )
+
+    assert stage.max_invocations == 3
+    assert promotion.max_invocations == 2
+
+
 def test_service_normalizer_emits_exact_provider_provenance_and_correlation() -> None:
     envelope = _envelope()
     effect_id = next(
