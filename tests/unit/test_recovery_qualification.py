@@ -211,6 +211,34 @@ def test_preregistered_probe_metrics_end_at_the_selected_proof(
 
 @pytest.mark.parametrize(
     "archetype_id",
+    ("stage-absence", "stage-unavailable", "stage-stale"),
+)
+def test_traffic_reobservation_preserves_static_failure_probe_counts(
+    tmp_path,
+    archetype_id: str,
+) -> None:
+    fixture = next(
+        item
+        for item in build_recovery_qualification_fixtures()
+        if item.archetype.archetype_id == archetype_id
+        and item.seed == RECOVERY_QUALIFICATION_SEEDS[0]
+    )
+
+    result = asyncio.run(
+        execute_recovery_qualification_proof_lane(
+            fixture,
+            policy=RecoveryQualificationPolicy.FIXED,
+            state_directory=tmp_path / archetype_id,
+            restart=False,
+            _include_safety_replays=False,
+        )
+    )
+
+    assert result.probe_count == fixture.archetype.fixed_probe_count == 3
+
+
+@pytest.mark.parametrize(
+    "archetype_id",
     (
         "stage-drop-committed",
         "stage-pending",
