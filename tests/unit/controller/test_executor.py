@@ -838,6 +838,7 @@ def test_tool_timeout_and_shorter_investigation_deadline_have_distinct_reasons()
     None
 ):
     async def scenario() -> None:
+        tool_clock = FakeClock()
         tool_handler = BlockingHandler()
         tool = ProbeController(
             _envelope(max_elapsed_ms=1_000),
@@ -845,6 +846,7 @@ def test_tool_timeout_and_shorter_investigation_deadline_have_distinct_reasons()
                 tool_handler,
                 capability=_closed_capability(timeout_ms=50),
             ),
+            clock=tool_clock,
         )
         timed_out = await tool.execute(_request())
         assert timed_out.audit.outcome is ProbeOutcome.TIMED_OUT

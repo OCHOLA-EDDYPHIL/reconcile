@@ -514,6 +514,50 @@ class _ReleasePlanner(_Planner):
         return await super().plan(planner_input)
 
 
+def test_evidence_source_starts_stage_with_service_observation() -> None:
+    settings = _settings()
+    state, _adapter, action, reader, firestore, _client = _provider(settings)
+    action.stage_revision(
+        mode=CloudRunFaultMode.PASS_THROUGH,
+        operation_id=settings.stage_operation_id,
+        release_id=settings.release_id,
+        image_digest=settings.image_digest,
+        configuration_sha256=settings.configuration_sha256,
+    )
+    service_reads_before_current = state.service_read_count
+    definition = build_release_chain_definition(settings, invoked_at=NOW)
+    node = definition.chain.nodes[0]
+    envelope = definition.envelopes[node.node_id]
+    store = InMemoryRecoveryRunStore()
+    source = ReleaseChainEvidenceSource(
+        store=store,
+        definition=definition,
+        settings=settings,
+        cloud_run=reader,
+        firestore=firestore,
+        clock=lambda: NOW + timedelta(seconds=2),
+    )
+    request = RecoveryRunRequest(
+        schema_version=RECOVERY_RUN_REQUEST_VERSION,
+        run_id="stage-primary-service-observation",
+        scenario="cloud-run-rollout",
+        policy=RecoveryRunPolicy.ADAPTIVE,
+        fault=RecoveryRunFault.NO_FAULT,
+    )
+
+    async def exercise():
+        await store.create(request, definition.chain, created_at=NOW)
+        return await source.current(request.run_id, node, envelope)
+
+    current = asyncio.run(exercise())
+
+    assert tuple(item.capability_name for item in current.report.probe_audit) == (
+        "cloud-run-service-get",
+    )
+    assert state.service_read_count == service_reads_before_current + 1
+    assert state.revision_read_count == 0
+
+
 def test_evidence_source_repolls_pending_provider_state_in_a_new_bounded_round() -> (
     None
 ):
@@ -556,6 +600,7 @@ def test_evidence_source_repolls_pending_provider_state_in_a_new_bounded_round()
         pending = await source.fixed(request.run_id, node, envelope)
         staged.conditions = (_ready(),)
         staged.reconciling = False
+        state.health_ready = True
         await source.current(request.run_id, node, envelope)
         terminal = await source.fixed(request.run_id, node, envelope)
         return pending, terminal
@@ -596,7 +641,7 @@ def test_evidence_source_repolls_pending_provider_state_in_a_new_bounded_round()
         if item.evidence_id in bound_ids
     }
     assert "cloud-run-revision-get" in bound_capabilities
-    assert "cloud-run-revision-health" not in bound_capabilities
+    assert "cloud-run-revision-health" in bound_capabilities
     assert len(pending.report.probe_audit) == 3
     assert len(terminal.report.probe_audit) == 3
     assert state.revision_read_count == 2
@@ -1382,6 +1427,54 @@ def test_reset_waits_for_settled_baseline_and_supports_the_fault_proxy() -> None
     )
     with pytest.raises(ReleaseChainError, match="freshly reprovisioned"):
         asyncio.run(recorder.capture_baseline())
+
+
+def test_reset_discovers_a_retry_revision_as_the_only_serving_reference() -> None:
+    settings = _settings()
+    state, _adapter, action, reader, firestore, _client = _provider(settings)
+    retry_revision = settings.revision_for_operation(
+        f"{settings.stage_operation_id}-retry"
+    )
+    mutator = ReleaseChainBlindMutator(
+        settings=settings,
+        cloud_action=action,
+        cloud_reader=reader,
+        firestore=firestore,
+        invoked_at=NOW,
+        clock=lambda: NOW + timedelta(seconds=2),
+        settle_poll_interval_seconds=0,
+    )
+
+    async def exercise():
+        outcome = await BlindPolicyExecutor(mutator).blind_retry(
+            operation_id=settings.stage_operation_id,
+            fault=RecoveryRunFault.DROP_AFTER_ACCEPT,
+        )
+        serving_before = tuple(
+            (status.revision, status.percent)
+            for status in state.service.traffic_statuses
+        )
+        reset = await ReleaseChainResetter(
+            settings=settings,
+            cloud_action=action,
+            cloud_reader=reader,
+            firestore=firestore,
+            baseline_revision=BASELINE,
+            clock=lambda: NOW + timedelta(seconds=3),
+            poll_interval_seconds=0,
+        ).reset()
+        return outcome, serving_before, reset
+
+    outcome, serving_before, reset = asyncio.run(exercise())
+
+    assert outcome.chain_completed is True
+    assert serving_before == ((retry_revision, 100),)
+    assert reset.release_revisions_before == tuple(
+        sorted((settings.staged_revision, retry_revision))
+    )
+    assert reset.serving_revision == BASELINE
+    assert reset.serving_percent == 100
+    assert reset.release_record_absent is True
 
 
 def test_reset_fails_closed_when_cloud_run_never_settles() -> None:

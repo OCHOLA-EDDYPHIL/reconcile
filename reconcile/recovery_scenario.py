@@ -930,7 +930,7 @@ class ReleaseChainEvidenceSource:
         # round here would turn PENDING into a permanent cached state.
         session = await self._session(run_id, node, envelope, refresh=True)
         primary = (
-            CLOUD_RUN_REVISION_CAPABILITY
+            CLOUD_RUN_SERVICE_CAPABILITY
             if node.node_id == "stage"
             else CLOUD_RUN_SERVICE_CAPABILITY
             if node.node_id == "promote"
@@ -1852,6 +1852,7 @@ class RecoveryPolicyResultRecorder:
             configuration_sha256=self._settings.configuration_sha256,
         )
         candidates = tuple(dict.fromkeys((self._baseline_revision, *revisions)))
+
         async def read_current_traffic(revision: str):
             try:
                 return await asyncio.to_thread(
@@ -2772,7 +2773,16 @@ class ReleaseChainResetter:
             configuration_sha256=self._settings.configuration_sha256,
         )
         previous = None
-        for revision in (self._settings.staged_revision, self._baseline):
+        candidate_revisions = tuple(
+            dict.fromkeys(
+                (
+                    self._settings.staged_revision,
+                    *before,
+                    self._baseline,
+                )
+            )
+        )
+        for revision in candidate_revisions:
             try:
                 previous = await asyncio.to_thread(
                     self._cloud_reader.read_service,

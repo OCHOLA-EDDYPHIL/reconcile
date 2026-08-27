@@ -84,7 +84,7 @@ RECOVERY_QUALIFICATION_ARCHETYPES = (
         "stage-drop-committed",
         stage=RecoveryQualificationStage.STAGE,
         fault=RecoveryQualificationFaultClass.DROP_AFTER_ACCEPT,
-        opportunity=RecoveryQualificationOpportunity.NEUTRAL,
+        opportunity=RecoveryQualificationOpportunity.ADAPTIVE_FAVORED,
         evidence=(
             "stage-revision-exists",
             "stage-revision-ready",
@@ -93,7 +93,7 @@ RECOVERY_QUALIFICATION_ARCHETYPES = (
         resolution=RecoveryQualificationResolution.CONTINUE,
         action=PermitAction.CONTINUE,
         fixed_probes=3,
-        adaptive_probes=3,
+        adaptive_probes=2,
     ),
     _archetype(
         "stage-pending",
@@ -159,7 +159,7 @@ RECOVERY_QUALIFICATION_ARCHETYPES = (
         "stage-fresh",
         stage=RecoveryQualificationStage.STAGE,
         fault=RecoveryQualificationFaultClass.FRESHNESS,
-        opportunity=RecoveryQualificationOpportunity.NEUTRAL,
+        opportunity=RecoveryQualificationOpportunity.ADAPTIVE_FAVORED,
         evidence=(
             "stage-revision-ready",
             "stage-traffic-unchanged",
@@ -168,7 +168,7 @@ RECOVERY_QUALIFICATION_ARCHETYPES = (
         resolution=RecoveryQualificationResolution.CONTINUE,
         action=PermitAction.CONTINUE,
         fixed_probes=3,
-        adaptive_probes=3,
+        adaptive_probes=2,
     ),
     _archetype(
         "stage-stale",
@@ -310,7 +310,7 @@ RECOVERY_QUALIFICATION_ARCHETYPES = (
         "cross-provider-adaptive",
         stage=RecoveryQualificationStage.STAGE,
         fault=RecoveryQualificationFaultClass.DROP_AFTER_ACCEPT,
-        opportunity=RecoveryQualificationOpportunity.NEUTRAL,
+        opportunity=RecoveryQualificationOpportunity.ADAPTIVE_FAVORED,
         evidence=(
             "stage-revision-ready",
             "stage-traffic-unchanged",
@@ -318,7 +318,7 @@ RECOVERY_QUALIFICATION_ARCHETYPES = (
         resolution=RecoveryQualificationResolution.CONTINUE,
         action=PermitAction.CONTINUE,
         fixed_probes=3,
-        adaptive_probes=3,
+        adaptive_probes=2,
     ),
 )
 

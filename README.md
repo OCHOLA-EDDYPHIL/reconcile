@@ -9,7 +9,7 @@ next exact action—or refuses to mutate.
 
 **Gemini investigates. Deterministic evidence decides.**
 
-[Replay the accepted proof](#judge-path) ·
+[Replay the accepted proof](#replay-the-proof) ·
 [Inspect the live-cloud evidence](https://github.com/OCHOLA-EDDYPHIL/reconcile/issues/173#issuecomment-5427414445) ·
 [Read the claims and limitations](docs/claims-and-limitations.md) ·
 [Use the demo bundle](demo/README.md)
@@ -31,7 +31,7 @@ The baseline row values come from an accepted scripted, provider-shaped
 qualification—not a live-cloud A/B. The direct Google Cloud candidate separately
 proved that the recovery path works against Cloud Run and Firestore.
 
-## Judge path
+## Replay the proof
 
 Prerequisites: Git, Python 3.12.13, and
 [uv 0.12.3](https://docs.astral.sh/uv/). The lockfile is authoritative.
@@ -44,7 +44,7 @@ uv run --no-sync python scripts/replay_gate_g5r.py
 uv run --no-sync python scripts/check_release_candidate.py
 ```
 
-The first command validates a sanitized, checked-in derivation of the accepted
+The replay command validates a sanitized, checked-in derivation of the accepted
 evidence and prints this outcome:
 
 ```text
@@ -62,14 +62,14 @@ RESULT: PASS
 ```
 
 This is an evidence replay, not a substitute for the original cloud run. The
-public acceptance record carries the immutable hashes; the ephemeral deployment
-was deliberately cleaned up and there is no current public endpoint.
+linked acceptance record carries the immutable hashes. The ephemeral deployment
+was deliberately cleaned up, and the replay does not depend on a public endpoint.
 
 ## How it works
 
 1. `RolloutAgent` binds an intended release chain: stage, promote, and record.
 2. A durable dispatch gate records provider contact and the lost acknowledgement.
-3. `RecoveryAgent`, orchestrated with Google ADK, asks Gemini 3.5 Flash for an
+3. `RecoveryAgent` invokes an ADK-backed Gemini 3.5 Flash planner for an
    evidence-cited hypothesis and bounded read-only probe proposals.
 4. Capability allowlists, freshness rules, and provider adapters admit evidence.
 5. Deterministic rules produce either a verified certificate or an ambiguity
@@ -88,7 +88,7 @@ The diagram source is [docs/architecture.dot](docs/architecture.dot).
 | Technology | Critical-path role |
 | --- | --- |
 | Gemini 3.5 Flash on Vertex AI | Generates a bound hypothesis and proposes useful evidence reads under a budget. |
-| Google ADK | Orchestrates `RolloutAgent` and `RecoveryAgent` while preserving the dispatch boundary. |
+| Google ADK | Provides the `LlmAgent` and `Runner` boundary for the stateless advisory Gemini planner turn. |
 | Cloud Run | Hosts the five services and is the real mutation target for stage and promotion. |
 | Firestore | Stores recovery state, provider ledgers, single-use permit claims, and the final release record. |
 | Cloud Storage | Holds sealed operator and infrastructure artifacts for hosted execution. |

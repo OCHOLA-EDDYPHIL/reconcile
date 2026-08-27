@@ -1,8 +1,8 @@
-# Demo candidate
+# Proof replay and walkthrough
 
-This bundle is the recording-ready Proof-to-Permit story. It is tied to the exact
-G5R candidate and keeps scripted comparison evidence separate from direct-cloud
-operational proof.
+This bundle presents the reproducible Proof-to-Permit walkthrough. It is tied to
+the accepted G5R evidence and keeps scripted comparison evidence separate from
+direct-cloud operational proof.
 
 ## Run it
 
@@ -32,15 +32,15 @@ Use [proof.svg](proof.svg) as the opening comparison visual and
 [../docs/architecture.svg](../docs/architecture.svg) for the authority walkthrough.
 Both have checked-in Graphviz sources.
 
-## Recording packet
+## Walkthrough assets
 
 - [script.md](script.md) — timed narration and exact screen actions
 - [proof.svg](proof.svg) — baseline-versus-live hero visual
 - [../docs/architecture.svg](../docs/architecture.svg) — numbered architecture
+- [../docs/architecture.png](../docs/architecture.png) — raster architecture export
 - [evidence/proof-to-permit.json](evidence/proof-to-permit.json) — sanitized proof
-- [../devpost-submission.md](../devpost-submission.md) — local submission-copy draft
 
-## Rehearsal acceptance
+## Walkthrough checklist
 
 - [ ] Start from a clean checkout and complete the locked install.
 - [ ] Run both commands above with no cloud credentials in the checkout.
@@ -48,11 +48,12 @@ Both have checked-in Graphviz sources.
 - [ ] Show `UNKNOWN` and both denied actions before any permit.
 - [ ] Show the exact correlated revision and both single-use permits.
 - [ ] Show `1/1/1` and replay rejection before provider contact.
-- [ ] State that the deployment was cleaned up and no public endpoint exists.
+- [ ] State that the accepted deployment was cleaned up and the replay requires
+      no public endpoint.
 - [ ] If a live provider is unavailable, use the accepted evidence replay; do not
       improvise a new cloud candidate during recording.
-- [ ] Check every public link in a private/incognito browser before publication.
+- [ ] Check every external link in a private/incognito browser before sharing.
 - [ ] Keep the final recording at or below four minutes.
 
-Publication, upload, release creation, and external submission remain separate
-owner-authorized actions.
+The walkthrough uses accepted evidence replay and does not require a live
+deployment.

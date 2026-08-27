@@ -200,7 +200,7 @@
       "type": "string"
     },
     "fixture_catalog_sha256": {
-      "const": "639885ea30a9fc6b3a427c7628bf476d75864b2154993b57b79b22626bf8ff8f",
+      "const": "a7dbde6f9e65fb56b9e90afa23a6acaf0341d87c908f292999b2638d73e5f462",
       "title": "Fixture Catalog Sha256",
       "type": "string"
     },

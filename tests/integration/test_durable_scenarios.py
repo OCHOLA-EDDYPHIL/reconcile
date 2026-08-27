@@ -3811,35 +3811,56 @@ def test_terminal_comparison_startup_reaudits_canonical_lane_rows(
     tmp_path: Path,
 ) -> None:
     async def exercise() -> None:
-        os.chmod(tmp_path, 0o700)
+        store, work, token = await _ready_parent_for_workflow_result(
+            tmp_path,
+            launch_id="terminal-comparison-lane-audit",
+            mode=ScenarioRunMode.COMPARE,
+        )
+        assert work.scenario_result is not None
+        assert work.scenario_result.execution_envelope is not None
+        assert (
+            work.scenario_result.execution_envelope.context.evidence_budget.max_elapsed_ms
+            == 5_000
+        )
         workspace_root = tmp_path / "workspaces"
-        workspace_root.mkdir(mode=0o700)
         database = tmp_path / "parent.sqlite3"
-        store = SqliteScenarioStore(database)
+        comparison = _comparison_for_work(work)
+        assert comparison.adaptive is not None
+        await store.record_lane_result(
+            token,
+            ScenarioLane.FIXED,
+            comparison.baseline,
+            occurred_at=datetime.now(UTC),
+        )
+        await store.record_lane_result(
+            token,
+            ScenarioLane.ADAPTIVE,
+            comparison.adaptive,
+            occurred_at=datetime.now(UTC),
+        )
+        recorded = await store.record_workflow_result(
+            token,
+            comparison,
+            occurred_at=datetime.now(UTC),
+        )
+        await store.release_scenario_lease(token, now=datetime.now(UTC))
+        assert recorded.workflow_result == comparison
+        investigation_id = work.scenario_request.investigation_id
+
         workflow = DurableScenarioWorkflow(
             store,
             workspace_root,
-            semantic_config_sha256="1" * 64,
-            planner_factory=lambda _scenario: _ScriptedPlanner(
-                tuple(step.request for step in STORAGE_FIXED_PROBE_PLAN.steps)
-            ),
+            semantic_config_sha256="0" * 64,
+            planner_factory=lambda _scenario: _ScriptedPlanner(()),
         )
         first = OperatorApplicationService(
             runner=workflow,
             projection_store=store,
         )
         await first.start()
-        created = await first.launch(
-            ScenarioLaunchRequest(
-                schema_version=SCENARIO_LAUNCH_REQUEST_VERSION,
-                launch_id="terminal-comparison-lane-audit",
-                scenario=ScenarioLaunchName.STORAGE,
-                mode=ScenarioRunMode.COMPARE,
-            )
-        )
-        investigation_id = created.snapshot.investigation_id
-        assert (await _terminal(first, investigation_id)).lifecycle is (
-            ScenarioRunLifecycle.COMPLETED
+        terminal = await _terminal(first, investigation_id)
+        assert terminal.lifecycle is ScenarioRunLifecycle.COMPLETED, (
+            terminal.failure_category
         )
         await first.aclose()
 

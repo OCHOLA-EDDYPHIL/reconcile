@@ -90,11 +90,15 @@ class RuleObservation(StrictModel):
             raise ValueError("rule effect assertions must be unique")
         states = {item.state for item in self.effect_assertions}
         if self.verdict is RuleVerdict.AUTHORITATIVE_EFFECTS:
-            if (
-                EffectAssertionState.ESTABLISHED not in states
-                or self.operation_status
-                not in {None, OperationStatus.TERMINAL_COMMITTED}
-            ):
+            if not states.intersection(
+                {
+                    EffectAssertionState.ESTABLISHED,
+                    EffectAssertionState.NOT_ESTABLISHED,
+                }
+            ) or self.operation_status not in {
+                None,
+                OperationStatus.TERMINAL_COMMITTED,
+            }:
                 raise ValueError("authoritative effect verdict is inconsistent")
         elif self.verdict is RuleVerdict.AUTHORITATIVE_NON_EXECUTION:
             if (

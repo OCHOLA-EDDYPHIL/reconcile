@@ -10,6 +10,10 @@ import pytest
 
 import reconcile.recovery_qualification as recovery_qualification_module
 from reconcile.contracts import (
+    Classification,
+    EffectAssertion,
+    EffectAssertionState,
+    OperationStatus,
     PermitAction,
     RecoveryHypothesisDisposition,
     RecoveryRunFault,
@@ -40,6 +44,7 @@ from reconcile.recovery_qualification import (
 )
 from reconcile.recovery_qualification_execution import (
     _fault,
+    _qualification_health_is_redundant,
     _RecordingEvidenceSource,
     _run_to_qualification_dispatch_boundary,
     execute_recovery_qualification_proof_lane,
@@ -52,7 +57,11 @@ from reconcile.recovery_qualification_provider import (
     build_recovery_qualification_provider,
     recovery_qualification_provider_scenario,
 )
-from tests.contract._factories import make_recovery_qualification_examples
+from tests.contract._factories import (
+    make_evidence,
+    make_recovery_examples,
+    make_recovery_qualification_examples,
+)
 
 NOW = datetime(2026, 8, 23, tzinfo=UTC)
 
@@ -198,6 +207,173 @@ def test_preregistered_probe_metrics_end_at_the_selected_proof(
     assert result.demonstrated_evidence_profile == fixture.archetype.evidence_profile
     if archetype_id == "record-predispatch-retry":
         assert result.provider_mutations.record_calls == 1
+
+
+@pytest.mark.parametrize(
+    "archetype_id",
+    (
+        "stage-drop-committed",
+        "stage-pending",
+        "stage-terminal-partial",
+        "stage-fresh",
+        "cross-provider-adaptive",
+    ),
+)
+def test_authoritative_revision_semantics_preserve_cross_strategy_parity(
+    tmp_path,
+    archetype_id: str,
+) -> None:
+    fixture = next(
+        item
+        for item in build_recovery_qualification_fixtures()
+        if item.archetype.archetype_id == archetype_id
+        and item.seed == RECOVERY_QUALIFICATION_SEEDS[0]
+    )
+
+    async def execute():
+        fixed = await execute_recovery_qualification_proof_lane(
+            fixture,
+            policy=RecoveryQualificationPolicy.FIXED,
+            state_directory=tmp_path / archetype_id / "fixed",
+            restart=False,
+            _include_safety_replays=False,
+        )
+        adaptive = await execute_recovery_qualification_proof_lane(
+            fixture,
+            policy=RecoveryQualificationPolicy.ADAPTIVE,
+            state_directory=tmp_path / archetype_id / "adaptive",
+            restart=False,
+            _include_safety_replays=False,
+        )
+        return fixed, adaptive
+
+    fixed, adaptive = asyncio.run(execute())
+
+    assert fixed.probe_count == fixture.archetype.fixed_probe_count
+    assert adaptive.probe_count == fixture.archetype.adaptive_probe_count
+    assert fixed.admitted_evidence_sha256 == adaptive.admitted_evidence_sha256
+    assert fixed.decision_sha256 == adaptive.decision_sha256
+    assert fixed.permit_sha256 == adaptive.permit_sha256
+
+
+def test_qualification_health_projection_retains_material_evidence() -> None:
+    base, _decision = make_evidence(Classification.COMMITTED)
+    _chain, _hypothesis, certificate, witness, _permit = make_recovery_examples()
+    common_correlation = {
+        "release_id": "release-7",
+        "revision": "revision-7",
+    }
+    established = EffectAssertion(
+        effect_id="stage-readiness",
+        state=EffectAssertionState.ESTABLISHED,
+    )
+    not_established = established.model_copy(
+        update={"state": EffectAssertionState.NOT_ESTABLISHED}
+    )
+    unverified = established.model_copy(
+        update={"state": EffectAssertionState.UNVERIFIED}
+    )
+    revision = base.model_copy(
+        update={
+            "evidence_id": "revision-evidence",
+            "capability_name": "cloud-run-revision-get",
+            "correlation": {
+                **common_correlation,
+                "readiness": "READY",
+                "reconciling": "false",
+                "terminal_condition": "SUCCEEDED",
+            },
+            "effect_assertions": (established,),
+            "operation_status": None,
+        }
+    )
+    health = base.model_copy(
+        update={
+            "evidence_id": "health-evidence",
+            "capability_name": "cloud-run-revision-health",
+            "correlation": common_correlation,
+            "effect_assertions": (established,),
+            "operation_status": None,
+        }
+    )
+
+    assert _qualification_health_is_redundant(
+        health,
+        (revision, health),
+        certificate,
+    )
+    assert not _qualification_health_is_redundant(
+        health,
+        (health,),
+        certificate,
+    )
+    assert not _qualification_health_is_redundant(
+        health.model_copy(update={"correlation": {"release_id": "release-7"}}),
+        (revision, health),
+        certificate,
+    )
+    assert not _qualification_health_is_redundant(
+        health,
+        (
+            revision.model_copy(
+                update={
+                    "correlation": {
+                        **revision.correlation,
+                        "revision": "revision-other",
+                    }
+                }
+            ),
+            health,
+        ),
+        certificate,
+    )
+    assert not _qualification_health_is_redundant(
+        health.model_copy(update={"effect_assertions": (not_established,)}),
+        (revision, health),
+        certificate,
+    )
+    assert not _qualification_health_is_redundant(
+        health,
+        (revision, health),
+        witness,
+    )
+
+    pending_revision = revision.model_copy(
+        update={
+            "correlation": {
+                **common_correlation,
+                "readiness": "UNKNOWN",
+                "reconciling": "true",
+                "terminal_condition": "NONE",
+            },
+            "effect_assertions": (unverified,),
+            "operation_status": OperationStatus.ACTIVE,
+        }
+    )
+    unhealthy = health.model_copy(update={"effect_assertions": (not_established,)})
+    pending_certificate = certificate.model_copy(
+        update={"classification": Classification.PENDING, "transition": None}
+    )
+    assert _qualification_health_is_redundant(
+        unhealthy,
+        (pending_revision, unhealthy),
+        pending_certificate,
+    )
+    assert not _qualification_health_is_redundant(
+        unhealthy,
+        (
+            pending_revision.model_copy(
+                update={
+                    "correlation": {
+                        **pending_revision.correlation,
+                        "terminal_condition": "SUCCEEDED",
+                    }
+                }
+            ),
+            unhealthy,
+        ),
+        pending_certificate,
+    )
 
 
 def test_proof_measurement_lookup_fails_closed_for_an_unknown_report() -> None:

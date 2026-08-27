@@ -738,12 +738,14 @@ def _states(
             )
             if allowed_scope is not None and observation.operation_state == "SUCCEEDED":
                 result[effect_id] = EffectAssertionState.ESTABLISHED
-        elif (
-            type(observation) is _HealthObservation
-            and scope == STAGE_READINESS_EFFECT_SCOPE
-            and observation.health_status == "READY"
+        elif type(observation) is _HealthObservation and (
+            scope == STAGE_READINESS_EFFECT_SCOPE
         ):
-            result[effect_id] = EffectAssertionState.ESTABLISHED
+            result[effect_id] = (
+                EffectAssertionState.ESTABLISHED
+                if observation.health_status == "READY"
+                else EffectAssertionState.NOT_ESTABLISHED
+            )
     return result
 
 
@@ -875,7 +877,10 @@ class CloudRunObservationNormalizer:
             # long-running operation name.
             operation_status = OperationStatus.ACTIVE
             verdict = RuleVerdict.AUTHORITATIVE_PENDING
-        elif EffectAssertionState.ESTABLISHED in definitive:
+        elif EffectAssertionState.ESTABLISHED in definitive or (
+            type(observation) is _HealthObservation
+            and EffectAssertionState.NOT_ESTABLISHED in definitive
+        ):
             verdict = RuleVerdict.AUTHORITATIVE_EFFECTS
         else:
             # RuleObservation deliberately has no target-state verdict for a lone

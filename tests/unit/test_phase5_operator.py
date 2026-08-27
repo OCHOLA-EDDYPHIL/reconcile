@@ -2069,8 +2069,7 @@ def test_continuation_can_restart_a_chained_provider_failure(tmp_path: Path) -> 
     )
 
     assert (
-        tuple(item.action for item in carried)
-        == operator._INITIAL_CONTINUATION_ACTIONS
+        tuple(item.action for item in carried) == operator._INITIAL_CONTINUATION_ACTIONS
     )
     assert terminal.action is operator.Phase5Action.PROVIDER_ACCEPTANCE
     assert terminal.status is operator.OutcomeStatus.FAILED
@@ -3670,6 +3669,22 @@ def test_teardown_verifier_accepts_observed_provider_normalization_only() -> Non
             {"cleanup_policies": [{"condition": [{"older_than": "86400s"}]}]},
         ),
         (
+            "google_artifact_registry_repository_iam_member",
+            {
+                "location": "us-central1",
+                "project": "reconcile-dev-260813-14fa6d",
+                "repository": "reconcile-p5",
+            },
+            {
+                "location": "us-central1",
+                "project": "reconcile-dev-260813-14fa6d",
+                "repository": (
+                    "projects/reconcile-dev-260813-14fa6d/locations/us-central1/"
+                    "repositories/reconcile-p5"
+                ),
+            },
+        ),
+        (
             "google_billing_budget",
             {
                 "amount": [
@@ -3820,6 +3835,22 @@ def test_bootstrap_teardown_rejects_unscoped_or_nearby_bucket_state(
             {"cleanup_policies": [{"condition": [{"older_than": "86401s"}]}]},
         ),
         (
+            "google_artifact_registry_repository_iam_member",
+            {
+                "location": "us-central1",
+                "project": "reconcile-dev-260813-14fa6d",
+                "repository": "reconcile-p5",
+            },
+            {
+                "location": "us-central1",
+                "project": "reconcile-dev-260813-14fa6d",
+                "repository": (
+                    "projects/other-project/locations/us-central1/"
+                    "repositories/reconcile-p5"
+                ),
+            },
+        ),
+        (
             "google_billing_budget",
             {"budget_filter": [{"calendar_period": None}]},
             {"budget_filter": [{"calendar_period": "YEAR"}]},
@@ -3846,6 +3877,185 @@ def test_teardown_verifier_rejects_nearby_foundation_drift(
         approved,
         None,
         resource_type=resource_type,
+    )
+
+
+def _post_recovery_canary_teardown_projection() -> tuple[
+    dict[str, Any], dict[str, Any]
+]:
+    release_id = f"p5-release-{_SOURCE[:24]}"
+    approved = {
+        "name": "reconcile-p5-canary",
+        "template": [
+            {
+                "containers": [
+                    {
+                        "env": [
+                            {
+                                "name": "RECONCILE_CANARY_RELEASE_ID",
+                                "value": "baseline",
+                            },
+                            {
+                                "name": "RECONCILE_SOURCE_REVISION",
+                                "value": _SOURCE,
+                            },
+                        ]
+                    }
+                ],
+                "labels": {"reconcile-release": "baseline"},
+                "revision": "reconcile-p5-canary-b-approved",
+            }
+        ],
+        "traffic": [
+            {
+                "percent": 100,
+                "revision": "reconcile-p5-canary-b-approved",
+            }
+        ],
+    }
+    observed = json.loads(json.dumps(approved))
+    observed_template = observed["template"][0]
+    observed_template["containers"][0]["env"][0]["value"] = release_id
+    observed_template["labels"]["reconcile-release"] = release_id
+    observed_template["revision"] = operator.deterministic_stage_revision(
+        service="reconcile-p5-canary",
+        release_id=release_id,
+    )
+    return approved, observed
+
+
+def test_runtime_teardown_accepts_exact_post_recovery_canary_template() -> None:
+    approved, observed = _post_recovery_canary_teardown_projection()
+
+    assert operator._matches_approved_teardown_resource(
+        observed,
+        approved,
+        None,
+        resource_type="google_cloud_run_v2_service",
+        action=operator.Phase5Action.RUNTIME_TEARDOWN,
+    )
+
+
+@pytest.mark.parametrize(
+    "drift",
+    (
+        "release-environment",
+        "release-label",
+        "release-revision",
+        "source-revision",
+        "wrong-action",
+    ),
+)
+def test_runtime_teardown_rejects_nearby_post_recovery_canary_drift(
+    drift: str,
+) -> None:
+    approved, observed = _post_recovery_canary_teardown_projection()
+    action = operator.Phase5Action.RUNTIME_TEARDOWN
+    template = observed["template"][0]
+    if drift == "release-environment":
+        template["containers"][0]["env"][0]["value"] += "-other"
+    elif drift == "release-label":
+        template["labels"]["reconcile-release"] += "-other"
+    elif drift == "release-revision":
+        template["revision"] += "-other"
+    elif drift == "source-revision":
+        template["containers"][0]["env"][1]["value"] = "b" * 40
+    else:
+        action = operator.Phase5Action.FOUNDATION_TEARDOWN
+
+    assert not operator._matches_approved_teardown_resource(
+        observed,
+        approved,
+        None,
+        resource_type="google_cloud_run_v2_service",
+        action=action,
+    )
+
+
+def test_runtime_teardown_verifier_accepts_exact_post_recovery_provider_state(
+    tmp_path: Path,
+) -> None:
+    approved_canary, observed_canary = _post_recovery_canary_teardown_projection()
+    approved_repository = {
+        "condition": [],
+        "location": "us-central1",
+        "member": (
+            "serviceAccount:rec-p5-fault@reconcile-dev-260813-14fa6d."
+            "iam.gserviceaccount.com"
+        ),
+        "project": "reconcile-dev-260813-14fa6d",
+        "repository": "reconcile-p5",
+        "role": "roles/artifactregistry.reader",
+    }
+    qualification = {
+        "terraform_version": "1.15.8",
+        "variables": {"source_revision": {"value": _SOURCE}},
+        "resource_changes": [
+            {
+                "address": (
+                    "google_artifact_registry_repository_iam_member."
+                    "canary_mutator_image_reader"
+                ),
+                "change": {
+                    "actions": ["delete"],
+                    "after": None,
+                    "before": approved_repository,
+                    "reconcile_before_unknown": {"etag": True, "id": True},
+                },
+                "provider_name": "registry.terraform.io/hashicorp/google",
+                "type": "google_artifact_registry_repository_iam_member",
+            },
+            {
+                "address": "google_cloud_run_v2_service.canary",
+                "change": {
+                    "actions": ["delete"],
+                    "after": None,
+                    "before": approved_canary,
+                    "reconcile_before_unknown": {},
+                },
+                "provider_name": "registry.terraform.io/hashicorp/google",
+                "type": "google_cloud_run_v2_service",
+            },
+        ],
+    }
+    qualification_bytes = operator._canonical_value_bytes(qualification)
+    normalized, resources, iam_edges, _, variables = operator._parse_plan_json(
+        qualification_bytes
+    )
+    binding = operator.TerraformPlanBinding(
+        action=operator.Phase5Action.RUNTIME_TEARDOWN,
+        stack="runtime",
+        qualification_path=str(tmp_path / "plans" / "runtime-destroy.tfplan.json"),
+        qualification_sha256=hashlib.sha256(qualification_bytes).hexdigest(),
+        variables_path=str(tmp_path / "plans" / "runtime-destroy.tfvars.json"),
+        variables_sha256=hashlib.sha256(
+            operator._canonical_value_bytes(variables)
+        ).hexdigest(),
+        execution_plan_path=str(tmp_path / "execution" / "runtime-destroy.tfplan"),
+        normalized_plan_sha256=hashlib.sha256(normalized).hexdigest(),
+        resource_inventory_sha256=operator._hash_value(
+            [item.model_dump(mode="json") for item in resources]
+        ),
+        iam_inventory_sha256=operator._hash_value(
+            [item.model_dump(mode="json") for item in iam_edges]
+        ),
+        resources=resources,
+        iam_edges=iam_edges,
+    )
+    rendered = _live_teardown_plan(qualification)
+    changes = {item["address"]: item["change"] for item in rendered["resource_changes"]}
+    repository = changes[
+        "google_artifact_registry_repository_iam_member.canary_mutator_image_reader"
+    ]["before"]
+    repository["repository"] = (
+        f"projects/{repository['project']}/locations/{repository['location']}/"
+        f"repositories/{repository['repository']}"
+    )
+    changes["google_cloud_run_v2_service.canary"]["before"] = observed_canary
+
+    operator._verify_rendered_plan(
+        json.dumps(rendered, separators=(",", ":"), sort_keys=True).encode(),
+        binding,
     )
 
 

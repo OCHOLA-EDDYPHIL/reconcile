@@ -945,3 +945,33 @@ def test_health_provenance_is_distinct_and_stale_observations_are_rejected() -> 
             )
         )
     assert raised.value.reason is EvidenceReason.UNVERIFIABLE_AUTHORITY
+
+
+def test_unhealthy_health_observation_refutes_stage_readiness() -> None:
+    envelope = _envelope()
+    readiness = next(
+        effect.effect_id
+        for effect in envelope.expected_effects
+        if effect.commit_scope == STAGE_READINESS_EFFECT_SCOPE
+    )
+    result = build_cloud_run_rule_registration(
+        capability_name=CLOUD_RUN_HEALTH_CAPABILITY,
+        binding=_binding(),
+    ).normalizer(
+        _rule_input(
+            capability=CLOUD_RUN_HEALTH_CAPABILITY,
+            relevant_effect_ids=(readiness,),
+            envelope=envelope,
+            payload={
+                "observation": {
+                    "observation_schema": CLOUD_RUN_HEALTH_OBSERVATION_VERSION,
+                    "release_id": RELEASE,
+                    "revision": REVISION,
+                    "health_status": "UNHEALTHY",
+                }
+            },
+        )
+    )
+
+    assert result.effect_assertions[0].state is (EffectAssertionState.NOT_ESTABLISHED)
+    assert result.verdict is RuleVerdict.AUTHORITATIVE_EFFECTS

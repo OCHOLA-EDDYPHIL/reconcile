@@ -25,7 +25,7 @@ digraph ReconcileArchitecture {
   edge [fontname="Arial", fontsize=9, fontcolor="#cbd5e1", color="#64748b", arrowsize=0.75];
 
   rollout [label="1  RolloutAgent\nexact release intent", fillcolor="#13253d"];
-  gate [label="2 / 8  ADK dispatch gate\nrequires matching unspent permit", fillcolor="#172554", color="#818cf8"];
+  gate [label="2 / 8  deterministic dispatch gate\nrequires matching unspent permit", fillcolor="#172554", color="#818cf8"];
   proxy [label="Tool / fault proxy\ndurable dispatch receipt", fillcolor="#172554", color="#818cf8"];
   cloud [label="Google Cloud Run\nstage revision → promote traffic", fillcolor="#082f49", color="#38bdf8"];
   lost [label="3  acknowledgement lost\noutcome is ambiguous", shape=octagon, fillcolor="#451a1a", color="#fb7185"];
@@ -35,7 +35,7 @@ digraph ReconcileArchitecture {
     color="#a78bfa";
     fontcolor="#ddd6fe";
     style="rounded,dashed";
-    recovery [label="4  RecoveryAgent\nGoogle ADK orchestration", fillcolor="#2e1065", color="#c4b5fd"];
+    recovery [label="4  RecoveryAgent\nADK-backed Gemini planner", fillcolor="#2e1065", color="#c4b5fd"];
     gemini [label="Gemini 3.5 Flash\nevidence-cited hypothesis + probe proposal", fillcolor="#2e1065", color="#c4b5fd"];
     recovery -> gemini [label="bounded context", color="#a78bfa"];
   }
