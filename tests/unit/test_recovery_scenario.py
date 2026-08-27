@@ -30,6 +30,7 @@ from reconcile.hosted.cloud_run_canary import CloudRunCanaryTarget
 from reconcile.hosted.firestore_release import FIRESTORE_RELEASE_DATABASE
 from reconcile.persistence import InMemoryRecoveryRunStore, SqliteDurableRuntimeStore
 from reconcile.recovery_scenario import (
+    RECOVERY_EVIDENCE_BUDGET_MS,
     BlindPolicyExecutor,
     RecoveryPolicyComparisonRunner,
     ReleaseChainActionPreparer,
@@ -82,6 +83,11 @@ def test_release_chain_has_stable_semantic_keys_and_declared_effect_dependencies
     assert all(
         node.semantic_action.expected_effect_sha256s for node in first.chain.nodes
     )
+    assert RECOVERY_EVIDENCE_BUDGET_MS == 60_000
+    assert {
+        envelope.context.evidence_budget.max_elapsed_ms
+        for envelope in first.envelopes.values()
+    } == {RECOVERY_EVIDENCE_BUDGET_MS}
     assert (
         first.envelopes["record"].expected_effects[0].predicate["cloud_run_revision"]
         == _settings().staged_revision

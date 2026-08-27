@@ -41,6 +41,7 @@ from reconcile.hosted.workflow import (
     HostedOperationScope,
     HostedWorkflowOperation,
 )
+from reconcile.recovery_scenario import RECOVERY_EVIDENCE_BUDGET_MS
 from reconcile.scenarios.service import ScenarioMode, ScenarioName, _request
 
 pytestmark = pytest.mark.unit
@@ -223,6 +224,14 @@ def test_runtime_transport_timeouts_are_component_scoped() -> None:
         Component.FAULT_PROXY: (10.0, 15.0),
         Component.SANDBOX: (10.0, 15.0),
     }
+
+
+def test_recovery_provider_timeout_preserves_fixed_fallback_budget() -> None:
+    assert (
+        RECOVERY_EVIDENCE_BUDGET_MS
+        - int(hosted_runtime._HOSTED_RECOVERY_PROVIDER_TIMEOUT_SECONDS * 1_000)
+        >= 30_000
+    )
 
 
 def test_fault_proxy_recovery_actions_use_durable_authorizers(
