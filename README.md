@@ -9,12 +9,12 @@ next exact action—or refuses to mutate.
 
 **Gemini investigates. Deterministic evidence decides.**
 
-[Replay the accepted proof](#replay-the-proof) ·
-[Inspect the live-cloud evidence](https://github.com/OCHOLA-EDDYPHIL/reconcile/issues/173#issuecomment-5427414445) ·
+[Validate the offline evidence fixture](#validate-the-offline-evidence-fixture) ·
+[Inspect the fresh provider proof](demo/evidence/provider-proof.json) ·
 [Read the claims and limitations](docs/claims-and-limitations.md) ·
 [Use the demo bundle](demo/README.md)
 
-![Blind baselines compared with the accepted live Proof-to-Permit trace](demo/proof.svg)
+![Scripted policy fixture and separate direct Google Cloud trace](demo/proof.svg)
 
 ## The failure mode
 
@@ -31,53 +31,67 @@ The baseline row values come from an accepted scripted, provider-shaped
 qualification—not a live-cloud A/B. The direct Google Cloud candidate separately
 proved that the recovery path works against Cloud Run and Firestore.
 
-## Replay the proof
+## Validate the offline evidence fixture
 
 Prerequisites: Git, Python 3.12.13, and
 [uv 0.12.3](https://docs.astral.sh/uv/). The lockfile is authoritative.
 
 ```bash
-git clone https://github.com/OCHOLA-EDDYPHIL/reconcile.git
-cd reconcile
+git clone https://github.com/OCHOLA-EDDYPHIL/reconcile-proof-to-permit.git
+cd reconcile-proof-to-permit
 uv sync --locked --all-groups
 uv run --no-sync python scripts/replay_gate_g5r.py
 uv run --no-sync python scripts/check_release_candidate.py
 ```
 
-The replay command validates a sanitized, checked-in derivation of the accepted
-evidence and prints this outcome:
+The first command is an offline validator for a sanitized, checked-in evidence
+fixture. It checks frozen classifications, counts, hashes, permit constraints,
+and replay behavior; it does not rerun the recovery workflow, call Gemini, or
+contact Google Cloud. The validated outcome is:
 
 ```text
 Accepted scripted baseline | fault: drop-after-accept
   blind retry  -> 2 revisions, 1 promotion, 1 record (duplicate revision)
   blind abort  -> 1 staged revision, 0 promotions, 0 records (incomplete chain)
 
-Accepted direct live-cloud trace | Gate G5R
-  pass 1       -> UNKNOWN; CONTINUE denied; RETRY denied; 0 permits
+Accepted direct live-cloud trace | source 4d626bb
+  pass 1       -> UNKNOWN; CONTINUE denied; RETRY denied; 0 recovery-action permits
   pass 2       -> COMMITTED; 1 exact correlated revision
+  authority    -> deterministic certificates; two max_uses=1 permits
+  evidence     -> 49 durable events; provider/live projection hash linked
   effects      -> 1 revision / 1 promotion / 1 Firestore record
   replay       -> rejected before provider contact; contact delta 0
+  cleanup      -> zero retained Phase 5 cloud resources
 
 RESULT: PASS
 ```
 
-This is an evidence replay, not a substitute for the original cloud run. The
-linked acceptance record carries the immutable hashes. The ephemeral deployment
-was deliberately cleaned up, and the replay does not depend on a public endpoint.
+This is offline evidence-fixture validation, not recovery execution or a
+substitute for a provider run. The validator checks the manifest and its linked,
+checked-in provider proof, corroboration, and cleanup record; the same evidence
+is published with hashes. The ephemeral deployment was deliberately cleaned up,
+and the validator does not depend on a public endpoint.
 
 ## How it works
 
-1. `RolloutAgent` binds an intended release chain: stage, promote, and record.
+1. [`RolloutAgent`](reconcile/recovery_agents.py) binds an intended release chain:
+   stage, promote, and record.
 2. A durable dispatch gate records provider contact and the lost acknowledgement.
-3. `RecoveryAgent` invokes an ADK-backed Gemini 3.5 Flash planner for an
-   evidence-cited hypothesis and bounded read-only probe proposals.
-4. Capability allowlists, freshness rules, and provider adapters admit evidence.
-5. Deterministic rules produce either a verified certificate or an ambiguity
-   witness. Model text is never an authorization input.
-6. A certificate may mint an expiring permit for one exact semantic action with
-   `max_uses=1`; Firestore durably arbitrates its claim.
-7. The dispatcher consumes that permit before provider contact. Replay is denied
-   before a second call can leave the process.
+3. [`RecoveryAgent`](reconcile/recovery_agents.py) invokes an ADK-backed Gemini
+   3.5 Flash planner for an evidence-cited hypothesis and bounded read-only probe
+   proposals.
+4. [Evidence admission](reconcile/evidence/admission.py) applies capability,
+   freshness, provenance, and correlation rules to provider observations.
+5. [Deterministic verification](reconcile/evidence/recovery_verification.py)
+   produces either a verified certificate or an ambiguity witness. Model text is
+   never an authorization input.
+6. The [recovery workflow](reconcile/recovery_workflow.py) may issue an expiring
+   permit for one exact semantic action with `max_uses=1`; the
+   [Firestore permit store](reconcile/hosted/firestore_permits.py) durably
+   arbitrates its claim.
+7. The [dispatcher](reconcile/hosted/recovery_dispatch.py) consumes that permit
+   before provider contact. Replay is denied before a second call can leave the
+   process.
 
 ![Proof-to-Permit authority and trust boundaries](docs/architecture.svg)
 
@@ -89,20 +103,29 @@ The diagram source is [docs/architecture.dot](docs/architecture.dot).
 | --- | --- |
 | Gemini 3.5 Flash on Vertex AI | Generates a bound hypothesis and proposes useful evidence reads under a budget. |
 | Google ADK | Provides the `LlmAgent` and `Runner` boundary for the stateless advisory Gemini planner turn. |
-| Cloud Run | Hosts the five services and is the real mutation target for stage and promotion. |
-| Firestore | Stores recovery state, provider ledgers, single-use permit claims, and the final release record. |
+| Cloud Run | Hosts API, controller, fault proxy, sandbox, and canary services; the canary is the real stage-and-promotion target. |
+| Firestore | Separates runtime authority state, isolated sandbox state, and target release records across three databases. |
 | Cloud Storage | Holds sealed operator and infrastructure artifacts for hosted execution. |
-| Google IAM | Separates service identities and constrains provider reads and mutations. |
+| Google IAM | Gives each service its own identity: the controller can investigate and verify, while the fault proxy alone receives the bounded target-mutation role. |
 
 Gemini improves the investigation surface; it does not decide whether the effect
 occurred. That separation is the product's central trust boundary.
 
 ## Evidence
 
-- [Gate G5R live acceptance](https://github.com/OCHOLA-EDDYPHIL/reconcile/issues/173#issuecomment-5427414445): initial `UNKNOWN`, later exact revision correlation, deterministic certificates, two exact permits, effects `1/1/1`, and zero-contact replay rejection.
-- [Gate decision](https://github.com/OCHOLA-EDDYPHIL/reconcile/issues/174#issuecomment-5427421390): accepted at source `7f64cda91de7d0404f4673a818352e296a1a817e`.
-- [Frozen qualification bundle](https://gist.github.com/OCHOLA-EDDYPHIL/c746539699b1a686f2e32f02fd4f740e): 100 scripted cases, 400 policy lanes, and zero false permits.
-- [Baseline implementation acceptance](https://github.com/OCHOLA-EDDYPHIL/reconcile/issues/171#issuecomment-5384542611): same fault and provider interfaces across blind retry, blind abort, fixed, and adaptive lanes.
+The [public evidence release](https://github.com/OCHOLA-EDDYPHIL/reconcile-proof-to-permit/releases/tag/v0.1.1)
+keeps the fresh provider record, corroboration, cleanup record, and checksums
+together. Its live-cloud lineage remains distinct from the scripted qualification:
+
+| Evidence layer | Lineage | Purpose |
+| --- | --- | --- |
+| [Fresh provider proof](demo/evidence/provider-proof.json) | source `4d626bb67739ca51c7569124724ea5d7ac8f5c0e`; run `p5r-adaptive-b166ba368d1cbc3e9ab57dee61b3dd74`; 49 projected events | Records initial `UNKNOWN`, later exact revision correlation, deterministic certificates, two exact permits, effects `1/1/1`, stable snapshot reread, and zero-contact replay rejection. |
+| [Live corroboration](demo/evidence/live-corroboration.json) | same public release | Records five ready, revision-bound Cloud Run services, three Firestore databases, provider-correlated logs, and the durable 49-event snapshot reread. |
+| [Cleanup verification](demo/evidence/cleanup-verification.json) | same public release | Records the post-capture cleanup state. |
+| [Offline bundle manifest](demo/evidence/proof-to-permit.json) | scripted qualification plus hash-linked provider, corroboration, and cleanup artifacts | Lets the local validator check the full checked-in bundle without cloud credentials; it does not rerun the provider workflow. |
+
+The offline qualification represented by the fixture covers 100 scripted cases,
+400 policy lanes, and zero false recovery-action permits.
 
 The frozen matrix authorized the wording **“proof-to-permit safety on the frozen
 recovery matrix.”** It did not authorize adaptive-efficiency or model-superiority
@@ -123,13 +146,18 @@ and cleanup requirements are in the [hosted runbook](docs/hosted-runbook.md).
 
 ## Repository map
 
-- `reconcile/recovery_agents.py` — RolloutAgent, RecoveryAgent, and dispatch boundary
-- `reconcile/recovery_workflow.py` — durable Proof-to-Permit lifecycle
-- `reconcile/evidence/` — evidence admission, deterministic rules, and verification
-- `reconcile/controller/permits.py` — exact permit issue, claim, completion, and denial
-- `reconcile/hosted/` — Google Cloud adapters and durable hosted stores
-- `schemas/` — versioned public contracts
-- `demo/` — proof fixture, visual, recording script, and rehearsal notes
+- [`reconcile/recovery_agents.py`](reconcile/recovery_agents.py) — RolloutAgent,
+  RecoveryAgent, and dispatch boundary
+- [`reconcile/recovery_workflow.py`](reconcile/recovery_workflow.py) — durable
+  Proof-to-Permit lifecycle
+- [`reconcile/evidence/`](reconcile/evidence/) — evidence admission,
+  deterministic rules, and verification
+- [`reconcile/controller/permits.py`](reconcile/controller/permits.py) — exact
+  permit issue, claim, completion, and denial
+- [`reconcile/hosted/`](reconcile/hosted/) — Google Cloud adapters and durable
+  hosted stores
+- [`schemas/`](schemas/) — versioned public contracts
+- [`demo/`](demo/) — offline fixture, visual summary, and reference narration
 
 ## Claim boundary
 

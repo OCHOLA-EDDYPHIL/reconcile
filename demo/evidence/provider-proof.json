@@ -1,0 +1,97 @@
+{
+  "acceptance": {
+    "event_count": 49,
+    "events_sha256": "c41b6b5701e50e46867d87c7d6993595797b92bf2316517347f770189aaf39ec",
+    "provider_file_sha256": "c46bba695d6ea11b91af1605cbdcaaacefed4bc317229563a26ebd7c21c82b87",
+    "provider_record_sha256": "5ccd883dde676a9ee049e14200fcfeabfd1f5d1fd6fbea94141fe68ced71983c",
+    "snapshot_reread_stable": true,
+    "snapshot_sha256": "929f2d6175ac079080c4bf10369e291a43f7c3afe3f3d0d52e43faf3f4ef397b"
+  },
+  "candidate": {
+    "candidate_sha256": "297dbd7b5fe72db91e45ff06d1200313ca4ab448ffa57b26ac6a30d8762638fa",
+    "image_digest": "sha256:160471416779de06923cf5addb622206c3a5281b1858a2e2a111077218a423ef",
+    "source_revision": "4d626bb67739ca51c7569124724ea5d7ac8f5c0e"
+  },
+  "effects": {
+    "continue_permits_consumed": 2,
+    "continue_permits_issued": 2,
+    "promotions": 1,
+    "release_records": 1,
+    "retry_permits_consumed": 0,
+    "retry_permits_issued": 0,
+    "revisions": 1
+  },
+  "gemini": {
+    "bound_to_hypothesis": true,
+    "configured_model": "gemini-3.5-flash",
+    "count_attempts": 1,
+    "generation_attempts": 1,
+    "hypothesis_count": 1,
+    "hypothesis_id": "hypothesis-e61163ea829f43d1593b6a9df2454f7c",
+    "ledger_revision": 4,
+    "ledger_state": "finalized",
+    "planner_outcome": "planner-succeeded",
+    "provider_ledger_absent_before": true,
+    "reported_model": "gemini-3.5-flash"
+  },
+  "initial_pass": {
+    "acknowledgement_lost": true,
+    "action_permits_issued": 0,
+    "classification": "UNKNOWN",
+    "continue_allowed": false,
+    "continue_denial": "insufficient_authoritative_evidence",
+    "dispatch_outcome": "OUTCOME_UNKNOWN",
+    "report_sha256": "623428317e4d8fb9c64b6e023be85861d6a7df68917853c06168b33e87826fb2",
+    "retry_allowed": false,
+    "retry_denial": "ambiguous_duplicate_risk"
+  },
+  "permits": [
+    {
+      "certificate_sha256": "4a009e5d75a2663615fb96c8e7913232604a5fb829626546a8e01809983fb1c2",
+      "classification": "COMMITTED",
+      "completion_outcome": "SUCCEEDED",
+      "max_uses": 1,
+      "state": "COMPLETED",
+      "transition": "stage-to-promote"
+    },
+    {
+      "certificate_sha256": "0e229bd29c975e770a566fc8ddeeaa76fa3080f1f3e910478504b5df88406b83",
+      "classification": "COMMITTED",
+      "completion_outcome": "SUCCEEDED",
+      "max_uses": 1,
+      "state": "COMPLETED",
+      "transition": "promote-to-record"
+    }
+  ],
+  "replay": {
+    "outcome": "REJECTED_BEFORE_PROVIDER_CONTACT",
+    "provider_contact": false,
+    "provider_contact_delta": 0,
+    "snapshot_unchanged": true,
+    "whole_request_created": false
+  },
+  "reset": {
+    "baseline_revision": "reconcile-p5-canary-b-be77779d39439565",
+    "release_record_absent": true,
+    "release_revisions_after": [
+      "reconcile-p5-canary-r-4a955e5169d2b921"
+    ],
+    "release_revisions_before": [
+      "reconcile-p5-canary-r-4a955e5169d2b921"
+    ],
+    "reset_operation_sha256": "e97b746d9b6d95284309e71477aee9d53f395c6405c61e9f99828afcdfa83849",
+    "serving_percent": 100,
+    "serving_revision": "reconcile-p5-canary-b-be77779d39439565"
+  },
+  "run_id": "p5r-adaptive-b166ba368d1cbc3e9ab57dee61b3dd74",
+  "schema_version": "reconcile/provider-proof/v1",
+  "settled_pass": {
+    "classification": "COMMITTED",
+    "correlated_revision": "reconcile-p5-canary-r-4a955e5169d2b921",
+    "correlated_revision_count": 1,
+    "report_sha256": "8ab3424685103abbe61529a1e5c08eb245378386a31a489ba05d7412c0f8f1cb",
+    "serving_revision": "reconcile-p5-canary-r-4a955e5169d2b921",
+    "traffic_percent": 100
+  },
+  "status": "PASS"
+}

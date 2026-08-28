@@ -2,81 +2,126 @@ digraph ReconcileArchitecture {
   graph [
     bgcolor="#07111f",
     fontname="Arial",
-    label="RECONCILE — Proof-to-Permit authority flow",
+    label="RECONCILE — advisory investigation, deterministic authority, bounded execution",
     labelloc="t",
     labeljust="l",
     fontcolor="#f8fafc",
-    fontsize=22,
-    pad=0.35,
-    ranksep=0.65,
-    nodesep=0.35,
-    splines=polyline
+    fontsize=24,
+    pad=0.30,
+    rankdir=TB,
+    ranksep=0.64,
+    nodesep=0.30,
+    newrank=true,
+    splines=polyline,
+    ratio=fill,
+    size="14.64,7.5!",
+    dpi=144
   ];
   node [
     shape=box,
     style="rounded,filled",
     fontname="Arial",
-    fontsize=11,
+    fontsize=12,
     fontcolor="#e2e8f0",
     color="#475569",
     fillcolor="#111c2e",
-    margin="0.14,0.10"
+    margin="0.17,0.12",
+    penwidth=1.4
   ];
-  edge [fontname="Arial", fontsize=9, fontcolor="#cbd5e1", color="#64748b", arrowsize=0.75];
+  edge [
+    fontname="Arial",
+    fontsize=10,
+    fontcolor="#cbd5e1",
+    color="#64748b",
+    arrowsize=0.75,
+    penwidth=1.4
+  ];
 
-  rollout [label="1  RolloutAgent\nexact release intent", fillcolor="#13253d"];
-  gate [label="2 / 8  deterministic dispatch gate\nrequires matching unspent permit", fillcolor="#172554", color="#818cf8"];
-  proxy [label="Tool / fault proxy\ndurable dispatch receipt", fillcolor="#172554", color="#818cf8"];
-  cloud [label="Google Cloud Run\nstage revision → promote traffic", fillcolor="#082f49", color="#38bdf8"];
-  lost [label="3  acknowledgement lost\noutcome is ambiguous", shape=octagon, fillcolor="#451a1a", color="#fb7185"];
-
-  subgraph cluster_advisory {
-    label="ADVISORY — cannot authorize a mutation";
-    color="#a78bfa";
-    fontcolor="#ddd6fe";
-    style="rounded,dashed";
-    recovery [label="4  RecoveryAgent\nADK-backed Gemini planner", fillcolor="#2e1065", color="#c4b5fd"];
-    gemini [label="Gemini 3.5 Flash\nevidence-cited hypothesis + probe proposal", fillcolor="#2e1065", color="#c4b5fd"];
-    recovery -> gemini [label="bounded context", color="#a78bfa"];
-  }
-
-  subgraph cluster_readonly {
-    label="READ-ONLY PROVIDER EVIDENCE";
-    color="#38bdf8";
-    fontcolor="#bae6fd";
+  subgraph cluster_authority_flow {
+    label="PROOF-TO-PERMIT AUTHORITY PATH";
+    color="#475569";
+    fontcolor="#cbd5e1";
+    fontsize=14;
     style="rounded";
-    allowlist [label="5  capability allowlist\nbudget + freshness checks", fillcolor="#082f49", color="#38bdf8"];
-    probes [label="Cloud Run operation, revision, service\nFirestore release-record read", fillcolor="#082f49", color="#38bdf8"];
-    evidence [label="normalized evidence\nsource + time + exact correlation", fillcolor="#082f49", color="#38bdf8"];
-    allowlist -> probes -> evidence;
+    margin=18;
+
+    fault [
+      label="1  LOST ACKNOWLEDGEMENT\nprovider outcome is ambiguous",
+      shape=octagon,
+      fillcolor="#451a1a",
+      color="#fb7185"
+    ];
+    advisory [
+      label="2  ADVISORY ONLY\nRecoveryAgent + ADK / Gemini\nhypothesis and proposed reads\nnever mutation authority",
+      fillcolor="#2e1065",
+      color="#c4b5fd"
+    ];
+    evidence [
+      label="3  READ-ONLY EVIDENCE\nallowlist + budget + freshness\nprovenance + exact correlation",
+      fillcolor="#082f49",
+      color="#38bdf8"
+    ];
+    authority [
+      label="4  DETERMINISTIC AUTHORITY\nrules consume admitted facts\nUNKNOWN → HOLD\nproved effect → certificate",
+      fillcolor="#052e2b",
+      color="#34d399"
+    ];
+    permit [
+      label="5  EXACT PERMIT\nsemantic action + expiry\nmax_uses=1 • durable Firestore CAS",
+      fillcolor="#052e2b",
+      color="#34d399"
+    ];
+    dispatch [
+      label="6  GUARDED PROVIDER CONTACT\nclaim permit before dispatch\nconsumed replay rejected pre-contact",
+      fillcolor="#172554",
+      color="#818cf8"
+    ];
+
+    { rank=same; fault; advisory; evidence; }
+    { rank=same; authority; permit; dispatch; }
+    fault -> advisory [label="reconcile; do not guess", color="#fbbf24", weight=20];
+    advisory -> evidence [label="bounded probe proposal", color="#a78bfa", weight=20];
+    evidence -> authority [label="admitted facts", color="#38bdf8", weight=20];
+    authority -> permit [label="verified certificate only", color="#34d399", weight=20];
+    permit -> dispatch [label="claim before contact", color="#34d399", weight=20];
   }
 
-  subgraph cluster_authority {
-    label="DETERMINISTIC AUTHORITY";
-    color="#34d399";
-    fontcolor="#a7f3d0";
+  subgraph cluster_topology {
+    label="DEPLOYED TOPOLOGY — FIVE CLOUD RUN SERVICES • ONE IAM-SCOPED IDENTITY PER SERVICE";
+    color="#334155";
+    fontcolor="#cbd5e1";
+    fontsize=14;
     style="rounded";
-    verifier [label="6  deterministic verifier\nclassification + declared effects", fillcolor="#052e2b", color="#34d399"];
-    witness [label="ambiguity witness\nHOLD — no mutation", fillcolor="#3f1d2e", color="#fb7185"];
-    certificate [label="verified certificate\nexact transition + evidence hash", fillcolor="#052e2b", color="#34d399"];
-    permits [label="7  Firestore permit store\nexact action • expiry • max_uses=1", fillcolor="#052e2b", color="#34d399"];
-    verifier -> witness [label="stale / missing / conflict", color="#fb7185"];
-    verifier -> certificate [label="all effects established", color="#34d399"];
-    certificate -> permits [label="issue exact permit", color="#34d399"];
+    margin=18;
+
+    api [label="API\noperator entry\ninvokes controller / proxy", fillcolor="#13253d", color="#60a5fa"];
+    controller [label="CONTROLLER\nGemini + provider reads\ndeterministic verifier\ninvokes sandbox", fillcolor="#13253d", color="#60a5fa"];
+    proxy [label="FAULT PROXY\npermit-gated mutation\ninvokes sandbox", fillcolor="#172554", color="#818cf8"];
+    canary [label="CANARY\nread by controller\nmutated by fault proxy", fillcolor="#13253d", color="#60a5fa"];
+    sandbox [label="SANDBOX\nisolated scenario service\ncalled by controller / proxy", fillcolor="#13253d", color="#60a5fa"];
+
+    vertex [label="Vertex AI\ncontroller identity", shape=component, fillcolor="#2e1065", color="#c4b5fd"];
+    runtime_db [label="runtime Firestore\nAPI + controller + proxy\nauthority state + permit CAS", shape=cylinder, fillcolor="#082f49", color="#38bdf8"];
+    target_db [label="target Firestore\ncontroller reads • proxy mutates", shape=cylinder, fillcolor="#082f49", color="#38bdf8"];
+    sandbox_db [label="sandbox Firestore\nsandbox identity only", shape=cylinder, fillcolor="#082f49", color="#38bdf8"];
+
+    { rank=same; api; controller; proxy; canary; sandbox; }
+    { rank=same; vertex; runtime_db; target_db; sandbox_db; }
+
+    api -> controller [label="investigation", weight=20];
+    controller -> proxy [label="exact permit", color="#34d399", weight=20];
+    proxy -> canary [label="bounded stage / promote", color="#34d399", weight=20];
+    canary -> sandbox [style=invis, weight=20];
+    controller -> vertex [label="advisory call", color="#a78bfa"];
+    controller -> runtime_db [label="read / CAS", color="#38bdf8"];
+    proxy -> runtime_db [label="dispatch receipt / claim", color="#38bdf8"];
+    controller -> target_db [label="read only", style=dashed, color="#38bdf8"];
+    proxy -> target_db [label="release-record mutation", color="#34d399"];
+    sandbox -> sandbox_db [label="isolated state", color="#38bdf8"];
+    vertex -> runtime_db [style=invis, weight=20];
+    runtime_db -> target_db [style=invis, weight=20];
+    target_db -> sandbox_db [style=invis, weight=20];
   }
 
-  record [label="Firestore release record\ncreate exactly once for release ID", fillcolor="#082f49", color="#38bdf8"];
-  replay [label="9  consumed permit replay\nrejected before provider contact", shape=octagon, fillcolor="#451a1a", color="#fb7185"];
-
-  rollout -> gate [label="launch authority"];
-  gate -> proxy [label="claim once"];
-  proxy -> cloud [label="stage"];
-  cloud -> lost [label="response dropped", color="#fb7185"];
-  lost -> recovery [label="reconcile; do not guess", color="#fbbf24"];
-  gemini -> allowlist [label="propose safe reads", color="#a78bfa"];
-  evidence -> verifier [label="admitted facts", color="#34d399"];
-  permits -> gate [label="continue / retry permit", color="#34d399"];
-  proxy -> cloud [label="promote", color="#34d399"];
-  proxy -> record [label="persist completion", color="#34d399"];
-  gate -> replay [label="already consumed", color="#fb7185"];
+  permit -> proxy [style=invis, weight=40];
 }

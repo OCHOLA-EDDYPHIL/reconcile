@@ -1,0 +1,30 @@
+{
+  "schema_version": "reconcile/live-corroboration/v1",
+  "captured_at": "2026-08-28T17:18:31Z",
+  "status": "PASS",
+  "source_revision": "4d626bb67739ca51c7569124724ea5d7ac8f5c0e",
+  "run_id": "p5r-adaptive-b166ba368d1cbc3e9ab57dee61b3dd74",
+  "provider_acceptance_evidence_sha256": "313dcf99995138fcba9764c2a91814add929cc6c2c7b02ce7b72c27047ab20a4",
+  "provider_projection_sha256": "27118dde742d01eadb93778996964f55702ccc12238f6fb5795542f4ca31e480",
+  "cloud_run": {
+    "service_count": 5,
+    "ready_count": 5,
+    "revision_bound_count": 5,
+    "log_entry_count": 143,
+    "run_correlated_log_entry_count": 11,
+    "log_service_stream_count": 6,
+    "log_revision_stream_count": 7
+  },
+  "firestore": {
+    "native_database_count": 3,
+    "durable_recovery_snapshot_reread": true,
+    "durable_recovery_event_count": 49
+  },
+  "gemini": {
+    "configured_model": "gemini-3.5-flash",
+    "reported_model": "gemini-3.5-flash",
+    "count_attempts": 1,
+    "generation_attempts": 1,
+    "planner_outcome": "planner-succeeded"
+  }
+}
