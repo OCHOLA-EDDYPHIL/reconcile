@@ -23,7 +23,11 @@ from reconcile.adaptive import (
     ProposalDisposition,
     execute_adaptive_investigation,
 )
-from reconcile.adk_planner import AdkGeminiPlanner, VertexAdcPlannerConfig
+from reconcile.adk_planner import (
+    AdkGeminiPlanner,
+    GuardedDispatchContext,
+    VertexAdcPlannerConfig,
+)
 from reconcile.contracts import (
     SCENARIO_RUN_REQUEST_VERSION,
     AdaptivePlannerPhase,
@@ -94,6 +98,13 @@ def test_one_real_gemini_turn_commits_only_through_deterministic_storage_evidenc
     project = _required_environment("RECONCILE_VERTEX_PROJECT")
     location = _required_environment("RECONCILE_VERTEX_LOCATION")
     model = _required_environment("RECONCILE_VERTEX_MODEL")
+    if location != "us":
+        pytest.fail("RECONCILE_VERTEX_LOCATION must be us", pytrace=False)
+    if model != "gemini-3.5-flash":
+        pytest.fail(
+            "RECONCILE_VERTEX_MODEL must be gemini-3.5-flash",
+            pytrace=False,
+        )
 
     invoked_at = datetime.now(UTC)
     database_path = tmp_path / "real-gemini-storage.sqlite3"
@@ -121,6 +132,11 @@ def test_one_real_gemini_turn_commits_only_through_deterministic_storage_evidenc
     )
     envelope = scenario_result.execution_envelope
     assert envelope is not None
+    budget = envelope.context.evidence_budget.model_copy(
+        update={"max_elapsed_ms": 60_000}
+    )
+    context = envelope.context.model_copy(update={"evidence_budget": budget})
+    envelope = envelope.model_copy(update={"context": context})
     sealed_envelope = canonical_json_bytes(envelope)
 
     read_target = LocalStorageReadTarget(database_path)
@@ -145,7 +161,7 @@ def test_one_real_gemini_turn_commits_only_through_deterministic_storage_evidenc
             ),
         ),
         max_turns=1,
-        planner_timeout_ms=4_500,
+        planner_timeout_ms=30_000,
         include_explanation=False,
     )
     credentials = _gcloud_credentials()
@@ -153,26 +169,46 @@ def test_one_real_gemini_turn_commits_only_through_deterministic_storage_evidenc
         project=project,
         location=location,
         model=model,
-        timeout_seconds=4.25,
-        max_output_tokens=1_024,
+        timeout_seconds=25,
+        max_output_tokens=4_096,
         credentials=credentials,
     )
+    assert (
+        config.timeout_seconds * 1_000
+        < policy.planner_timeout_ms
+        < envelope.context.evidence_budget.max_elapsed_ms
+    )
+
+    dispatch_count = 0
+
+    async def dispatch(context: GuardedDispatchContext):
+        nonlocal dispatch_count
+        dispatch_count += 1
+        await context.count_tokens()
+        return await context.generate_content()
 
     async def investigate(planner_config: VertexAdcPlannerConfig):
-        async with AdkGeminiPlanner.from_vertex_adc(planner_config) as planner:
-            return await execute_adaptive_investigation(
-                envelope,
-                capabilities,
-                rules,
-                planner,
-                policy,
-            )
+        async with AdkGeminiPlanner.from_vertex_adc_guarded(planner_config) as planner:
+            planner.bind_guarded_dispatch_hook(dispatch)
+            try:
+                result = await execute_adaptive_investigation(
+                    envelope,
+                    capabilities,
+                    rules,
+                    planner,
+                    policy,
+                )
+            finally:
+                consumed = planner.clear_guarded_dispatch_hook(dispatch)
+            return result, consumed
 
-    result = asyncio.run(investigate(config))
+    result, consumed = asyncio.run(investigate(config))
     del credentials, config
     fixed_report = definition.investigate(envelope)
 
     assert canonical_json_bytes(envelope) == sealed_envelope
+    assert consumed is True
+    assert dispatch_count == 1
     assert result.model_invocation_count == 1
     assert result.acquisition_turn_count == 1
     assert len(result.turns) == 1
