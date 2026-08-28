@@ -2,12 +2,12 @@
 
 <!-- duration-seconds: 210 -->
 
-Target recording length: 3 minutes 30 seconds. Keep the terminal at a readable
-font size and use the exact commands shown here.
+Reference sequence length: 3 minutes 30 seconds. The screen cues navigate the
+checked-in and public artifacts; they do not instruct a new provider run.
 
 ## 0:00–0:22 — The lost acknowledgement
 
-**Screen:** Open `demo/proof.svg`, centered on the left-hand fault.
+**Screen:** Open `demo/proof.svg`, centered on the lost-acknowledgement fault.
 
 **Narration:**
 
@@ -18,7 +18,7 @@ does neither. Gemini investigates; deterministic evidence decides.”
 
 ## 0:22–0:45 — Make both baselines lose
 
-**Screen:** Highlight the red scripted-baseline panel.
+**Screen:** Highlight the red scripted-fixture panel.
 
 **Narration:**
 
@@ -37,15 +37,16 @@ uv run --no-sync python scripts/replay_gate_g5r.py
 
 **Narration:**
 
-“Now the direct Google Cloud candidate. The first reconciliation pass sees the
-exact revision response, but not yet authoritative traffic and effect settlement.
-The classifier returns UNKNOWN. CONTINUE is denied for insufficient evidence.
-RETRY is denied because it risks a duplicate. No permit, promotion, or Firestore
-record exists. The safe answer is allowed to be ‘I do not know yet.’”
+“The offline validator next checks the checked-in provider evidence. Its first
+recorded reconciliation pass cannot yet establish authoritative settlement. The
+classifier returns UNKNOWN. CONTINUE is denied for insufficient evidence. RETRY
+is denied because it risks a duplicate, and zero recovery-action permits are
+issued. The safe answer is allowed to be ‘I do not know yet.’”
 
 ## 1:15–1:50 — Investigate, prove, permit
 
-**Screen:** Open `docs/architecture.svg`; follow steps 4 through 8.
+**Screen:** Open `docs/architecture.svg`; follow the advisory, evidence,
+deterministic-authority, and guarded-action lanes.
 
 **Narration:**
 
@@ -59,17 +60,16 @@ durable claim before the dispatcher contacts the provider.”
 
 ## 1:50–2:25 — Complete exactly the intended chain
 
-**Screen:** Return to the terminal's live-trace section; point to the revision,
-permit, and effect lines.
+**Screen:** Return to the terminal's validated direct-trace section; point to the
+revision, permit, and effect lines.
 
 **Narration:**
 
-“After Cloud Run settles, the later pass observes one uniquely correlated revision,
-matching generation, terminal success, and unchanged pre-promotion traffic. It
-classifies COMMITTED. One permit promotes that exact revision. A second certified
-permit writes the release record. The final provider counters are one revision,
-one promotion, and one Firestore completion. The revision serves one hundred
-percent of traffic.”
+“After Cloud Run settles, the later pass observes one uniquely correlated revision
+serving one hundred percent of traffic and classifies COMMITTED. One permit
+promotes that exact revision. A second certified permit writes the release record.
+The final provider counters are one revision, one promotion, and one Firestore
+completion.”
 
 ## 2:25–2:47 — Attack the authority boundary
 
@@ -84,16 +84,18 @@ cannot spend, widen, or replay a permit.”
 
 ## 2:47–3:00 — Show the hosted Google Cloud proof
 
-**Screen:** Show a sanitized Google Cloud Logs Explorer capture from the accepted
-run, filtered to `run_id="p5r-adaptive-9b53f92fcb05d60fabe3e1a5301ba402"`.
-Point to the Cloud Run service, revision, and timestamp that match the checked-in
-evidence. Keep project, account, and unrelated log fields hidden.
+**Screen:** Open the public
+[provider proof](https://github.com/OCHOLA-EDDYPHIL/reconcile-proof-to-permit/releases/download/v0.1.1/provider-proof.json).
+Find source `4d626bb67739ca51c7569124724ea5d7ac8f5c0e`, run
+`p5r-adaptive-b166ba368d1cbc3e9ab57dee61b3dd74`, and the 49-event projection.
 
 **Narration:**
 
-“This Logs Explorer record is from the accepted hosted run. Its run and revision
-identifiers match the immutable evidence, tying the replay to backend execution
-on Google Cloud.”
+“The fresh public provider proof identifies source
+`4d626bb67739ca51c7569124724ea5d7ac8f5c0e`, run
+`p5r-adaptive-b166ba368d1cbc3e9ab57dee61b3dd74`, and a 49-event projection. Its
+run and revision identifiers bind this artifact to the recorded Google Cloud
+execution. The same hash-linked record is checked in for offline validation.”
 
 ## 3:00–3:20 — Show the proof, not a promise
 
@@ -105,10 +107,11 @@ uv run --no-sync python scripts/check_release_candidate.py
 
 **Narration:**
 
-“The checked-in fixture validates the frozen counts, classifications, certificate
-hashes, permit limits, replay result, links, and claim boundary. The original
-live record is linked by immutable hashes. The cloud resources were cleaned up
-after capture, so this is a reproducible evidence replay, not an active service.”
+“The checked-in fixture validates frozen counts, classifications, certificate
+hashes, permit limits, replay result, links, and the claim boundary. The fresh
+provider record, live corroboration, cleanup verification, and checksums are in
+the public evidence release. The cloud resources were cleaned up after capture,
+so this is offline evidence-fixture validation, not an active service.”
 
 ## 3:20–3:30 — Close
 

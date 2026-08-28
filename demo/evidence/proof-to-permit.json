@@ -1,10 +1,5 @@
 {
-  "schema_version": "reconcile/demo-proof/v1",
-  "generated_from": {
-    "accepted_gate": "https://github.com/OCHOLA-EDDYPHIL/reconcile/issues/174#issuecomment-5427421390",
-    "accepted_live_trace": "https://github.com/OCHOLA-EDDYPHIL/reconcile/issues/173#issuecomment-5427414445",
-    "qualification_bundle": "https://gist.github.com/OCHOLA-EDDYPHIL/c746539699b1a686f2e32f02fd4f740e"
-  },
+  "schema_version": "reconcile/demo-proof/v2",
   "claim_boundary": {
     "adaptive_efficiency_claim_authorized": false,
     "authorized_safety_claim": "proof-to-permit safety on the frozen recovery matrix",
@@ -67,82 +62,11 @@
   },
   "live_gate": {
     "execution_basis": "direct live Google Cloud candidate",
-    "source_revision": "7f64cda91de7d0404f4673a818352e296a1a817e",
-    "image_digest": "sha256:8131aab576337e233a49ccf8f454253742f325ee656d2114b4b72d7b4a258b54",
-    "candidate_id": "11b296709925140d402946eee2f8f9483aefc94389061344d662f55eba646b01",
-    "run_id": "p5r-adaptive-9b53f92fcb05d60fabe3e1a5301ba402",
-    "gemini": {
-      "configured_model": "gemini-3.5-flash",
-      "hypothesis_id": "hypothesis-514a16bf7adf59858f3b32fd11aca946",
-      "provider_ledger_count": 1,
-      "provider_ledger_generation": 1
-    },
-    "initial_pass": {
-      "classification": "UNKNOWN",
-      "report_sha256": "33d5209b7679195e84cb4683bb7c3f2ae4029d64ccd6b599ad3cf888b5f8812e",
-      "continue_allowed": false,
-      "continue_denial": "insufficient_authoritative_evidence",
-      "retry_allowed": false,
-      "retry_denial": "ambiguous_duplicate_risk",
-      "permits_issued": 0,
-      "promotions": 0,
-      "release_records": 0
-    },
-    "settled_pass": {
-      "classification": "COMMITTED",
-      "correlated_revision": "reconcile-p5-canary-r-0e784fd908ceb530",
-      "correlated_revision_count": 1,
-      "service_reconciling": false,
-      "service_terminal_condition": "SUCCEEDED",
-      "traffic_percent": 100
-    },
-    "permits": [
-      {
-        "action": "CONTINUE stage-to-promote",
-        "certificate_sha256": "32597ead4bd06a5c4eb0f1f480d8c0b25b55b8f5f825956b8c4f6d944da051a4",
-        "max_uses": 1,
-        "permit_id": "permit-1dbbbd292b5ff1f68e22564020c5ef64",
-        "state": "SUCCEEDED"
-      },
-      {
-        "action": "CONTINUE promote-to-record",
-        "certificate_sha256": "9e525f7937202159eca15f6a58fe1e490bf14c602190dab817bd5ad25627dbcb",
-        "max_uses": 1,
-        "permit_id": "permit-1d665c50510f4237f107eeb957a21b9a",
-        "state": "SUCCEEDED"
-      }
-    ],
-    "effects": {
-      "continue_permits_consumed": 2,
-      "continue_permits_issued": 2,
-      "promotions": 1,
-      "release_record_path": "releases/p5-release-7f64cda91de7d0404f4673a8",
-      "release_records": 1,
-      "retry_permits_consumed": 0,
-      "retry_permits_issued": 0,
-      "revisions": 1
-    },
-    "replay": {
-      "outcome": "REJECTED_BEFORE_PROVIDER_CONTACT",
-      "provider_contact": false,
-      "provider_contact_delta": 0,
-      "whole_request_created": false
-    },
-    "evidence": {
-      "provider_acceptance_record_sha256": "80808adb7bf254f86a6e77e013e8d494fd18e831a87dc116eb00017c3a4da484",
-      "canonical_file_sha256": "ebd9bb4e3d485b333c90fb05f7c4ae0a87716ce7aa5b73ee6f543c89d116045a",
-      "snapshot_sha256": "55bd8f585f7851fdefbcdfee6f92a215e380732c7ef619083a3f2bbd3f082a51",
-      "transcript_sha256": "925da06a92385c22ca1a2d3b7477f4c01c5699023e28f085ec1111091314fac4",
-      "event_count": 47
-    },
-    "cleanup": {
-      "cloud_run_resources": 0,
-      "firestore_databases": 0,
-      "gcs_buckets": 0,
-      "artifact_registries": 0,
-      "active_phase5_service_accounts": 0,
-      "active_phase5_iam_bindings": 0,
-      "phase5_budgets": 0
-    }
+    "provider_proof": "provider-proof.json",
+    "provider_proof_sha256": "27118dde742d01eadb93778996964f55702ccc12238f6fb5795542f4ca31e480",
+    "live_corroboration": "live-corroboration.json",
+    "live_corroboration_sha256": "408525043d82b0ee69404038e90358d82c7a531d35cbcfc169729ac5791fbcc9",
+    "cleanup_verification": "cleanup-verification.json",
+    "cleanup_verification_sha256": "34c4bd615f99b650baeca3e91736759c135c0fc172d1753ac1513d58afd71bcc"
   }
 }

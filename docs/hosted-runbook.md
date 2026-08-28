@@ -104,6 +104,7 @@ independently inventory the scoped project afterward.
 
 ## Accepted reference
 
-The canonical accepted candidate, evidence hashes, exact outcomes, teardown
-exception, direct cleanup, and zero-resource inventory are in the
-[Gate G5R acceptance record](https://github.com/OCHOLA-EDDYPHIL/reconcile/issues/173#issuecomment-5427414445).
+The canonical accepted candidate, evidence hashes, and exact outcomes are in the
+[sanitized provider proof](../demo/evidence/provider-proof.json). The teardown
+evidence and zero-resource inventory are in the hash-bound
+[cleanup verification](../demo/evidence/cleanup-verification.json).

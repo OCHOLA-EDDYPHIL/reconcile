@@ -1,8 +1,9 @@
-# Proof replay and walkthrough
+# Offline proof fixture and architecture guide
 
-This bundle presents the reproducible Proof-to-Permit walkthrough. It is tied to
-the accepted G5R evidence and keeps scripted comparison evidence separate from
-direct-cloud operational proof.
+This bundle explains the Proof-to-Permit authority boundary and validates a
+sanitized evidence bundle without cloud credentials. It keeps scripted
+comparison evidence distinct from fresh direct-cloud provider evidence while
+checking their shared manifest and cross-file hashes.
 
 ## Run it
 
@@ -17,43 +18,56 @@ For machine-readable output:
 uv run --no-sync python scripts/replay_gate_g5r.py --json
 ```
 
-The replay validates [evidence/proof-to-permit.json](evidence/proof-to-permit.json)
-before printing anything. It refuses changed counts, hashes, classifications,
-claim authorization, permit cardinality, replay behavior, or cleanup inventory.
+The first command is an offline evidence-fixture validator. It validates the
+[bundle manifest](evidence/proof-to-permit.json),
+[provider proof](evidence/provider-proof.json),
+[live corroboration](evidence/live-corroboration.json), and
+[cleanup verification](evidence/cleanup-verification.json) before printing
+anything. It refuses changed counts, hashes, classifications, claim
+authorization, permit cardinality, replay behavior, or cleanup inventory. It
+does not execute the recovery workflow, invoke Gemini, or contact Google Cloud.
 
 ## Evidence layers
 
-| Panel | What it demonstrates | What it does not demonstrate |
+| Layer | What it demonstrates | What it does not demonstrate |
 | --- | --- | --- |
 | Accepted scripted baseline | Under the same provider-shaped drop-after-accept fixture, blind retry creates two revisions and blind abort leaves the chain incomplete. | A live Google Cloud A/B test. |
-| Direct live-cloud G5R trace | Gemini hypothesis, initial fail-closed result, later correlated revision, deterministic certificate, exact permits, effects `1/1/1`, and replay denial. | Adaptive superiority, measured efficiency, or an active public endpoint. |
+| [Fresh provider proof](evidence/provider-proof.json) | Source `4d626bb67739ca51c7569124724ea5d7ac8f5c0e`, run `p5r-adaptive-b166ba368d1cbc3e9ab57dee61b3dd74`, and 49 projected events: initial `UNKNOWN`, later correlated revision, deterministic certificates, exact permits, effects `1/1/1`, stable snapshot reread, and replay denial. | Adaptive superiority, measured efficiency, or an active public endpoint. |
+| Corroboration and cleanup | Five ready, revision-bound Cloud Run services, three Firestore databases, provider-correlated logs, a durable snapshot reread, then zero retained Phase 5 resources after cleanup. | A currently deployed public service. |
 
-Use [proof.svg](proof.svg) as the opening comparison visual and
-[../docs/architecture.svg](../docs/architecture.svg) for the authority walkthrough.
-Both have checked-in Graphviz sources.
+The provider proof is checked in for offline validation and mirrored in the
+[public evidence release](https://github.com/OCHOLA-EDDYPHIL/reconcile-proof-to-permit/releases/tag/v0.1.1)
+with live corroboration, cleanup verification, and checksums. The scripted
+baseline remains a separate evidence layer, not a live-cloud A/B.
+
+Use [proof.svg](proof.svg) for the evidence-layer summary and
+[../docs/architecture.svg](../docs/architecture.svg) for the authority and hosted
+topology. Both have checked-in Graphviz sources and PNG exports.
 
 ## Walkthrough assets
 
-- [script.md](script.md) — timed narration and exact screen actions
-- [proof.svg](proof.svg) — baseline-versus-live hero visual
-- [../docs/architecture.svg](../docs/architecture.svg) — numbered architecture
+- [script.md](script.md) — reference narration aligned to the fresh provider proof
+- [proof.svg](proof.svg) and [proof.png](proof.png) — evidence-layer summary
+- [../docs/architecture.svg](../docs/architecture.svg) — authority and hosted topology
 - [../docs/architecture.png](../docs/architecture.png) — raster architecture export
-- [evidence/proof-to-permit.json](evidence/proof-to-permit.json) — sanitized proof
+- [evidence/proof-to-permit.json](evidence/proof-to-permit.json) — offline bundle
+  manifest
+- [evidence/provider-proof.json](evidence/provider-proof.json),
+  [evidence/live-corroboration.json](evidence/live-corroboration.json), and
+  [evidence/cleanup-verification.json](evidence/cleanup-verification.json) —
+  hash-linked provider evidence
 
-## Walkthrough checklist
+## Code-path navigation
 
-- [ ] Start from a clean checkout and complete the locked install.
-- [ ] Run both commands above with no cloud credentials in the checkout.
-- [ ] Keep “scripted baseline” and “direct live-cloud trace” labels visible.
-- [ ] Show `UNKNOWN` and both denied actions before any permit.
-- [ ] Show the exact correlated revision and both single-use permits.
-- [ ] Show `1/1/1` and replay rejection before provider contact.
-- [ ] State that the accepted deployment was cleaned up and the replay requires
-      no public endpoint.
-- [ ] If a live provider is unavailable, use the accepted evidence replay; do not
-      improvise a new cloud candidate during recording.
-- [ ] Check every external link in a private/incognito browser before sharing.
-- [ ] Keep the final recording at or below four minutes.
+- Advisory investigation: [recovery_agents.py](../reconcile/recovery_agents.py)
+- Evidence admission: [admission.py](../reconcile/evidence/admission.py)
+- Deterministic verification:
+  [recovery_verification.py](../reconcile/evidence/recovery_verification.py)
+- Recovery state machine: [recovery_workflow.py](../reconcile/recovery_workflow.py)
+- Permit issue and claim: [permits.py](../reconcile/controller/permits.py) and
+  [firestore_permits.py](../reconcile/hosted/firestore_permits.py)
+- Guarded provider contact:
+  [recovery_dispatch.py](../reconcile/hosted/recovery_dispatch.py)
 
-The walkthrough uses accepted evidence replay and does not require a live
-deployment.
+The offline validation path does not require a live deployment or a public
+endpoint.

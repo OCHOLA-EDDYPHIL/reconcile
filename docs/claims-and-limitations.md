@@ -10,7 +10,7 @@ submission draft must not broaden it.
 | Proof-to-Permit was safe on the frozen recovery matrix. | Accepted scripted qualification: 100 cases, 400 lanes, zero false permits, fixed/adaptive decision and permit parity in all 100 cases. |
 | Blind retry duplicated the stage effect in the accepted drop-after-accept case. | Provider-shaped scripted lane: two release-labelled revisions, one promotion, one record. |
 | Blind abort left the chain incomplete in that case. | Provider-shaped scripted lane: one staged revision, zero promotions, zero records; baseline revision still serving. |
-| The direct live-cloud candidate failed closed before settlement. | Initial G5R pass was `UNKNOWN`; continuation and retry were denied; no permit, promotion, or record existed. |
+| The direct live-cloud candidate failed closed before settlement. | Initial G5R pass was `UNKNOWN`; continuation and retry were denied; zero recovery-action permits were issued. |
 | The settled live pass safely continued the exact chain. | One correlated revision, deterministic certificates, two `max_uses=1` permits, one promotion, and one Firestore record. |
 | Permit replay was stopped before provider contact. | Replay outcome `REJECTED_BEFORE_PROVIDER_CONTACT`, contact delta zero. |
 
@@ -85,11 +85,11 @@ identity material outside the repository.
 - **Model availability:** provider failure never widens authority. The workflow
   fails closed or uses an explicitly configured deterministic route.
 - **Public proof:** the public record exposes evidence hashes and a sanitized
-  summary, not the private raw 47-event artifact.
+  summary, not a private raw provider record or event transcript.
 
 ## Evidence index
 
-- [Accepted live trace](https://github.com/OCHOLA-EDDYPHIL/reconcile/issues/173#issuecomment-5427414445)
-- [Gate acceptance](https://github.com/OCHOLA-EDDYPHIL/reconcile/issues/174#issuecomment-5427421390)
+- [Fresh provider proof](../demo/evidence/provider-proof.json)
+- [Hash-linked live corroboration](../demo/evidence/live-corroboration.json)
 - [Qualification artifacts](https://gist.github.com/OCHOLA-EDDYPHIL/c746539699b1a686f2e32f02fd4f740e)
-- [Baseline acceptance](https://github.com/OCHOLA-EDDYPHIL/reconcile/issues/171#issuecomment-5384542611)
+- [Scripted qualification manifest](../demo/evidence/proof-to-permit.json)

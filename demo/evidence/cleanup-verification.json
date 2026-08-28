@@ -1,0 +1,32 @@
+{
+  "schema_version": "reconcile/cleanup-verification/v1",
+  "captured_at": "2026-08-28T17:28:09Z",
+  "status": "PASS",
+  "source_revision": "4d626bb67739ca51c7569124724ea5d7ac8f5c0e",
+  "run_id": "p5r-adaptive-b166ba368d1cbc3e9ab57dee61b3dd74",
+  "provider_projection_sha256": "27118dde742d01eadb93778996964f55702ccc12238f6fb5795542f4ca31e480",
+  "live_corroboration_sha256": "408525043d82b0ee69404038e90358d82c7a531d35cbcfc169729ac5791fbcc9",
+  "teardown_evidence": {
+    "runtime_sha256": "04e7d549d19925f03e9eb22ac2b892a00766c4f495ec6d5b40ff814de993d810",
+    "foundation_sha256": "8c7dba1f646c64c19b5ecc41becd8f7a531768179a6aa1c1324483a4b050deb1",
+    "state_protection_sha256": "88b72d6497bf7b4da1759e3c068beba45e9cbf05b035d9d9a9595118ec518f27",
+    "bootstrap_sha256": "429f42331c07eab2559848e8f2c0082a8cc032fd2fa2ce18f6f5aa8dfe7814a6"
+  },
+  "inventory": {
+    "cloud_run_services": 0,
+    "cloud_run_jobs": 0,
+    "artifact_repositories": 0,
+    "firestore_databases": 0,
+    "storage_buckets": 0,
+    "phase5_named_service_accounts": 0,
+    "custom_roles": 0,
+    "phase5_project_iam_members": 0,
+    "phase5_budgets": 0
+  },
+  "service_account_audit": {
+    "created_during_run_window": 6,
+    "deleted_without_error_during_run_window": 6,
+    "remaining_default_compute_accounts": 1,
+    "remaining_phase5_named_accounts": 0
+  }
+}
