@@ -3921,6 +3921,7 @@ def _prepare_container_from_snapshot(
     runner: CommandRunner,
 ) -> tuple[str, str]:
     _verify_python_interpreter()
+    identity = deployment or _legacy_deployment_identity()
     command = (
         _PYTHON,
         "-P",
@@ -3940,6 +3941,8 @@ def _prepare_container_from_snapshot(
         str(source_root),
         "--source-date-epoch",
         str(source_date_epoch),
+        "--image-project-id",
+        identity.project_id,
     )
     try:
         output = _validated_runner_bytes(
@@ -3966,7 +3969,7 @@ def _prepare_container_from_snapshot(
         or value.get("status") != "passed"
         or not isinstance(image_digest, str)
         or re.fullmatch(r"sha256:[0-9a-f]{64}", image_digest) is None
-        or source_tag != _image_source_tag(source_revision, deployment)
+        or source_tag != _image_source_tag(source_revision, identity)
     ):
         raise OperatorError("CONTAINER_PREPARATION_FAILED")
     return image_digest, source_tag

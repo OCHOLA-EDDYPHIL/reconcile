@@ -3254,6 +3254,7 @@ def test_snapshot_checkers_use_pinned_python_and_reverify_before_terraform(
     assert container_cwd == source
     assert container_environment["PYTHONPATH"] == str(source)
     assert container_timeout == 7_200
+    assert container_argv[-2:] == ("--image-project-id", "example-project-id")
 
     argv, cwd, environment, timeout = calls[1]
     assert argv[:5] == (

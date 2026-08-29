@@ -21,6 +21,7 @@ _DOCKERFILE = _ROOT / "Dockerfile"
 _DOCKERIGNORE = _ROOT / ".dockerignore"
 _PROJECT = "example-project-id"
 _REGION = "us-central1"
+_PROJECT_ID = re.compile(r"[a-z][a-z0-9-]{4,28}[a-z0-9]")
 _SOURCE_REVISION = re.compile(r"[0-9a-f]{40}")
 _IMAGE_DIGEST = re.compile(r"sha256:[0-9a-f]{64}")
 _ARCHIVE_SHA256 = re.compile(r"[0-9a-f]{64}")
@@ -768,11 +769,16 @@ def _source_identity(selected_revision: str | None) -> tuple[str, int]:
     return revision, int(epoch)
 
 
-def _image_source_tag(source_revision: str) -> str:
+def _image_source_tag(
+    source_revision: str,
+    project_id: str = _PROJECT,
+) -> str:
     if _SOURCE_REVISION.fullmatch(source_revision) is None:
         _fail("source revision is invalid")
+    if _PROJECT_ID.fullmatch(project_id) is None:
+        _fail("image project id is invalid")
     return (
-        f"{_REGION}-docker.pkg.dev/{_PROJECT}/reconcile-p5/"
+        f"{_REGION}-docker.pkg.dev/{project_id}/reconcile-p5/"
         f"reconcile:git-{source_revision}"
     )
 
@@ -1287,6 +1293,7 @@ def run_gate(
     docker_host: str | None = None,
     source_root: Path | None = None,
     source_date_epoch: int | None = None,
+    image_project_id: str = _PROJECT,
 ) -> GateResult:
     build_root = _ROOT if source_root is None else source_root
     if source_root is not None:
@@ -1345,7 +1352,7 @@ def run_gate(
             if source_revision is None or epoch is None:  # validated above
                 _fail("explicit source identity is invalid")
         image_tag = (
-            _image_source_tag(source_revision)
+            _image_source_tag(source_revision, image_project_id)
             if artifact_destination is not None
             else f"reconcile-phase5-verification:{source_revision}"
         )
@@ -1447,7 +1454,9 @@ def run_gate(
                 sealed_image.config_digest if sealed_image is not None else None
             ),
             source_tag=(
-                _image_source_tag(source_revision) if sealed_image is not None else None
+                _image_source_tag(source_revision, image_project_id)
+                if sealed_image is not None
+                else None
             ),
         )
 
@@ -1462,6 +1471,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--docker-host")
     parser.add_argument("--source-root", type=Path)
     parser.add_argument("--source-date-epoch", type=int)
+    parser.add_argument("--image-project-id", default=_PROJECT)
     return parser.parse_args()
 
 
@@ -1482,6 +1492,7 @@ def main() -> int:
                 docker_host=arguments.docker_host,
                 source_root=arguments.source_root,
                 source_date_epoch=arguments.source_date_epoch,
+                image_project_id=arguments.image_project_id,
             )
     except ContainerGateError as error:
         print(
