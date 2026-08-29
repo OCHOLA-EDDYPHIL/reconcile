@@ -862,10 +862,8 @@ class HostedControllerDispatcher:
             and isinstance(material, HostedSandboxOrderMaterial)
             else self._fixed
         )
-        creation = await service.create_and_wait_result(
-            envelope,
-            started_at=work.updated_at,
-        )
+        # Bound evidence acquisition, not upstream scheduling or cold-start latency.
+        creation = await service.create_and_wait_result(envelope)
         report = creation.report
         if (
             report.status is not InvestigationStatus.COMPLETED

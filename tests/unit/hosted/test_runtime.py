@@ -476,7 +476,7 @@ def test_hybrid_executor_rejects_authoritative_routes_before_planner_constructio
         ),
     ),
 )
-def test_controller_selects_adaptive_service_only_for_sandbox(
+def test_controller_selects_service_and_starts_evidence_budget_locally(
     scenario_name: ScenarioName,
     mode: ScenarioMode,
     expected_strategy: DurableExecutionStrategy,
@@ -493,7 +493,7 @@ def test_controller_selects_adaptive_service_only_for_sandbox(
         launch_request=SimpleNamespace(mode=SimpleNamespace(value=mode.value)),
         updated_at=datetime(2026, 8, 18, tzinfo=UTC),
     )
-    selected: list[DurableExecutionStrategy] = []
+    selected: list[tuple[DurableExecutionStrategy, dict[str, object]]] = []
 
     class _RouteSelected(Exception):
         pass
@@ -509,8 +509,8 @@ def test_controller_selects_adaptive_service_only_for_sandbox(
         ) -> None:
             self.strategy = strategy
 
-        async def create_and_wait_result(self, *_args: object, **_kwargs: object):
-            selected.append(self.strategy)
+        async def create_and_wait_result(self, *_args: object, **kwargs: object):
+            selected.append((self.strategy, kwargs))
             raise _RouteSelected
 
     async def sealed(*_args: object, **_kwargs: object):
@@ -545,7 +545,7 @@ def test_controller_selects_adaptive_service_only_for_sandbox(
             await dispatcher(scope)
 
     asyncio.run(scenario())
-    assert selected == [expected_strategy]
+    assert selected == [(expected_strategy, {})]
 
 
 @pytest.mark.parametrize(
