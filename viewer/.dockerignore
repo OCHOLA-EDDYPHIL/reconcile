@@ -1,0 +1,8 @@
+**
+!Dockerfile
+!server.py
+!public_contract.py
+!bundle/
+!bundle/index.html
+!bundle/snapshot.json
+!bundle/bundle-manifest.json

@@ -130,6 +130,7 @@ class _CloudState:
         self.generation = 1
         self.update_count = 0
         self.revision_read_count = 0
+        self.health_read_count = 0
         self.health_ready = True
         self.provider_reads_unavailable_after_stage = False
         self.unhealthy_after_stage = False
@@ -318,6 +319,7 @@ class _Health:
         self.state = state
 
     def get(self, **_kwargs):
+        self.state.health_read_count += 1
         if self.state.unhealthy_after_stage or not self.state.health_ready:
             return 503, b"{}"
         return 200, json.dumps(

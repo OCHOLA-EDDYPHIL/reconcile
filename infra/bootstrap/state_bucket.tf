@@ -1,4 +1,6 @@
 locals {
+  state_bucket_name = "${var.project_id}-p5-state"
+
   labels = {
     app         = "reconcile"
     environment = "phase5"
@@ -8,7 +10,7 @@ locals {
 
 resource "google_storage_bucket" "terraform_state" {
   project                     = var.project_id
-  name                        = var.state_bucket_name
+  name                        = local.state_bucket_name
   location                    = var.region
   storage_class               = "STANDARD"
   uniform_bucket_level_access = true

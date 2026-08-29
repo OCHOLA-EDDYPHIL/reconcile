@@ -60,6 +60,7 @@ class HostedRecoveryDispatchError(RuntimeError):
 
 
 _ACCEPTANCE_RUN_ID = re.compile(r"p5r-(?:fixed|adaptive)-[0-9a-f]{32}")
+_PARTIAL_READ_ACCEPTANCE_RUN_ID = re.compile(r"p5w-fixed-[0-9a-f]{32}")
 _OPERATION_DENIED = b'{"code":"operation-denied"}'
 
 
@@ -234,15 +235,22 @@ class HostedRecoveryDispatchGateway:
         if (
             prepared.target_node_id != "stage"
             or scope.authority_kind is not RecoveryAuthorityKind.LAUNCH_PERMIT
-            or _ACCEPTANCE_RUN_ID.fullmatch(scope.run_id) is None
         ):
             return
         try:
             snapshot = await self._store.get(scope.run_id)
-            if snapshot.request.fault not in {
+            acceptance_replay = _ACCEPTANCE_RUN_ID.fullmatch(
+                scope.run_id
+            ) is not None and snapshot.request.fault in {
                 RecoveryRunFault.DROP_AFTER_ACCEPT,
                 RecoveryRunFault.NO_FAULT,
-            }:
+            }
+            partial_read_replay = (
+                _PARTIAL_READ_ACCEPTANCE_RUN_ID.fullmatch(scope.run_id) is not None
+                and snapshot.request.fault
+                is RecoveryRunFault.ACCEPTANCE_DROP_AFTER_ACCEPT_PARTIAL_READ_OUTAGE
+            )
+            if not (acceptance_replay or partial_read_replay):
                 return
             receipt_id = (
                 "dispatch-denial-"

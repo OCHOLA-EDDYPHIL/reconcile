@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import re
 from enum import StrEnum
 from typing import Literal
 
@@ -54,6 +55,9 @@ class RecoveryRunPolicy(StrEnum):
 class RecoveryRunFault(StrEnum):
     NO_FAULT = "no-fault"
     DROP_AFTER_ACCEPT = "drop-after-accept"
+    ACCEPTANCE_DROP_AFTER_ACCEPT_PARTIAL_READ_OUTAGE = (
+        "acceptance-drop-after-accept-partial-read-outage"
+    )
     SUPPRESS_BEFORE_DISPATCH = "suppress-before-dispatch"
 
 
@@ -131,6 +135,18 @@ class RecoveryRunRequest(StrictModel):
     scenario: Literal["cloud-run-rollout"] = "cloud-run-rollout"
     policy: RecoveryRunPolicy
     fault: RecoveryRunFault
+
+    @model_validator(mode="after")
+    def validate_acceptance_fault(self) -> RecoveryRunRequest:
+        if self.fault is not (
+            RecoveryRunFault.ACCEPTANCE_DROP_AFTER_ACCEPT_PARTIAL_READ_OUTAGE
+        ):
+            return self
+        if self.policy is not RecoveryRunPolicy.FIXED:
+            raise ValueError("partial-read acceptance fault requires fixed policy")
+        if re.fullmatch(r"p5w-fixed-[0-9a-f]{32}", self.run_id) is None:
+            raise ValueError("partial-read acceptance fault requires a sealed run id")
+        return self
 
 
 class RecoveryNodeProgress(StrictModel):

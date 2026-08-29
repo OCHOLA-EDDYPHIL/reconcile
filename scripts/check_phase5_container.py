@@ -153,8 +153,10 @@ def verify_static_contract(source_root: Path | None = None) -> None:
         "COPY pyproject.toml uv.lock ./",
         "COPY reconcile ./reconcile",
         "uv sync --locked --no-dev --no-editable",
+        "reconcile-0.1.1.dist-info",
         'cache="$metadata/uv_cache.json"',
         'rm "$cache"',
+        'org.opencontainers.image.version="0.1.1"',
         "COPY --from=builder --chown=65532:65532 /opt/reconcile /opt/reconcile",
         "USER 65532:65532",
         'ENTRYPOINT ["/opt/reconcile/bin/python", "-m", "reconcile.hosted"]',
@@ -1115,6 +1117,7 @@ def component_environment(
     }
     if component == "api":
         specific = {
+            "RECONCILE_ACCEPTANCE_PARTIAL_READ_OUTAGE_ENABLED": "true",
             "RECONCILE_ALLOWED_CALLER_EMAILS": (
                 f"rec-p5-apply@{_PROJECT}.iam.gserviceaccount.com"
             ),
@@ -1127,6 +1130,7 @@ def component_environment(
         }
     elif component == "controller":
         specific = {
+            "RECONCILE_ACCEPTANCE_PARTIAL_READ_OUTAGE_ENABLED": "true",
             "RECONCILE_ALLOWED_CALLER_EMAILS": (
                 f"rec-p5-api@{_PROJECT}.iam.gserviceaccount.com"
             ),
@@ -1165,6 +1169,7 @@ def component_environment(
         }
     elif component == "fault-proxy":
         specific = {
+            "RECONCILE_ACCEPTANCE_PARTIAL_READ_OUTAGE_ENABLED": "true",
             "RECONCILE_ALLOWED_CALLER_EMAILS": (
                 f"rec-p5-api@{_PROJECT}.iam.gserviceaccount.com"
             ),

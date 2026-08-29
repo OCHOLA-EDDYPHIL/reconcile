@@ -10,6 +10,7 @@ from typing import Any
 
 import pytest
 
+from reconcile.deployment_profile import DeploymentProfile
 from reconcile.hosted.provider import (
     HOSTED_CANDIDATE_IDENTITY_VERSION,
     HostedCandidateIdentity,
@@ -17,6 +18,57 @@ from reconcile.hosted.provider import (
 from scripts import check_phase5_terraform_plans as plans
 
 pytestmark = pytest.mark.unit
+
+
+def test_non_placeholder_profile_rebuilds_all_identity_expectations(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assigned_globals = (
+        "_APPLY_EMAIL",
+        "_APPLY_MEMBER",
+        "_AUDIENCES",
+        "_BILLING_ACCOUNT",
+        "_CANARY_BASELINE_IDENTITY",
+        "_CANARY_BASELINE_REVISION",
+        "_COMMON_RUNTIME_ENVIRONMENT",
+        "_CUSTOM_ROLE_EXPECTED",
+        "_IAM_EXPECTED",
+        "_IMAGE_REFERENCE",
+        "_OPERATOR_MEMBER",
+        "_OWNER",
+        "_PROJECT",
+        "_PROJECT_NUMBER",
+        "_RECOVERY_PAYLOAD_SHA256",
+        "_RUNTIME_ADDRESSES",
+        "_RUNTIME_EMAILS",
+        "_RUNTIME_ENVIRONMENT",
+        "_STACKS",
+        "_STATE_BUCKET",
+        "_TARGET_BUCKET",
+    )
+    for name in assigned_globals:
+        monkeypatch.setattr(plans, name, getattr(plans, name))
+    profile = DeploymentProfile(
+        schema_version="reconcile/deployment-profile/v1",
+        project_id="reconcile-test-123456",
+        project_number="123456789012",
+        billing_account_id="ABCDEF-123456-ABCDEF",
+        owner_account="owner@example.com",
+    )
+
+    plans._configure_deployment(profile)
+
+    expectations = json.dumps(
+        {
+            "custom_roles": plans._CUSTOM_ROLE_EXPECTED,
+            "iam": plans._IAM_EXPECTED,
+        },
+        sort_keys=True,
+    )
+    assert "example-project-id" not in expectations
+    assert profile.project_id in expectations
+    runtime = next(item for item in plans._STACKS if item.name == "runtime")
+    assert runtime.variables["acceptance_partial_read_outage_enabled"] is True
 
 
 def test_recovery_payload_hash_is_the_canonical_hosted_candidate_identity() -> None:
@@ -756,13 +808,14 @@ def test_copy_rewrites_private_working_files_from_read_only_source(
     )
 
 
-def test_copy_rejects_bootstrap_local_backend_path_drift(tmp_path: Path) -> None:
+def test_copy_rejects_embedded_bootstrap_backend_configuration(tmp_path: Path) -> None:
     source = tmp_path / "source"
     shutil.copytree(plans._STACKS[0].source, source)
     versions = source / "versions.tf"
     versions.write_text(
         versions.read_text(encoding="utf-8").replace(
-            'path = "terraform.tfstate"', 'path = "drift.tfstate"'
+            'backend "local" {}',
+            'backend "local" {\n    path = "drift.tfstate"\n  }',
         ),
         encoding="utf-8",
     )

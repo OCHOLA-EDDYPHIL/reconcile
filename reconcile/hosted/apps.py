@@ -664,6 +664,7 @@ def create_component_app(
         RecoveryFirestoreReleaseActionAuthorizer | None
     ) = None,
     recovery_action_caller_email: str | None = None,
+    acceptance_partial_read_outage_enabled: bool = False,
     internal_operation_handlers: Mapping[InternalOperation, InternalOperationHandler]
     | None = None,
 ) -> FastAPI:
@@ -671,6 +672,8 @@ def create_component_app(
 
     if type(config) is not HostedConfig:
         raise TypeError("hosted app requires exact configuration")
+    if type(acceptance_partial_read_outage_enabled) is not bool:
+        raise TypeError("partial-read acceptance state must be boolean")
     if (
         sandbox_evidence_reader is not None
         and config.component is not Component.SANDBOX
@@ -727,6 +730,9 @@ def create_component_app(
             operator_service=operator_service,  # type: ignore[arg-type]
             recovery_service=recovery_service,  # type: ignore[arg-type]
             hosted=True,
+            acceptance_partial_read_outage_enabled=(
+                acceptance_partial_read_outage_enabled
+            ),
         )
     else:
         if any(

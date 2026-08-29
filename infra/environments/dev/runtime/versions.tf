@@ -9,8 +9,6 @@ terraform {
   }
 
   backend "gcs" {
-    bucket                      = "example-project-id-p5-state"
-    prefix                      = "phase5/runtime"
-    impersonate_service_account = "rec-p5-apply@example-project-id.iam.gserviceaccount.com"
+    prefix = "phase5/runtime"
   }
 }

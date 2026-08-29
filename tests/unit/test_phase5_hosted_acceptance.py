@@ -15,6 +15,11 @@ import httpx
 import pytest
 
 import reconcile.phase5_hosted_acceptance as acceptance_module
+from reconcile.adapters.cloud_run import (
+    CLOUD_RUN_HEALTH_CAPABILITY,
+    CLOUD_RUN_REVISION_CAPABILITY,
+    CLOUD_RUN_SERVICE_CAPABILITY,
+)
 from reconcile.adapters.firestore_business import (
     FIRESTORE_BUSINESS_CAPABILITY_NAME,
     FIRESTORE_BUSINESS_TARGET_KIND,
@@ -39,6 +44,7 @@ from reconcile.contracts import (
     AdvisoryTurnStatus,
     AdvisoryTurnSummary,
     AmbiguityKind,
+    AmbiguityWitness,
     CapabilityRef,
     Classification,
     ComparisonStrategyKind,
@@ -61,6 +67,7 @@ from reconcile.contracts import (
     RecoveryDispatchReceipt,
     RecoveryFirestoreObservation,
     RecoveryMutationCounters,
+    RecoveryNodeState,
     RecoveryPolicyResult,
     RecoveryReceiptOutcome,
     RecoveryResetResult,
@@ -99,6 +106,7 @@ from reconcile.contracts import (
     TerminalStateEventPayload,
     TerminalStateSummary,
     canonical_json_bytes,
+    canonical_sha256,
 )
 from reconcile.evidence.classification import _action_gates
 from reconcile.hosted.firestore_provider_ledger import HostedProviderLedgerObservation
@@ -121,6 +129,7 @@ from reconcile.persistence.recovery_runs import (
 )
 from reconcile.phase5_hosted_acceptance import (
     PHASE5_HOSTED_ACCEPTANCE_VERSION,
+    PHASE5_PROVIDER_ACCEPTANCE_VERSION,
     AcceptanceLimitation,
     AcceptanceMode,
     CanaryReprovisionObservation,
@@ -135,6 +144,7 @@ from reconcile.phase5_hosted_acceptance import (
     HostedAcceptanceRecord,
     InterfaceParityObservation,
     LifecycleDiagnostics,
+    PartialReadOutageObservation,
     RecoveryLaneAcceptanceObservation,
     ScenarioAcceptanceObservation,
     ServiceComponent,
@@ -886,6 +896,52 @@ class _RecoveryLaunchClient:
                 yield event
 
 
+def _partial_read_witness() -> AmbiguityWitness:
+    witness = make_recovery_examples()[3]
+    assert type(witness) is AmbiguityWitness
+    history_ids = ("effects-occurred", "effects-not-occurred")
+    committed = witness.possible_histories[0].model_copy(
+        update={"history_id": history_ids[0]}
+    )
+    absent = witness.possible_histories[1]
+    partial = type(absent).model_validate(
+        absent.model_dump(mode="python")
+        | {
+            "history_id": history_ids[1],
+            "classification": Classification.PARTIAL,
+            "effect_states": tuple(
+                effect.model_copy(
+                    update={
+                        "state": (
+                            EffectAssertionState.ESTABLISHED
+                            if index == 0
+                            else EffectAssertionState.NOT_ESTABLISHED
+                        )
+                    }
+                )
+                for index, effect in enumerate(absent.effect_states)
+            ),
+            "summary": (
+                "The staged revision exists, but the unavailable reads cannot "
+                "establish the remaining effects."
+            ),
+        }
+    )
+    histories = (committed, partial)
+    observations = tuple(
+        observation.model_copy(update={"distinguishes_history_ids": history_ids})
+        for observation in witness.discriminating_observations
+    )
+    return AmbiguityWitness.model_validate(
+        witness.model_dump(mode="python")
+        | {
+            "node_id": "stage",
+            "possible_histories": histories,
+            "discriminating_observations": observations,
+        }
+    )
+
+
 def _recovery_result(
     *,
     candidate: CandidateIdentity,
@@ -893,6 +949,7 @@ def _recovery_result(
     fault: RecoveryRunFault,
     purpose: str,
     service_uid: str,
+    ambiguity_witness: AmbiguityWitness | None = None,
 ) -> RecoveryPolicyResult:
     settings = acceptance_module._candidate_release_settings(candidate)
     binding = recovery_experiment_binding(settings, fault)
@@ -907,13 +964,18 @@ def _recovery_result(
     blind_abort = policy is RecoveryRunPolicy.BLIND_ABORT
     proof_policy = policy in {RecoveryRunPolicy.FIXED, RecoveryRunPolicy.ADAPTIVE}
     suppressed = fault is RecoveryRunFault.SUPPRESS_BEFORE_DISPATCH
+    partial_read_outage = (
+        fault is RecoveryRunFault.ACCEPTANCE_DROP_AFTER_ACCEPT_PARTIAL_READ_OUTAGE
+    )
+    if partial_read_outage != (ambiguity_witness is not None):
+        raise AssertionError("partial-read test result requires its witness")
     intended_revision = settings.staged_revision
     duplicate_revision = settings.revision_for_operation(
         f"{settings.stage_operation_id}-retry"
     )
     serving_revision = (
         "reconcile-p5-canary-baseline"
-        if blind_abort
+        if blind_abort or partial_read_outage
         else duplicate_revision
         if blind_retry
         else intended_revision
@@ -955,6 +1017,39 @@ def _recovery_result(
                 recorded_at=NOW,
             ),
         )
+    elif partial_read_outage:
+        receipts = (
+            RecoveryDispatchReceipt(
+                schema_version=RECOVERY_DISPATCH_RECEIPT_VERSION,
+                receipt_id=f"receipt-contacted-{run_id}",
+                run_id=run_id,
+                release_id=settings.release_id,
+                node_id="stage",
+                semantic_action_sha256="6" * 64,
+                action_request_sha256="7" * 64,
+                authority_id=f"launch-replay-{run_id}",
+                claim_id=f"claim-replay-{run_id}",
+                attempt=1,
+                provider_contact=True,
+                outcome=RecoveryReceiptOutcome.PROVIDER_CONTACTED,
+                recorded_at=NOW,
+            ),
+            RecoveryDispatchReceipt(
+                schema_version=RECOVERY_DISPATCH_RECEIPT_VERSION,
+                receipt_id=f"receipt-replay-denied-{run_id}",
+                run_id=run_id,
+                release_id=settings.release_id,
+                node_id="stage",
+                semantic_action_sha256="6" * 64,
+                action_request_sha256="7" * 64,
+                authority_id=f"launch-replay-{run_id}",
+                claim_id=f"claim-replay-{run_id}",
+                attempt=1,
+                provider_contact=False,
+                outcome=RecoveryReceiptOutcome.REJECTED_BEFORE_PROVIDER_CONTACT,
+                recorded_at=NOW,
+            ),
+        )
     elif proof_policy and fault in {
         RecoveryRunFault.DROP_AFTER_ACCEPT,
         RecoveryRunFault.NO_FAULT,
@@ -985,17 +1080,31 @@ def _recovery_result(
         input_intent_sha256=binding.input_intent_sha256,
         fault_boundary_sha256=binding.fault_boundary_sha256,
         observation_catalog_sha256=binding.observation_catalog_sha256,
-        chain_completed=not blind_abort,
-        terminal_disposition="ABORTED" if blind_abort else "COMPLETED",
+        chain_completed=not (blind_abort or partial_read_outage),
+        terminal_disposition=(
+            "ESCALATED"
+            if partial_read_outage
+            else "ABORTED"
+            if blind_abort
+            else "COMPLETED"
+        ),
         counters=RecoveryMutationCounters(
             revisions_created=2 if blind_retry else 1,
-            promotions_accepted=0 if blind_abort else 1,
-            release_records_created=0 if blind_abort else 1,
-            provider_contacts=4 if blind_retry else 1 if blind_abort else 3,
-            continue_permits_issued=2 if proof_policy else 0,
+            promotions_accepted=0 if blind_abort or partial_read_outage else 1,
+            release_records_created=0 if blind_abort or partial_read_outage else 1,
+            provider_contacts=(
+                4 if blind_retry else 1 if blind_abort or partial_read_outage else 3
+            ),
+            continue_permits_issued=(
+                2 if proof_policy and not partial_read_outage else 0
+            ),
             retry_permits_issued=1 if suppressed else 0,
             retry_permits_consumed=1 if suppressed else 0,
-            action_permits_consumed=(3 if suppressed else 2) if proof_policy else 0,
+            action_permits_consumed=(
+                (3 if suppressed else 2)
+                if proof_policy and not partial_read_outage
+                else 0
+            ),
         ),
         cloud_run=RecoveryCloudRunObservation(
             baseline_revision="reconcile-p5-canary-baseline",
@@ -1010,10 +1119,16 @@ def _recovery_result(
             document_path=f"releases/{settings.release_id}",
             expected_payload_sha256=settings.payload_sha256,
             expected_semantic_action_sha256="6" * 64,
-            payload_sha256=None if blind_abort else settings.payload_sha256,
-            semantic_action_sha256=None if blind_abort else "6" * 64,
-            exists=not blind_abort,
-            cloud_run_revision=None if blind_abort else serving_revision,
+            payload_sha256=(
+                None if blind_abort or partial_read_outage else settings.payload_sha256
+            ),
+            semantic_action_sha256=(
+                None if blind_abort or partial_read_outage else "6" * 64
+            ),
+            exists=not (blind_abort or partial_read_outage),
+            cloud_run_revision=(
+                None if blind_abort or partial_read_outage else serving_revision
+            ),
         ),
         dispatch_receipts=receipts,
         timeline=(
@@ -1024,8 +1139,14 @@ def _recovery_result(
                 detail="The isolated lane reached its recorded terminal outcome.",
             ),
         ),
-        certificate_sha256s=("9" * 64,) if proof_policy else (),
-        witness_sha256s=(),
+        certificate_sha256s=(
+            ("9" * 64,) if proof_policy and not partial_read_outage else ()
+        ),
+        witness_sha256s=(
+            (canonical_sha256(ambiguity_witness),)
+            if ambiguity_witness is not None
+            else ()
+        ),
     )
 
 
@@ -1038,12 +1159,17 @@ def _recovery_lane(
     previous_service_uid: str,
     service_uid: str,
 ) -> RecoveryLaneAcceptanceObservation:
+    partial_read_outage = (
+        fault is RecoveryRunFault.ACCEPTANCE_DROP_AFTER_ACCEPT_PARTIAL_READ_OUTAGE
+    )
+    ambiguity_witness = _partial_read_witness() if partial_read_outage else None
     result = _recovery_result(
         candidate=candidate,
         policy=policy,
         fault=fault,
         purpose=purpose,
         service_uid=service_uid,
+        ambiguity_witness=ambiguity_witness,
     )
     reprovision = CanaryReprovisionObservation(
         previous_service_uid=previous_service_uid,
@@ -1107,19 +1233,59 @@ def _recovery_lane(
         reprovision=reprovision,
         result=result,
         reset=reset,
-        acknowledgement_lost=fault is RecoveryRunFault.DROP_AFTER_ACCEPT,
+        acknowledgement_lost=fault
+        in {
+            RecoveryRunFault.DROP_AFTER_ACCEPT,
+            RecoveryRunFault.ACCEPTANCE_DROP_AFTER_ACCEPT_PARTIAL_READ_OUTAGE,
+        },
         launch_outcome=(
             None
             if not proof_policy
             else RecoveryDispatchOutcome.OUTCOME_UNKNOWN
-            if fault is RecoveryRunFault.DROP_AFTER_ACCEPT
+            if fault
+            in {
+                RecoveryRunFault.DROP_AFTER_ACCEPT,
+                RecoveryRunFault.ACCEPTANCE_DROP_AFTER_ACCEPT_PARTIAL_READ_OUTAGE,
+            }
             else RecoveryDispatchOutcome.SUCCEEDED
         ),
         live_authority_replay_denial_count=(
             1
             if proof_policy
-            and fault in {RecoveryRunFault.DROP_AFTER_ACCEPT, RecoveryRunFault.NO_FAULT}
+            and fault
+            in {
+                RecoveryRunFault.DROP_AFTER_ACCEPT,
+                RecoveryRunFault.NO_FAULT,
+                RecoveryRunFault.ACCEPTANCE_DROP_AFTER_ACCEPT_PARTIAL_READ_OUTAGE,
+            }
             else 0
+        ),
+        partial_read_outage=(
+            PartialReadOutageObservation(
+                classification=Classification.UNKNOWN,
+                lifecycle=RecoveryRunLifecycle.ESCALATED,
+                decision=RecoveryDecision.ESCALATE,
+                witness=ambiguity_witness,
+                node_states=(
+                    RecoveryNodeState.ESCALATED,
+                    RecoveryNodeState.WAITING,
+                    RecoveryNodeState.WAITING,
+                ),
+                probe_capabilities=(
+                    CLOUD_RUN_SERVICE_CAPABILITY,
+                    CLOUD_RUN_REVISION_CAPABILITY,
+                    CLOUD_RUN_HEALTH_CAPABILITY,
+                ),
+                probe_outcomes=(
+                    ProbeOutcome.COMPLETED,
+                    ProbeOutcome.UNAVAILABLE,
+                    ProbeOutcome.UNAVAILABLE,
+                ),
+                certificate_count=0,
+                action_permit_count=0,
+            )
+            if ambiguity_witness is not None
+            else None
         ),
         **api_values,
         **hypothesis_values,
@@ -1294,9 +1460,12 @@ def test_provider_seals_one_canonical_owner_only_record(tmp_path: Path) -> None:
     assert path.stat().st_nlink == 1
     payload = path.read_bytes()
     assert hashlib.sha256(payload).hexdigest() == binding.file_sha256
+    assert b'"partial_read_outage"' not in payload
+    assert b'"deployment_profile_sha256"' not in payload
     record, observed_binding = read_provider_record(root, candidate)
     assert canonical_json_bytes(record) == payload
     assert observed_binding == binding
+    assert record.schema_version == PHASE5_PROVIDER_ACCEPTANCE_VERSION
     assert record.provider_ledger_absent_before
     assert record.adaptive_recovery.result.policy == RecoveryRunPolicy.ADAPTIVE.value
     assert (
@@ -1402,6 +1571,34 @@ def test_recovery_lane_rejects_a_live_replay_count_without_its_receipt() -> None
         match="live recovery authority replay evidence changed",
     ):
         RecoveryLaneAcceptanceObservation.model_validate(values)
+
+
+def test_partial_read_lane_requires_exact_non_authorizing_evidence() -> None:
+    lane = _recovery_lane(
+        candidate=_candidate(),
+        policy=RecoveryRunPolicy.FIXED,
+        fault=RecoveryRunFault.ACCEPTANCE_DROP_AFTER_ACCEPT_PARTIAL_READ_OUTAGE,
+        purpose="hosted-fixed-partial-read-outage",
+        previous_service_uid="canary-hosted-5-uid",
+        service_uid="canary-hosted-6-uid",
+    )
+
+    assert lane.result.run_id.startswith("p5w-fixed-")
+    assert len(lane.result.run_id) == len("p5w-fixed-") + 32
+    assert lane.partial_read_outage is not None
+
+    promoted = lane.model_dump(mode="python")
+    promoted["result"]["counters"]["promotions_accepted"] = 1
+    with pytest.raises(ValueError, match="partial-read acceptance evidence changed"):
+        RecoveryLaneAcceptanceObservation.model_validate(promoted)
+
+    reordered = lane.model_dump(mode="python")
+    histories = reordered["partial_read_outage"]["witness"]["possible_histories"]
+    reordered["partial_read_outage"]["witness"]["possible_histories"] = tuple(
+        reversed(histories)
+    )
+    with pytest.raises(ValueError, match="partial-read ambiguity witness changed"):
+        RecoveryLaneAcceptanceObservation.model_validate(reordered)
 
 
 def test_legacy_provider_fixed_fallback_proves_no_planner_invocation() -> None:
@@ -1731,6 +1928,11 @@ def test_hosted_revalidates_provider_and_never_launches_another_adaptive_sandbox
             RecoveryRunFault.SUPPRESS_BEFORE_DISPATCH,
             "hosted-fixed-suppress",
         ),
+        (
+            RecoveryRunPolicy.FIXED,
+            RecoveryRunFault.ACCEPTANCE_DROP_AFTER_ACCEPT_PARTIAL_READ_OUTAGE,
+            "hosted-fixed-partial-read-outage",
+        ),
     ]
     assert tuple(lane.policy for lane in record.recovery_comparison.lanes) == (
         "blind-retry",
@@ -1746,12 +1948,12 @@ def test_hosted_revalidates_provider_and_never_launches_another_adaptive_sandbox
     )
     assert tuple(
         lane.live_authority_replay_denial_count for lane in record.recovery_lanes
-    ) == (0, 0, 1, 1, 0)
+    ) == (0, 0, 1, 1, 0, 1)
     all_uids = (
         provider.adaptive_recovery.reprovision.service_uid,
         *(lane.reprovision.service_uid for lane in record.recovery_lanes),
     )
-    assert len(set(all_uids)) == 6
+    assert len(set(all_uids)) == 7
     assert all(
         current.reprovision.previous_service_uid == previous.reprovision.service_uid
         for previous, current in zip(
@@ -1760,6 +1962,43 @@ def test_hosted_revalidates_provider_and_never_launches_another_adaptive_sandbox
             strict=True,
         )
     )
+    partial = record.recovery_lanes[-1]
+    observation = partial.partial_read_outage
+    assert partial.result.terminal_disposition == "ESCALATED"
+    assert partial.result.certificate_sha256s == ()
+    assert partial.result.counters.continue_permits_issued == 0
+    assert partial.result.counters.action_permits_consumed == 0
+    assert partial.result.counters.promotions_accepted == 0
+    assert partial.result.counters.release_records_created == 0
+    assert partial.result.firestore.exists is False
+    assert partial.replay_provider_contact_delta == 0
+    assert tuple(
+        (receipt.outcome, receipt.provider_contact)
+        for receipt in partial.result.dispatch_receipts
+    ) == (
+        (RecoveryReceiptOutcome.PROVIDER_CONTACTED, True),
+        (RecoveryReceiptOutcome.REJECTED_BEFORE_PROVIDER_CONTACT, False),
+    )
+    assert observation is not None
+    assert observation.classification is Classification.UNKNOWN
+    assert observation.lifecycle is RecoveryRunLifecycle.ESCALATED
+    assert observation.decision is RecoveryDecision.ESCALATE
+    assert observation.certificate_count == 0
+    assert observation.action_permit_count == 0
+    assert observation.probe_outcomes == (
+        ProbeOutcome.COMPLETED,
+        ProbeOutcome.UNAVAILABLE,
+        ProbeOutcome.UNAVAILABLE,
+    )
+    assert tuple(
+        history.history_id for history in observation.witness.possible_histories
+    ) == ("effects-occurred", "effects-not-occurred")
+    assert tuple(
+        history.classification for history in observation.witness.possible_histories
+    ) == (Classification.COMMITTED, Classification.PARTIAL)
+    assert partial.result.witness_sha256s == (canonical_sha256(observation.witness),)
+    assert partial.reset.serving_revision == partial.reset.baseline_revision
+    assert partial.reset.release_record_absent
     assert tuple(item.control for item in record.exact_main_test_substitutions) == (
         "controller-restart",
         "provider-timeout",

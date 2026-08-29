@@ -444,6 +444,9 @@ def test_smoke_environment_loads_each_exact_component(component: str) -> None:
     assert config.component.value == component
     assert "GOOGLE_APPLICATION_CREDENTIALS" not in environment
     assert "CLOUDSDK_CONFIG" not in environment
+    assert config.acceptance_partial_read_outage_enabled is (
+        component in {"api", "controller", "fault-proxy"}
+    )
     if component == "fault-proxy":
         assert config.canary_location == "us-central1"
         assert config.canary_service == "reconcile-p5-canary"

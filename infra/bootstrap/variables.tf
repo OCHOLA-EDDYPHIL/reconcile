@@ -1,10 +1,9 @@
 variable "project_id" {
-  type    = string
-  default = "example-project-id"
+  type = string
 
   validation {
-    condition     = var.project_id == "example-project-id"
-    error_message = "The bootstrap stack is restricted to the approved project."
+    condition     = can(regex("^[a-z][a-z0-9-]{4,28}[a-z0-9]$", var.project_id))
+    error_message = "The project ID must use the canonical Google Cloud project-ID form."
   }
 }
 
@@ -18,33 +17,21 @@ variable "region" {
   }
 }
 
-variable "state_bucket_name" {
-  type    = string
-  default = "example-project-id-p5-state"
-
-  validation {
-    condition     = var.state_bucket_name == "example-project-id-p5-state"
-    error_message = "The state bucket name must match the approved deterministic name."
-  }
-}
-
 variable "billing_account_id" {
-  type    = string
-  default = "000000-000000-000000"
+  type = string
 
   validation {
-    condition     = var.billing_account_id == "000000-000000-000000"
-    error_message = "The billing account must match the approved project billing account."
+    condition     = can(regex("^[0-9A-F]{6}-[0-9A-F]{6}-[0-9A-F]{6}$", var.billing_account_id))
+    error_message = "The billing account ID must use the canonical Google Cloud form."
   }
 }
 
 variable "owner_principal" {
-  type    = string
-  default = "user:owner@example.invalid"
+  type = string
 
   validation {
-    condition     = var.owner_principal == "user:owner@example.invalid"
-    error_message = "The bootstrap impersonator must be the approved owner principal."
+    condition     = can(regex("^user:[a-z0-9._%+-]+@[a-z0-9.-]+[.][a-z0-9-]+$", var.owner_principal))
+    error_message = "The bootstrap impersonator must be one canonical user principal."
   }
 }
 

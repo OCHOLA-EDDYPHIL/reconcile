@@ -34,9 +34,24 @@ from pydantic import Field, JsonValue, StringConstraints, model_validator
 
 from reconcile import phase5_hosted_acceptance as _acceptance
 from reconcile.contracts.base import AwareDatetime, Sha256Digest, StrictModel
+from reconcile.deployment_profile import (
+    DeploymentIdentity,
+    DeploymentProfileBinding,
+    DeploymentProfileError,
+    RuntimeAudiences,
+    RuntimeServiceAccounts,
+    TerraformBackendBinding,
+    capture_backend_configs,
+    capture_sealed_deployment_profile,
+    load_external_deployment_profile,
+    seal_backend_configs,
+    seal_deployment_profile,
+)
 from reconcile.evidence.recovery_rules import deterministic_stage_revision
 
 _SCHEMA = "reconcile/phase5-operator/v1"
+_MANIFEST_SCHEMA_V2 = "reconcile/phase5-operator/v2"
+_DRAFT_SCHEMA_V2 = "reconcile/phase5-operator-draft/v2"
 _PROJECT_ID = "example-project-id"
 _PROJECT_NUMBER = "000000000000"
 _REGION = "us-central1"
@@ -129,7 +144,7 @@ _OUTPUT_BUDGET_MIGRATION_TERRAFORM_PATHS = frozenset(
         "infra/environments/dev/runtime/locals.tf",
     }
 )
-_PROJECT_DEPENDENCY_RECORD_PATH = "reconcile-0.1.0.dist-info/RECORD"
+_PROJECT_DEPENDENCY_RECORD_PATH = "reconcile-0.1.1.dist-info/RECORD"
 
 _EXECUTION_ROOT_FILES = frozenset(
     {".dockerignore", "Dockerfile", "pyproject.toml", "uv.lock"}
@@ -201,6 +216,13 @@ _PLAN_FILES = {
     "bootstrap-teardown": ("bootstrap", "bootstrap-destroy"),
 }
 
+_V2_MANIFEST_FIELDS = frozenset(
+    {
+        "deployment_profile",
+        "terraform_backends",
+    }
+)
+
 GitRevision = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{40}$")]
 GitObjectId = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{40}$")]
 ImageDigest = Annotated[str, StringConstraints(pattern=r"^sha256:[0-9a-f]{64}$")]
@@ -219,6 +241,37 @@ SafeArgument = Annotated[
 RecordName = Annotated[
     str, StringConstraints(pattern=r"^[a-z0-9][a-z0-9-]{0,191}[.]json$")
 ]
+
+
+def _legacy_deployment_identity() -> DeploymentIdentity:
+    project = _PROJECT_ID
+    origin = f"https://reconcile.invalid/phase5/{project}"
+    return DeploymentIdentity.model_construct(
+        deployment_profile_sha256="0" * 64,
+        project_id=project,
+        project_number=_PROJECT_NUMBER,
+        billing_account_id="000000-000000-000000",
+        owner_account=_OWNER_ACCOUNT,
+        owner_principal=_OWNER,
+        region=_REGION,
+        state_bucket_name=_STATE_BUCKET,
+        target_bucket_name=f"{project}-p5-target",
+        apply_service_account_email=_OPERATOR_SERVICE_ACCOUNT,
+        runtime_service_accounts=RuntimeServiceAccounts(
+            api=f"rec-p5-api@{project}.iam.gserviceaccount.com",
+            canary=f"rec-p5-canary@{project}.iam.gserviceaccount.com",
+            controller=f"rec-p5-controller@{project}.iam.gserviceaccount.com",
+            fault_proxy=f"rec-p5-fault@{project}.iam.gserviceaccount.com",
+            sandbox=f"rec-p5-sandbox@{project}.iam.gserviceaccount.com",
+        ),
+        audiences=RuntimeAudiences(
+            api=f"{origin}/api",
+            canary=f"{origin}/canary",
+            controller=f"{origin}/controller",
+            fault_proxy=f"{origin}/fault-proxy",
+            sandbox=f"{origin}/sandbox",
+        ),
+    )
 
 
 class OperatorError(RuntimeError):
@@ -464,6 +517,7 @@ class TerraformPlanBinding(StrictModel):
     qualification_sha256: Sha256Digest
     variables_path: SafeArgument
     variables_sha256: Sha256Digest
+    backend_config_sha256: Sha256Digest | None = None
     execution_plan_path: SafeArgument
     normalized_plan_sha256: Sha256Digest
     resource_inventory_sha256: Sha256Digest
@@ -514,9 +568,13 @@ class ImageArtifactBinding(StrictModel):
 class Phase5ManifestDraft(StrictModel):
     """Canonical, secret-free input used to seal one exact manifest."""
 
-    schema_version: Literal["reconcile/phase5-operator-draft/v1"]
+    schema_version: Literal[
+        "reconcile/phase5-operator-draft/v1",
+        "reconcile/phase5-operator-draft/v2",
+    ]
     source_revision: GitRevision
     image_digest: ImageDigest
+    deployment_profile_sha256: Sha256Digest | None = None
     created_at: AwareDatetime
     work_deadline: AwareDatetime
     approval_expires_at: AwareDatetime
@@ -527,6 +585,10 @@ class Phase5ManifestDraft(StrictModel):
             raise ValueError("the work deadline must be exactly eight hours")
         if self.approval_expires_at - self.work_deadline != _TEARDOWN_WINDOW:
             raise ValueError("the teardown-only window must be exactly two hours")
+        if (self.schema_version == _DRAFT_SCHEMA_V2) != (
+            self.deployment_profile_sha256 is not None
+        ):
+            raise ValueError("draft deployment profile binding is incomplete")
         return self
 
 
@@ -541,11 +603,16 @@ class _HasRecordHash(StrictModel):
 
 
 class Phase5ApprovalManifest(_HasRecordHash):
-    schema_version: Literal["reconcile/phase5-operator/v1"] = _SCHEMA
+    schema_version: Literal[
+        "reconcile/phase5-operator/v1",
+        "reconcile/phase5-operator/v2",
+    ] = _MANIFEST_SCHEMA_V2
     record_type: Literal["approval-manifest"] = "approval-manifest"
     source_revision: GitRevision
     origin_url: Literal["git@github.com:OCHOLA-EDDYPHIL/reconcile.git"]
     operator_state_root: SafeArgument
+    deployment_profile: DeploymentProfileBinding | None = None
+    terraform_backends: tuple[TerraformBackendBinding, ...] = ()
     execution_source: ExecutionSourceBinding
     python_dependencies: PythonDependencyBinding
     infrastructure_revision: Sha256Digest
@@ -563,8 +630,8 @@ class Phase5ApprovalManifest(_HasRecordHash):
     resource_inventory_sha256: Sha256Digest
     iam_inventory_sha256: Sha256Digest
     plan_inventory_sha256: Sha256Digest
-    project_id: Literal["example-project-id"]
-    project_number: Literal["000000000000"]
+    project_id: SafeArgument
+    project_number: SafeArgument
     region: Literal["us-central1"]
     authenticated_exposure: tuple[ExposureBinding, ...]
     terraform_version: Literal["1.15.8"]
@@ -617,13 +684,34 @@ class Phase5ApprovalManifest(_HasRecordHash):
             raise ValueError("the work deadline must be exactly eight hours")
         if self.approval_expires_at - self.work_deadline != _TEARDOWN_WINDOW:
             raise ValueError("the teardown-only window must be exactly two hours")
+        is_v2 = self.schema_version == _MANIFEST_SCHEMA_V2
+        if is_v2:
+            if self.deployment_profile is None:
+                raise ValueError("deployment profile binding is required")
+            deployment = self.deployment_profile.identity
+            if (
+                self.project_id != deployment.project_id
+                or self.project_number != deployment.project_number
+                or self.region != deployment.region
+            ):
+                raise ValueError("manifest identity differs from deployment profile")
+        else:
+            if self.deployment_profile is not None or self.terraform_backends:
+                raise ValueError("legacy manifest contains v2 deployment bindings")
+            if (
+                self.project_id != _PROJECT_ID
+                or self.project_number != _PROJECT_NUMBER
+                or self.region != _REGION
+            ):
+                raise ValueError("legacy manifest identity is invalid")
+            deployment = _legacy_deployment_identity()
         expected_image = (
             f"{self.region}-docker.pkg.dev/{self.project_id}/reconcile-p5/"
             f"reconcile@{self.image_digest}"
         )
         if self.image_reference != expected_image:
             raise ValueError("image reference is not the one immutable digest")
-        if self.authenticated_exposure != _fixed_exposure():
+        if self.authenticated_exposure != _fixed_exposure(deployment):
             raise ValueError("authenticated exposure differs from the fixed graph")
         if self.semantic_config_sha256 != self.semantic_sources.sha256:
             raise ValueError("semantic configuration source hash mismatch")
@@ -645,6 +733,24 @@ class Phase5ApprovalManifest(_HasRecordHash):
         state_root = _canonical_absolute_path(
             Path(self.operator_state_root), require_exists=False
         )
+        if is_v2:
+            assert self.deployment_profile is not None
+            if self.deployment_profile.path != str(
+                state_root / "bindings" / "deployment-profile.json"
+            ):
+                raise ValueError("deployment profile is outside approved state")
+            backend_by_stack = {item.stack: item for item in self.terraform_backends}
+            if tuple(item.stack for item in self.terraform_backends) != tuple(
+                sorted(_STACK_ROOTS)
+            ) or set(backend_by_stack) != set(_STACK_ROOTS):
+                raise ValueError("Terraform backend inventory is not closed-world")
+            for stack, backend in backend_by_stack.items():
+                if backend.path != str(
+                    state_root / "bindings" / "backends" / f"{stack}.tfbackend"
+                ):
+                    raise ValueError("Terraform backend is outside approved state")
+        else:
+            backend_by_stack = {}
         if (
             self.execution_source.root != str(state_root / "source")
             or self.execution_source.source_revision != self.source_revision
@@ -674,6 +780,11 @@ class Phase5ApprovalManifest(_HasRecordHash):
                 != str(state_root / "execution" / f"{stem}.tfplan")
             ):
                 raise ValueError("Terraform plan is outside the approved state root")
+            expected_backend_sha256 = (
+                backend_by_stack[plan.stack].sha256 if is_v2 else None
+            )
+            if plan.backend_config_sha256 != expected_backend_sha256:
+                raise ValueError("Terraform plan backend binding mismatch")
         if self.plan_inventory_sha256 != _plan_inventory_hash(self.terraform_plans):
             raise ValueError("plan inventory aggregate hash mismatch")
         if self.resource_inventory_sha256 != _resource_inventory_hash(
@@ -683,7 +794,7 @@ class Phase5ApprovalManifest(_HasRecordHash):
         if self.iam_inventory_sha256 != _iam_inventory_hash(self.terraform_plans):
             raise ValueError("IAM inventory aggregate hash mismatch")
         expected_archive = state_root / "images" / "reconcile.oci.tar"
-        expected_tag = _image_source_tag(self.source_revision)
+        expected_tag = _image_source_tag(self.source_revision, deployment)
         if (
             self.image_artifact.archive_path != str(expected_archive)
             or self.image_artifact.source_tag != expected_tag
@@ -707,6 +818,8 @@ class Phase5ApprovalManifest(_HasRecordHash):
             runtime_variables_sha256=runtime_variables_sha256,
             state_root=state_root,
             image_archive=expected_archive,
+            deployment=deployment if is_v2 else None,
+            terraform_backends=self.terraform_backends,
         )
         accepted_commands = [expected_commands]
         if self.source_revision in _LEGACY_STATE_BUCKET_CLEANUP_SOURCE_REVISIONS:
@@ -720,6 +833,8 @@ class Phase5ApprovalManifest(_HasRecordHash):
                     runtime_variables_sha256=runtime_variables_sha256,
                     state_root=state_root,
                     image_archive=expected_archive,
+                    deployment=deployment if is_v2 else None,
+                    terraform_backends=self.terraform_backends,
                     include_state_bucket_cleanup=False,
                     include_bootstrap_protection_update=False,
                 )
@@ -735,6 +850,8 @@ class Phase5ApprovalManifest(_HasRecordHash):
                     runtime_variables_sha256=runtime_variables_sha256,
                     state_root=state_root,
                     image_archive=expected_archive,
+                    deployment=deployment if is_v2 else None,
+                    terraform_backends=self.terraform_backends,
                     include_bootstrap_protection_update=False,
                 )
             )
@@ -749,6 +866,8 @@ class Phase5ApprovalManifest(_HasRecordHash):
                     runtime_variables_sha256=runtime_variables_sha256,
                     state_root=state_root,
                     image_archive=expected_archive,
+                    deployment=deployment if is_v2 else None,
+                    terraform_backends=self.terraform_backends,
                     image_identity_format="--format={{.Id}}",
                 )
             )
@@ -763,6 +882,8 @@ class Phase5ApprovalManifest(_HasRecordHash):
                         runtime_variables_sha256=runtime_variables_sha256,
                         state_root=state_root,
                         image_archive=expected_archive,
+                        deployment=deployment if is_v2 else None,
+                        terraform_backends=self.terraform_backends,
                         image_identity_format="--format={{.Id}}",
                         include_state_bucket_cleanup=False,
                         include_bootstrap_protection_update=False,
@@ -790,7 +911,7 @@ class Phase5Approval(_HasRecordHash):
     record_type: Literal["approval"] = "approval"
     manifest_sha256: Sha256Digest
     decision: Literal["APPROVE_EXACT_MANIFEST"]
-    approved_by: Literal["user:owner@example.invalid"]
+    approved_by: Principal
     approved_at: AwareDatetime
     work_deadline: AwareDatetime
     approval_expires_at: AwareDatetime
@@ -969,8 +1090,19 @@ class CommandRunner(Protocol):
 
 
 def _canonical_model_bytes(model: StrictModel) -> bytes:
+    exclude: Any = None
+    if isinstance(model, Phase5ApprovalManifest) and model.schema_version == _SCHEMA:
+        exclude = {
+            **{name: True for name in _V2_MANIFEST_FIELDS},
+            "terraform_plans": {"__all__": {"backend_config_sha256"}},
+        }
+    elif (
+        isinstance(model, Phase5ManifestDraft)
+        and model.schema_version == "reconcile/phase5-operator-draft/v1"
+    ):
+        exclude = {"deployment_profile_sha256"}
     return json.dumps(
-        model.model_dump(mode="json"),
+        model.model_dump(mode="json", exclude=exclude),
         allow_nan=False,
         ensure_ascii=False,
         separators=(",", ":"),
@@ -993,7 +1125,14 @@ def _hash_value(value: Any) -> str:
 
 
 def _hash_model_without(model: StrictModel, field: str) -> str:
-    value = model.model_dump(mode="json", exclude={field})
+    exclude: Any = {field}
+    if isinstance(model, Phase5ApprovalManifest) and model.schema_version == _SCHEMA:
+        exclude = {
+            field: True,
+            **{name: True for name in _V2_MANIFEST_FIELDS},
+            "terraform_plans": {"__all__": {"backend_config_sha256"}},
+        }
+    value = model.model_dump(mode="json", exclude=exclude)
     payload = json.dumps(
         value,
         allow_nan=False,
@@ -1032,44 +1171,45 @@ def _seal_descriptor(
     return CommandDescriptor.model_validate(payload)
 
 
-def _fixed_exposure() -> tuple[ExposureBinding, ...]:
-    service_accounts = {
-        component: (
-            f"serviceAccount:rec-p5-{component.replace('_', '-')}@"
-            f"{_PROJECT_ID}.iam.gserviceaccount.com"
-        )
-        for component in ("api", "controller", "fault", "sandbox")
-    }
+def _fixed_exposure(
+    deployment: DeploymentIdentity | None = None,
+) -> tuple[ExposureBinding, ...]:
+    identity = deployment or _legacy_deployment_identity()
+    service_accounts = identity.runtime_service_accounts
     return (
         ExposureBinding(
             service="api",
-            audience=f"https://reconcile.invalid/phase5/{_PROJECT_ID}/api",
-            allowed_callers=(_OPERATOR_PRINCIPAL,),
+            audience=identity.audiences.api,
+            allowed_callers=(f"serviceAccount:{identity.apply_service_account_email}",),
         ),
         ExposureBinding(
             service="controller",
-            audience=(f"https://reconcile.invalid/phase5/{_PROJECT_ID}/controller"),
-            allowed_callers=(service_accounts["api"],),
+            audience=identity.audiences.controller,
+            allowed_callers=(f"serviceAccount:{service_accounts.api}",),
         ),
         ExposureBinding(
             service="fault-proxy",
-            audience=(f"https://reconcile.invalid/phase5/{_PROJECT_ID}/fault-proxy"),
-            allowed_callers=(service_accounts["api"],),
+            audience=identity.audiences.fault_proxy,
+            allowed_callers=(f"serviceAccount:{service_accounts.api}",),
         ),
         ExposureBinding(
             service="sandbox",
-            audience=f"https://reconcile.invalid/phase5/{_PROJECT_ID}/sandbox",
+            audience=identity.audiences.sandbox,
             allowed_callers=(
-                service_accounts["controller"],
-                service_accounts["fault"],
+                f"serviceAccount:{service_accounts.controller}",
+                f"serviceAccount:{service_accounts.fault_proxy}",
             ),
         ),
     )
 
 
-def _image_source_tag(source_revision: str) -> str:
+def _image_source_tag(
+    source_revision: str,
+    deployment: DeploymentIdentity | None = None,
+) -> str:
+    identity = deployment or _legacy_deployment_identity()
     return (
-        f"{_REGION}-docker.pkg.dev/{_PROJECT_ID}/reconcile-p5/"
+        f"{identity.region}-docker.pkg.dev/{identity.project_id}/reconcile-p5/"
         f"reconcile:git-{source_revision}"
     )
 
@@ -1079,21 +1219,22 @@ def _oci_source_tag(source_revision: str) -> str:
 
 
 def _plan_inventory_hash(plans: tuple[TerraformPlanBinding, ...]) -> str:
-    return _hash_value(
-        [
-            {
-                "action": item.action.value,
-                "stack": item.stack,
-                "qualification_path": item.qualification_path,
-                "qualification_sha256": item.qualification_sha256,
-                "variables_path": item.variables_path,
-                "variables_sha256": item.variables_sha256,
-                "execution_plan_path": item.execution_plan_path,
-                "normalized_plan_sha256": item.normalized_plan_sha256,
-            }
-            for item in sorted(plans, key=lambda value: value.action.value)
-        ]
-    )
+    inventory: list[dict[str, Any]] = []
+    for item in sorted(plans, key=lambda value: value.action.value):
+        binding: dict[str, Any] = {
+            "action": item.action.value,
+            "stack": item.stack,
+            "qualification_path": item.qualification_path,
+            "qualification_sha256": item.qualification_sha256,
+            "variables_path": item.variables_path,
+            "variables_sha256": item.variables_sha256,
+            "execution_plan_path": item.execution_plan_path,
+            "normalized_plan_sha256": item.normalized_plan_sha256,
+        }
+        if item.backend_config_sha256 is not None:
+            binding["backend_config_sha256"] = item.backend_config_sha256
+        inventory.append(binding)
+    return _hash_value(inventory)
 
 
 def _resource_inventory_hash(plans: tuple[TerraformPlanBinding, ...]) -> str:
@@ -1144,6 +1285,8 @@ def fixed_command_descriptors(
     semantic_config_sha256: str,
     runtime_source_sha256: str,
     runtime_variables_sha256: str,
+    deployment: DeploymentIdentity | None = None,
+    terraform_backends: tuple[TerraformBackendBinding, ...] = (),
 ) -> tuple[CommandDescriptor, ...]:
     """Build the closed, shell-free argv inventory bound into a manifest."""
 
@@ -1157,6 +1300,8 @@ def fixed_command_descriptors(
         runtime_variables_sha256=runtime_variables_sha256,
         state_root=root,
         image_archive=root / "images" / "reconcile.oci.tar",
+        deployment=deployment,
+        terraform_backends=terraform_backends,
     )
 
 
@@ -1170,6 +1315,8 @@ def _fixed_commands(
     runtime_variables_sha256: str,
     state_root: Path,
     image_archive: Path,
+    deployment: DeploymentIdentity | None = None,
+    terraform_backends: tuple[TerraformBackendBinding, ...] = (),
     image_identity_format: Literal[
         "--format={{.Descriptor.digest}}",
         "--format={{.Id}}",
@@ -1177,6 +1324,7 @@ def _fixed_commands(
     include_state_bucket_cleanup: bool = True,
     include_bootstrap_protection_update: bool = True,
 ) -> tuple[CommandDescriptor, ...]:
+    identity = deployment or _legacy_deployment_identity()
     root = _canonical_absolute_path(state_root, require_exists=False)
     plan_root = root / "plans"
     execution_root = root / "execution"
@@ -1184,7 +1332,11 @@ def _fixed_commands(
     source_root = root / "source"
     dependency_root = root / "python-dependencies"
     terraform_cli_config = root / "terraform.rc"
-    image_tag = _image_source_tag(source_revision)
+    deployment_profile_path = root / "bindings" / "deployment-profile.json"
+    image_tag = _image_source_tag(source_revision, identity)
+    backend_by_stack = {item.stack: item for item in terraform_backends}
+    if terraform_backends and set(backend_by_stack) != set(_STACK_ROOTS):
+        raise ValueError("Terraform backend inventory is not closed-world")
 
     def terraform_action(action: Phase5Action) -> CommandDescriptor:
         stack, stem = _PLAN_FILES[action.value]
@@ -1202,7 +1354,9 @@ def _fixed_commands(
             "-lockfile=readonly",
             "-no-color",
         ]
-        if stack == "bootstrap":
+        if terraform_backends:
+            init.append(f"-backend-config={backend_by_stack[stack].path}")
+        elif stack == "bootstrap":
             init.append(f"-backend-config=path={root / 'state' / 'bootstrap.tfstate'}")
         plan = [
             _TERRAFORM,
@@ -1229,13 +1383,13 @@ def _fixed_commands(
                     "services",
                     "enable",
                     "cloudresourcemanager.googleapis.com",
-                    f"--project={_PROJECT_ID}",
-                    f"--account={_OWNER_ACCOUNT}",
+                    f"--project={identity.project_id}",
+                    f"--account={identity.owner_account}",
                     "--quiet",
                 ),
             )
         if action is Phase5Action.BOOTSTRAP_TEARDOWN and include_state_bucket_cleanup:
-            commands += (_state_bucket_cleanup_command(),)
+            commands += (_state_bucket_cleanup_command(identity),)
         commands += (tuple(init),)
         if (
             action is Phase5Action.BOOTSTRAP_TEARDOWN
@@ -1312,8 +1466,9 @@ def _fixed_commands(
                     "/usr/bin/gcloud",
                     "auth",
                     "configure-docker",
-                    f"{_REGION}-docker.pkg.dev",
-                    f"--impersonate-service-account={_OPERATOR_SERVICE_ACCOUNT}",
+                    f"{identity.region}-docker.pkg.dev",
+                    "--impersonate-service-account="
+                    f"{identity.apply_service_account_email}",
                     "--quiet",
                 ),
                 (_DOCKER, "image", "load", "--input", str(image_archive)),
@@ -1332,8 +1487,9 @@ def _fixed_commands(
                     "images",
                     "describe",
                     image_tag,
-                    f"--project={_PROJECT_ID}",
-                    f"--impersonate-service-account={_OPERATOR_SERVICE_ACCOUNT}",
+                    f"--project={identity.project_id}",
+                    "--impersonate-service-account="
+                    f"{identity.apply_service_account_email}",
                     "--format=value(image_summary.digest)",
                     "--quiet",
                 ),
@@ -1341,7 +1497,7 @@ def _fixed_commands(
             environment=(
                 EnvironmentBinding(
                     name="CLOUDSDK_AUTH_IMPERSONATE_SERVICE_ACCOUNT",
-                    value=_OPERATOR_SERVICE_ACCOUNT,
+                    value=identity.apply_service_account_email,
                 ),
                 EnvironmentBinding(name="DOCKER_CONFIG", value=str(root / "docker")),
                 EnvironmentBinding(name="DOCKER_HOST", value=_DOCKER_HOST),
@@ -1361,6 +1517,11 @@ def _fixed_commands(
                     "provider",
                     "--state-root",
                     str(root),
+                    *(
+                        ("--deployment-profile", str(deployment_profile_path))
+                        if deployment is not None
+                        else ()
+                    ),
                     "--source-revision",
                     source_revision,
                     "--image-digest",
@@ -1378,7 +1539,7 @@ def _fixed_commands(
             environment=(
                 EnvironmentBinding(
                     name="RECONCILE_API_AUDIENCE",
-                    value=f"https://reconcile.invalid/phase5/{_PROJECT_ID}/api",
+                    value=identity.audiences.api,
                 ),
                 EnvironmentBinding(
                     name="PYTHONPATH",
@@ -1399,6 +1560,11 @@ def _fixed_commands(
                     "hosted",
                     "--state-root",
                     str(root),
+                    *(
+                        ("--deployment-profile", str(deployment_profile_path))
+                        if deployment is not None
+                        else ()
+                    ),
                     "--source-revision",
                     source_revision,
                     "--image-digest",
@@ -1416,14 +1582,14 @@ def _fixed_commands(
             environment=(
                 EnvironmentBinding(
                     name="RECONCILE_API_AUDIENCE",
-                    value=f"https://reconcile.invalid/phase5/{_PROJECT_ID}/api",
+                    value=identity.audiences.api,
                 ),
                 EnvironmentBinding(
                     name="PYTHONPATH",
                     value=f"{source_root}:{dependency_root}",
                 ),
             ),
-            timeout_seconds=14_400,
+            timeout_seconds=5_400,
         ),
         terraform_action(Phase5Action.RUNTIME_TEARDOWN),
         terraform_action(Phase5Action.FOUNDATION_TEARDOWN),
@@ -1432,17 +1598,30 @@ def _fixed_commands(
     )
 
 
-def _state_bucket_cleanup_command() -> tuple[str, ...]:
+def _state_bucket_cleanup_command(
+    deployment: DeploymentIdentity | None = None,
+) -> tuple[str, ...]:
+    identity = deployment or _legacy_deployment_identity()
     return (
         "/usr/bin/gcloud",
         "storage",
         "rm",
         "--all-versions",
-        f"gs://{_STATE_BUCKET}/**",
-        f"--project={_PROJECT_ID}",
-        f"--account={_OWNER_ACCOUNT}",
+        f"gs://{identity.state_bucket_name}/**",
+        f"--project={identity.project_id}",
+        f"--account={identity.owner_account}",
         "--quiet",
     )
+
+
+def _empty_state_bucket_cleanup_stderr(command: tuple[str, ...]) -> bytes:
+    if len(command) < 5:
+        return b""
+    return (
+        "Removing objects:\n"
+        "ERROR: (gcloud.storage.rm) The following URLs matched no objects or files:\n"
+        f"{command[4]}\n"
+    ).encode("ascii")
 
 
 def _minimal_subprocess_environment(
@@ -2534,6 +2713,7 @@ def _capture_plan(
     action: Phase5Action,
     state_root: Path,
     required_runtime_values: set[str],
+    backend_config_sha256: str | None = None,
 ) -> TerraformPlanBinding:
     stack, stem = _PLAN_FILES[action.value]
     qualification_path = state_root / "plans" / f"{stem}.tfplan.json"
@@ -2611,6 +2791,7 @@ def _capture_plan(
         qualification_sha256=hashlib.sha256(qualification).hexdigest(),
         variables_path=str(variables_path),
         variables_sha256=hashlib.sha256(variables).hexdigest(),
+        backend_config_sha256=backend_config_sha256,
         execution_plan_path=str(execution_plan_path),
         normalized_plan_sha256=hashlib.sha256(normalized).hexdigest(),
         resource_inventory_sha256=_hash_value(
@@ -2629,7 +2810,9 @@ def _capture_image_artifact(
     state_root: Path,
     source_revision: str,
     expected_digest: str,
+    deployment: DeploymentIdentity | None = None,
 ) -> ImageArtifactBinding:
+    identity = deployment or _legacy_deployment_identity()
     archive = state_root / "images" / "reconcile.oci.tar"
     archive_sha256 = _immutable_file_sha256(archive)
     try:
@@ -2699,13 +2882,13 @@ def _capture_image_artifact(
     ) as error:
         raise OperatorError("OCI_IMAGE_INVALID") from error
     immutable_reference = (
-        f"{_REGION}-docker.pkg.dev/{_PROJECT_ID}/reconcile-p5/"
+        f"{identity.region}-docker.pkg.dev/{identity.project_id}/reconcile-p5/"
         f"reconcile@{expected_digest}"
     )
     return ImageArtifactBinding(
         archive_path=str(archive),
         archive_sha256=archive_sha256,
-        source_tag=_image_source_tag(source_revision),
+        source_tag=_image_source_tag(source_revision, identity),
         manifest_digest=expected_digest,
         config_digest=config_digest,
         immutable_reference=immutable_reference,
@@ -3435,6 +3618,8 @@ def _capture_artifact_bindings(
     repository = _canonical_absolute_path(repo_root, require_exists=True)
     state = _canonical_absolute_path(state_root, require_exists=True)
     for relative in (
+        "bindings",
+        "bindings/backends",
         "docker",
         "execution",
         "images",
@@ -3446,6 +3631,27 @@ def _capture_artifact_bindings(
         "terraform-data/runtime",
     ):
         _verify_artifact_directory(state / relative)
+    if draft.schema_version == _DRAFT_SCHEMA_V2:
+        try:
+            deployment_profile = capture_sealed_deployment_profile(state_root=state)
+            terraform_backends = capture_backend_configs(
+                state_root=state,
+                identity=deployment_profile.identity,
+            )
+        except DeploymentProfileError as error:
+            raise OperatorError(error.code) from error
+        if (
+            draft.deployment_profile_sha256 is None
+            or deployment_profile.sha256 != draft.deployment_profile_sha256
+        ):
+            raise OperatorError("DEPLOYMENT_PROFILE_DRIFT")
+        deployment = deployment_profile.identity
+        backend_by_stack = {item.stack: item for item in terraform_backends}
+    else:
+        deployment_profile = None
+        terraform_backends = ()
+        deployment = _legacy_deployment_identity()
+        backend_by_stack = {}
     execution_source = _capture_execution_source(
         state_root=state,
         repo_root=repository,
@@ -3471,6 +3677,7 @@ def _capture_artifact_bindings(
         state_root=state,
         source_revision=draft.source_revision,
         expected_digest=draft.image_digest,
+        deployment=deployment if deployment_profile is not None else None,
     )
     python_dependencies = _verify_python_dependency_derivation(
         state_root=state,
@@ -3494,6 +3701,16 @@ def _capture_artifact_bindings(
         prompt_sha256,
         _canonical_utc_timestamp(draft.created_at),
     }
+    if deployment_profile is not None:
+        required_runtime_values.update(
+            {
+                deployment.project_id,
+                deployment.target_bucket_name,
+                deployment.apply_service_account_email,
+                *deployment.runtime_service_accounts.model_dump().values(),
+                *deployment.audiences.model_dump().values(),
+            }
+        )
     plans = tuple(
         sorted(
             (
@@ -3501,6 +3718,11 @@ def _capture_artifact_bindings(
                     action=Phase5Action(action),
                     state_root=state,
                     required_runtime_values=required_runtime_values,
+                    backend_config_sha256=(
+                        backend_by_stack[_PLAN_FILES[action][0]].sha256
+                        if deployment_profile is not None
+                        else None
+                    ),
                 )
                 for action in _PLAN_FILES
             ),
@@ -3509,6 +3731,8 @@ def _capture_artifact_bindings(
     )
     return {
         "operator_state_root": str(state),
+        "deployment_profile": deployment_profile,
+        "terraform_backends": terraform_backends,
         "execution_source": execution_source,
         "python_dependencies": python_dependencies,
         "terraform_cli_config_path": str(terraform_cli_config),
@@ -3542,8 +3766,14 @@ def build_manifest(
         repo_root=repo_root,
         runner=runner,
     )
+    profile_binding = artifacts["deployment_profile"]
+    deployment = (
+        profile_binding.identity
+        if isinstance(profile_binding, DeploymentProfileBinding)
+        else _legacy_deployment_identity()
+    )
     image_reference = (
-        f"{_REGION}-docker.pkg.dev/{_PROJECT_ID}/reconcile-p5/"
+        f"{deployment.region}-docker.pkg.dev/{deployment.project_id}/reconcile-p5/"
         f"reconcile@{draft.image_digest}"
     )
     runtime_source_sha256, runtime_variables_sha256 = _runtime_acceptance_hashes(
@@ -3552,17 +3782,19 @@ def build_manifest(
     )
     return _seal(
         Phase5ApprovalManifest,
-        schema_version=_SCHEMA,
+        schema_version=(
+            _MANIFEST_SCHEMA_V2 if draft.schema_version == _DRAFT_SCHEMA_V2 else _SCHEMA
+        ),
         record_type="approval-manifest",
         source_revision=draft.source_revision,
         origin_url=_ORIGIN_URL,
         **artifacts,
         image_digest=draft.image_digest,
         image_reference=image_reference,
-        project_id=_PROJECT_ID,
-        project_number=_PROJECT_NUMBER,
-        region=_REGION,
-        authenticated_exposure=_fixed_exposure(),
+        project_id=deployment.project_id,
+        project_number=deployment.project_number,
+        region=deployment.region,
+        authenticated_exposure=_fixed_exposure(deployment),
         terraform_version=_TERRAFORM_VERSION,
         terraform_executable=_TERRAFORM,
         terraform_binary_sha256=_TERRAFORM_SHA256,
@@ -3598,6 +3830,10 @@ def build_manifest(
             runtime_variables_sha256=runtime_variables_sha256,
             state_root=state_root,
             image_archive=Path(artifacts["image_artifact"].archive_path),
+            deployment=(
+                deployment if draft.schema_version == _DRAFT_SCHEMA_V2 else None
+            ),
+            terraform_backends=artifacts["terraform_backends"],
         ),
     )
 
@@ -3639,6 +3875,7 @@ def _write_private_draft(path: Path, draft: Phase5ManifestDraft) -> None:
 
 def _verify_preparation_state_empty(state: Phase5StateStore) -> None:
     expected_root = {
+        "bindings",
         "docker",
         "execution",
         "images",
@@ -3647,13 +3884,18 @@ def _verify_preparation_state_empty(state: Phase5StateStore) -> None:
         "terraform-data",
     }
     expected_terraform_data = {"bootstrap", "foundation", "runtime"}
+    expected_bindings = {"backends"}
     try:
         if {path.name for path in state.root.iterdir()} != expected_root:
             raise OperatorError("PREPARATION_STATE_NOT_EMPTY")
         terraform_data = state.root / "terraform-data"
         if {path.name for path in terraform_data.iterdir()} != expected_terraform_data:
             raise OperatorError("PREPARATION_STATE_NOT_EMPTY")
+        bindings = state.root / "bindings"
+        if {path.name for path in bindings.iterdir()} != expected_bindings:
+            raise OperatorError("PREPARATION_STATE_NOT_EMPTY")
         leaves = (
+            bindings / "backends",
             state.root / "docker",
             state.root / "execution",
             state.root / "images",
@@ -3675,6 +3917,7 @@ def _prepare_container_from_snapshot(
     source_revision: str,
     source_date_epoch: int,
     artifact_output: Path,
+    deployment: DeploymentIdentity | None = None,
     runner: CommandRunner,
 ) -> tuple[str, str]:
     _verify_python_interpreter()
@@ -3723,7 +3966,7 @@ def _prepare_container_from_snapshot(
         or value.get("status") != "passed"
         or not isinstance(image_digest, str)
         or re.fullmatch(r"sha256:[0-9a-f]{64}", image_digest) is None
-        or source_tag != _image_source_tag(source_revision)
+        or source_tag != _image_source_tag(source_revision, deployment)
     ):
         raise OperatorError("CONTAINER_PREPARATION_FAILED")
     return image_digest, source_tag
@@ -3734,6 +3977,7 @@ def _prepare_terraform_from_snapshot(
     source_root: Path,
     state_root: Path,
     provider_mirror: Path | None,
+    deployment_profile_path: Path | None = None,
     runtime_identity: Mapping[str, str],
     runner: CommandRunner,
 ) -> None:
@@ -3751,6 +3995,8 @@ def _prepare_terraform_from_snapshot(
         "--artifact-output",
         str(state_root / "plans"),
     ]
+    if deployment_profile_path is not None:
+        command.extend(("--deployment-profile", str(deployment_profile_path)))
     if provider_mirror is not None:
         command.extend(("--provider-mirror", str(provider_mirror)))
     for name in (
@@ -3794,6 +4040,7 @@ def prepare_phase5_artifacts(
     source_revision: str,
     created_at: datetime,
     provider_mirror: Path | None,
+    deployment_profile_path: Path,
 ) -> tuple[Phase5ManifestDraft, Path]:
     """Prepare the complete private, no-cloud input set for manifest sealing."""
 
@@ -3808,8 +4055,23 @@ def prepare_phase5_artifacts(
         repo_root=root,
         runner=_default_runner,
     )
+    try:
+        profile = load_external_deployment_profile(
+            deployment_profile_path,
+            repo_root=root,
+        )
+    except DeploymentProfileError as error:
+        raise OperatorError(error.code) from error
     state = Phase5StateStore(state_root)
     _verify_preparation_state_empty(state)
+    try:
+        profile_binding = seal_deployment_profile(profile, state_root=state.root)
+        seal_backend_configs(
+            state_root=state.root,
+            identity=profile_binding.identity,
+        )
+    except DeploymentProfileError as error:
+        raise OperatorError(error.code) from error
     _write_immutable_empty_file(
         state.root / "terraform.rc",
         failure="TERRAFORM_CLI_CONFIG_WRITE_FAILED",
@@ -3830,6 +4092,7 @@ def prepare_phase5_artifacts(
         source_revision=source_revision,
         source_date_epoch=execution_source.source_date_epoch,
         artifact_output=image_path,
+        deployment=profile_binding.identity,
         runner=_default_runner,
     )
     _immutable_file_sha256(image_path)
@@ -3837,6 +4100,7 @@ def prepare_phase5_artifacts(
         state_root=state.root,
         source_revision=source_revision,
         expected_digest=image_digest,
+        deployment=profile_binding.identity,
     )
     lock_binding = _source_file_binding(
         source_root,
@@ -3878,14 +4142,16 @@ def prepare_phase5_artifacts(
         source_root=source_root,
         state_root=state.root,
         provider_mirror=provider_mirror,
+        deployment_profile_path=Path(profile_binding.path),
         runtime_identity=runtime_identity,
         runner=_default_runner,
     )
 
     draft = Phase5ManifestDraft(
-        schema_version="reconcile/phase5-operator-draft/v1",
+        schema_version=_DRAFT_SCHEMA_V2,
         source_revision=source_revision,
         image_digest=image_digest,
+        deployment_profile_sha256=profile_binding.sha256,
         created_at=moment,
         work_deadline=moment + _WORK_WINDOW,
         approval_expires_at=moment + _WORK_WINDOW + _TEARDOWN_WINDOW,
@@ -3902,7 +4168,12 @@ def build_approval(
     approved_at: datetime,
 ) -> Phase5Approval:
     approved_at = _utc(approved_at)
-    if approved_by != _OWNER:
+    expected_owner = (
+        manifest.deployment_profile.identity.owner_principal
+        if manifest.deployment_profile is not None
+        else _OWNER
+    )
+    if approved_by != expected_owner:
         raise OperatorError("APPROVER_NOT_OWNER")
     if approved_at < manifest.created_at or approved_at >= manifest.work_deadline:
         raise OperatorError("APPROVAL_OUTSIDE_WORK_WINDOW")
@@ -4026,6 +4297,8 @@ class Phase5StateStore:
 
     def _ensure_layout(self) -> None:
         for relative in (
+            "bindings",
+            "bindings/backends",
             "docker",
             "execution",
             "images",
@@ -4865,6 +5138,8 @@ def _validate_continuation_bounds(
     )
     fixed_fields = (
         "origin_url",
+        "deployment_profile",
+        "terraform_backends",
         "project_id",
         "project_number",
         "region",
@@ -5123,8 +5398,14 @@ def _validate_approval_binding(
     manifest: Phase5ApprovalManifest,
     approval: Phase5Approval,
 ) -> None:
+    expected_owner = (
+        manifest.deployment_profile.identity.owner_principal
+        if manifest.deployment_profile is not None
+        else _OWNER
+    )
     if (
         approval.manifest_sha256 != manifest.record_sha256
+        or approval.approved_by != expected_owner
         or approval.work_deadline != manifest.work_deadline
         or approval.approval_expires_at != manifest.approval_expires_at
         or approval.authorization_estimate_usd != manifest.authorization_estimate_usd
@@ -5304,9 +5585,18 @@ def _verify_approved_artifacts(
     if str(state.root) != manifest.operator_state_root:
         raise OperatorError("OPERATOR_STATE_ROOT_DRIFT")
     draft = Phase5ManifestDraft(
-        schema_version="reconcile/phase5-operator-draft/v1",
+        schema_version=(
+            _DRAFT_SCHEMA_V2
+            if manifest.schema_version == _MANIFEST_SCHEMA_V2
+            else "reconcile/phase5-operator-draft/v1"
+        ),
         source_revision=manifest.source_revision,
         image_digest=manifest.image_digest,
+        deployment_profile_sha256=(
+            manifest.deployment_profile.sha256
+            if manifest.deployment_profile is not None
+            else None
+        ),
         created_at=manifest.created_at,
         work_deadline=manifest.work_deadline,
         approval_expires_at=manifest.approval_expires_at,
@@ -5324,6 +5614,8 @@ def _verify_approved_artifacts(
         raise OperatorError("ARTIFACT_VERIFICATION_FAILED") from error
     expected = {
         "operator_state_root": manifest.operator_state_root,
+        "deployment_profile": manifest.deployment_profile,
+        "terraform_backends": manifest.terraform_backends,
         "execution_source": manifest.execution_source,
         "python_dependencies": manifest.python_dependencies,
         "terraform_cli_config_path": manifest.terraform_cli_config_path,
@@ -5552,6 +5844,11 @@ def _acceptance_candidate(manifest: Phase5ApprovalManifest) -> object:
             image_digest=manifest.image_digest,
             infrastructure_revision=manifest.infrastructure_revision,
             semantic_config_sha256=manifest.semantic_config_sha256,
+            deployment=(
+                manifest.deployment_profile.identity
+                if manifest.deployment_profile is not None
+                else None
+            ),
         )
     except (TypeError, ValueError) as error:
         raise OperatorError("ACCEPTANCE_CANDIDATE_INVALID") from error
@@ -6485,7 +6782,7 @@ def _run_descriptor_once(
             iter(_FOUNDATION_INIT_RETRY_DELAYS_SECONDS)
             if descriptor.action is Phase5Action.FOUNDATION_APPLY
             and index == 0
-            and command == _FOUNDATION_INIT_COMMAND
+            and command[: len(_FOUNDATION_INIT_COMMAND)] == _FOUNDATION_INIT_COMMAND
             else iter(())
         )
         while True:
@@ -6556,10 +6853,9 @@ def _run_descriptor_once(
             cleanup_already_empty = (
                 descriptor.action is Phase5Action.BOOTSTRAP_TEARDOWN
                 and index == 0
-                and command == _state_bucket_cleanup_command()
                 and result.returncode == 1
                 and result.stdout == b""
-                and result.stderr == _EMPTY_STATE_BUCKET_CLEANUP_STDERR
+                and result.stderr == _empty_state_bucket_cleanup_stderr(command)
             )
             final_code = 0 if cleanup_already_empty else result.returncode
             if final_code == 0:
@@ -6773,6 +7069,7 @@ def _parser() -> argparse.ArgumentParser:
     prepare_parser.add_argument("--source-revision", required=True)
     prepare_parser.add_argument("--created-at", type=_parse_timestamp, required=True)
     prepare_parser.add_argument("--provider-mirror", type=Path)
+    prepare_parser.add_argument("--deployment-profile", type=Path, required=True)
 
     approval_parser = subcommands.add_parser("record-approval")
     approval_parser.add_argument("--state-dir", type=Path, required=True)
@@ -6835,12 +7132,14 @@ def main(argv: Sequence[str] | None = None) -> int:
                 source_revision=namespace.source_revision,
                 created_at=namespace.created_at,
                 provider_mirror=namespace.provider_mirror,
+                deployment_profile_path=namespace.deployment_profile,
             )
             _emit(
                 {
                     "schema_version": _SCHEMA,
                     "status": "ARTIFACTS_PREPARED",
                     "draft_path": str(draft_path),
+                    "deployment_profile_sha256": (draft.deployment_profile_sha256),
                     "image_digest": draft.image_digest,
                     "created_at": draft.created_at.isoformat(),
                     "work_deadline": draft.work_deadline.isoformat(),
@@ -6868,6 +7167,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                     "schema_version": _SCHEMA,
                     "status": "MANIFEST_SEALED",
                     "manifest_sha256": manifest.record_sha256,
+                    "deployment_profile_sha256": (
+                        manifest.deployment_profile.sha256
+                        if manifest.deployment_profile is not None
+                        else None
+                    ),
                     "authorization_estimate_usd": (manifest.authorization_estimate_usd),
                     "contingency_authorization_estimate_usd": (
                         manifest.contingency_authorization_estimate_usd

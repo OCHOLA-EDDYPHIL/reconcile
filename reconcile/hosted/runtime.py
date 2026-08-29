@@ -1041,12 +1041,18 @@ def create_runtime_component_app(
             config,
             selected_transport,
             FirestoreRecoveryRunStore(cas),
+            acceptance_partial_read_outage_enabled=(
+                config.acceptance_partial_read_outage_enabled
+            ),
         )
         return create_component_app(
             config,
             transport=selected_transport,
             operator_service=operator,
             recovery_service=recovery,
+            acceptance_partial_read_outage_enabled=(
+                config.acceptance_partial_read_outage_enabled
+            ),
         )
 
     authorizer = FirestoreHostedOperationScopeAuthorizer(scenario_store)
@@ -1138,6 +1144,9 @@ def create_runtime_component_app(
                 cloud_reader=recovery_cloud_reader,
                 firestore=recovery_firestore,
                 dispatch_gateway=recovery_dispatch,
+                acceptance_partial_read_outage_enabled=(
+                    config.acceptance_partial_read_outage_enabled
+                ),
             )
             return RecoveryRunApplicationService(
                 workflow,
@@ -1156,8 +1165,14 @@ def create_runtime_component_app(
                     HostedRecoveryHandler(
                         expected_caller_email=config.allowed_caller_emails[0],
                         service=recovery_service,
+                        acceptance_partial_read_outage_enabled=(
+                            config.acceptance_partial_read_outage_enabled
+                        ),
                     ),
                 ),
+            ),
+            acceptance_partial_read_outage_enabled=(
+                config.acceptance_partial_read_outage_enabled
             ),
         )
 
@@ -1211,6 +1226,9 @@ def create_runtime_component_app(
                 recovery_store=recovery_store,
                 permit_authority=permit_authority,
                 target=canary_target,
+                acceptance_partial_read_outage_enabled=(
+                    config.acceptance_partial_read_outage_enabled
+                ),
             ),
             firestore_release_target=release_target,
             firestore_release_action_authorizer=(
@@ -1223,6 +1241,9 @@ def create_runtime_component_app(
             recovery_action_caller_email=_required(
                 config.recovery_action_caller_email,
                 "recovery action caller",
+            ),
+            acceptance_partial_read_outage_enabled=(
+                config.acceptance_partial_read_outage_enabled
             ),
             internal_operation_handlers=_handlers(
                 (

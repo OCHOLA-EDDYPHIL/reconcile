@@ -11,6 +11,7 @@ from fastapi.testclient import TestClient
 
 from reconcile.contracts import (
     MAX_RECOVERY_RUN_EVENTS,
+    RECOVERY_RUN_REQUEST_VERSION,
     ActionPermitState,
     Classification,
     RecoveryNodeProgress,
@@ -19,6 +20,7 @@ from reconcile.contracts import (
     RecoveryRunEventPayload,
     RecoveryRunEventType,
     RecoveryRunFailureCategory,
+    RecoveryRunFault,
     RecoveryRunLifecycle,
     RecoveryRunPolicy,
     RecoveryRunRequest,
@@ -215,6 +217,44 @@ def test_hosted_recovery_api_rejects_blind_policy_before_service_contact(
     assert response.status_code == 400
     assert response.json()["code"] == "invalid_contract"
     assert service.launch_calls == 0
+
+
+def test_hosted_recovery_api_requires_explicit_partial_read_acceptance_enablement() -> (
+    None
+):
+    request = RecoveryRunRequest(
+        schema_version=RECOVERY_RUN_REQUEST_VERSION,
+        run_id=f"p5w-fixed-{'a' * 32}",
+        scenario="cloud-run-rollout",
+        policy=RecoveryRunPolicy.FIXED,
+        fault=(RecoveryRunFault.ACCEPTANCE_DROP_AFTER_ACCEPT_PARTIAL_READ_OUTAGE),
+    )
+    disabled_service = _RecoveryService()
+    disabled = TestClient(
+        create_app(recovery_service=disabled_service, hosted=True)
+    ).post(
+        "/api/v1/recovery-runs",
+        content=canonical_json_bytes(request),
+        headers={"Content-Type": "application/json"},
+    )
+    enabled_service = _RecoveryService()
+    enabled = TestClient(
+        create_app(
+            recovery_service=enabled_service,
+            hosted=True,
+            acceptance_partial_read_outage_enabled=True,
+        )
+    ).post(
+        "/api/v1/recovery-runs",
+        content=canonical_json_bytes(request),
+        headers={"Content-Type": "application/json"},
+    )
+
+    assert disabled.status_code == 400
+    assert disabled.json()["code"] == "invalid_contract"
+    assert disabled_service.launch_calls == 0
+    assert enabled.status_code == 202
+    assert enabled_service.launch_calls == 1
 
 
 def test_recovery_api_rejects_noncanonical_cursor_without_calling_service() -> None:

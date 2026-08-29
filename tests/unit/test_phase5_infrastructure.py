@@ -218,10 +218,7 @@ def test_three_stacks_have_separate_pinned_backends() -> None:
         bootstrap_path, re.compile(r'(?m)^\s*backend\s+"local"\s*\{')
     )
     assert len(bootstrap_backend) == 1
-    assert set(re.findall(r"(?m)^\s*([a-z_]+)\s*=", bootstrap_backend[0][-1])) == {
-        "path"
-    }
-    assert _attribute(bootstrap_backend[0][-1], "path") == '"terraform.tfstate"'
+    assert not re.findall(r"(?m)^\s*([a-z_]+)\s*=", bootstrap_backend[0][-1])
     for path, prefix in (
         (_STACKS[1] / "versions.tf", "phase5/foundation"),
         (_STACKS[2] / "versions.tf", "phase5/runtime"),
@@ -229,12 +226,8 @@ def test_three_stacks_have_separate_pinned_backends() -> None:
         backend = _matching_blocks(path, re.compile(r'(?m)^\s*backend\s+"gcs"\s*\{'))
         assert len(backend) == 1
         assignments = set(re.findall(r"(?m)^\s*([a-z_]+)\s*=", backend[0][-1]))
-        assert assignments == {"bucket", "impersonate_service_account", "prefix"}
-        assert _attribute(backend[0][-1], "bucket") == ('"example-project-id-p5-state"')
+        assert assignments == {"prefix"}
         assert _attribute(backend[0][-1], "prefix") == f'"{prefix}"'
-        assert _attribute(backend[0][-1], "impersonate_service_account") == (
-            '"rec-p5-apply@example-project-id.iam.gserviceaccount.com"'
-        )
     assert re.search(r'prefix\s*=\s*"phase5/foundation"', foundation) is not None
     assert re.search(r'prefix\s*=\s*"phase5/runtime"', runtime) is not None
 
@@ -250,7 +243,7 @@ def test_three_stacks_have_separate_pinned_backends() -> None:
         assignments = set(re.findall(r"(?m)^\s*([a-z_]+)\s*=", provider_block))
         assert assignments == {"impersonate_service_account", "project", "region"}
         assert _attribute(provider_block, "impersonate_service_account") == (
-            '"rec-p5-apply@example-project-id.iam.gserviceaccount.com"'
+            '"rec-p5-apply@${var.project_id}.iam.gserviceaccount.com"'
         )
 
 
@@ -289,9 +282,7 @@ def test_resources_and_apis_are_restricted_to_the_frozen_allowlists() -> None:
 def test_public_principals_and_secret_values_are_absent() -> None:
     source = "\n".join(path.read_text(encoding="utf-8") for path in _terraform_files())
     lowered = source.lower()
-    invokers = _named_block(
-        _STACKS[2] / "variables.tf", "variable", "api_invoker_members"
-    )
+    runtime_locals = (_STACKS[2] / "locals.tf").read_text(encoding="utf-8")
     run_resources = {
         resource.name: resource
         for resource in _resources()
@@ -316,10 +307,11 @@ def test_public_principals_and_secret_values_are_absent() -> None:
         is None
     )
     assert (
-        '"serviceAccount:rec-p5-apply@example-project-id.iam.gserviceaccount.com"'
-        in invokers
+        '"serviceAccount:rec-p5-apply@${var.project_id}.iam.gserviceaccount.com"'
+        in runtime_locals
     )
-    assert "var.api_invoker_members == toset" in invokers
+    assert 'variable "api_invoker_members"' not in source
+    assert 'variable "service_account_emails"' not in source
     assert set(run_resources) == _CLOUD_RUN_SERVICES
     for resource in run_resources.values():
         assert _attribute(resource.body, "invoker_iam_disabled") == "false"
@@ -368,6 +360,11 @@ def test_cloud_run_audiences_and_candidate_environment_are_closed_world() -> Non
     }
     source = (_STACKS[2] / "cloud_run.tf").read_text(encoding="utf-8")
     locals_source = (_STACKS[2] / "locals.tf").read_text(encoding="utf-8")
+    acceptance_fault = _named_block(
+        _STACKS[2] / "variables.tf",
+        "variable",
+        "acceptance_partial_read_outage_enabled",
+    )
 
     assert set(run_resources) == _CLOUD_RUN_SERVICES
     for name, resource in run_resources.items():
@@ -392,6 +389,15 @@ def test_cloud_run_audiences_and_candidate_environment_are_closed_world() -> Non
     ):
         assert source.count(name) == 1
     assert source.count("RECONCILE_TARGET_DATABASE") == 3
+    assert _attribute(acceptance_fault, "type") == "bool"
+    assert _attribute(acceptance_fault, "default") == "false"
+    assert (
+        source.count(
+            "RECONCILE_ACCEPTANCE_PARTIAL_READ_OUTAGE_ENABLED = "
+            "tostring(var.acceptance_partial_read_outage_enabled)"
+        )
+        == 3
+    )
     assert source.count("local.sandbox_database_name") == 1
     assert source.count("local.target_database_name") == 2
     assert 'sandbox_database_name = "reconcile-p5-sandbox"' in locals_source
@@ -435,7 +441,7 @@ def test_canary_runtime_drift_and_baseline_rotation_are_explicit() -> None:
         "var.region",
         "var.request_timeout_seconds.canary",
         "var.semantic_config_sha256",
-        "var.service_account_emails.canary",
+        "local.service_account_emails.canary",
         "var.source_revision",
     ):
         assert template_input in locals_source
@@ -678,12 +684,12 @@ def test_apply_identity_and_runtime_iam_graph_are_closed_world() -> None:
         ),
         "canary_operation_reader": (
             '"projects/${var.project_id}/roles/reconcileP5CanaryOperationReader"',
-            '"serviceAccount:${var.service_account_emails.controller}"',
+            '"serviceAccount:${local.service_account_emails.controller}"',
             None,
         ),
         "canary_revision_reader": (
             '"projects/${var.project_id}/roles/reconcileP5CanaryRevisionReader"',
-            '"serviceAccount:${var.service_account_emails[each.value]}"',
+            '"serviceAccount:${local.service_account_emails[each.value]}"',
             'toset(["controller", "fault_proxy"])',
         ),
     }
@@ -729,7 +735,7 @@ def test_apply_identity_and_runtime_iam_graph_are_closed_world() -> None:
     assert _attribute(image_reader, "repository") == '"reconcile-p5"'
     assert _attribute(image_reader, "role") == '"roles/artifactregistry.reader"'
     assert _attribute(image_reader, "member") == (
-        '"serviceAccount:${var.service_account_emails.fault_proxy}"'
+        '"serviceAccount:${local.service_account_emails.fault_proxy}"'
     )
 
     assert set(bucket_iam) == {"target_mutator", "target_viewer"}
@@ -761,15 +767,15 @@ def test_apply_identity_and_runtime_iam_graph_are_closed_world() -> None:
     assert _attribute(act_as, "for_each") == "local.service_accounts"
     assert _attribute(act_as, "role") == '"roles/iam.serviceAccountUser"'
     assert _attribute(act_as, "member") == (
-        '"serviceAccount:rec-p5-apply@example-project-id.iam.gserviceaccount.com"'
+        '"serviceAccount:rec-p5-apply@${var.project_id}.iam.gserviceaccount.com"'
     )
     canary_act_as = service_account_iam["canary_mutator_act_as"].body
     assert _attribute(canary_act_as, "service_account_id") == (
-        '"projects/${var.project_id}/serviceAccounts/${var.service_account_emails.canary}"'
+        '"projects/${var.project_id}/serviceAccounts/${local.service_account_emails.canary}"'
     )
     assert _attribute(canary_act_as, "role") == '"roles/iam.serviceAccountUser"'
     assert _attribute(canary_act_as, "member") == (
-        '"serviceAccount:${var.service_account_emails.fault_proxy}"'
+        '"serviceAccount:${local.service_account_emails.fault_proxy}"'
     )
 
     billing_iam = [
@@ -791,7 +797,7 @@ def test_apply_identity_and_runtime_iam_graph_are_closed_world() -> None:
         "internal",
     }
     api_operator = run_iam["api_operator"].body
-    assert _attribute(api_operator, "for_each") == "var.api_invoker_members"
+    assert _attribute(api_operator, "for_each") == "local.api_invoker_members"
     assert _attribute(api_operator, "name") == "google_cloud_run_v2_service.api.name"
     assert _attribute(api_operator, "role") == '"roles/run.invoker"'
     assert _attribute(api_operator, "member") == "each.value"
@@ -802,17 +808,17 @@ def test_apply_identity_and_runtime_iam_graph_are_closed_world() -> None:
     assert _attribute(internal, "member") == ('"serviceAccount:${each.value.member}"')
     assert _attribute(run_iam["canary_reader"].body, "role") == '"roles/run.viewer"'
     assert _attribute(run_iam["canary_reader"].body, "member") == (
-        '"serviceAccount:${var.service_account_emails.controller}"'
+        '"serviceAccount:${local.service_account_emails.controller}"'
     )
     assert _attribute(run_iam["canary_mutator"].body, "role") == (
         '"projects/${var.project_id}/roles/reconcileP5CanaryMutator"'
     )
     assert _attribute(run_iam["canary_mutator"].body, "member") == (
-        '"serviceAccount:${var.service_account_emails.fault_proxy}"'
+        '"serviceAccount:${local.service_account_emails.fault_proxy}"'
     )
     assert _attribute(run_iam["canary_invoker"].body, "role") == ('"roles/run.invoker"')
     assert _attribute(run_iam["canary_invoker"].body, "member") == (
-        '"serviceAccount:${var.service_account_emails.controller}"'
+        '"serviceAccount:${local.service_account_emails.controller}"'
     )
 
     invocation_locals = _matching_blocks(
@@ -823,23 +829,23 @@ def test_apply_identity_and_runtime_iam_graph_are_closed_world() -> None:
         internal_invocations = {
           api_to_controller = {
             service = google_cloud_run_v2_service.controller.name
-            member  = var.service_account_emails.api
+        member  = local.service_account_emails.api
           }
           api_to_fault_proxy = {
             service = google_cloud_run_v2_service.fault_proxy.name
-            member  = var.service_account_emails.api
+        member  = local.service_account_emails.api
           }
           controller_to_fault_proxy = {
             service = google_cloud_run_v2_service.fault_proxy.name
-            member  = var.service_account_emails.controller
+        member  = local.service_account_emails.controller
           }
           controller_to_sandbox = {
             service = google_cloud_run_v2_service.sandbox.name
-            member  = var.service_account_emails.controller
+        member  = local.service_account_emails.controller
           }
           fault_proxy_to_sandbox = {
             service = google_cloud_run_v2_service.sandbox.name
-            member  = var.service_account_emails.fault_proxy
+        member  = local.service_account_emails.fault_proxy
           }
         }
     """

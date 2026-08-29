@@ -16,6 +16,7 @@ from reconcile.contracts.base import (
 )
 from reconcile.contracts.codec import canonical_sha256, decode_contract
 from reconcile.contracts.recovery_run import (
+    RecoveryRunFault,
     RecoveryRunPolicy,
     RecoveryRunRequest,
     RecoveryRunSnapshot,
@@ -438,13 +439,19 @@ class HostedRecoveryHandler:
         *,
         expected_caller_email: str,
         service: HostedRecoveryService,
+        acceptance_partial_read_outage_enabled: bool = False,
     ) -> None:
         if type(expected_caller_email) is not str or not expected_caller_email:
             raise ValueError("hosted recovery caller is invalid")
         if not callable(getattr(service, "launch_and_wait_result", None)):
             raise TypeError("hosted recovery service is invalid")
+        if type(acceptance_partial_read_outage_enabled) is not bool:
+            raise TypeError("partial-read acceptance state must be boolean")
         self._expected_caller_email = expected_caller_email
         self._service = service
+        self._acceptance_partial_read_outage_enabled = (
+            acceptance_partial_read_outage_enabled
+        )
 
     async def __call__(
         self,
@@ -457,6 +464,12 @@ class HostedRecoveryHandler:
             RecoveryRunPolicy.FIXED,
             RecoveryRunPolicy.ADAPTIVE,
         }:
+            raise HostedRecoveryGatewayError from None
+        if (
+            recovery.fault
+            is RecoveryRunFault.ACCEPTANCE_DROP_AFTER_ACCEPT_PARTIAL_READ_OUTAGE
+            and not self._acceptance_partial_read_outage_enabled
+        ):
             raise HostedRecoveryGatewayError from None
         try:
             result = await self._service.launch_and_wait_result(recovery)
@@ -664,6 +677,7 @@ class HostedRecoveryRunGateway:
         store: RecoveryRunStore,
         *,
         poll_interval_seconds: float = 0.01,
+        acceptance_partial_read_outage_enabled: bool = False,
     ) -> None:
         if type(config) is not HostedConfig or config.component is not Component.API:
             raise ValueError("hosted recovery gateway requires API configuration")
@@ -684,11 +698,16 @@ class HostedRecoveryRunGateway:
             or poll_interval_seconds <= 0
         ):
             raise ValueError("hosted recovery poll interval is invalid")
+        if type(acceptance_partial_read_outage_enabled) is not bool:
+            raise TypeError("partial-read acceptance state must be boolean")
         self._endpoint = f"{config.controller_url}{_RECOVERY_PATH}"
         self._audience = config.controller_audience
         self._transport = transport
         self._store = store
         self._poll = float(poll_interval_seconds)
+        self._acceptance_partial_read_outage_enabled = (
+            acceptance_partial_read_outage_enabled
+        )
 
     async def launch(
         self,
@@ -702,6 +721,12 @@ class HostedRecoveryRunGateway:
     ) -> RecoveryRunLaunchResult:
         if type(recovery) is not RecoveryRunRequest:
             raise TypeError("hosted recovery launch requires an exact request")
+        if (
+            recovery.fault
+            is RecoveryRunFault.ACCEPTANCE_DROP_AFTER_ACCEPT_PARTIAL_READ_OUTAGE
+            and not self._acceptance_partial_read_outage_enabled
+        ):
+            raise HostedRecoveryGatewayError from None
         request = _recovery_request(recovery)
         try:
             response = await self._transport.request(

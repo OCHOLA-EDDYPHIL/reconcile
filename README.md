@@ -11,11 +11,9 @@ next exact action—or refuses to mutate.
 **Gemini investigates. Deterministic evidence decides.**
 
 [Validate the offline evidence bundle](#validate-the-offline-evidence-bundle) ·
-[Inspect the provider evidence record](demo/evidence/provider-proof.json) ·
+[Inspect the provider evidence record](evidence/v0.1.0/provider-proof.json) ·
 [Read the claims and limitations](docs/claims-and-limitations.md) ·
-[Use the demo bundle](demo/README.md)
-
-[![Scripted policy fixture and recorded Google Cloud trace](demo/proof.png)](demo/proof.png)
+[Inspect the versioned evidence](evidence/v0.1.0/proof-to-permit.json)
 
 ## The failure mode
 
@@ -43,7 +41,7 @@ git clone https://github.com/OCHOLA-EDDYPHIL/reconcile.git
 cd reconcile
 uv sync --locked --all-groups
 uv run --no-sync python scripts/validate_evidence.py
-uv run --no-sync python scripts/check_release_candidate.py
+uv run --no-sync python scripts/check_public_package.py
 ```
 
 The first command performs offline evidence validation. It checks the frozen
@@ -62,7 +60,7 @@ Accepted scripted baseline | fault: drop-after-accept
 Recorded direct live-cloud evidence
   pass 1       -> UNKNOWN; CONTINUE denied; RETRY denied; 0 recovery-action permits
   pass 2       -> COMMITTED; 1 exact correlated revision
-  authority    -> deterministic certificates; two max_uses=1 permits
+  authority    -> hash-bound deterministic certificates; two max_uses=1 permits
   evidence     -> 49 durable events; provider projection hash linked
   effects      -> 1 revision / 1 promotion / 1 Firestore record
   replay       -> rejected before provider contact; contact delta 0
@@ -83,13 +81,16 @@ This result validates recorded, sanitized evidence. It is not a provider run.
 4. [Evidence admission](reconcile/evidence/admission.py) applies capability,
    freshness, provenance, and correlation rules to provider observations.
 5. [Deterministic verification](reconcile/evidence/recovery_verification.py)
-   produces a verified certificate or an ambiguity witness. Model text is never
-   an authorization input.
+   produces a hash-bound verified certificate or an ambiguity witness. Model
+   text is never an authorization input.
 6. The [recovery workflow](reconcile/recovery_workflow.py) may issue an expiring
    permit for one exact semantic action with `max_uses=1`.
 7. The [Firestore permit store](reconcile/hosted/firestore_permits.py) claims that
    permit before the [dispatcher](reconcile/hosted/recovery_dispatch.py) contacts
    the provider. Replay is denied before another call can leave the process.
+
+The effect graph is a declared action DAG populated and verified against
+admitted provider observations; Gemini does not infer or authorize that graph.
 
 [![Recovery authority and trust boundaries](docs/architecture.png)](docs/architecture.png)
 
@@ -124,16 +125,58 @@ checksums together.
 
 | Evidence layer | Purpose |
 | --- | --- |
-| [Provider evidence record](demo/evidence/provider-proof.json) | Records initial `UNKNOWN`, later exact revision correlation, deterministic certificates, two exact permits, effects `1/1/1`, stable snapshot reread, and zero-contact replay rejection. |
-| [Live corroboration](demo/evidence/live-corroboration.json) | Records revision-bound Cloud Run services, isolated Firestore databases, correlated logs, and the durable event snapshot reread. |
-| [Cleanup verification](demo/evidence/cleanup-verification.json) | Records the post-capture zero-resource inventory. |
-| [Evidence bundle manifest](demo/evidence/proof-to-permit.json) | Hash-links the scripted qualification and provider records for offline validation. |
+| [Provider evidence record](evidence/v0.1.0/provider-proof.json) | Records initial `UNKNOWN`, later exact revision correlation, hash-bound deterministic certificates, two exact permits, effects `1/1/1`, stable snapshot reread, and zero-contact replay rejection. |
+| [Live corroboration](evidence/v0.1.0/live-corroboration.json) | Records revision-bound Cloud Run services, isolated Firestore databases, correlated logs, and the durable event snapshot reread. |
+| [Cleanup verification](evidence/v0.1.0/cleanup-verification.json) | Records the post-capture zero-resource inventory. |
+| [Evidence bundle manifest](evidence/v0.1.0/proof-to-permit.json) | Hash-links the scripted qualification and provider records for offline validation. |
 
 The scripted qualification covers 100 cases, 400 policy lanes, and zero false
 recovery-action permits. It did not authorize adaptive-efficiency or
 model-superiority claims: the observed 20% median probe reduction missed the
 preregistered 25% threshold. The exact authorized wording is recorded in the
 [claims and limitations](docs/claims-and-limitations.md).
+
+## Static evidence viewer
+
+The viewer exports a closed, immutable bundle from one validated versioned
+evidence directory. It records the viewer source revision separately from the
+source revision described by the evidence, embeds no environment identity, and
+runs under a role-free identity with no outbound application calls to the
+operational API or provider targets.
+
+```bash
+PUBLIC_EVIDENCE=/absolute/path/outside-repo/public-evidence/v0.1.1
+VIEWER_BUNDLE=/absolute/path/outside-repo/viewer-bundle
+VIEWER_CONTEXT=/absolute/path/outside-repo/viewer-context
+
+uv run --no-sync python -m viewer.export \
+  --evidence "$PUBLIC_EVIDENCE" \
+  --output "$VIEWER_BUNDLE" \
+  --build-context-output "$VIEWER_CONTEXT"
+
+VIEWER_SOURCE_REVISION="$(uv run --no-sync python -c \
+  'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["viewer_source_revision"])' \
+  "$VIEWER_BUNDLE/snapshot.json")"
+EVIDENCE_SOURCE_REVISION="$(uv run --no-sync python -c \
+  'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["evidence_source_revision"])' \
+  "$VIEWER_BUNDLE/snapshot.json")"
+SNAPSHOT_SHA256="$(sha256sum "$VIEWER_BUNDLE/snapshot.json" | awk '{print $1}')"
+
+docker build \
+  --file "$VIEWER_CONTEXT/Dockerfile" \
+  --build-arg VIEWER_SOURCE_REVISION="$VIEWER_SOURCE_REVISION" \
+  --build-arg EVIDENCE_SOURCE_REVISION="$EVIDENCE_SOURCE_REVISION" \
+  --build-arg SNAPSHOT_SHA256="$SNAPSHOT_SHA256" \
+  --tag reconcile-viewer:"$VIEWER_SOURCE_REVISION" \
+  "$VIEWER_CONTEXT"
+```
+
+The exporter refuses a dirty checkout, a non-`main` branch, or a local `main`
+that differs from `origin/main`; the runtime sources are read from that verified
+commit. The runtime serves only the generated HTML, snapshot, bundle manifest,
+and health response over `GET` and `HEAD`. Other methods are rejected. The
+complete digest-pinned Cloud Run deployment sequence is in the
+[hosted runbook](docs/hosted-runbook.md#static-viewer-boundary).
 
 ## Interfaces
 
@@ -160,7 +203,8 @@ and cleanup requirements are in the [hosted runbook](docs/hosted-runbook.md).
 - [`reconcile/hosted/`](reconcile/hosted/) — Google Cloud adapters and durable
   stores
 - [`schemas/`](schemas/) — versioned public contracts
-- [`demo/`](demo/) — offline evidence bundle, diagrams, and narration
+- [`evidence/`](evidence/) — immutable, versioned public evidence bundles
+- [`viewer/`](viewer/) — static evidence projection and read-only server
 
 ## Claim boundary
 

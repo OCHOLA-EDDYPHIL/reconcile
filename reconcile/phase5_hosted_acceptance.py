@@ -23,6 +23,11 @@ from google.auth import impersonated_credentials
 from google.cloud import firestore_v1, run_v2
 from pydantic import Field, StringConstraints, model_validator
 
+from reconcile.adapters.cloud_run import (
+    CLOUD_RUN_HEALTH_CAPABILITY,
+    CLOUD_RUN_REVISION_CAPABILITY,
+    CLOUD_RUN_SERVICE_CAPABILITY,
+)
 from reconcile.adapters.firestore_business import (
     FIRESTORE_BUSINESS_CAPABILITY_NAME,
     FIRESTORE_BUSINESS_CAPABILITY_VERSION,
@@ -44,6 +49,7 @@ from reconcile.contracts import (
     AdaptivePlannerPhase,
     AdvisoryTurnEventPayload,
     AdvisoryTurnStatus,
+    AmbiguityWitness,
     Classification,
     ComparisonStrategyKind,
     EffectAssertionState,
@@ -54,7 +60,9 @@ from reconcile.contracts import (
     ProbeOutcome,
     ProbeRequestDisposition,
     ProbeRequestEventPayload,
+    RecoveryDecision,
     RecoveryDispatchOutcome,
+    RecoveryNodeState,
     RecoveryPolicyComparison,
     RecoveryPolicyResult,
     RecoveryReceiptOutcome,
@@ -81,6 +89,7 @@ from reconcile.contracts import (
     ScenarioRunSnapshot,
     TerminalStateEventPayload,
     canonical_json_bytes,
+    canonical_sha256,
     decode_contract,
 )
 from reconcile.contracts.base import (
@@ -88,6 +97,11 @@ from reconcile.contracts.base import (
     Identifier,
     Sha256Digest,
     StrictModel,
+)
+from reconcile.deployment_profile import (
+    DeploymentIdentity,
+    RuntimeAudiences,
+    RuntimeServiceAccounts,
 )
 from reconcile.hosted.cloud_run_canary import (
     CloudRunCanaryActionAdapter,
@@ -146,7 +160,8 @@ from reconcile.scenarios.sandbox_order import (
 )
 from reconcile.scenarios.storage import STORAGE_EFFECT_ID
 
-PHASE5_HOSTED_ACCEPTANCE_VERSION = "reconcile/phase5-hosted-acceptance/v2"
+PHASE5_PROVIDER_ACCEPTANCE_VERSION = "reconcile/phase5-hosted-acceptance/v2"
+PHASE5_HOSTED_ACCEPTANCE_VERSION = "reconcile/phase5-hosted-acceptance/v3"
 PHASE5_ACCEPTANCE_ARTIFACT_VERSION = "reconcile/phase5-acceptance-artifact/v1"
 
 _PROJECT_ID = "example-project-id"
@@ -276,17 +291,15 @@ class CandidateIdentity(StrictModel):
     image_digest: ImageDigest
     infrastructure_revision: Sha256Digest
     semantic_config_sha256: Sha256Digest
-    project_id: Literal["example-project-id"] = _PROJECT_ID
-    region: Literal["us-central1"] = _REGION
-    operator_service_account: Literal[
-        "rec-p5-apply@example-project-id.iam.gserviceaccount.com"
-    ] = _APPLY_SERVICE_ACCOUNT
-    api_audience: Literal["https://reconcile.invalid/phase5/example-project-id/api"] = (
-        _API_AUDIENCE
+    deployment_profile_sha256: Sha256Digest | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
     )
-    controller_audience: Literal[
-        "https://reconcile.invalid/phase5/example-project-id/controller"
-    ] = _CONTROLLER_AUDIENCE
+    project_id: str = _PROJECT_ID
+    region: Literal["us-central1"] = _REGION
+    operator_service_account: ServiceAccountEmail = _APPLY_SERVICE_ACCOUNT
+    api_audience: str = _API_AUDIENCE
+    controller_audience: str = _CONTROLLER_AUDIENCE
     provider_source: Literal["registry.terraform.io/hashicorp/google"] = (
         _PROVIDER_SOURCE
     )
@@ -304,7 +317,32 @@ class CandidateIdentity(StrictModel):
 
     @model_validator(mode="after")
     def validate_identity(self) -> CandidateIdentity:
-        expected = _model_hash(self, exclude={"candidate_sha256"})
+        if self.deployment_profile_sha256 is None:
+            if (
+                self.project_id != "example-project-id"
+                or self.operator_service_account
+                != "rec-p5-apply@example-project-id.iam.gserviceaccount.com"
+                or self.api_audience
+                != "https://reconcile.invalid/phase5/example-project-id/api"
+                or self.controller_audience
+                != "https://reconcile.invalid/phase5/example-project-id/controller"
+            ):
+                raise ValueError("legacy candidate deployment identity changed")
+        else:
+            origin = f"https://reconcile.invalid/phase5/{self.project_id}"
+            if (
+                re.fullmatch(r"[a-z][a-z0-9-]{4,28}[a-z0-9]", self.project_id) is None
+                or self.project_id == "example-project-id"
+                or self.operator_service_account
+                != f"rec-p5-apply@{self.project_id}.iam.gserviceaccount.com"
+                or self.api_audience != f"{origin}/api"
+                or self.controller_audience != f"{origin}/controller"
+            ):
+                raise ValueError("candidate deployment identity is not derived")
+        payload = self.model_dump(mode="json", exclude={"candidate_sha256"})
+        if self.deployment_profile_sha256 is None:
+            payload.pop("deployment_profile_sha256", None)
+        expected = _json_hash(payload)
         if self.candidate_sha256 != expected:
             raise ValueError("candidate identity hash mismatch")
         return self
@@ -345,10 +383,6 @@ class ServiceDeploymentObservation(StrictModel):
         expected_name = _SERVICE_NAMES[self.component]
         if self.service_name != expected_name:
             raise ValueError("service observation name mismatch")
-        if self.service_account_email != _SERVICE_ACCOUNTS[self.component]:
-            raise ValueError("service account observation mismatch")
-        if self.custom_audience != _SERVICE_AUDIENCES[self.component]:
-            raise ValueError("custom audience observation mismatch")
         if (
             self.observed_generation != self.generation
             or self.latest_created_revision != self.latest_ready_revision
@@ -356,13 +390,6 @@ class ServiceDeploymentObservation(StrictModel):
             or self.revision_observed_generation != self.revision_generation
         ):
             raise ValueError("serving revision observation is not current and ready")
-        expected_invoker_iam_sha256 = (
-            _expected_api_invoker_iam_sha256()
-            if self.component is ServiceComponent.API
-            else None
-        )
-        if self.api_invoker_iam_sha256 != expected_invoker_iam_sha256:
-            raise ValueError("API invoker IAM observation is not exact")
         return self
 
 
@@ -634,7 +661,7 @@ class AcceptanceArtifactBinding(StrictModel):
 
 
 class HostedAcceptanceRecord(StrictModel):
-    schema_version: Literal["reconcile/phase5-hosted-acceptance/v2"]
+    schema_version: Literal["reconcile/phase5-hosted-acceptance/v3"]
     record_type: Literal["hosted-acceptance"]
     candidate: CandidateIdentity
     provider_artifact: AcceptanceArtifactBinding
@@ -645,7 +672,7 @@ class HostedAcceptanceRecord(StrictModel):
         min_length=3, max_length=3
     )
     recovery_lanes: tuple[RecoveryLaneAcceptanceObservation, ...] = Field(
-        min_length=5, max_length=5
+        min_length=6, max_length=6
     )
     recovery_comparison: RecoveryPolicyComparison
     provider_ledger: HostedProviderLedgerObservation
@@ -808,6 +835,68 @@ class CanaryReprovisionObservation(StrictModel):
         return self
 
 
+class PartialReadOutageObservation(StrictModel):
+    """Terminal proof shape for the isolated partial-read outage lane."""
+
+    classification: Literal[Classification.UNKNOWN]
+    lifecycle: Literal[RecoveryRunLifecycle.ESCALATED]
+    decision: Literal[RecoveryDecision.ESCALATE]
+    witness: AmbiguityWitness
+    node_states: tuple[RecoveryNodeState, ...] = Field(min_length=3, max_length=3)
+    probe_capabilities: tuple[Identifier, ...] = Field(min_length=3, max_length=3)
+    probe_outcomes: tuple[ProbeOutcome, ...] = Field(min_length=3, max_length=3)
+    certificate_count: Literal[0]
+    action_permit_count: Literal[0]
+
+    @model_validator(mode="after")
+    def validate_observation(self) -> PartialReadOutageObservation:
+        history_ids = tuple(
+            history.history_id for history in self.witness.possible_histories
+        )
+        history_classifications = tuple(
+            history.classification for history in self.witness.possible_histories
+        )
+        expected_history_ids = ("effects-occurred", "effects-not-occurred")
+        expected_history_set = set(expected_history_ids)
+        if (
+            self.witness.node_id != "stage"
+            or history_ids != expected_history_ids
+            or history_classifications
+            != (Classification.COMMITTED, Classification.PARTIAL)
+            or len(
+                {
+                    canonical_sha256(history)
+                    for history in self.witness.possible_histories
+                }
+            )
+            != 2
+            or any(
+                set(observation.distinguishes_history_ids) != expected_history_set
+                for observation in self.witness.discriminating_observations
+            )
+            or self.node_states
+            != (
+                RecoveryNodeState.ESCALATED,
+                RecoveryNodeState.WAITING,
+                RecoveryNodeState.WAITING,
+            )
+            or self.probe_capabilities
+            != (
+                CLOUD_RUN_SERVICE_CAPABILITY,
+                CLOUD_RUN_REVISION_CAPABILITY,
+                CLOUD_RUN_HEALTH_CAPABILITY,
+            )
+            or self.probe_outcomes
+            != (
+                ProbeOutcome.COMPLETED,
+                ProbeOutcome.UNAVAILABLE,
+                ProbeOutcome.UNAVAILABLE,
+            )
+        ):
+            raise ValueError("partial-read ambiguity witness changed")
+        return self
+
+
 class RecoveryLaneAcceptanceObservation(StrictModel):
     """One physically isolated policy lane and its sanitized API evidence."""
 
@@ -832,6 +921,10 @@ class RecoveryLaneAcceptanceObservation(StrictModel):
     hypothesis_node_sha256: Sha256Digest | None = None
     hypothesis_input_sha256: Sha256Digest | None = None
     hypothesis_output_sha256: Sha256Digest | None = None
+    partial_read_outage: PartialReadOutageObservation | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
 
     @model_validator(mode="after")
     def validate_lane(self) -> RecoveryLaneAcceptanceObservation:
@@ -846,7 +939,13 @@ class RecoveryLaneAcceptanceObservation(StrictModel):
         ):
             raise ValueError("recovery lane changed its physical target")
         proof_policy = self.result.policy in {"fixed", "adaptive"}
-        drop_after_accept = self.result.fault == "drop-after-accept"
+        partial_read_outage = self.result.fault == (
+            RecoveryRunFault.ACCEPTANCE_DROP_AFTER_ACCEPT_PARTIAL_READ_OUTAGE.value
+        )
+        drop_after_accept = self.result.fault in {
+            RecoveryRunFault.DROP_AFTER_ACCEPT.value,
+            RecoveryRunFault.ACCEPTANCE_DROP_AFTER_ACCEPT_PARTIAL_READ_OUTAGE.value,
+        }
         if self.acknowledgement_lost != drop_after_accept:
             raise ValueError("recovery lane fault was not observed at its boundary")
         api_fields = (
@@ -874,6 +973,7 @@ class RecoveryLaneAcceptanceObservation(StrictModel):
         expected_live_replay = proof_policy and self.result.fault in {
             RecoveryRunFault.DROP_AFTER_ACCEPT.value,
             RecoveryRunFault.NO_FAULT.value,
+            RecoveryRunFault.ACCEPTANCE_DROP_AFTER_ACCEPT_PARTIAL_READ_OUTAGE.value,
         }
         if (
             self.live_authority_replay_denial_count != len(replay_denials)
@@ -891,7 +991,7 @@ class RecoveryLaneAcceptanceObservation(StrictModel):
                 any(value is None for value in api_fields)
                 or self.snapshot_sha256 != self.replay_snapshot_sha256
                 or self.event_count < 1
-                or not self.result.chain_completed
+                or self.result.chain_completed != (not partial_read_outage)
                 or self.launch_outcome
                 is not (
                     RecoveryDispatchOutcome.OUTCOME_UNKNOWN
@@ -933,7 +1033,76 @@ class RecoveryLaneAcceptanceObservation(StrictModel):
                 RecoveryReceiptOutcome.PROVIDER_CONTACTED,
             ) or tuple(item.attempt for item in record_receipts) != (1, 2):
                 raise ValueError("suppressed dispatch retry evidence changed")
+        _validate_partial_read_outage(self, required=partial_read_outage)
         return self
+
+
+def _validate_partial_read_outage(
+    lane: RecoveryLaneAcceptanceObservation,
+    *,
+    required: bool,
+) -> None:
+    observation = lane.partial_read_outage
+    if not required:
+        if observation is not None:
+            raise ValueError("partial-read evidence appeared outside its sealed fault")
+        return
+    if observation is None:
+        raise ValueError("partial-read acceptance evidence is missing")
+
+    result = lane.result
+    counters = result.counters
+    receipts = result.dispatch_receipts
+    witness_sha256 = canonical_sha256(observation.witness)
+    receipt_shape = tuple(
+        (receipt.node_id, receipt.attempt, receipt.outcome, receipt.provider_contact)
+        for receipt in receipts
+    )
+    if (
+        result.policy != RecoveryRunPolicy.FIXED.value
+        or result.chain_completed
+        or result.terminal_disposition != RecoveryRunLifecycle.ESCALATED.value
+        or result.certificate_sha256s
+        or result.witness_sha256s != (witness_sha256,)
+        or (
+            counters.revisions_created,
+            counters.promotions_accepted,
+            counters.release_records_created,
+            counters.provider_contacts,
+            counters.continue_permits_issued,
+            counters.retry_permits_issued,
+            counters.retry_permits_consumed,
+            counters.action_permits_consumed,
+        )
+        != (1, 0, 0, 1, 0, 0, 0, 0)
+        or result.cloud_run.release_revisions != (result.cloud_run.intended_revision,)
+        or result.cloud_run.serving_revision != result.cloud_run.baseline_revision
+        or result.cloud_run.serving_percent != 100
+        or result.firestore.exists
+        or receipt_shape
+        != (
+            (
+                "stage",
+                1,
+                RecoveryReceiptOutcome.PROVIDER_CONTACTED,
+                True,
+            ),
+            (
+                "stage",
+                1,
+                RecoveryReceiptOutcome.REJECTED_BEFORE_PROVIDER_CONTACT,
+                False,
+            ),
+        )
+        or len({receipt.semantic_action_sha256 for receipt in receipts}) != 1
+        or len({receipt.action_request_sha256 for receipt in receipts}) != 1
+        or len({receipt.authority_id for receipt in receipts}) != 1
+        or len({receipt.claim_id for receipt in receipts}) != 1
+        or lane.reset.serving_revision != lane.reset.baseline_revision
+        or lane.reset.serving_percent != 100
+        or not lane.reset.release_record_absent
+    ):
+        raise ValueError("partial-read acceptance evidence changed")
 
 
 def _validate_recovery_lane(
@@ -995,6 +1164,11 @@ def _validate_hosted_recovery_evidence(record: HostedAcceptanceRecord) -> None:
             RecoveryRunPolicy.FIXED,
             RecoveryRunFault.SUPPRESS_BEFORE_DISPATCH,
             "hosted-fixed-suppress",
+        ),
+        (
+            RecoveryRunPolicy.FIXED,
+            RecoveryRunFault.ACCEPTANCE_DROP_AFTER_ACCEPT_PARTIAL_READ_OUTAGE,
+            "hosted-fixed-partial-read-outage",
         ),
     )
     for lane, (policy, fault, purpose) in zip(
@@ -1140,6 +1314,91 @@ _SERVICE_AUDIENCES = {
 }
 
 
+def configure_deployment_identity(identity: DeploymentIdentity) -> None:
+    """Bind all hosted acceptance expectations to one sealed deployment identity."""
+
+    if type(identity) is not DeploymentIdentity:
+        raise TypeError("hosted acceptance requires an exact deployment identity")
+    global _APPLY_SERVICE_ACCOUNT
+    global _API_AUDIENCE
+    global _CANARY_AUDIENCE
+    global _CANARY_REPROVISION_IAM
+    global _CANARY_SERVICE_ACCOUNT
+    global _CONTROLLER_AUDIENCE
+    global _FAULT_PROXY_AUDIENCE
+    global _PROJECT_ID
+    global _SANDBOX_AUDIENCE
+    global _SERVICE_ACCOUNTS
+    global _SERVICE_AUDIENCES
+
+    _PROJECT_ID = identity.project_id
+    _APPLY_SERVICE_ACCOUNT = identity.apply_service_account_email
+    _API_AUDIENCE = identity.audiences.api
+    _CANARY_AUDIENCE = identity.audiences.canary
+    _CONTROLLER_AUDIENCE = identity.audiences.controller
+    _FAULT_PROXY_AUDIENCE = identity.audiences.fault_proxy
+    _SANDBOX_AUDIENCE = identity.audiences.sandbox
+    _CANARY_SERVICE_ACCOUNT = identity.runtime_service_accounts.canary
+    _SERVICE_ACCOUNTS = {
+        ServiceComponent.API: identity.runtime_service_accounts.api,
+        ServiceComponent.CANARY: identity.runtime_service_accounts.canary,
+        ServiceComponent.CONTROLLER: identity.runtime_service_accounts.controller,
+        ServiceComponent.FAULT_PROXY: identity.runtime_service_accounts.fault_proxy,
+        ServiceComponent.SANDBOX: identity.runtime_service_accounts.sandbox,
+    }
+    _SERVICE_AUDIENCES = {
+        ServiceComponent.API: identity.audiences.api,
+        ServiceComponent.CANARY: identity.audiences.canary,
+        ServiceComponent.CONTROLLER: identity.audiences.controller,
+        ServiceComponent.FAULT_PROXY: identity.audiences.fault_proxy,
+        ServiceComponent.SANDBOX: identity.audiences.sandbox,
+    }
+    _CANARY_REPROVISION_IAM = {
+        "google_cloud_run_v2_service_iam_member.canary_invoker": (
+            "roles/run.invoker",
+            f"serviceAccount:{identity.runtime_service_accounts.controller}",
+        ),
+        "google_cloud_run_v2_service_iam_member.canary_mutator": (
+            f"projects/{identity.project_id}/roles/reconcileP5CanaryMutator",
+            f"serviceAccount:{identity.runtime_service_accounts.fault_proxy}",
+        ),
+        "google_cloud_run_v2_service_iam_member.canary_reader": (
+            "roles/run.viewer",
+            f"serviceAccount:{identity.runtime_service_accounts.controller}",
+        ),
+    }
+
+
+def _legacy_deployment_identity() -> DeploymentIdentity:
+    project = "example-project-id"
+    return DeploymentIdentity.model_construct(
+        deployment_profile_sha256="0" * 64,
+        project_id=project,
+        project_number="000000000000",
+        billing_account_id="000000-000000-000000",
+        owner_account="owner@example.invalid",
+        owner_principal="user:owner@example.invalid",
+        region="us-central1",
+        state_bucket_name=f"{project}-p5-state",
+        target_bucket_name=f"{project}-p5-target",
+        apply_service_account_email=(f"rec-p5-apply@{project}.iam.gserviceaccount.com"),
+        runtime_service_accounts=RuntimeServiceAccounts(
+            api=f"rec-p5-api@{project}.iam.gserviceaccount.com",
+            canary=f"rec-p5-canary@{project}.iam.gserviceaccount.com",
+            controller=f"rec-p5-controller@{project}.iam.gserviceaccount.com",
+            fault_proxy=f"rec-p5-fault@{project}.iam.gserviceaccount.com",
+            sandbox=f"rec-p5-sandbox@{project}.iam.gserviceaccount.com",
+        ),
+        audiences=RuntimeAudiences(
+            api=f"https://reconcile.invalid/phase5/{project}/api",
+            canary=f"https://reconcile.invalid/phase5/{project}/canary",
+            controller=f"https://reconcile.invalid/phase5/{project}/controller",
+            fault_proxy=f"https://reconcile.invalid/phase5/{project}/fault-proxy",
+            sandbox=f"https://reconcile.invalid/phase5/{project}/sandbox",
+        ),
+    )
+
+
 def _required_service_environment(
     component: ServiceComponent,
     candidate: CandidateIdentity,
@@ -1251,6 +1510,12 @@ def _required_service_environment(
                 "RECONCILE_TARGET_DATABASE": "reconcile-p5-sandbox",
             }
         )
+    if candidate.deployment_profile_sha256 is not None and component in {
+        ServiceComponent.API,
+        ServiceComponent.CONTROLLER,
+        ServiceComponent.FAULT_PROXY,
+    }:
+        required["RECONCILE_ACCEPTANCE_PARTIAL_READ_OUTAGE_ENABLED"] = "true"
     return required
 
 
@@ -1260,7 +1525,9 @@ def build_candidate_identity(
     image_digest: str,
     infrastructure_revision: str,
     semantic_config_sha256: str,
+    deployment: DeploymentIdentity | None = None,
 ) -> CandidateIdentity:
+    configure_deployment_identity(deployment or _legacy_deployment_identity())
     values = {
         "source_revision": source_revision,
         "image_digest": image_digest,
@@ -1281,6 +1548,8 @@ def build_candidate_identity(
         "input_token_limit": 12_000,
         "output_token_limit": 4_096,
     }
+    if deployment is not None:
+        values["deployment_profile_sha256"] = deployment.deployment_profile_sha256
     return CandidateIdentity(
         **values,  # type: ignore[arg-type]
         candidate_sha256=_json_hash(values),  # type: ignore[arg-type]
@@ -1341,7 +1610,12 @@ def _recovery_run_id(
             "service_uid": service_uid,
         }
     )[:32]
-    return f"p5r-{policy.value}-{suffix}"
+    prefix = (
+        "p5w"
+        if fault is RecoveryRunFault.ACCEPTANCE_DROP_AFTER_ACCEPT_PARTIAL_READ_OUTAGE
+        else "p5r"
+    )
+    return f"{prefix}-{policy.value}-{suffix}"
 
 
 def _model_hash(model: StrictModel, *, exclude: set[str] | None = None) -> str:
@@ -1364,10 +1638,10 @@ def _json_hash(value: object) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
-def _expected_api_invoker_iam_sha256() -> str:
+def _expected_api_invoker_iam_sha256(operator_service_account: str) -> str:
     return _json_hash(
         {
-            "members": [f"serviceAccount:{_APPLY_SERVICE_ACCOUNT}"],
+            "members": [f"serviceAccount:{operator_service_account}"],
             "role": "roles/run.invoker",
         }
     )
@@ -1404,9 +1678,37 @@ def _validate_record_common(
         f"{candidate.region}-docker.pkg.dev/{candidate.project_id}/reconcile-p5/"
         f"reconcile@{candidate.image_digest}"
     )
+    project = candidate.project_id
+    origin = f"https://reconcile.invalid/phase5/{project}"
+    expected_accounts = {
+        ServiceComponent.API: f"rec-p5-api@{project}.iam.gserviceaccount.com",
+        ServiceComponent.CANARY: f"rec-p5-canary@{project}.iam.gserviceaccount.com",
+        ServiceComponent.CONTROLLER: (
+            f"rec-p5-controller@{project}.iam.gserviceaccount.com"
+        ),
+        ServiceComponent.FAULT_PROXY: (
+            f"rec-p5-fault@{project}.iam.gserviceaccount.com"
+        ),
+        ServiceComponent.SANDBOX: f"rec-p5-sandbox@{project}.iam.gserviceaccount.com",
+    }
+    expected_audiences = {
+        ServiceComponent.API: f"{origin}/api",
+        ServiceComponent.CANARY: f"{origin}/canary",
+        ServiceComponent.CONTROLLER: f"{origin}/controller",
+        ServiceComponent.FAULT_PROXY: f"{origin}/fault-proxy",
+        ServiceComponent.SANDBOX: f"{origin}/sandbox",
+    }
     for item in deployments:
+        expected_invoker_iam_sha256 = (
+            _expected_api_invoker_iam_sha256(candidate.operator_service_account)
+            if item.component is ServiceComponent.API
+            else None
+        )
         if (
             item.image_reference != expected_image
+            or item.service_account_email != expected_accounts[item.component]
+            or item.custom_audience != expected_audiences[item.component]
+            or item.api_invoker_iam_sha256 != expected_invoker_iam_sha256
             or item.source_revision != candidate.source_revision
             or item.image_digest != candidate.image_digest
             or item.infrastructure_revision != candidate.infrastructure_revision
@@ -1968,7 +2270,7 @@ async def run_provider_acceptance(
     provider_ledger = await backend.provider_ledger()
     diagnostics = await backend.diagnostics()
     values = {
-        "schema_version": PHASE5_HOSTED_ACCEPTANCE_VERSION,
+        "schema_version": PHASE5_PROVIDER_ACCEPTANCE_VERSION,
         "record_type": "provider-acceptance",
         "candidate": candidate,
         "deployments": deployments,
@@ -2058,6 +2360,11 @@ async def run_hosted_acceptance(
             RecoveryRunPolicy.FIXED,
             RecoveryRunFault.SUPPRESS_BEFORE_DISPATCH,
             "hosted-fixed-suppress",
+        ),
+        (
+            RecoveryRunPolicy.FIXED,
+            RecoveryRunFault.ACCEPTANCE_DROP_AFTER_ACCEPT_PARTIAL_READ_OUTAGE,
+            "hosted-fixed-partial-read-outage",
         ),
     )
     recovery_lanes = tuple(
@@ -2551,9 +2858,8 @@ def _expected_canary_revision(
     candidate: CandidateIdentity,
     variables: Mapping[str, object],
 ) -> str:
-    service_accounts = variables.get("service_account_emails")
     timeouts = variables.get("request_timeout_seconds")
-    if type(service_accounts) is not dict or type(timeouts) is not dict:
+    if type(timeouts) is not dict:
         raise HostedAcceptanceError("CANARY_REPROVISION_INPUT_INVALID")
     if (
         variables.get("project_id") != candidate.project_id
@@ -2562,7 +2868,6 @@ def _expected_canary_revision(
         or variables.get("image_digest") != candidate.image_digest
         or variables.get("infrastructure_revision") != candidate.infrastructure_revision
         or variables.get("semantic_config_sha256") != candidate.semantic_config_sha256
-        or service_accounts.get("canary") != _CANARY_SERVICE_ACCOUNT
         or type(timeouts.get("canary")) is not int
         or not 1 <= timeouts["canary"] <= 3_600
     ):
@@ -2580,7 +2885,10 @@ def _expected_canary_revision(
     return f"{_CANARY_SERVICE}-b-{_json_hash(identity)[:16]}"
 
 
-def _verify_runtime_backend(data_directory: Path) -> None:
+def _verify_runtime_backend(
+    data_directory: Path,
+    candidate: CandidateIdentity,
+) -> None:
     _private_directory(data_directory, writable=True)
     payload = _read_owner_file(
         data_directory / "terraform.tfstate",
@@ -2598,9 +2906,10 @@ def _verify_runtime_backend(data_directory: Path) -> None:
     config = backend.get("config")
     if (
         type(config) is not dict
-        or config.get("bucket") != f"{_PROJECT_ID}-p5-state"
+        or config.get("bucket") != f"{candidate.project_id}-p5-state"
         or config.get("prefix") != "phase5/runtime"
-        or config.get("impersonate_service_account") != _APPLY_SERVICE_ACCOUNT
+        or config.get("impersonate_service_account")
+        != candidate.operator_service_account
     ):
         raise HostedAcceptanceError("CANARY_REPROVISION_BACKEND_INVALID")
 
@@ -2835,6 +3144,7 @@ class GcloudReadOnlyInspector:
         self._clock = clock
         self._canary_baseline_revision = canary_baseline_revision
         self._recovery_definition_created_at = recovery_definition_created_at
+        self._candidate: CandidateIdentity | None = None
 
     def _run(self, argv: tuple[str, ...], *, timeout: int = 30) -> bytes:
         try:
@@ -2853,6 +3163,9 @@ class GcloudReadOnlyInspector:
         self,
         candidate: CandidateIdentity,
     ) -> tuple[ServiceDeploymentObservation, ...]:
+        if type(candidate) is not CandidateIdentity:
+            raise HostedAcceptanceError("CANDIDATE_IDENTITY_CHANGED")
+        self._candidate = candidate
         service_payloads: dict[ServiceComponent, bytes] = {}
         for component in ServiceComponent:
             service = _SERVICE_NAMES[component]
@@ -2865,7 +3178,8 @@ class GcloudReadOnlyInspector:
                     service,
                     f"--project={candidate.project_id}",
                     f"--region={candidate.region}",
-                    f"--impersonate-service-account={_APPLY_SERVICE_ACCOUNT}",
+                    "--impersonate-service-account="
+                    f"{candidate.operator_service_account}",
                     "--format=json",
                     "--quiet",
                 )
@@ -2885,7 +3199,8 @@ class GcloudReadOnlyInspector:
                     serving_revisions[component],
                     f"--project={candidate.project_id}",
                     f"--region={candidate.region}",
-                    f"--impersonate-service-account={_APPLY_SERVICE_ACCOUNT}",
+                    "--impersonate-service-account="
+                    f"{candidate.operator_service_account}",
                     "--format=json",
                     "--quiet",
                 )
@@ -2900,11 +3215,13 @@ class GcloudReadOnlyInspector:
                     _SERVICE_NAMES[ServiceComponent.API],
                     f"--project={candidate.project_id}",
                     f"--region={candidate.region}",
-                    f"--impersonate-service-account={_APPLY_SERVICE_ACCOUNT}",
+                    "--impersonate-service-account="
+                    f"{candidate.operator_service_account}",
                     "--format=json",
                     "--quiet",
                 )
-            )
+            ),
+            operator_service_account=candidate.operator_service_account,
         )
         service_uris = {
             component: _service_description_uri(payload)
@@ -2930,6 +3247,15 @@ class GcloudReadOnlyInspector:
         )
 
     def lifecycle_diagnostics(self) -> LifecycleDiagnostics:
+        candidate = self._candidate
+        if candidate is None:
+            return LifecycleDiagnostics(
+                available=False,
+                entry_count=0,
+                payload_sha256=hashlib.sha256(b"").hexdigest(),
+                revision_names=(),
+                observed_at=self._clock(),
+            )
         service_filter = " OR ".join(
             f'resource.labels.service_name="{name}"' for name in _SERVICE_NAMES.values()
         )
@@ -2938,8 +3264,8 @@ class GcloudReadOnlyInspector:
             "logging",
             "read",
             f'resource.type="cloud_run_revision" AND ({service_filter})',
-            f"--project={_PROJECT_ID}",
-            f"--impersonate-service-account={_APPLY_SERVICE_ACCOUNT}",
+            f"--project={candidate.project_id}",
+            f"--impersonate-service-account={candidate.operator_service_account}",
             "--freshness=1h",
             f"--limit={_MAX_LOG_ENTRIES}",
             "--order=asc",
@@ -3034,7 +3360,11 @@ def _invoker_iam_disabled(
     return observed[0] if observed else False
 
 
-def _normalize_api_invoker_iam_policy(payload: bytes) -> str:
+def _normalize_api_invoker_iam_policy(
+    payload: bytes,
+    *,
+    operator_service_account: str,
+) -> str:
     value = _decode_json_object(payload)
     bindings = _sequence(value.get("bindings"))
     if len(bindings) != 1:
@@ -3043,12 +3373,12 @@ def _normalize_api_invoker_iam_policy(payload: bytes) -> str:
     if set(binding) != {"members", "role"}:
         raise HostedAcceptanceError("API_INVOKER_IAM_MISMATCH")
     members = tuple(_text(item) for item in _sequence(binding.get("members")))
-    expected_member = f"serviceAccount:{_APPLY_SERVICE_ACCOUNT}"
+    expected_member = f"serviceAccount:{operator_service_account}"
     if _text(binding.get("role")) != "roles/run.invoker" or members != (
         expected_member,
     ):
         raise HostedAcceptanceError("API_INVOKER_IAM_MISMATCH")
-    return _expected_api_invoker_iam_sha256()
+    return _expected_api_invoker_iam_sha256(operator_service_account)
 
 
 def _normalize_service_description(
@@ -3322,7 +3652,7 @@ class TerraformCanaryReprovisioner:
             exact_mode=0o400,
         ):
             raise HostedAcceptanceError("CANARY_REPROVISION_BINDING_INVALID")
-        _verify_runtime_backend(data)
+        _verify_runtime_backend(data, self._candidate)
         if _terraform_binary_sha256() != _TERRAFORM_SHA256:
             raise HostedAcceptanceError("CANARY_REPROVISION_TERRAFORM_INVALID")
         return source, execution, data, cli_config, variables
@@ -3340,7 +3670,8 @@ class TerraformCanaryReprovisioner:
                 *arguments,
                 f"--project={self._candidate.project_id}",
                 f"--region={self._candidate.region}",
-                f"--impersonate-service-account={_APPLY_SERVICE_ACCOUNT}",
+                "--impersonate-service-account="
+                f"{self._candidate.operator_service_account}",
                 "--format=json",
                 "--quiet",
             ),
@@ -3711,7 +4042,8 @@ class CloudRunAcceptanceBackend:
         source = os.environ if environ is None else environ
         self._inspector = inspector
         self._identity_supplier = identity_supplier or GcloudIdentityTokenSupplier(
-            source
+            source,
+            operator_service_account=candidate.operator_service_account,
         )
         self._command_runner = command_runner
         self._environment = _minimal_environment(source)
@@ -3760,7 +4092,7 @@ class CloudRunAcceptanceBackend:
         return OperatorApiClient(
             self._api_uri,
             identity_token_supplier=self._identity_supplier,
-            identity_audience=_API_AUDIENCE,
+            identity_audience=self._candidate.api_audience,
         )
 
     async def scenario(
@@ -3815,7 +4147,7 @@ class CloudRunAcceptanceBackend:
                 )
                 credentials = impersonated_credentials.Credentials(
                     source_credentials=source,
-                    target_principal=_APPLY_SERVICE_ACCOUNT,
+                    target_principal=self._candidate.operator_service_account,
                     target_scopes=("https://www.googleapis.com/auth/cloud-platform",),
                     lifetime=3_600,
                 )
@@ -4031,6 +4363,7 @@ class CloudRunAcceptanceBackend:
         hypothesis_node_sha256: str | None = None
         hypothesis_input_sha256: str | None = None
         hypothesis_output_sha256: str | None = None
+        partial_read_outage: PartialReadOutageObservation | None = None
         terminal_owned = policy in {
             RecoveryRunPolicy.BLIND_RETRY,
             RecoveryRunPolicy.BLIND_ABORT,
@@ -4131,6 +4464,33 @@ class CloudRunAcceptanceBackend:
                 acknowledgement_lost = (
                     launch_outcome is RecoveryDispatchOutcome.OUTCOME_UNKNOWN
                 )
+                if (
+                    fault
+                    is RecoveryRunFault.ACCEPTANCE_DROP_AFTER_ACCEPT_PARTIAL_READ_OUTAGE
+                ):
+                    try:
+                        if len(current.reports) != 1 or len(current.witnesses) != 1:
+                            raise ValueError
+                        partial_read_outage = PartialReadOutageObservation(
+                            classification=current.reports[-1].classification,
+                            lifecycle=current.lifecycle,
+                            decision=current.decision,
+                            witness=current.witnesses[0],
+                            node_states=tuple(node.state for node in current.nodes),
+                            probe_capabilities=tuple(
+                                item.capability_name
+                                for item in current.reports[-1].probe_audit
+                            ),
+                            probe_outcomes=tuple(
+                                item.outcome for item in current.reports[-1].probe_audit
+                            ),
+                            certificate_count=len(current.certificates),
+                            action_permit_count=len(current.action_permits),
+                        )
+                    except (TypeError, ValueError) as error:
+                        raise HostedAcceptanceError(
+                            "RECOVERY_PARTIAL_READ_EVIDENCE_CHANGED"
+                        ) from error
                 if policy is RecoveryRunPolicy.FIXED and current.hypotheses:
                     raise HostedAcceptanceError("FIXED_RECOVERY_USED_PROVIDER")
                 result = await recorder.record_proof(
@@ -4216,6 +4576,7 @@ class CloudRunAcceptanceBackend:
             hypothesis_node_sha256=hypothesis_node_sha256,
             hypothesis_input_sha256=hypothesis_input_sha256,
             hypothesis_output_sha256=hypothesis_output_sha256,
+            partial_read_outage=partial_read_outage,
         )
 
     @staticmethod
@@ -4358,7 +4719,7 @@ class CloudRunAcceptanceBackend:
         ):
             raise HostedAcceptanceError("CLI_IMPORT_PATH_INVALID")
         environment = dict(self._environment)
-        environment["RECONCILE_API_AUDIENCE"] = _API_AUDIENCE
+        environment["RECONCILE_API_AUDIENCE"] = self._candidate.api_audience
         environment["PYTHONDONTWRITEBYTECODE"] = "1"
         environment["PYTHONNOUSERSITE"] = "1"
         environment["PYTHONPATH"] = pythonpath
@@ -4428,8 +4789,14 @@ class CloudRunAcceptanceBackend:
                 path,
             )
             api_token, wrong_token = await asyncio.gather(
-                asyncio.to_thread(self._identity_supplier, _API_AUDIENCE),
-                asyncio.to_thread(self._identity_supplier, _CONTROLLER_AUDIENCE),
+                asyncio.to_thread(
+                    self._identity_supplier,
+                    self._candidate.api_audience,
+                ),
+                asyncio.to_thread(
+                    self._identity_supplier,
+                    self._candidate.controller_audience,
+                ),
             )
             (
                 application_status,
@@ -4514,6 +4881,7 @@ def load_artifact_binding(payload: bytes) -> AcceptanceArtifactBinding:
 __all__ = [
     "PHASE5_ACCEPTANCE_ARTIFACT_VERSION",
     "PHASE5_HOSTED_ACCEPTANCE_VERSION",
+    "PHASE5_PROVIDER_ACCEPTANCE_VERSION",
     "AcceptanceArtifactBinding",
     "AcceptanceLimitation",
     "AcceptanceMode",
@@ -4533,6 +4901,7 @@ __all__ = [
     "HostedAcceptanceRecord",
     "InterfaceParityObservation",
     "LifecycleDiagnostics",
+    "PartialReadOutageObservation",
     "ProviderAcceptanceRecord",
     "RecoveryLaneAcceptanceObservation",
     "RecoveryReleaseRecordReader",

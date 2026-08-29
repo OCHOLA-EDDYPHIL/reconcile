@@ -337,6 +337,7 @@
           "enum": [
             "no-fault",
             "drop-after-accept",
+            "acceptance-drop-after-accept-partial-read-outage",
             "suppress-before-dispatch"
           ],
           "title": "Fault",

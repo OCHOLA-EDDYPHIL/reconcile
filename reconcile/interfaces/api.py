@@ -33,6 +33,7 @@ from reconcile.contracts import (
     InvestigationStatus,
     RecoveryRunEvent,
     RecoveryRunEventType,
+    RecoveryRunFault,
     RecoveryRunLifecycle,
     RecoveryRunPolicy,
     RecoveryRunRequest,
@@ -1166,11 +1167,14 @@ def create_app(
     operator_service: _OperatorService | None = None,
     recovery_service: _RecoveryRunService | None = None,
     hosted: bool = False,
+    acceptance_partial_read_outage_enabled: bool = False,
 ) -> FastAPI:
     """Create the isolated single-process API and own its service lifetime."""
 
     if type(hosted) is not bool:
         raise TypeError("API hosted profile must be a boolean")
+    if type(acceptance_partial_read_outage_enabled) is not bool:
+        raise TypeError("partial-read acceptance state must be boolean")
 
     @asynccontextmanager
     async def lifespan(application: FastAPI) -> AsyncIterator[None]:
@@ -1260,6 +1264,12 @@ def create_app(
             RecoveryRunPolicy.FIXED,
             RecoveryRunPolicy.ADAPTIVE,
         }:
+            raise _InvalidApiRequest
+        if (
+            launch.fault
+            is RecoveryRunFault.ACCEPTANCE_DROP_AFTER_ACCEPT_PARTIAL_READ_OUTAGE
+            and not acceptance_partial_read_outage_enabled
+        ):
             raise _InvalidApiRequest
         request.state.investigation_id = launch.run_id
         service = _recovery_service(application)
