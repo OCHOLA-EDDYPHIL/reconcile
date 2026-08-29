@@ -417,6 +417,7 @@ def test_reprovision_uses_exact_direct_plan_and_proves_clean_state(
         f"-replace={address}" in plan_call[0] and f"-target={address}" in plan_call[0]
         for address in acceptance_module._CANARY_REPROVISION_ADDRESSES
     )
+    assert plan_call[0].count("-refresh=false") == 1
     assert not any(argument in {"sh", "bash", "-c"} for argument in plan_call[0])
     assert plan_call[2]["TF_DATA_DIR"] == str(
         Path(binding.state_root) / "terraform-data" / "runtime"
@@ -469,64 +470,35 @@ def test_reprovision_rejects_a_wider_plan_before_apply(
     assert reader.calls == []
 
 
-def test_reprovision_accepts_only_bounded_provider_normalization_drift(
+def test_reprovision_rejects_provider_drift_before_apply(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _binding, variables = _state(tmp_path)
     plan = json.loads(_plan(variables))
-    before = {
-        "annotations": None,
-        "template": [{"containers": [{"depends_on": None}]}],
-    }
-    after = {
-        "annotations": {},
-        "template": [{"containers": [{"depends_on": []}]}],
-    }
     plan["resource_drift"] = [
         {
             "address": "google_cloud_run_v2_service.canary",
-            "change": {"actions": ["update"], "before": before, "after": after},
-            "mode": "managed",
-            "provider_name": "registry.terraform.io/hashicorp/google",
-            "type": "google_cloud_run_v2_service",
-        },
-        {
-            "address": "google_cloud_run_v2_service_iam_member.canary_mutator",
             "change": {
                 "actions": ["update"],
                 "before": {
-                    "condition": [],
-                    "etag": "etag-before=",
-                    "id": "fixed-binding",
                     "location": "us-central1",
-                    "member": f"serviceAccount:rec-p5-fault@{PROJECT}.iam.gserviceaccount.com",
-                    "name": f"projects/{PROJECT}/locations/us-central1/services/reconcile-p5-canary",
+                    "name": "reconcile-p5-canary",
                     "project": PROJECT,
-                    "role": f"projects/{PROJECT}/roles/reconcileP5CanaryMutator",
+                    "template": [{"labels": {"reconcile-release": "baseline"}}],
                 },
                 "after": {
-                    "condition": [],
-                    "etag": "etag-after=",
-                    "id": "fixed-binding",
                     "location": "us-central1",
-                    "member": f"serviceAccount:rec-p5-fault@{PROJECT}.iam.gserviceaccount.com",
-                    "name": f"projects/{PROJECT}/locations/us-central1/services/reconcile-p5-canary",
+                    "name": "reconcile-p5-canary",
                     "project": PROJECT,
-                    "role": f"projects/{PROJECT}/roles/reconcileP5CanaryMutator",
+                    "template": [{"labels": {"reconcile-release": RELEASE}}],
                 },
             },
             "mode": "managed",
             "provider_name": "registry.terraform.io/hashicorp/google",
-            "type": "google_cloud_run_v2_service_iam_member",
+            "type": "google_cloud_run_v2_service",
         },
     ]
 
-    acceptance_module._validate_canary_reprovision_plan(
-        _canonical(plan), candidate=_candidate(), variables=variables
-    )
-
-    plan["resource_drift"][0]["change"]["after"]["ingress"] = "internal"
     with pytest.raises(HostedAcceptanceError, match="CANARY_REPROVISION_PLAN_WIDE"):
         acceptance_module._validate_canary_reprovision_plan(
             _canonical(plan), candidate=_candidate(), variables=variables
