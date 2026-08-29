@@ -5509,27 +5509,38 @@ def _checked_output(result: object, *, maximum: int = 4096) -> bytes:
     return result.stdout
 
 
-def _verify_exact_main_identity(
-    source_revision: str,
+def _current_main_revision(
     origin_url: str,
     *,
     repo_root: Path,
     runner: CommandRunner,
-) -> None:
+) -> str:
     root = _canonical_absolute_path(repo_root, require_exists=True)
-    if re.fullmatch(r"[0-9a-f]{40}", source_revision) is None:
-        raise OperatorError("SOURCE_REVISION_INVALID")
     _verify_git_binary(root, runner)
+    environment = _minimal_subprocess_environment()
+
+    def checked(argv: tuple[str, ...]) -> bytes:
+        try:
+            return _checked_output(
+                runner(
+                    argv,
+                    cwd=root,
+                    environment=environment,
+                    timeout_seconds=15,
+                )
+            )
+        except OperatorError:
+            raise
+        except Exception as error:
+            raise OperatorError("GIT_CHECK_FAILED") from error
+
+    if checked(("/usr/bin/git", "branch", "--show-current")) != b"main\n":
+        raise OperatorError("EXACT_MAIN_CHECK_FAILED")
+    head = checked(("/usr/bin/git", "rev-parse", "--verify", "HEAD"))
+    if re.fullmatch(rb"[0-9a-f]{40}\n", head) is None:
+        raise OperatorError("EXACT_MAIN_CHECK_FAILED")
     commands = (
-        (("/usr/bin/git", "branch", "--show-current"), b"main\n"),
-        (
-            ("/usr/bin/git", "rev-parse", "--verify", "HEAD"),
-            f"{source_revision}\n".encode(),
-        ),
-        (
-            ("/usr/bin/git", "rev-parse", "--verify", "origin/main"),
-            f"{source_revision}\n".encode(),
-        ),
+        (("/usr/bin/git", "rev-parse", "--verify", "origin/main"), head),
         (
             (
                 "/usr/bin/git",
@@ -5551,26 +5562,79 @@ def _verify_exact_main_identity(
                 "origin",
                 "refs/heads/main",
             ),
-            f"{source_revision}\trefs/heads/main\n".encode(),
+            head[:-1] + b"\trefs/heads/main\n",
         ),
     )
-    environment = _minimal_subprocess_environment()
     for argv, expected in commands:
-        try:
-            output = _checked_output(
-                runner(
-                    argv,
-                    cwd=root,
-                    environment=environment,
-                    timeout_seconds=15,
-                )
-            )
-        except OperatorError:
-            raise
-        except Exception as error:
-            raise OperatorError("GIT_CHECK_FAILED") from error
+        output = checked(argv)
         if output != expected:
             raise OperatorError("EXACT_MAIN_CHECK_FAILED")
+    return head[:-1].decode("ascii")
+
+
+def _verify_exact_main_identity(
+    source_revision: str,
+    origin_url: str,
+    *,
+    repo_root: Path,
+    runner: CommandRunner,
+) -> None:
+    if re.fullmatch(r"[0-9a-f]{40}", source_revision) is None:
+        raise OperatorError("SOURCE_REVISION_INVALID")
+    if (
+        _current_main_revision(
+            origin_url,
+            repo_root=repo_root,
+            runner=runner,
+        )
+        != source_revision
+    ):
+        raise OperatorError("EXACT_MAIN_CHECK_FAILED")
+
+
+def _verify_teardown_main_identity(
+    source_revision: str,
+    origin_url: str,
+    *,
+    repo_root: Path,
+    runner: CommandRunner,
+) -> None:
+    if re.fullmatch(r"[0-9a-f]{40}", source_revision) is None:
+        raise OperatorError("SOURCE_REVISION_INVALID")
+    current_revision = _current_main_revision(
+        origin_url,
+        repo_root=repo_root,
+        runner=runner,
+    )
+    if current_revision == source_revision:
+        return
+    try:
+        result = runner(
+            (
+                "/usr/bin/git",
+                "merge-base",
+                "--is-ancestor",
+                source_revision,
+                current_revision,
+            ),
+            cwd=_canonical_absolute_path(repo_root, require_exists=True),
+            environment=_minimal_subprocess_environment(),
+            timeout_seconds=15,
+        )
+    except Exception as error:
+        raise OperatorError("GIT_CHECK_FAILED") from error
+    if (
+        not isinstance(result, subprocess.CompletedProcess)
+        or type(result.returncode) is not int
+        or type(result.stdout) is not bytes
+        or type(result.stderr) is not bytes
+        or result.stdout
+        or result.stderr
+        or result.returncode not in {0, 1}
+    ):
+        raise OperatorError("GIT_CHECK_FAILED")
+    if result.returncode != 0:
+        raise OperatorError("EXACT_MAIN_CHECK_FAILED")
 
 
 def _verify_exact_main(
@@ -5723,7 +5787,15 @@ def authorize_action(
         raise OperatorError("APPROVAL_EXPIRED")
     if moment >= approval.work_deadline and not action.is_teardown:
         raise OperatorError("TEARDOWN_ONLY_WINDOW")
-    _verify_exact_main(manifest, repo_root=repo_root, runner=runner)
+    if action.is_teardown:
+        _verify_teardown_main_identity(
+            manifest.source_revision,
+            manifest.origin_url,
+            repo_root=repo_root,
+            runner=runner,
+        )
+    else:
+        _verify_exact_main(manifest, repo_root=repo_root, runner=runner)
     _verify_approved_artifacts(
         manifest,
         action=action,
