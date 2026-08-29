@@ -460,7 +460,7 @@ class _Health:
         self.calls: list[tuple[str, str]] = []
 
     def get(self, *, url: str, audience: str, timeout: float) -> tuple[int, bytes]:
-        assert timeout == 15.0
+        assert timeout == 25.0
         self.calls.append((url, audience))
         return self.status, self.body
 

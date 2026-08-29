@@ -241,6 +241,7 @@ def test_capability_inventory_is_read_only_empty_argument_and_exact_target() -> 
             target=_target(),
         )
         assert capability.read_only is True
+        assert capability.timeout_ms == 30_000
         assert capability.argument_schema["properties"] == {}
         assert capability.allowed_targets[0].scope == {
             "project": "demo-project",
