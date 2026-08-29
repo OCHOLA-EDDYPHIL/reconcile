@@ -386,7 +386,10 @@ class ServiceDeploymentObservation(StrictModel):
         if (
             self.observed_generation != self.generation
             or self.latest_created_revision != self.latest_ready_revision
-            or self.serving_revision != self.latest_ready_revision
+            or (
+                self.component is not ServiceComponent.CANARY
+                and self.serving_revision != self.latest_ready_revision
+            )
             or self.revision_observed_generation != self.revision_generation
         ):
             raise ValueError("serving revision observation is not current and ready")
@@ -3334,7 +3337,13 @@ def _require_ready_condition(status: Mapping[str, object]) -> None:
 def _service_serving_revision(payload: bytes) -> str:
     value = _decode_json_object(payload)
     status = _mapping(value.get("status"))
-    return _text(status.get("latestReadyRevisionName"))
+    traffic = _sequence(status.get("traffic"))
+    if len(traffic) != 1:
+        raise HostedAcceptanceError("DEPLOYMENT_TRAFFIC_INVALID")
+    target = _mapping(traffic[0])
+    if _integer(target.get("percent")) != 100:
+        raise HostedAcceptanceError("DEPLOYMENT_TRAFFIC_INVALID")
+    return _text(target.get("revisionName"))
 
 
 def _invoker_iam_disabled(
@@ -3401,17 +3410,19 @@ def _normalize_service_description(
     observed_generation = _integer(status.get("observedGeneration"))
     _require_ready_condition(status)
     latest_created_revision = _text(status.get("latestCreatedRevisionName"))
-    revision = _text(status.get("latestReadyRevisionName"))
-    if observed_generation != generation or latest_created_revision != revision:
-        raise HostedAcceptanceError("DEPLOYMENT_NOT_READY")
-    traffic = _sequence(status.get("traffic"))
-    if len(traffic) != 1:
-        raise HostedAcceptanceError("DEPLOYMENT_TRAFFIC_INVALID")
-    traffic_item = _mapping(traffic[0])
+    latest_ready_revision = _text(status.get("latestReadyRevisionName"))
     if (
-        _integer(traffic_item.get("percent")) != 100
-        or _text(traffic_item.get("revisionName")) != revision
+        observed_generation != generation
+        or latest_created_revision != latest_ready_revision
     ):
+        raise HostedAcceptanceError("DEPLOYMENT_NOT_READY")
+    revision = _service_serving_revision(payload)
+    expected_serving_revision = (
+        canary_baseline_revision
+        if component is ServiceComponent.CANARY and canary_baseline_revision is not None
+        else latest_ready_revision
+    )
+    if revision != expected_serving_revision:
         raise HostedAcceptanceError("DEPLOYMENT_TRAFFIC_INVALID")
     if _invoker_iam_disabled(value, annotations):
         raise HostedAcceptanceError("DEPLOYMENT_INVOKER_IAM_DISABLED")
@@ -3472,7 +3483,7 @@ def _normalize_service_description(
         observed_generation=observed_generation,
         ready=True,
         latest_created_revision=latest_created_revision,
-        latest_ready_revision=revision,
+        latest_ready_revision=latest_ready_revision,
         serving_revision=revision,
         traffic_percent=100,
         revision_generation=revision_generation,
