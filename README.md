@@ -13,7 +13,7 @@ next exact action—or refuses to mutate.
 [Validate the offline evidence bundle](#validate-the-offline-evidence-bundle) ·
 [Inspect the provider evidence record](evidence/v0.1.0/provider-proof.json) ·
 [Read the claims and limitations](docs/claims-and-limitations.md) ·
-[Inspect the versioned evidence](evidence/v0.1.0/proof-to-permit.json)
+[Inspect the versioned evidence](evidence/v0.1.1/proof-to-permit.json)
 
 ## The failure mode
 
