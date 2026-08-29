@@ -2856,6 +2856,7 @@ def test_cli_snapshot_imports_only_from_the_bound_snapshot(
     )
     dependencies = tmp_path / "python-dependencies"
     dependencies.mkdir()
+    state_root = tmp_path / "operator-state"
     live = tmp_path / "mutable-live" / "reconcile"
     live.mkdir(parents=True)
     (live / "__init__.py").write_text("", encoding="utf-8")
@@ -2887,6 +2888,9 @@ def test_cli_snapshot_imports_only_from_the_bound_snapshot(
 
     backend = CloudRunAcceptanceBackend(
         _candidate(),
+        state_root=state_root,
+        runtime_source_sha256=SHA_A,
+        runtime_variables_sha256=SHA_B,
         command_runner=runner,
         environ={
             "HOME": str(tmp_path),
@@ -2903,6 +2907,9 @@ def test_cli_snapshot_imports_only_from_the_bound_snapshot(
     assert argv[:4] == (acceptance_module.sys.executable, "-P", "-S", "-m")
     assert cwd == source
     assert environment["PYTHONPATH"] == f"{source}:{dependencies}"
+    assert environment["RECONCILE_DEPLOYMENT_PROFILE"] == str(
+        state_root / "bindings" / "deployment-profile.json"
+    )
     assert "LD_LIBRARY_PATH" not in environment
     assert str(live.parent) not in environment["PYTHONPATH"]
     assert timeout == 120
