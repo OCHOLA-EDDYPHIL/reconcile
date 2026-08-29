@@ -116,7 +116,10 @@ from reconcile.hosted.provider import (
     HostedPlannerOutcome,
     HostedProviderDispatch,
 )
-from reconcile.interfaces.api_client import InvestigationNotFoundError
+from reconcile.interfaces.api_client import (
+    InvestigationNotFoundError,
+    ServiceUnavailableError,
+)
 from reconcile.interfaces.operator_api_client import (
     LaunchOutcomeUnknownError,
     RecoveryLaunchResult,
@@ -2915,8 +2918,10 @@ def test_cli_snapshot_imports_only_from_the_bound_snapshot(
     assert timeout == 120
 
 
+@pytest.mark.parametrize("first_launch_unavailable", (False, True))
 def test_remote_scenario_waits_for_terminal_events_before_final_snapshot(
     monkeypatch: pytest.MonkeyPatch,
+    first_launch_unavailable: bool,
 ) -> None:
     candidate = _candidate()
     request = ScenarioLaunchRequest(
@@ -2946,6 +2951,8 @@ def test_remote_scenario_waits_for_terminal_events_before_final_snapshot(
         async def launch(self, _request):
             self.calls.append("launch")
             self.launch_count += 1
+            if first_launch_unavailable and self.launch_count == 1:
+                raise ServiceUnavailableError()
             return ScenarioLaunchResult(
                 created=self.launch_count == 1,
                 snapshot=expected.snapshot,
@@ -2981,7 +2988,14 @@ def test_remote_scenario_waits_for_terminal_events_before_final_snapshot(
     )
 
     assert observed.snapshot == expected.snapshot
-    assert client.calls == ["launch", "events:0", "snapshot", "status", "launch"]
+    assert client.calls == [
+        "launch",
+        *(["launch"] if first_launch_unavailable else []),
+        "events:0",
+        "snapshot",
+        "status",
+        "launch",
+    ]
 
 
 def test_remote_denials_distinguish_platform_from_application_json(
