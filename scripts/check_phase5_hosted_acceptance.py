@@ -10,6 +10,11 @@ import sys
 from pathlib import Path
 
 from reconcile.contracts import canonical_json_bytes
+from reconcile.deployment_profile import (
+    DeploymentProfileError,
+    load_sealed_deployment_profile_file,
+    resolve_deployment_identity,
+)
 from reconcile.phase5_hosted_acceptance import (
     AcceptanceMode,
     CloudRunAcceptanceBackend,
@@ -18,6 +23,8 @@ from reconcile.phase5_hosted_acceptance import (
     run_hosted_acceptance,
     run_provider_acceptance,
 )
+
+_ROOT = Path(__file__).parents[1]
 
 
 def _sha256(value: str) -> str:
@@ -32,6 +39,7 @@ def _arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("mode", choices=tuple(item.value for item in AcceptanceMode))
     parser.add_argument("--state-root", type=Path, required=True)
+    parser.add_argument("--deployment-profile", type=Path, required=True)
     parser.add_argument("--source-revision", required=True)
     parser.add_argument("--image-digest", required=True)
     parser.add_argument("--infrastructure-revision", required=True)
@@ -58,13 +66,18 @@ def _failure(code: str) -> bytes:
 def main() -> int:
     arguments = _arguments()
     try:
+        deployment_profile = load_sealed_deployment_profile_file(
+            arguments.deployment_profile,
+            repo_root=_ROOT,
+        )
         candidate = build_candidate_identity(
             source_revision=arguments.source_revision,
             image_digest=arguments.image_digest,
             infrastructure_revision=arguments.infrastructure_revision,
             semantic_config_sha256=arguments.semantic_config_sha256,
+            deployment=resolve_deployment_identity(deployment_profile),
         )
-    except (TypeError, ValueError):
+    except (DeploymentProfileError, TypeError, ValueError):
         sys.stderr.buffer.write(_failure("ACCEPTANCE_INPUT_INVALID") + b"\n")
         return 1
     try:

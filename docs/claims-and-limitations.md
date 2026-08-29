@@ -11,7 +11,7 @@ must not broaden it.
 | Blind retry duplicated the stage effect in the drop-after-accept fixture. | Two release-labelled revisions, one promotion, and one record. |
 | Blind abort left the chain incomplete in that fixture. | One staged revision, zero promotions, and zero records; the baseline revision kept serving. |
 | The recorded provider run failed closed before settlement. | The initial pass was `UNKNOWN`; continuation and retry were denied; no recovery-action permit was issued. |
-| The settled provider pass continued the exact chain. | One correlated revision, deterministic certificates, two `max_uses=1` permits, one promotion, and one Firestore record. |
+| The settled provider pass continued the exact chain. | One correlated revision, hash-bound deterministic certificates, two `max_uses=1` permits, one promotion, and one Firestore record. |
 | Permit replay stopped before provider contact. | Replay outcome `REJECTED_BEFORE_PROVIDER_CONTACT`, contact delta zero. |
 
 The scripted matrix compares policies under one declared fault. The provider
@@ -89,11 +89,14 @@ artifacts and identity material outside the repository.
   fails closed or uses an explicitly configured deterministic route.
 - **Published evidence:** the public record contains evidence hashes and a
   sanitized summary, not private raw provider data or an event transcript.
+- **Viewer:** the viewer serves a static projection of one versioned evidence
+  bundle. Its source revision and the evidence source revision are separate,
+  and it cannot invoke the operational core or authorize an action.
 
 ## Evidence index
 
-- [Provider evidence record](../demo/evidence/provider-proof.json)
-- [Hash-linked live corroboration](../demo/evidence/live-corroboration.json)
-- [Cleanup verification](../demo/evidence/cleanup-verification.json)
-- [Scripted qualification manifest](../demo/evidence/proof-to-permit.json)
+- [Provider evidence record](../evidence/v0.1.0/provider-proof.json)
+- [Hash-linked live corroboration](../evidence/v0.1.0/live-corroboration.json)
+- [Cleanup verification](../evidence/v0.1.0/cleanup-verification.json)
+- [Scripted qualification manifest](../evidence/v0.1.0/proof-to-permit.json)
 - [v0.1.0 evidence release](https://github.com/OCHOLA-EDDYPHIL/reconcile/releases/tag/v0.1.0)

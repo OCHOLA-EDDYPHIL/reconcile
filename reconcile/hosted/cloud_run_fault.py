@@ -282,6 +282,7 @@ class RecoveryCloudRunCanaryActionAuthorizer:
         recovery_store: RecoveryRunStore,
         permit_authority: PermitAuthority,
         target: CloudRunCanaryTarget,
+        acceptance_partial_read_outage_enabled: bool = False,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         if not isinstance(recovery_store, RecoveryRunStore):
@@ -290,9 +291,14 @@ class RecoveryCloudRunCanaryActionAuthorizer:
             raise TypeError("canary recovery authority requires a permit authority")
         if type(target) is not CloudRunCanaryTarget:
             raise TypeError("canary recovery authority requires an exact target")
+        if type(acceptance_partial_read_outage_enabled) is not bool:
+            raise TypeError("partial-read acceptance state must be boolean")
         self._store = recovery_store
         self._permit_authority = permit_authority
         self._target = target
+        self._acceptance_partial_read_outage_enabled = (
+            acceptance_partial_read_outage_enabled
+        )
         self._clock = clock or (lambda: datetime.now(UTC))
 
     @property
@@ -364,6 +370,12 @@ class RecoveryCloudRunCanaryActionAuthorizer:
         if cloud_run_action_request_sha256(request) != scope.action_request_sha256:
             raise PermissionError("canary request does not match recovery authority")
         snapshot = await self._store.get(scope.run_id)
+        if (
+            snapshot.request.fault
+            is RecoveryRunFault.ACCEPTANCE_DROP_AFTER_ACCEPT_PARTIAL_READ_OUTAGE
+            and not self._acceptance_partial_read_outage_enabled
+        ):
+            raise PermissionError("partial-read acceptance fault is disabled")
         if snapshot.lifecycle is not RecoveryRunLifecycle.RUNNING:
             raise PermissionError("canary recovery run is not active")
         node = self._node(snapshot, scope.target_node_id)
@@ -383,7 +395,11 @@ class RecoveryCloudRunCanaryActionAuthorizer:
         expected_fault_mode = (
             CloudRunFaultMode.DROP_AFTER_ACCEPT
             if request.action is CloudRunCanaryAction.STAGE
-            and snapshot.request.fault is RecoveryRunFault.DROP_AFTER_ACCEPT
+            and snapshot.request.fault
+            in {
+                RecoveryRunFault.DROP_AFTER_ACCEPT,
+                RecoveryRunFault.ACCEPTANCE_DROP_AFTER_ACCEPT_PARTIAL_READ_OUTAGE,
+            }
             else CloudRunFaultMode.PASS_THROUGH
         )
         if request.fault_mode is not expected_fault_mode:

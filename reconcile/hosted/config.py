@@ -39,6 +39,7 @@ class HostedConfig:
     image_digest: str
     infra_revision: str
     semantic_config_sha256: str
+    acceptance_partial_read_outage_enabled: bool = False
     runtime_database: str | None = None
     target_database: str | None = None
     target_bucket: str | None = None
@@ -79,6 +80,9 @@ _SOURCE_REVISION = "RECONCILE_SOURCE_REVISION"
 _IMAGE_DIGEST = "RECONCILE_IMAGE_DIGEST"
 _INFRA_REVISION = "RECONCILE_INFRA_REVISION"
 _SEMANTIC_CONFIG_SHA256 = "RECONCILE_SEMANTIC_CONFIG_SHA256"
+_ACCEPTANCE_PARTIAL_READ_OUTAGE_ENABLED = (
+    "RECONCILE_ACCEPTANCE_PARTIAL_READ_OUTAGE_ENABLED"
+)
 _RUNTIME_DATABASE = "RECONCILE_RUNTIME_DATABASE"
 _TARGET_DATABASE = "RECONCILE_TARGET_DATABASE"
 _TARGET_BUCKET = "RECONCILE_TARGET_BUCKET"
@@ -189,6 +193,7 @@ _COMPONENT_NAMES = {
 SUPPORTED_ENVIRONMENT_VARIABLES = frozenset().union(
     _COMMON_NAMES,
     *_COMPONENT_NAMES.values(),
+    {_ACCEPTANCE_PARTIAL_READ_OUTAGE_ENABLED},
 )
 
 _EMAIL_PATTERN = re.compile(
@@ -203,42 +208,30 @@ _HOST_PATTERN = re.compile(
 _SOURCE_REVISION_PATTERN = re.compile(r"[0-9a-f]{40}")
 _IMAGE_DIGEST_PATTERN = re.compile(r"sha256:[0-9a-f]{64}")
 _SHA256_PATTERN = re.compile(r"[0-9a-f]{64}")
+_PROJECT_ID_PATTERN = re.compile(r"[a-z][a-z0-9-]{4,28}[a-z0-9]")
 _UTC_TIMESTAMP_PATTERN = re.compile(
     r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}"
     r"(?:\.[0-9]{6})?Z"
 )
-_APPROVED_PROJECT_ID = "example-project-id"
 _APPROVED_RUNTIME_DATABASE = "reconcile-p5-runtime"
 _APPROVED_SANDBOX_DATABASE = "reconcile-p5-sandbox"
 _APPROVED_TARGET_DATABASE = "reconcile-p5-target"
-_APPROVED_TARGET_BUCKET = "example-project-id-p5-target"
 _APPROVED_VERTEX_PROMPT_VERSION = "adaptive-planner-v3"
 _APPROVED_VERTEX_PROMPT_SHA256 = (
     "a18ac5bbd22570562acc6dfbc49437a82f0db6a265a4de737c1371b6ef2ca2d3"
 )
-_APPROVED_AUDIENCES = {
-    component: (
-        f"https://reconcile.invalid/phase5/{_APPROVED_PROJECT_ID}/{component.value}"
-    )
-    for component in Component
-}
-_APPROVED_CALLERS = {
-    Component.API: ("rec-p5-apply@example-project-id.iam.gserviceaccount.com"),
-    Component.CONTROLLER: ("rec-p5-api@example-project-id.iam.gserviceaccount.com"),
-    Component.FAULT_PROXY: ("rec-p5-api@example-project-id.iam.gserviceaccount.com"),
-}
-_APPROVED_SANDBOX_READ_CALLER = (
-    "rec-p5-controller@example-project-id.iam.gserviceaccount.com"
-)
-_APPROVED_SANDBOX_MUTATION_CALLER = (
-    "rec-p5-fault@example-project-id.iam.gserviceaccount.com"
-)
-_APPROVED_CANARY_AUDIENCE = (
-    f"https://reconcile.invalid/phase5/{_APPROVED_PROJECT_ID}/canary"
-)
-_APPROVED_CANARY_SERVICE_ACCOUNT = (
-    "rec-p5-canary@example-project-id.iam.gserviceaccount.com"
-)
+
+
+def _service_account(project_id: str, account_id: str) -> str:
+    return f"{account_id}@{project_id}.iam.gserviceaccount.com"
+
+
+def _expected_audience(project_id: str, component: Component) -> str:
+    return f"https://reconcile.invalid/phase5/{project_id}/{component.value}"
+
+
+def _expected_canary_audience(project_id: str) -> str:
+    return f"https://reconcile.invalid/phase5/{project_id}/canary"
 
 
 def _expected_canary_baseline_revision(
@@ -256,7 +249,10 @@ def _expected_canary_baseline_revision(
         "region": "us-central1",
         "request_timeout_seconds": 60,
         "semantic_config_sha256": semantic_config_sha256,
-        "service_account_email": _APPROVED_CANARY_SERVICE_ACCOUNT,
+        "service_account_email": _service_account(
+            project_id,
+            "rec-p5-canary",
+        ),
         "source_revision": source_revision,
     }
     encoded = json.dumps(
@@ -342,6 +338,15 @@ def _integer(
     return parsed
 
 
+def _optional_boolean(environment: Mapping[str, str], name: str) -> bool:
+    value = environment.get(name)
+    if value is None:
+        return False
+    if value not in {"false", "true"}:
+        raise HostedConfigError("is invalid")
+    return value == "true"
+
+
 def _pattern(
     environment: Mapping[str, str],
     name: str,
@@ -363,11 +368,17 @@ def _email(environment: Mapping[str, str], name: str) -> str:
 def _single_allowed_caller(
     environment: Mapping[str, str],
     component: Component,
+    project_id: str,
 ) -> tuple[str, ...]:
     value = _required(environment, _ALLOWED_CALLERS)
     if "," in value or _EMAIL_PATTERN.fullmatch(value) is None or len(value) > 254:
         raise HostedConfigError("is invalid")
-    if value != _APPROVED_CALLERS[component]:
+    expected = {
+        Component.API: _service_account(project_id, "rec-p5-apply"),
+        Component.CONTROLLER: _service_account(project_id, "rec-p5-api"),
+        Component.FAULT_PROXY: _service_account(project_id, "rec-p5-api"),
+    }
+    if value != expected[component]:
         raise HostedConfigError("is invalid")
     return (value,)
 
@@ -383,8 +394,9 @@ def _audience(
     environment: Mapping[str, str],
     name: str,
     component: Component,
+    project_id: str,
 ) -> str:
-    return _exact(environment, name, _APPROVED_AUDIENCES[component])
+    return _exact(environment, name, _expected_audience(project_id, component))
 
 
 def _https_origin(environment: Mapping[str, str], name: str) -> str:
@@ -431,11 +443,21 @@ def _load_config(environment: Mapping[str, str]) -> HostedConfig:
     except ValueError as error:
         raise HostedConfigError("is invalid") from error
 
-    expected_names = _COMMON_NAMES | _COMPONENT_NAMES[component]
+    optional_names = (
+        {_ACCEPTANCE_PARTIAL_READ_OUTAGE_ENABLED}
+        if component in {Component.API, Component.CONTROLLER, Component.FAULT_PROXY}
+        and _ACCEPTANCE_PARTIAL_READ_OUTAGE_ENABLED in managed
+        else set()
+    )
+    expected_names = _COMMON_NAMES | _COMPONENT_NAMES[component] | optional_names
     if set(managed) != expected_names:
         if set(managed) - SUPPORTED_ENVIRONMENT_VARIABLES:
             raise HostedConfigError("contains unsupported variables")
         raise HostedConfigError("does not match the selected component")
+
+    project_id = _pattern(managed, _PROJECT_ID, _PROJECT_ID_PATTERN)
+    sandbox_read_identity = _service_account(project_id, "rec-p5-controller")
+    sandbox_mutation_identity = _service_account(project_id, "rec-p5-fault")
 
     if component is Component.SANDBOX:
         sandbox_read_caller = _email(managed, _SANDBOX_READ_CALLER)
@@ -443,21 +465,26 @@ def _load_config(environment: Mapping[str, str]) -> HostedConfig:
         if sandbox_read_caller == sandbox_mutation_caller:
             raise HostedConfigError("is invalid")
         if (
-            sandbox_read_caller != _APPROVED_SANDBOX_READ_CALLER
-            or sandbox_mutation_caller != _APPROVED_SANDBOX_MUTATION_CALLER
+            sandbox_read_caller != sandbox_read_identity
+            or sandbox_mutation_caller != sandbox_mutation_identity
         ):
             raise HostedConfigError("is invalid")
         allowed_callers = (sandbox_read_caller, sandbox_mutation_caller)
     else:
         sandbox_read_caller = None
         sandbox_mutation_caller = None
-        allowed_callers = _single_allowed_caller(managed, component)
+        allowed_callers = _single_allowed_caller(managed, component, project_id)
 
     common: dict[str, object] = {
         "component": component,
         "port": _integer(managed, _PORT, minimum=1, maximum=65535),
-        "project_id": _exact(managed, _PROJECT_ID, _APPROVED_PROJECT_ID),
-        "auth_audience": _audience(managed, _AUTH_AUDIENCE, component),
+        "project_id": project_id,
+        "auth_audience": _audience(
+            managed,
+            _AUTH_AUDIENCE,
+            component,
+            project_id,
+        ),
         "allowed_caller_emails": allowed_callers,
         "source_revision": _pattern(
             managed, _SOURCE_REVISION, _SOURCE_REVISION_PATTERN
@@ -467,6 +494,10 @@ def _load_config(environment: Mapping[str, str]) -> HostedConfig:
         "semantic_config_sha256": _pattern(
             managed, _SEMANTIC_CONFIG_SHA256, _SHA256_PATTERN
         ),
+        "acceptance_partial_read_outage_enabled": _optional_boolean(
+            managed,
+            _ACCEPTANCE_PARTIAL_READ_OUTAGE_ENABLED,
+        ),
     }
     specific: dict[str, object]
     if component is Component.API:
@@ -474,14 +505,18 @@ def _load_config(environment: Mapping[str, str]) -> HostedConfig:
             "runtime_database": _exact(
                 managed, _RUNTIME_DATABASE, _APPROVED_RUNTIME_DATABASE
             ),
-            "target_bucket": _exact(managed, _TARGET_BUCKET, _APPROVED_TARGET_BUCKET),
+            "target_bucket": _exact(
+                managed,
+                _TARGET_BUCKET,
+                f"{project_id}-p5-target",
+            ),
             "controller_url": _https_origin(managed, _CONTROLLER_URL),
             "controller_audience": _audience(
-                managed, _CONTROLLER_AUDIENCE, Component.CONTROLLER
+                managed, _CONTROLLER_AUDIENCE, Component.CONTROLLER, project_id
             ),
             "fault_proxy_url": _https_origin(managed, _FAULT_PROXY_URL),
             "fault_proxy_audience": _audience(
-                managed, _FAULT_PROXY_AUDIENCE, Component.FAULT_PROXY
+                managed, _FAULT_PROXY_AUDIENCE, Component.FAULT_PROXY, project_id
             ),
         }
     elif component is Component.CONTROLLER:
@@ -507,14 +542,18 @@ def _load_config(environment: Mapping[str, str]) -> HostedConfig:
             "target_database": _exact(
                 managed, _TARGET_DATABASE, _APPROVED_TARGET_DATABASE
             ),
-            "target_bucket": _exact(managed, _TARGET_BUCKET, _APPROVED_TARGET_BUCKET),
+            "target_bucket": _exact(
+                managed,
+                _TARGET_BUCKET,
+                f"{project_id}-p5-target",
+            ),
             "fault_proxy_url": _https_origin(managed, _FAULT_PROXY_URL),
             "fault_proxy_audience": _audience(
-                managed, _FAULT_PROXY_AUDIENCE, Component.FAULT_PROXY
+                managed, _FAULT_PROXY_AUDIENCE, Component.FAULT_PROXY, project_id
             ),
             "sandbox_url": _https_origin(managed, _SANDBOX_URL),
             "sandbox_audience": _audience(
-                managed, _SANDBOX_AUDIENCE, Component.SANDBOX
+                managed, _SANDBOX_AUDIENCE, Component.SANDBOX, project_id
             ),
             "canary_location": _exact(managed, _CANARY_LOCATION, "us-central1"),
             "canary_service": _exact(
@@ -530,7 +569,7 @@ def _load_config(environment: Mapping[str, str]) -> HostedConfig:
             "canary_audience": _exact(
                 managed,
                 _CANARY_AUDIENCE,
-                _APPROVED_CANARY_AUDIENCE,
+                _expected_canary_audience(project_id),
             ),
             "recovery_release_id": _exact(
                 managed,
@@ -605,10 +644,14 @@ def _load_config(environment: Mapping[str, str]) -> HostedConfig:
             "target_database": _exact(
                 managed, _TARGET_DATABASE, _APPROVED_TARGET_DATABASE
             ),
-            "target_bucket": _exact(managed, _TARGET_BUCKET, _APPROVED_TARGET_BUCKET),
+            "target_bucket": _exact(
+                managed,
+                _TARGET_BUCKET,
+                f"{project_id}-p5-target",
+            ),
             "sandbox_url": _https_origin(managed, _SANDBOX_URL),
             "sandbox_audience": _audience(
-                managed, _SANDBOX_AUDIENCE, Component.SANDBOX
+                managed, _SANDBOX_AUDIENCE, Component.SANDBOX, project_id
             ),
             "canary_location": _exact(managed, _CANARY_LOCATION, "us-central1"),
             "canary_service": _exact(managed, _CANARY_SERVICE, "reconcile-p5-canary"),
@@ -620,12 +663,12 @@ def _load_config(environment: Mapping[str, str]) -> HostedConfig:
             "canary_audience": _exact(
                 managed,
                 _CANARY_AUDIENCE,
-                _APPROVED_CANARY_AUDIENCE,
+                _expected_canary_audience(project_id),
             ),
             "recovery_action_caller_email": _exact(
                 managed,
                 _RECOVERY_ACTION_CALLER,
-                _APPROVED_SANDBOX_READ_CALLER,
+                sandbox_read_identity,
             ),
         }
     else:

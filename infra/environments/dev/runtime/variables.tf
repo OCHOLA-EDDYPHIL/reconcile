@@ -1,10 +1,9 @@
 variable "project_id" {
-  type    = string
-  default = "example-project-id"
+  type = string
 
   validation {
-    condition     = var.project_id == "example-project-id"
-    error_message = "The runtime stack is restricted to the approved project."
+    condition     = can(regex("^[a-z][a-z0-9-]{4,28}[a-z0-9]$", var.project_id))
+    error_message = "The project ID must use the canonical Google Cloud project-ID form."
   }
 }
 
@@ -18,25 +17,9 @@ variable "region" {
   }
 }
 
-variable "service_account_emails" {
-  type = object({
-    api         = string
-    canary      = string
-    controller  = string
-    fault_proxy = string
-    sandbox     = string
-  })
-
-  validation {
-    condition = var.service_account_emails == {
-      api         = "rec-p5-api@example-project-id.iam.gserviceaccount.com"
-      canary      = "rec-p5-canary@example-project-id.iam.gserviceaccount.com"
-      controller  = "rec-p5-controller@example-project-id.iam.gserviceaccount.com"
-      fault_proxy = "rec-p5-fault@example-project-id.iam.gserviceaccount.com"
-      sandbox     = "rec-p5-sandbox@example-project-id.iam.gserviceaccount.com"
-    }
-    error_message = "Runtime service accounts must match the foundation stack outputs."
-  }
+variable "acceptance_partial_read_outage_enabled" {
+  type    = bool
+  default = false
 }
 
 variable "source_revision" {
@@ -84,17 +67,6 @@ variable "recovery_definition_created_at" {
       can(timecmp(var.recovery_definition_created_at, var.recovery_definition_created_at))
     )
     error_message = "The recovery definition timestamp must be canonical UTC RFC3339."
-  }
-}
-
-variable "api_invoker_members" {
-  type = set(string)
-
-  validation {
-    condition = var.api_invoker_members == toset([
-      "serviceAccount:rec-p5-apply@example-project-id.iam.gserviceaccount.com",
-    ])
-    error_message = "The API invoker must be the exact approval-bound operator identity."
   }
 }
 

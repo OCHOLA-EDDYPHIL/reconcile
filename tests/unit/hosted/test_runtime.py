@@ -258,6 +258,43 @@ def test_fault_proxy_recovery_actions_use_durable_authorizers(
     assert captured["recovery_action_caller_email"] == _CONTROLLER
 
 
+@pytest.mark.parametrize(
+    "component",
+    (Component.API, Component.CONTROLLER, Component.FAULT_PROXY),
+)
+def test_acceptance_partial_read_outage_enablement_reaches_each_runtime_boundary(
+    monkeypatch: pytest.MonkeyPatch,
+    component: Component,
+) -> None:
+    captured: dict[str, object] = {}
+    sentinel = object()
+
+    def capture(_config: HostedConfig, **kwargs: object) -> object:
+        captured.update(kwargs)
+        return sentinel
+
+    monkeypatch.setattr(hosted_runtime, "create_component_app", capture)
+    config = replace(
+        _config(component),
+        acceptance_partial_read_outage_enabled=True,
+    )
+
+    assert create_runtime_component_app(config) is sentinel
+    assert captured["acceptance_partial_read_outage_enabled"] is True
+    if component is Component.API:
+        assert (
+            captured["recovery_service"]._acceptance_partial_read_outage_enabled is True
+        )
+    elif component is Component.CONTROLLER:
+        handlers = captured["internal_operation_handlers"]
+        assert isinstance(handlers, dict)
+        recovery = handlers[InternalOperation.RECOVER]
+        assert recovery._acceptance_partial_read_outage_enabled is True
+    else:
+        authorizer = captured["cloud_run_canary_action_authorizer"]
+        assert authorizer._acceptance_partial_read_outage_enabled is True
+
+
 def test_controller_registers_lazy_recovery_with_manifest_bound_settings(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

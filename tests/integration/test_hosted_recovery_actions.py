@@ -9,11 +9,19 @@ import httpx
 import pytest
 from fastapi import FastAPI, Request
 
+from reconcile.adapters.cloud_run import (
+    CLOUD_RUN_HEALTH_CAPABILITY,
+    CLOUD_RUN_REVISION_CAPABILITY,
+    CLOUD_RUN_SERVICE_CAPABILITY,
+)
 from reconcile.contracts import (
     RECOVERY_ACTION_SCOPE_VERSION,
     RECOVERY_LAUNCH_PERMIT_VERSION,
     RECOVERY_RUN_REQUEST_VERSION,
     ActionPermitState,
+    AmbiguityWitness,
+    Classification,
+    ProbeOutcome,
     RecoveryActionScope,
     RecoveryAuthorityKind,
     RecoveryLaunchPermit,
@@ -48,9 +56,11 @@ from reconcile.persistence import InMemoryRecoveryRunStore, SqliteDurableRuntime
 from reconcile.recovery_agents import RecoveryAgent
 from reconcile.recovery_scenario import (
     ReleaseChainActionPreparer,
+    ReleaseChainResetter,
     build_release_chain_definition,
     build_release_chain_workflow,
 )
+from reconcile.recovery_workflow import RecoveryRunApplicationService
 from tests.integration.test_recovery_release_chain import (
     BASELINE,
     NOW,
@@ -223,6 +233,230 @@ def test_hosted_suppression_retries_once_without_a_controller_side_claim(
 
 def test_cloud_run_and_firestore_action_paths_are_distinct() -> None:
     assert CLOUD_RUN_CANARY_ACTION_PATH != FIRESTORE_RELEASE_ACTION_PATH
+
+
+def test_partial_read_outage_produces_a_replay_stable_ambiguity_witness(
+    tmp_path,
+) -> None:
+    settings = _settings()
+    (
+        cloud_state,
+        cloud_adapter,
+        cloud_proxy,
+        cloud_reader,
+        firestore,
+        firestore_client,
+    ) = _provider(settings)
+    store = InMemoryRecoveryRunStore()
+    authority = PermitAuthority(
+        SqliteDurableRuntimeStore(tmp_path / "partial-read-outage.sqlite3"),
+        clock=lambda: NOW + timedelta(seconds=2),
+    )
+    cloud_authorizer = RecoveryCloudRunCanaryActionAuthorizer(
+        recovery_store=store,
+        permit_authority=authority,
+        target=cloud_adapter.target,
+        acceptance_partial_read_outage_enabled=True,
+        clock=lambda: NOW + timedelta(seconds=2),
+    )
+    firestore_authorizer = RecoveryFirestoreReleaseActionAuthorizer(
+        recovery_store=store,
+        permit_authority=authority,
+        target=firestore,
+        clock=lambda: NOW + timedelta(seconds=2),
+    )
+    application = FastAPI()
+
+    @application.middleware("http")
+    async def bind_caller(request: Request, call_next):
+        request.state.verified_caller = VerifiedCaller(
+            email=CALLER,
+            subject="controller-subject",
+            issuer="https://accounts.google.com",
+            audience="https://fault.example.test",
+            expires_at=2**31,
+        )
+        return await call_next(request)
+
+    install_cloud_run_canary_fault_route(
+        application,
+        proxy=cloud_proxy,
+        action_authorizer=cloud_authorizer,
+        expected_caller_email=CALLER,
+        expected_image_digest=settings.image_digest,
+        expected_configuration_sha256=settings.configuration_sha256,
+    )
+    install_firestore_release_action_route(
+        application,
+        target=firestore,
+        authorizer=firestore_authorizer,
+        expected_caller_email=CALLER,
+    )
+
+    async def exercise():
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=application),
+            base_url="https://fault.example.test",
+        ) as client:
+            recording = _RecordingHttpClient(client)
+            gateway = HostedRecoveryDispatchGateway(
+                fault_proxy_url="https://fault.example.test",
+                fault_proxy_audience="https://fault.example.test",
+                transport=HostedHttpTransport(
+                    token_supplier=lambda _audience: "e30.e30.sig",
+                    http_client=recording,
+                ),
+                recovery_store=store,
+                permit_authority=authority,
+            )
+            workflow = build_release_chain_workflow(
+                settings=settings,
+                invoked_at=NOW,
+                store=store,
+                permit_authority=authority,
+                recovery_agent=RecoveryAgent(
+                    _Planner(output=_output(probe_count=0)),
+                    clock=lambda: NOW + timedelta(seconds=2),
+                ),
+                cloud_action=None,
+                cloud_reader=cloud_reader,
+                firestore=firestore,
+                dispatch_gateway=gateway,
+                acceptance_partial_read_outage_enabled=True,
+                clock=lambda: NOW + timedelta(seconds=2),
+            )
+            service = RecoveryRunApplicationService(
+                workflow,
+                store,
+                clock=lambda: NOW + timedelta(seconds=2),
+            )
+            request = RecoveryRunRequest(
+                schema_version=RECOVERY_RUN_REQUEST_VERSION,
+                run_id=f"p5w-fixed-{'0' * 32}",
+                scenario="cloud-run-rollout",
+                policy=RecoveryRunPolicy.FIXED,
+                fault=(
+                    RecoveryRunFault.ACCEPTANCE_DROP_AFTER_ACCEPT_PARTIAL_READ_OUTAGE
+                ),
+            )
+            first = await service.launch_and_wait_result(request)
+            provider_counts = (
+                cloud_state.update_count,
+                cloud_state.service_read_count,
+                cloud_state.revision_read_count,
+                cloud_state.health_read_count,
+            )
+            request_count = len(recording.requests)
+            replayed = await service.launch_and_wait_result(request)
+            await service.aclose()
+
+            direct_revision = cloud_reader.read_revision(
+                release_id=settings.release_id,
+                revision=settings.staged_revision,
+            )
+            direct_health = cloud_reader.read_health(
+                release_id=settings.release_id,
+                revision=settings.staged_revision,
+            )
+            reset = await ReleaseChainResetter(
+                settings=settings,
+                cloud_action=cloud_proxy,
+                cloud_reader=cloud_reader,
+                firestore=firestore,
+                baseline_revision=BASELINE,
+                clock=lambda: NOW + timedelta(seconds=3),
+                poll_interval_seconds=0,
+            ).reset()
+            return (
+                first,
+                replayed,
+                tuple(recording.requests),
+                provider_counts,
+                request_count,
+                direct_revision,
+                direct_health,
+                reset,
+            )
+
+    (
+        first,
+        replayed,
+        requests,
+        provider_counts,
+        request_count,
+        direct_revision,
+        direct_health,
+        reset,
+    ) = asyncio.run(exercise())
+    snapshot = first.snapshot
+    replay_snapshot = replayed.snapshot
+    witness = snapshot.witnesses[0]
+    stage_report = snapshot.reports[-1]
+    cloud_requests = tuple(
+        content
+        for url, content in requests
+        if url.endswith(CLOUD_RUN_CANARY_ACTION_PATH)
+    )
+
+    assert first.created is True
+    assert replayed.created is False
+    assert replay_snapshot == snapshot
+    assert canonical_sha256(replay_snapshot.witnesses[0]) == canonical_sha256(witness)
+    assert snapshot.lifecycle is RecoveryRunLifecycle.ESCALATED
+    assert snapshot.decision.value == "ESCALATE"
+    assert type(witness) is AmbiguityWitness
+    assert len(witness.possible_histories) == 2
+    assert {history.history_id for history in witness.possible_histories} == {
+        "effects-occurred",
+        "effects-not-occurred",
+    }
+    assert (
+        len({canonical_sha256(history) for history in witness.possible_histories}) == 2
+    )
+    evidence_ids = {binding.evidence_id for binding in witness.evidence}
+    assert all(
+        set(history.compatible_evidence_ids) <= evidence_ids
+        for history in witness.possible_histories
+    )
+    assert stage_report.classification is Classification.UNKNOWN
+    assert snapshot.certificates == ()
+    assert snapshot.action_permits == ()
+    assert [node.state for node in snapshot.nodes] == [
+        RecoveryNodeState.ESCALATED,
+        RecoveryNodeState.WAITING,
+        RecoveryNodeState.WAITING,
+    ]
+    assert tuple(item.capability_name for item in stage_report.probe_audit) == (
+        CLOUD_RUN_SERVICE_CAPABILITY,
+        CLOUD_RUN_REVISION_CAPABILITY,
+        CLOUD_RUN_HEALTH_CAPABILITY,
+    )
+    assert tuple(item.outcome for item in stage_report.probe_audit) == (
+        ProbeOutcome.COMPLETED,
+        ProbeOutcome.UNAVAILABLE,
+        ProbeOutcome.UNAVAILABLE,
+    )
+    assert provider_counts == (1, 2, 0, 0)
+    assert len(cloud_requests) == 2
+    assert cloud_requests[0] == cloud_requests[1]
+    assert request_count == len(requests) == 2
+    assert sum(receipt.provider_contact for receipt in snapshot.dispatch_receipts) == 1
+    assert tuple(
+        (receipt.outcome, receipt.provider_contact)
+        for receipt in snapshot.dispatch_receipts
+    ) == (
+        (RecoveryReceiptOutcome.PROVIDER_CONTACTED, True),
+        (RecoveryReceiptOutcome.REJECTED_BEFORE_PROVIDER_CONTACT, False),
+    )
+    assert snapshot.launch_permit is not None
+    assert snapshot.launch_permit.state is RecoveryLaunchPermitState.COMPLETED
+    assert snapshot.launch_permit.outcome.value == "OUTCOME_UNKNOWN"
+    assert firestore_client.document("releases", settings.release_id).create_count == 0
+    assert direct_revision.revision == settings.staged_revision
+    assert direct_health.revision == settings.staged_revision
+    assert reset.serving_revision == BASELINE
+    assert reset.serving_percent == 100
+    assert reset.release_record_absent is True
 
 
 def test_acceptance_stage_replay_is_denied_before_a_second_provider_call(

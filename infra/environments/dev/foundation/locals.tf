@@ -17,7 +17,7 @@ locals {
   runtime_database_name  = "reconcile-p5-runtime"
   sandbox_database_name  = "reconcile-p5-sandbox"
   target_database_name   = "reconcile-p5-target"
-  target_bucket_name     = "example-project-id-p5-target"
+  target_bucket_name     = "${var.project_id}-p5-target"
 
   service_accounts = {
     api = {

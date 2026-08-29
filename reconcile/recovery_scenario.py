@@ -106,9 +106,13 @@ from reconcile.contracts.base import (
     reject_sensitive_values,
 )
 from reconcile.controller import (
+    BoundProbe,
+    CapabilityRegistration,
     CapabilityRegistry,
+    CapabilityUnavailable,
     ControllerClock,
     ProbeController,
+    ProbeObservation,
     probe_request_sha256,
 )
 from reconcile.controller.permits import PermitAuthority
@@ -536,6 +540,7 @@ def build_release_chain_workflow(
     cloud_reader: CloudRunCanaryReader,
     firestore: GoogleFirestoreReleaseTarget,
     dispatch_gateway: object | None = None,
+    acceptance_partial_read_outage_enabled: bool = False,
     clock: Callable[[], datetime] | None = None,
 ):
     """Assemble fixed/adaptive lanes over the exact same production boundaries."""
@@ -545,6 +550,8 @@ def build_release_chain_workflow(
 
     if type(recovery_agent) is not RecoveryAgent:
         raise TypeError("release workflow requires an exact RecoveryAgent")
+    if type(acceptance_partial_read_outage_enabled) is not bool:
+        raise TypeError("partial-read acceptance state must be boolean")
     reader_target = _require_cloud_target(settings, cloud_reader)
     if (cloud_action is None) == (dispatch_gateway is None):
         raise ValueError("release workflow requires exactly one dispatch boundary")
@@ -564,6 +571,7 @@ def build_release_chain_workflow(
         settings=settings,
         cloud_run=cloud_reader,
         firestore=firestore,
+        acceptance_partial_read_outage_enabled=(acceptance_partial_read_outage_enabled),
         clock=clock,
     )
     gateway = (
@@ -578,9 +586,19 @@ def build_release_chain_workflow(
             clock=clock,
         )
     )
+
+    def definition_for(request: RecoveryRunRequest):
+        if (
+            request.fault
+            is RecoveryRunFault.ACCEPTANCE_DROP_AFTER_ACCEPT_PARTIAL_READ_OUTAGE
+            and not acceptance_partial_read_outage_enabled
+        ):
+            raise ReleaseChainError("partial-read acceptance fault is disabled")
+        return definition
+
     return ProofToPermitWorkflow(
         store=store,
-        definition_factory=lambda _request: definition,
+        definition_factory=definition_for,
         evidence_source=evidence,
         action_preparer=ReleaseChainActionPreparer(),
         recovery_agent=recovery_agent,
@@ -631,7 +649,11 @@ class ReleaseChainActionPreparer:
                 "configuration_sha256": arguments["configuration_sha256"],
                 "fault_mode": (
                     CloudRunFaultMode.DROP_AFTER_ACCEPT.value
-                    if request.fault is RecoveryRunFault.DROP_AFTER_ACCEPT
+                    if request.fault
+                    in {
+                        RecoveryRunFault.DROP_AFTER_ACCEPT,
+                        RecoveryRunFault.ACCEPTANCE_DROP_AFTER_ACCEPT_PARTIAL_READ_OUTAGE,
+                    }
                     else CloudRunFaultMode.PASS_THROUGH.value
                 ),
                 "image_digest": arguments["image_digest"],
@@ -744,6 +766,10 @@ class _EvidenceSession:
     executed_request_sha256s: set[str]
 
 
+async def _unavailable_partial_read(_probe: BoundProbe) -> ProbeObservation:
+    raise CapabilityUnavailable
+
+
 class ReleaseChainEvidenceSource:
     """Incrementally acquire real provider reads through the sealed rule path."""
 
@@ -755,6 +781,7 @@ class ReleaseChainEvidenceSource:
         settings: ReleaseChainSettings,
         cloud_run: CloudRunCanaryReader,
         firestore: GoogleFirestoreReleaseTarget,
+        acceptance_partial_read_outage_enabled: bool = False,
         clock: Callable[[], datetime] | None = None,
         controller_clock: ControllerClock | None = None,
     ) -> None:
@@ -770,6 +797,8 @@ class ReleaseChainEvidenceSource:
             raise TypeError("release evidence requires the sealed Cloud Run reader")
         if type(firestore) is not GoogleFirestoreReleaseTarget:
             raise TypeError("release evidence requires the sealed Firestore target")
+        if type(acceptance_partial_read_outage_enabled) is not bool:
+            raise TypeError("partial-read acceptance state must be boolean")
         _require_cloud_target(settings, cloud_run)
         _require_firestore_target(settings, firestore)
         self._store = store
@@ -777,6 +806,9 @@ class ReleaseChainEvidenceSource:
         self._settings = settings
         self._cloud_run = cloud_run
         self._firestore = firestore
+        self._acceptance_partial_read_outage_enabled = (
+            acceptance_partial_read_outage_enabled
+        )
         self._receipts = RecoveryRunReceiptReader(store)
         self._clock = clock or (lambda: datetime.now(UTC))
         self._controller_clock = controller_clock
@@ -805,6 +837,43 @@ class ReleaseChainEvidenceSource:
             return existing
         capabilities = CapabilityRegistry()
         rules = TargetRuleRegistry()
+        partial_read_outage = (
+            snapshot.request.fault
+            is RecoveryRunFault.ACCEPTANCE_DROP_AFTER_ACCEPT_PARTIAL_READ_OUTAGE
+        )
+        if partial_read_outage:
+            if (
+                not self._acceptance_partial_read_outage_enabled
+                or snapshot.request.policy is not RecoveryRunPolicy.FIXED
+                or node.node_id != "stage"
+            ):
+                raise ReleaseChainError(
+                    "partial-read acceptance evidence is unavailable"
+                )
+            launch = snapshot.launch_permit
+            matching_receipts = tuple(
+                receipt
+                for receipt in snapshot.dispatch_receipts
+                if receipt.node_id == node.node_id
+                and receipt.attempt == 1
+                and receipt.provider_contact
+                and receipt.outcome is RecoveryReceiptOutcome.PROVIDER_CONTACTED
+                and receipt.semantic_action_sha256
+                == node.semantic_action.semantic_action_sha256
+                and launch is not None
+                and receipt.action_request_sha256 == launch.action_request_sha256
+                and receipt.authority_id == launch.launch_permit_id
+                and receipt.claim_id == launch.claim_id
+            )
+            if (
+                launch is None
+                or launch.state is not RecoveryLaunchPermitState.COMPLETED
+                or launch.outcome is not RecoveryDispatchOutcome.OUTCOME_UNKNOWN
+                or len(matching_receipts) != 1
+            ):
+                raise ReleaseChainError(
+                    "partial-read acceptance requires one durable accepted stage"
+                )
         if node.node_id in {"stage", "promote"}:
             binding = (
                 CloudRunProbeBinding.for_stage(
@@ -820,15 +889,26 @@ class ReleaseChainEvidenceSource:
                 )
             )
             for reference in envelope.context.enabled_capabilities:
-                capabilities.register(
-                    build_cloud_run_capability_registration(
-                        reader=self._cloud_run,
-                        binding=binding,
-                        capability_name=reference.name,
-                        target=envelope.target,
-                        clock=self._clock,
-                    )
+                registration = build_cloud_run_capability_registration(
+                    reader=self._cloud_run,
+                    binding=binding,
+                    capability_name=reference.name,
+                    target=envelope.target,
+                    clock=self._clock,
                 )
+                if partial_read_outage and reference.name in {
+                    CLOUD_RUN_REVISION_CAPABILITY,
+                    CLOUD_RUN_HEALTH_CAPABILITY,
+                }:
+                    registration = CapabilityRegistration(
+                        capability=registration.capability,
+                        semantics=registration.semantics,
+                        enabled=registration.enabled,
+                        argument_byte_ceiling=registration.argument_byte_ceiling,
+                        max_invocations=registration.max_invocations,
+                        handler=_unavailable_partial_read,
+                    )
+                capabilities.register(registration)
                 rules.register(
                     build_cloud_run_rule_registration(
                         capability_name=reference.name,
@@ -1775,12 +1855,17 @@ def recovery_experiment_binding(
     boundary = {
         "fault": fault.value,
         "point": (
-            "cloud-run-stage-after-provider-accept"
-            if fault is RecoveryRunFault.DROP_AFTER_ACCEPT
+            "cloud-run-stage-after-provider-accept-partial-read-outage"
+            if fault
+            is RecoveryRunFault.ACCEPTANCE_DROP_AFTER_ACCEPT_PARTIAL_READ_OUTAGE
             else (
-                "firestore-record-after-authority-claim-before-provider-contact"
-                if fault is RecoveryRunFault.SUPPRESS_BEFORE_DISPATCH
-                else "no-injected-fault"
+                "cloud-run-stage-after-provider-accept"
+                if fault is RecoveryRunFault.DROP_AFTER_ACCEPT
+                else (
+                    "firestore-record-after-authority-claim-before-provider-contact"
+                    if fault is RecoveryRunFault.SUPPRESS_BEFORE_DISPATCH
+                    else "no-injected-fault"
+                )
             )
         ),
         "version": "recovery-fault-boundary-v1",

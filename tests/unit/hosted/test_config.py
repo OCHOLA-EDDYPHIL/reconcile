@@ -461,3 +461,29 @@ def test_ambient_non_application_variables_are_outside_the_config_namespace() ->
     }
 
     assert load_config(environment).component is Component.API
+
+
+@pytest.mark.parametrize(
+    "component",
+    (Component.API, Component.CONTROLLER, Component.FAULT_PROXY),
+)
+def test_partial_read_acceptance_enablement_is_strict_and_opt_in(
+    component: Component,
+) -> None:
+    environment = _environment(component)
+    assert not load_config(environment).acceptance_partial_read_outage_enabled
+
+    environment["RECONCILE_ACCEPTANCE_PARTIAL_READ_OUTAGE_ENABLED"] = "true"
+    assert load_config(environment).acceptance_partial_read_outage_enabled
+
+    environment["RECONCILE_ACCEPTANCE_PARTIAL_READ_OUTAGE_ENABLED"] = "True"
+    with pytest.raises(HostedConfigError, match="is invalid"):
+        load_config(environment)
+
+
+def test_sandbox_cannot_enable_partial_read_acceptance_fault() -> None:
+    environment = _environment(Component.SANDBOX)
+    environment["RECONCILE_ACCEPTANCE_PARTIAL_READ_OUTAGE_ENABLED"] = "true"
+
+    with pytest.raises(HostedConfigError, match="selected component"):
+        load_config(environment)

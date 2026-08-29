@@ -118,7 +118,10 @@ def test_operator_identity_is_opt_in_and_does_not_validate_unused_gcloud_state()
 ):
     assert (
         google_identity.operator_client_identity(
-            {"CLOUDSDK_ACTIVE_CONFIG_NAME": "INVALID_AND_UNUSED"}
+            {
+                "CLOUDSDK_ACTIVE_CONFIG_NAME": "INVALID_AND_UNUSED",
+                "RECONCILE_DEPLOYMENT_PROFILE": "not-an-absolute-profile",
+            }
         )
         is None
     )
@@ -142,6 +145,113 @@ def test_operator_identity_returns_the_exact_explicit_audience(
     assert type(supplier) is google_identity.GcloudIdentityTokenSupplier
     assert audience == _AUDIENCE
     assert supplier._environment["CLOUDSDK_ACTIVE_CONFIG_NAME"] == "reconcile-phase5"
+
+
+def test_operator_identity_derives_live_account_from_sealed_profile(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _fixed_home(monkeypatch, tmp_path)
+    project = "reconcile-test-123456"
+    profile = tmp_path / "deployment-profile.json"
+    profile.write_text(
+        json.dumps(
+            {
+                "billing_account_id": "ABCDEF-123456-ABCDEF",
+                "owner_account": "owner@example.com",
+                "project_id": project,
+                "project_number": "123456789012",
+                "schema_version": "reconcile/deployment-profile/v1",
+            },
+            separators=(",", ":"),
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+    profile.chmod(0o400)
+    audience = f"https://reconcile.invalid/phase5/{project}/api"
+
+    identity = google_identity.operator_client_identity(
+        {
+            "RECONCILE_API_AUDIENCE": audience,
+            "RECONCILE_DEPLOYMENT_PROFILE": str(profile),
+        }
+    )
+
+    assert identity is not None
+    supplier, observed_audience = identity
+    assert observed_audience == audience
+    assert supplier._operator_service_account == (
+        f"rec-p5-apply@{project}.iam.gserviceaccount.com"
+    )
+
+
+def test_operator_identity_rejects_profile_audience_mismatch(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _fixed_home(monkeypatch, tmp_path)
+    profile = tmp_path / "deployment-profile.json"
+    profile.write_text(
+        json.dumps(
+            {
+                "billing_account_id": "ABCDEF-123456-ABCDEF",
+                "owner_account": "owner@example.com",
+                "project_id": "reconcile-test-123456",
+                "project_number": "123456789012",
+                "schema_version": "reconcile/deployment-profile/v1",
+            },
+            separators=(",", ":"),
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+    profile.chmod(0o400)
+
+    with pytest.raises(google_identity.GoogleIdentityTokenError) as raised:
+        google_identity.operator_client_identity(
+            {
+                "RECONCILE_API_AUDIENCE": "https://reconcile.invalid/phase5/other-project/api",
+                "RECONCILE_DEPLOYMENT_PROFILE": str(profile),
+            }
+        )
+
+    assert raised.value.args == ()
+
+
+def test_operator_identity_rejects_unsealed_profile(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _fixed_home(monkeypatch, tmp_path)
+    profile = tmp_path / "deployment-profile.json"
+    profile.write_text(
+        json.dumps(
+            {
+                "billing_account_id": "ABCDEF-123456-ABCDEF",
+                "owner_account": "owner@example.com",
+                "project_id": "reconcile-test-123456",
+                "project_number": "123456789012",
+                "schema_version": "reconcile/deployment-profile/v1",
+            },
+            separators=(",", ":"),
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+    profile.chmod(0o600)
+
+    with pytest.raises(google_identity.GoogleIdentityTokenError) as raised:
+        google_identity.operator_client_identity(
+            {
+                "RECONCILE_API_AUDIENCE": (
+                    "https://reconcile.invalid/phase5/reconcile-test-123456/api"
+                ),
+                "RECONCILE_DEPLOYMENT_PROFILE": str(profile),
+            }
+        )
+
+    assert raised.value.args == ()
 
 
 @pytest.mark.parametrize(
@@ -217,6 +327,46 @@ def test_supplier_uses_exact_gcloud_argv_cwd_and_minimal_environment(
             },
         )
     ]
+
+
+def test_supplier_uses_a_validated_candidate_operator_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    custom = "rec-p5-apply@reconcile-test-123456.iam.gserviceaccount.com"
+    token = _token({"aud": _AUDIENCE, "exp": 2_000})
+    calls: list[tuple[str, ...]] = []
+    monkeypatch.setattr(google_identity.time, "time", lambda: 1_000)
+
+    def run(
+        command: tuple[str, ...], **_options: object
+    ) -> subprocess.CompletedProcess[bytes]:
+        calls.append(command)
+        return _result(token.encode())
+
+    monkeypatch.setattr(google_identity.subprocess, "run", run)
+    supplier = google_identity.GcloudIdentityTokenSupplier(
+        {},
+        operator_service_account=custom,
+    )
+
+    assert supplier(_AUDIENCE) == token
+    assert f"--impersonate-service-account={custom}" in calls[0]
+
+
+@pytest.mark.parametrize(
+    "value",
+    (
+        "",
+        "rec-p5-api@reconcile-test-123456.iam.gserviceaccount.com",
+        "rec-p5-apply@example.invalid",
+    ),
+)
+def test_supplier_rejects_an_invalid_operator_identity(value: str) -> None:
+    with pytest.raises(google_identity.GoogleIdentityTokenError):
+        google_identity.GcloudIdentityTokenSupplier(
+            {},
+            operator_service_account=value,
+        )
 
 
 @pytest.mark.parametrize(

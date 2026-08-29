@@ -23,6 +23,7 @@ pytestmark = pytest.mark.unit
 
 _NOW = datetime(2026, 8, 18, 6, 0, tzinfo=UTC)
 _SOURCE = "a" * 40
+_DEPLOYMENT_PROJECT = "reconcile-test-123456"
 _REPO_ROOT = Path(__file__).parents[2].resolve()
 _PROJECT_DEPENDENCY_PATHS = ("reconcile/phase5_operator.py",)
 _PINNED_OPERATOR_PYTHON = Path(
@@ -57,6 +58,24 @@ _PINNED_HOST_BINARIES = {
         _PINNED_OPERATOR_TERRAFORM_SHA256,
     ),
 }
+
+
+def _external_deployment_profile(tmp_path: Path) -> Path:
+    path = tmp_path / "deployment-profile.json"
+    path.write_text(
+        json.dumps(
+            {
+                "schema_version": "reconcile/deployment-profile/v1",
+                "project_id": _DEPLOYMENT_PROJECT,
+                "project_number": "123456789012",
+                "billing_account_id": "ABCDEF-123456-ABCDEF",
+                "owner_account": "owner@example.com",
+            }
+        ),
+        encoding="utf-8",
+    )
+    path.chmod(0o600)
+    return path.resolve()
 
 
 @pytest.fixture(autouse=True)
@@ -171,13 +190,13 @@ def _write_oci_archive(
                 (f"{site_packages}/{relative}", "directory", None)
                 for relative in project_directories
             ),
-            (f"{site_packages}/reconcile-0.1.0.dist-info", "directory", None),
+            (f"{site_packages}/reconcile-0.1.1.dist-info", "directory", None),
             *(
                 (f"{site_packages}/{relative}", "file", payload)
                 for relative, payload in project_entries
             ),
             (
-                f"{site_packages}/reconcile-0.1.0.dist-info/RECORD",
+                f"{site_packages}/reconcile-0.1.1.dist-info/RECORD",
                 "file",
                 record_payload,
             ),
@@ -580,7 +599,7 @@ def _write_project_dependency_files(
         project_dependency_paths,
     )
     root.chmod(0o700)
-    metadata = root / "reconcile-0.1.0.dist-info"
+    metadata = root / "reconcile-0.1.1.dist-info"
     metadata.mkdir(mode=0o700)
     project_directories: set[Path] = set()
     for relative, payload in project_entries:
@@ -1335,7 +1354,7 @@ def test_manifest_freezes_exact_identity_limits_estimates_and_commands(
     assert runtime_apply is not None
     for action, mode, timeout in (
         (operator.Phase5Action.PROVIDER_ACCEPTANCE, "provider", 3_600),
-        (operator.Phase5Action.HOSTED_ACCEPTANCE, "hosted", 14_400),
+        (operator.Phase5Action.HOSTED_ACCEPTANCE, "hosted", 5_400),
     ):
         descriptor = manifest.command_for(action)
         command = descriptor.commands[0]
@@ -2424,7 +2443,7 @@ def test_no_cloud_preparation_builds_complete_private_manifest_inputs(
         assert values["source_date_epoch"] == 1_787_032_800
         artifact_output = values["artifact_output"]
         digest = _write_oci_archive(artifact_output)
-        return digest, operator._image_source_tag(_SOURCE)
+        return digest, operator._image_source_tag(_SOURCE, values["deployment"])
 
     def fake_terraform(**values: Any) -> None:
         assert values["provider_mirror"] is None
@@ -2434,7 +2453,7 @@ def test_no_cloud_preparation_builds_complete_private_manifest_inputs(
         artifact_output = values["state_root"] / "plans"
         required = set(runtime_identity.values()) | {
             (
-                "us-central1-docker.pkg.dev/example-project-id/"
+                f"us-central1-docker.pkg.dev/{_DEPLOYMENT_PROJECT}/"
                 f"reconcile-p5/reconcile@{runtime_identity['image_digest']}"
             )
         }
@@ -2477,6 +2496,7 @@ def test_no_cloud_preparation_builds_complete_private_manifest_inputs(
         return _test_execution_binding(source)
 
     monkeypatch.setattr(operator, "_materialize_execution_source", fake_materialize)
+    deployment_profile = _external_deployment_profile(tmp_path)
 
     draft, draft_path = operator.prepare_phase5_artifacts(
         state_root=tmp_path / "state",
@@ -2484,11 +2504,27 @@ def test_no_cloud_preparation_builds_complete_private_manifest_inputs(
         source_revision=_SOURCE,
         created_at=_NOW,
         provider_mirror=None,
+        deployment_profile_path=deployment_profile,
     )
 
     assert draft.work_deadline == _NOW + timedelta(hours=8)
     assert draft.approval_expires_at == _NOW + timedelta(hours=10)
+    assert draft.schema_version == "reconcile/phase5-operator-draft/v2"
+    assert draft.deployment_profile_sha256 is not None
     assert stat.S_IMODE(draft_path.stat().st_mode) == 0o600
+    assert (
+        stat.S_IMODE(
+            (tmp_path / "state" / "bindings" / "deployment-profile.json").stat().st_mode
+        )
+        == 0o400
+    )
+    assert (
+        tmp_path / "state" / "bindings" / "backends" / "foundation.tfbackend"
+    ).read_text(encoding="utf-8") == (
+        f'bucket = "{_DEPLOYMENT_PROJECT}-p5-state"\n'
+        "impersonate_service_account = "
+        f'"rec-p5-apply@{_DEPLOYMENT_PROJECT}.iam.gserviceaccount.com"\n'
+    )
     assert len(tuple((tmp_path / "state" / "plans").iterdir())) == 14
     assert (
         stat.S_IMODE(
@@ -2519,6 +2555,7 @@ def test_preparation_rejects_every_reused_state_contaminant(
 ) -> None:
     monkeypatch.setattr(operator, "_verify_exact_main_identity", lambda *_, **__: None)
     state = operator.Phase5StateStore(tmp_path / "state")
+    deployment_profile = _external_deployment_profile(tmp_path)
     path = state.root / relative
     if directory:
         path.mkdir(mode=0o700)
@@ -2533,6 +2570,7 @@ def test_preparation_rejects_every_reused_state_contaminant(
             source_revision=_SOURCE,
             created_at=_NOW,
             provider_mirror=None,
+            deployment_profile_path=deployment_profile,
         )
 
 

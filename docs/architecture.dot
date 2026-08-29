@@ -2,86 +2,103 @@ digraph ReconcileArchitecture {
   graph [
     bgcolor="#07111f",
     fontname="Liberation Sans",
-    label=<<FONT POINT-SIZE="32"><B>RECONCILE</B> — RECOVERY AUTHORITY</FONT><BR/><FONT POINT-SIZE="18">Advisory investigation proposes evidence. Deterministic verification authorizes action.</FONT>>,
+    label=<<FONT POINT-SIZE="32"><B>RECONCILE</B> — RECOVERY AUTHORITY</FONT><BR/><FONT POINT-SIZE="18">Advisory investigation proposes evidence. Deterministic verification controls action.</FONT>>,
     labelloc="t",
     labeljust="l",
     fontcolor="#f8fafc",
     pad=0.42,
     rankdir=TB,
-    ranksep=0.76,
-    nodesep=0.86,
+    ranksep=0.88,
+    nodesep=0.48,
     newrank=true,
+    ratio=fill,
+    size="14.3,8.0!",
     splines=polyline
   ];
   node [
     shape=box,
     style="rounded,filled",
     fontname="Liberation Sans",
-    fontsize=19,
+    fontsize=18,
     fontcolor="#e2e8f0",
     color="#475569",
     fillcolor="#111c2e",
-    margin="0.25,0.19",
+    margin="0.23,0.17",
     penwidth=1.8
   ];
   edge [
     fontname="Liberation Sans",
-    fontsize=15,
+    fontsize=14,
     fontcolor="#cbd5e1",
     color="#64748b",
-    arrowsize=0.85,
+    arrowsize=0.82,
     penwidth=1.8
   ];
 
   fault [
-    label="1  LOST ACKNOWLEDGEMENT\nThe provider outcome is unknown.",
+    label="LOST ACKNOWLEDGEMENT\nProvider outcome is uncertain",
     shape=octagon,
     fillcolor="#451a1a",
-    color="#fb7185",
-    group="left"
+    color="#fb7185"
   ];
   advisory [
-    label="2  RECOVERY AGENT\nADK + Gemini propose a hypothesis\nand bounded read-only probes.\nAdvisory only.",
+    label="RECOVERY AGENT\nGemini proposes a hypothesis\nand bounded read-only probes\nAdvisory only",
     fillcolor="#2e1065",
-    color="#c4b5fd",
-    group="right"
+    color="#c4b5fd"
   ];
   evidence [
-    label="3  EVIDENCE GATE\nAllowlisted sources • read budget\nprovenance • freshness • correlation",
+    label="EVIDENCE GATE\nAllowlisted sources and reads\nProvenance • freshness • correlation",
     fillcolor="#082f49",
-    color="#38bdf8",
-    group="left"
+    color="#38bdf8"
   ];
   verifier [
-    label="4  DETERMINISTIC VERIFIER\nAdmitted facts only.\nUNKNOWN → HOLD\nProved effect → certificate",
+    label="DETERMINISTIC VERIFIER\nAdmitted facts only\nIncomplete proof stays UNKNOWN",
     fillcolor="#052e2b",
-    color="#34d399",
-    group="right"
+    color="#34d399"
+  ];
+  ambiguity [
+    label="AMBIGUITY WITNESS\nCompatible histories\nNo mutation authority",
+    fillcolor="#451a1a",
+    color="#fb7185"
+  ];
+  certificate [
+    label="EFFECT CERTIFICATE\nExact established effect",
+    fillcolor="#052e2b",
+    color="#34d399"
   ];
   permit [
-    label="5  EXACT PERMIT\nOne semantic action • expiry\nmax_uses=1 • durable Firestore CAS",
+    label="EXACT PERMIT\nOne semantic action\nExpiring and single-use",
     fillcolor="#052e2b",
-    color="#34d399",
-    group="right"
+    color="#34d399"
   ];
   dispatch [
-    label="6  GUARDED DISPATCH\nClaim before provider contact.\nConsumed replay is denied pre-contact.",
+    label="GUARDED DISPATCH\nClaim before provider contact\nConsumed replay is denied",
     fillcolor="#172554",
-    color="#818cf8",
-    group="left"
+    color="#818cf8"
+  ];
+  record [
+    label="VERSIONED EVIDENCE\nSanitized immutable record",
+    fillcolor="#3f2d14",
+    color="#fbbf24"
+  ];
+  viewer [
+    label="READ-ONLY VIEWER\nStatic projection\nNo operational connection",
+    fillcolor="#1f2937",
+    color="#94a3b8"
   ];
 
-  { rank=same; fault; advisory; }
-  { rank=same; evidence; verifier; }
-  { rank=same; dispatch; permit; }
+  { rank=same; fault; advisory; evidence; verifier; }
+  { rank=same; ambiguity; certificate; permit; dispatch; }
+  { rank=same; record; viewer; }
 
-  fault -> evidence [style=invis, weight=100];
-  evidence -> dispatch [style=invis, weight=100];
-  advisory -> verifier [style=invis, weight=100];
-
-  fault -> advisory [label="reconcile", color="#fbbf24", weight=20];
-  advisory -> evidence [label="probe proposal", color="#a78bfa", weight=20];
-  evidence -> verifier [label="admitted facts", color="#38bdf8", weight=20];
-  verifier -> permit [label="verified certificate", color="#34d399", weight=20];
-  dispatch -> permit [label="atomic claim", color="#34d399", dir=back, weight=20];
+  fault -> advisory [label="investigate", color="#fbbf24"];
+  advisory -> evidence [label="probe proposal", color="#a78bfa"];
+  evidence -> verifier [label="admitted facts", color="#38bdf8"];
+  verifier -> ambiguity [label="proof incomplete", color="#fb7185"];
+  verifier -> certificate [label="effect established", color="#34d399"];
+  certificate -> permit [label="narrow authority", color="#34d399"];
+  permit -> dispatch [label="atomic claim", color="#34d399"];
+  ambiguity -> record [label="record", color="#fbbf24"];
+  dispatch -> record [label="record", color="#fbbf24"];
+  record -> viewer [label="static export", style=dashed, color="#94a3b8"];
 }

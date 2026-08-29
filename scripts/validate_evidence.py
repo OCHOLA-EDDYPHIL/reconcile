@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate and present the sanitized offline evidence bundle."""
+"""Validate and present a versioned sanitized evidence bundle."""
 
 from __future__ import annotations
 
@@ -13,7 +13,9 @@ from pathlib import Path
 from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_EVIDENCE = ROOT / "demo" / "evidence" / "proof-to-permit.json"
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+DEFAULT_EVIDENCE = ROOT / "evidence" / "v0.1.0" / "proof-to-permit.json"
 
 SOURCE_REVISION = "4d626bb67739ca51c7569124724ea5d7ac8f5c0e"
 IMAGE_DIGEST = "sha256:160471416779de06923cf5addb622206c3a5281b1858a2e2a111077218a423ef"
@@ -668,6 +670,19 @@ def load_and_validate(path: Path) -> dict[str, Any]:
     """Load and cross-check the four-file offline evidence bundle."""
 
     index, _ = _read_json(path)
+    if index.get("schema_version") == "reconcile/public-evidence/v1":
+        try:
+            from reconcile.public_evidence import (
+                PublicEvidenceError,
+                load_public_evidence,
+                public_bundle_dict,
+            )
+        except ImportError as error:
+            raise EvidenceError("public evidence validator is unavailable") from error
+        try:
+            return public_bundle_dict(load_public_evidence(path.resolve()))
+        except PublicEvidenceError as error:
+            raise EvidenceError(error.code) from error
     _object(
         index,
         {"schema_version", "claim_boundary", "scripted_baseline", "live_gate"},
@@ -728,6 +743,30 @@ def load_and_validate(path: Path) -> dict[str, Any]:
 
 
 def summary(payload: dict[str, Any]) -> dict[str, Any]:
+    if payload["schema_version"] == "reconcile/public-evidence/v1":
+        provider = payload["provider_proof"]
+        adaptive = provider["adaptive_recovery"]
+        ambiguity = payload["live_corroboration"]["ambiguity_proof"]
+        return {
+            "claim": payload["claim_boundary"]["authorized_safety_claim"],
+            "live_gate": {
+                "adaptive": {
+                    "chain_completed": adaptive["chain_completed"],
+                    "effects": adaptive["effects"],
+                    "replay": adaptive["replay"],
+                },
+                "ambiguity": {
+                    "classification": ambiguity["classification"],
+                    "lifecycle": ambiguity["lifecycle"],
+                    "histories": list(ambiguity["history_ids"]),
+                    "effects": ambiguity["effects"],
+                    "certificate_count": ambiguity["certificate_count"],
+                    "action_permit_count": ambiguity["action_permit_count"],
+                },
+                "source_revision": provider["candidate"]["source_revision"],
+            },
+            "status": "PASS",
+        }
     baseline = payload["scripted_baseline"]
     provider = payload["provider_proof"]
     return {
@@ -755,6 +794,30 @@ def summary(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def _print_human(payload: dict[str, Any]) -> None:
+    if payload["schema_version"] == "reconcile/public-evidence/v1":
+        provider = payload["provider_proof"]
+        adaptive = provider["adaptive_recovery"]
+        ambiguity = payload["live_corroboration"]["ambiguity_proof"]
+        print("RECONCILE - offline evidence validation")
+        print("Gemini guides evidence acquisition. Deterministic evidence decides.\n")
+        print(
+            "Recorded adaptive recovery | "
+            f"source {provider['candidate']['source_revision'][:7]}"
+        )
+        print(
+            "  effects      -> "
+            f"{adaptive['effects']['revisions']} revision / "
+            f"{adaptive['effects']['promotions']} promotion / "
+            f"{adaptive['effects']['release_records']} release record"
+        )
+        print("  replay       -> rejected before provider contact; contact delta 0")
+        print("\nRecorded partial-read outage")
+        print("  result       -> UNKNOWN / ESCALATED; no action permit")
+        print("  histories    -> " + " / ".join(ambiguity["history_ids"]))
+        print("  effects      -> 1 staged revision / 0 promotions / 0 records")
+        print("  cleanup      -> zero retained cloud resources")
+        print("\nRESULT: PASS")
+        return
     baseline = payload["scripted_baseline"]["policies"]
     provider = payload["provider_proof"]
     print("RECONCILE — offline evidence validation")
@@ -775,7 +838,7 @@ def _print_human(payload: dict[str, Any]) -> None:
         f"  pass 2       -> COMMITTED; exact revision "
         f"{provider['settled_pass']['correlated_revision']}"
     )
-    print("  authority    -> deterministic certificates; two max_uses=1 permits")
+    print("  authority    -> hash-bound certificates; two max_uses=1 permits")
     print("  evidence     -> 49 durable events; provider/corroboration hashes linked")
     print("  effects      -> 1 revision / 1 promotion / 1 Firestore record")
     print("  replay       -> rejected before provider contact; contact delta 0")

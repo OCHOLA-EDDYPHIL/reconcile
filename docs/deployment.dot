@@ -2,15 +2,17 @@ digraph ReconcileDeployment {
   graph [
     bgcolor="#07111f",
     fontname="Liberation Sans",
-    label=<<FONT POINT-SIZE="32"><B>RECONCILE</B> — GOOGLE CLOUD TRUST TOPOLOGY</FONT><BR/><FONT POINT-SIZE="18">Five Cloud Run identities. Controller reads evidence; fault proxy performs permitted mutations.</FONT>>,
+    label=<<FONT POINT-SIZE="32"><B>RECONCILE</B> — GOOGLE CLOUD TRUST TOPOLOGY</FONT><BR/><FONT POINT-SIZE="18">Operational authority is isolated from the static evidence viewer.</FONT>>,
     labelloc="t",
     labeljust="l",
     fontcolor="#f8fafc",
     pad=0.42,
     rankdir=TB,
-    ranksep=2.40,
-    nodesep=0.62,
+    ranksep=1.18,
+    nodesep=0.58,
     newrank=true,
+    ratio=fill,
+    size="14.3,8.0!",
     splines=polyline,
     compound=true
   ];
@@ -18,7 +20,7 @@ digraph ReconcileDeployment {
     shape=box,
     style="rounded,filled",
     fontname="Liberation Sans",
-    fontsize=19,
+    fontsize=18,
     fontcolor="#e2e8f0",
     color="#60a5fa",
     fillcolor="#13253d",
@@ -27,93 +29,109 @@ digraph ReconcileDeployment {
   ];
   edge [
     fontname="Liberation Sans",
-    fontsize=16,
+    fontsize=14,
     fontcolor="#cbd5e1",
     color="#64748b",
     arrowsize=0.80,
     penwidth=1.7
   ];
 
-  subgraph cluster_run {
-    label="CLOUD RUN • ONE SERVICE ACCOUNT PER SERVICE";
+  subgraph cluster_core {
+    label="OPERATIONAL CORE • SEPARATE SERVICE IDENTITIES";
     fontname="Liberation Sans";
-    fontsize=19;
+    fontsize=18;
     fontcolor="#cbd5e1";
     color="#475569";
     style="rounded";
-    margin=22;
+    margin=20;
 
-    api [
-      label="API\noperator entry\ncalls controller / proxy",
-      group="api"
-    ];
+    api [label="CLOUD RUN API\nAuthenticated entry\nDurable orchestration"];
     controller [
-      label="CONTROLLER\nGemini + read-only evidence\ncalls proxy / sandbox",
-      group="controller"
+      label="CLOUD RUN CONTROLLER\nAdvisory planning\nEvidence admission and verification"
     ];
     proxy [
-      label="FAULT PROXY\npermit-gated mutation\ncalls canary / sandbox",
+      label="CLOUD RUN FAULT PROXY\nPermit-gated mutation\nControlled acknowledgement loss",
       fillcolor="#172554",
-      color="#818cf8",
-      group="proxy"
+      color="#818cf8"
     ];
-    canary [
-      label="CANARY\ncontroller reads\nfault proxy mutates"
-    ];
-    sandbox [
-      label="SANDBOX\ncontroller reads\nfault proxy mutates",
-      group="controller"
-    ];
+    target [label="CLOUD RUN TARGET\nStaged release and traffic state"];
+    sandbox [label="CLOUD RUN SANDBOX\nIsolated provider-shaped state"];
 
     { rank=same; api; controller; proxy; }
-    { rank=same; sandbox; canary; }
-    api -> controller [label="investigate", weight=20];
-    controller -> proxy [label="exact permit", color="#34d399", weight=20];
-    proxy -> canary [label="stage / promote", color="#34d399", weight=20];
+    { rank=same; target; sandbox; }
+    api -> controller [label="investigate"];
+    controller -> proxy [label="exact permit", color="#34d399"];
+    proxy -> target [label="permitted action", color="#34d399"];
     controller -> sandbox [label="read", style=dashed, color="#38bdf8"];
     proxy -> sandbox [label="mutate", color="#34d399"];
-    sandbox -> canary [style=invis, weight=20];
   }
 
-  subgraph cluster_managed {
-    label="MANAGED SERVICES • IAM-SCOPED ACCESS";
+  subgraph cluster_data {
+    label="MANAGED SERVICES • LEAST-PRIVILEGE ACCESS";
     fontname="Liberation Sans";
-    fontsize=19;
+    fontsize=18;
     fontcolor="#cbd5e1";
     color="#475569";
     style="rounded";
-    margin=22;
+    margin=20;
 
     vertex [
-      label="VERTEX AI\ncontroller only\nGemini planning",
+      label="VERTEX AI\nBounded advisory planning",
       shape=component,
       fillcolor="#2e1065",
       color="#c4b5fd"
     ];
-    runtime_db [
-      label="RUNTIME FIRESTORE\nusers: API / controller / fault proxy\nviewer: sandbox\nauthority + permit claims",
+    authority [
+      label="FIRESTORE AUTHORITY\nRecovery state and permit claims",
       shape=cylinder,
       fillcolor="#082f49",
       color="#38bdf8"
     ];
-    target_db [
-      label="TARGET FIRESTORE\nviewer: controller\nuser: fault proxy\nrelease evidence",
+    provider_state [
+      label="PROVIDER STATE\nRelease and sandbox evidence",
       shape=cylinder,
       fillcolor="#082f49",
       color="#38bdf8"
     ];
-    sandbox_db [
-      label="SANDBOX FIRESTORE\nuser: sandbox\nisolated state",
-      shape=cylinder,
-      fillcolor="#082f49",
-      color="#38bdf8"
+    custody [
+      label="PRIVATE CUSTODY\nOperator records and raw evidence",
+      shape=folder,
+      fillcolor="#3f2d14",
+      color="#fbbf24"
     ];
 
-    { rank=same; runtime_db; vertex; sandbox_db; target_db; }
+    { rank=same; authority; vertex; provider_state; custody; }
   }
 
-  controller -> vertex [label="advisory", color="#a78bfa"];
-  controller -> runtime_db [label="authority", color="#38bdf8"];
-  proxy -> target_db [label="permitted write", color="#34d399"];
-  sandbox -> sandbox_db [label="isolated state", color="#38bdf8"];
+  subgraph cluster_public {
+    label="PUBLIC EVIDENCE SURFACE • NO OPERATIONAL AUTHORITY";
+    fontname="Liberation Sans";
+    fontsize=18;
+    fontcolor="#cbd5e1";
+    color="#475569";
+    style="rounded";
+    margin=20;
+
+    versioned [
+      label="VERSIONED EVIDENCE\nSanitized immutable files",
+      shape=folder,
+      fillcolor="#3f2d14",
+      color="#fbbf24"
+    ];
+    viewer [
+      label="CLOUD RUN VIEWER\nStatic HTML and JSON\nRead-only routes",
+      fillcolor="#1f2937",
+      color="#94a3b8"
+    ];
+    public [label="PUBLIC READER\nBrowser or offline verifier"];
+
+    versioned -> viewer [label="bundled at build time", style=dashed];
+    viewer -> public [label="read-only response", dir=back];
+  }
+
+  controller -> vertex [label="advisory request", color="#a78bfa"];
+  controller -> authority [label="authority state", color="#38bdf8"];
+  controller -> provider_state [label="evidence reads", color="#38bdf8"];
+  proxy -> provider_state [label="permitted write", color="#34d399"];
+  custody -> versioned [label="sanitized export", style=dashed, color="#fbbf24"];
 }

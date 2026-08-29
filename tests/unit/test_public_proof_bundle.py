@@ -12,9 +12,9 @@ from typing import Any
 import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
-EVIDENCE_SOURCE = ROOT / "demo" / "evidence"
+EVIDENCE_SOURCE = ROOT / "evidence" / "v0.1.0"
 VALIDATOR_PATH = ROOT / "scripts" / "validate_evidence.py"
-LEGACY_VALIDATOR_PATH = ROOT / "scripts" / "replay_gate_g5r.py"
+PACKAGE_CHECK_PATH = ROOT / "scripts" / "check_public_package.py"
 
 SPEC = importlib.util.spec_from_file_location("validate_evidence", VALIDATOR_PATH)
 assert SPEC is not None and SPEC.loader is not None
@@ -197,12 +197,46 @@ def test_noncanonical_encoding_is_rejected(evidence_path: Path, prefix: bytes) -
         VALIDATOR.load_and_validate(evidence_path)
 
 
-def test_legacy_validator_entry_point_delegates_to_canonical_validator() -> None:
+def test_legacy_schema_and_exact_evidence_bytes_are_preserved() -> None:
+    expected = {
+        "cleanup-verification.json": (
+            "34c4bd615f99b650baeca3e91736759c135c0fc172d1753ac1513d58afd71bcc"
+        ),
+        "live-corroboration.json": (
+            "408525043d82b0ee69404038e90358d82c7a531d35cbcfc169729ac5791fbcc9"
+        ),
+        "proof-to-permit.json": (
+            "4b4b80de36dbd9520cc7139573be229ff5eee8816c90af92552088a763e9264d"
+        ),
+        "provider-proof.json": (
+            "27118dde742d01eadb93778996964f55702ccc12238f6fb5795542f4ca31e480"
+        ),
+    }
+
+    for filename, digest in expected.items():
+        assert hashlib.sha256(
+            (EVIDENCE_SOURCE / filename).read_bytes()
+        ).hexdigest() == (digest)
+    assert (
+        json.loads((EVIDENCE_SOURCE / "proof-to-permit.json").read_bytes())[
+            "schema_version"
+        ]
+        == "reconcile/demo-proof/v2"
+    )
+    assert (
+        json.loads((EVIDENCE_SOURCE / "provider-proof.json").read_bytes())[
+            "schema_version"
+        ]
+        == "reconcile/provider-proof/v1"
+    )
+
+
+def test_public_package_check_accepts_the_repository() -> None:
     completed = subprocess.run(
-        [sys.executable, str(LEGACY_VALIDATOR_PATH), "--json"],
+        [sys.executable, str(PACKAGE_CHECK_PATH)],
         check=True,
         capture_output=True,
         text=True,
     )
 
-    assert json.loads(completed.stdout)["status"] == "PASS"
+    assert "RECONCILE public package: PASS" in completed.stdout

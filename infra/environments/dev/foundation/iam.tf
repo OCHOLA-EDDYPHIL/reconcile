@@ -109,7 +109,7 @@ resource "google_service_account_iam_member" "apply_act_as" {
 
   service_account_id = "projects/${var.project_id}/serviceAccounts/${each.value.account_id}@${var.project_id}.iam.gserviceaccount.com"
   role               = "roles/iam.serviceAccountUser"
-  member             = "serviceAccount:rec-p5-apply@example-project-id.iam.gserviceaccount.com"
+  member             = "serviceAccount:rec-p5-apply@${var.project_id}.iam.gserviceaccount.com"
 
   depends_on = [google_service_account.runtime]
 }

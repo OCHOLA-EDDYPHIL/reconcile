@@ -12,10 +12,21 @@ import time
 from collections.abc import Mapping
 from pathlib import Path
 
+from reconcile.deployment_profile import (
+    DeploymentProfileError,
+    load_sealed_deployment_profile_file,
+    resolve_deployment_identity,
+)
+
 _GCLOUD = "/usr/bin/gcloud"
 _OPERATOR_SERVICE_ACCOUNT = "rec-p5-apply@example-project-id.iam.gserviceaccount.com"
+_DEPLOYMENT_PROFILE = "RECONCILE_DEPLOYMENT_PROFILE"
+_REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 _MAX_TOKEN_BYTES = 16_384
 _AUDIENCE = re.compile(r"^[\x21-\x7e]{1,2048}$")
+_OPERATOR_SERVICE_ACCOUNT_PATTERN = re.compile(
+    r"^rec-p5-apply@[a-z][a-z0-9-]{4,28}[a-z0-9][.]iam[.]gserviceaccount[.]com$"
+)
 _CONFIGURATION = re.compile(r"^[a-z][a-z0-9-]{0,62}$")
 _COMPACT_JWT = re.compile(r"^[A-Za-z0-9_-]+[.][A-Za-z0-9_-]+[.][A-Za-z0-9_-]+$")
 
@@ -66,10 +77,22 @@ def _minimal_environment(source: Mapping[str, str]) -> dict[str, str]:
 class GcloudIdentityTokenSupplier:
     """Mint and briefly cache the approval-bound operator service-account token."""
 
-    def __init__(self, environ: Mapping[str, str] | None = None) -> None:
+    def __init__(
+        self,
+        environ: Mapping[str, str] | None = None,
+        *,
+        operator_service_account: str = _OPERATOR_SERVICE_ACCOUNT,
+    ) -> None:
+        if (
+            type(operator_service_account) is not str
+            or _OPERATOR_SERVICE_ACCOUNT_PATTERN.fullmatch(operator_service_account)
+            is None
+        ):
+            raise GoogleIdentityTokenError from None
         self._environment = _minimal_environment(
             os.environ if environ is None else environ
         )
+        self._operator_service_account = operator_service_account
         self._lock = threading.Lock()
         self._audience: str | None = None
         self._token: str | None = None
@@ -92,7 +115,10 @@ class GcloudIdentityTokenSupplier:
                         _GCLOUD,
                         "auth",
                         "print-identity-token",
-                        (f"--impersonate-service-account={_OPERATOR_SERVICE_ACCOUNT}"),
+                        (
+                            "--impersonate-service-account="
+                            f"{self._operator_service_account}"
+                        ),
                         "--include-email",
                         f"--audiences={audience}",
                         "--quiet",
@@ -146,7 +172,29 @@ def operator_client_identity(
         return None
     if type(audience) is not str or _AUDIENCE.fullmatch(audience) is None:
         raise GoogleIdentityTokenError from None
-    return GcloudIdentityTokenSupplier(source), audience
+    operator_service_account = _OPERATOR_SERVICE_ACCOUNT
+    profile_path = source.get(_DEPLOYMENT_PROFILE)
+    if profile_path is not None:
+        if type(profile_path) is not str or not profile_path:
+            raise GoogleIdentityTokenError from None
+        try:
+            profile = load_sealed_deployment_profile_file(
+                Path(profile_path),
+                repo_root=_REPOSITORY_ROOT,
+            )
+            deployment = resolve_deployment_identity(profile)
+        except (DeploymentProfileError, OSError, TypeError, ValueError):
+            raise GoogleIdentityTokenError from None
+        if audience != deployment.audiences.api:
+            raise GoogleIdentityTokenError from None
+        operator_service_account = deployment.apply_service_account_email
+    return (
+        GcloudIdentityTokenSupplier(
+            source,
+            operator_service_account=operator_service_account,
+        ),
+        audience,
+    )
 
 
 __all__ = [

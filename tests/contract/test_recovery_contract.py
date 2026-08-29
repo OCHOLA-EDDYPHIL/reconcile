@@ -9,11 +9,15 @@ import pytest
 from pydantic import ValidationError
 
 from reconcile.contracts import (
+    RECOVERY_RUN_REQUEST_VERSION,
     ActionPermit,
     AmbiguityWitness,
     Classification,
     GeminiHypothesis,
     RecoveryChain,
+    RecoveryRunFault,
+    RecoveryRunPolicy,
+    RecoveryRunRequest,
     SemanticActionIdentity,
     canonical_json_bytes,
     decode_contract,
@@ -26,6 +30,27 @@ pytestmark = pytest.mark.contract
 
 def _payload(model: object) -> dict[str, object]:
     return json.loads(canonical_json_bytes(model))  # type: ignore[arg-type]
+
+
+def test_partial_read_acceptance_fault_is_fixed_and_run_id_scoped() -> None:
+    request = RecoveryRunRequest(
+        schema_version=RECOVERY_RUN_REQUEST_VERSION,
+        run_id=f"p5w-fixed-{'a' * 32}",
+        scenario="cloud-run-rollout",
+        policy=RecoveryRunPolicy.FIXED,
+        fault=(RecoveryRunFault.ACCEPTANCE_DROP_AFTER_ACCEPT_PARTIAL_READ_OUTAGE),
+    )
+
+    assert request.fault.value == ("acceptance-drop-after-accept-partial-read-outage")
+    for update in (
+        {"policy": RecoveryRunPolicy.ADAPTIVE},
+        {"run_id": f"p5r-fixed-{'a' * 32}"},
+        {"run_id": f"p5w-fixed-{'A' * 32}"},
+    ):
+        with pytest.raises(ValidationError, match="partial-read acceptance fault"):
+            RecoveryRunRequest.model_validate(
+                request.model_dump(mode="python") | update
+            )
 
 
 def test_recovery_contracts_round_trip_canonically() -> None:

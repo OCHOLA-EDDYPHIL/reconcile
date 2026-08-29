@@ -126,7 +126,12 @@ class RecoveryPolicyResult(StrictModel):
     schema_version: Literal[RECOVERY_POLICY_RESULT_VERSION]
     run_id: Identifier
     policy: Literal["blind-retry", "blind-abort", "fixed", "adaptive"]
-    fault: Literal["no-fault", "drop-after-accept", "suppress-before-dispatch"]
+    fault: Literal[
+        "no-fault",
+        "drop-after-accept",
+        "acceptance-drop-after-accept-partial-read-outage",
+        "suppress-before-dispatch",
+    ]
     target_sha256: Sha256Digest
     input_intent_sha256: Sha256Digest
     fault_boundary_sha256: Sha256Digest
@@ -143,6 +148,11 @@ class RecoveryPolicyResult(StrictModel):
 
     @model_validator(mode="after")
     def validate_result(self) -> RecoveryPolicyResult:
+        if (
+            self.fault == "acceptance-drop-after-accept-partial-read-outage"
+            and self.policy != "fixed"
+        ):
+            raise ValueError("partial-read acceptance result requires fixed policy")
         if tuple(item.sequence for item in self.timeline) != tuple(
             range(1, len(self.timeline) + 1)
         ):

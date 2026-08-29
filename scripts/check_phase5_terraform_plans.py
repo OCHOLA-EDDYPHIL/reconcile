@@ -15,6 +15,12 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from reconcile.deployment_profile import (
+    DeploymentProfile,
+    DeploymentProfileError,
+    load_sealed_deployment_profile_file,
+)
+
 _ROOT = Path(__file__).parents[1]
 _PROJECT = "example-project-id"
 _PROJECT_NUMBER = "000000000000"
@@ -23,6 +29,7 @@ _STATE_BUCKET = f"{_PROJECT}-p5-state"
 _TARGET_BUCKET = f"{_PROJECT}-p5-target"
 _SANDBOX_DATABASE = "reconcile-p5-sandbox"
 _OWNER = "user:owner@example.invalid"
+_BILLING_ACCOUNT = "000000-000000-000000"
 _APPLY_EMAIL = f"rec-p5-apply@{_PROJECT}.iam.gserviceaccount.com"
 _APPLY_MEMBER = f"serviceAccount:{_APPLY_EMAIL}"
 _OPERATOR_MEMBER = _APPLY_MEMBER
@@ -170,6 +177,7 @@ _COMMON_RUNTIME_ENVIRONMENT = {
 _RUNTIME_ENVIRONMENT = {
     "api": _COMMON_RUNTIME_ENVIRONMENT
     | {
+        "RECONCILE_ACCEPTANCE_PARTIAL_READ_OUTAGE_ENABLED": "true",
         "RECONCILE_ALLOWED_CALLER_EMAILS": _APPLY_EMAIL,
         "RECONCILE_AUTH_AUDIENCE": _AUDIENCES["api"],
         "RECONCILE_COMPONENT": "api",
@@ -187,6 +195,7 @@ _RUNTIME_ENVIRONMENT = {
     },
     "controller": _COMMON_RUNTIME_ENVIRONMENT
     | {
+        "RECONCILE_ACCEPTANCE_PARTIAL_READ_OUTAGE_ENABLED": "true",
         "RECONCILE_ALLOWED_CALLER_EMAILS": _RUNTIME_EMAILS["api"],
         "RECONCILE_AUTH_AUDIENCE": _AUDIENCES["controller"],
         "RECONCILE_CANARY_AUDIENCE": _AUDIENCES["canary"],
@@ -217,6 +226,7 @@ _RUNTIME_ENVIRONMENT = {
     },
     "fault_proxy": _COMMON_RUNTIME_ENVIRONMENT
     | {
+        "RECONCILE_ACCEPTANCE_PARTIAL_READ_OUTAGE_ENABLED": "true",
         "RECONCILE_ALLOWED_CALLER_EMAILS": _RUNTIME_EMAILS["api"],
         "RECONCILE_AUTH_AUDIENCE": _AUDIENCES["fault_proxy"],
         "RECONCILE_CANARY_AUDIENCE": _AUDIENCES["canary"],
@@ -350,28 +360,241 @@ _RUNTIME_ADDRESSES = frozenset(
     }
 )
 _STACKS = (
-    _Stack("bootstrap", _ROOT / "infra" / "bootstrap", _BOOTSTRAP_ADDRESSES, {}),
+    _Stack(
+        "bootstrap",
+        _ROOT / "infra" / "bootstrap",
+        _BOOTSTRAP_ADDRESSES,
+        {
+            "billing_account_id": _BILLING_ACCOUNT,
+            "owner_principal": _OWNER,
+            "project_id": _PROJECT,
+        },
+    ),
     _Stack(
         "foundation",
         _ROOT / "infra" / "environments" / "dev" / "foundation",
         _FOUNDATION_ADDRESSES,
-        {},
+        {
+            "billing_account_id": _BILLING_ACCOUNT,
+            "project_id": _PROJECT,
+            "project_number": _PROJECT_NUMBER,
+        },
     ),
     _Stack(
         "runtime",
         _ROOT / "infra" / "environments" / "dev" / "runtime",
         _RUNTIME_ADDRESSES,
         {
-            "api_invoker_members": [_OPERATOR_MEMBER],
+            "acceptance_partial_read_outage_enabled": True,
             "image_digest": _IMAGE_DIGEST,
             "infrastructure_revision": _INFRASTRUCTURE_REVISION,
+            "project_id": _PROJECT,
             "recovery_definition_created_at": _RECOVERY_DEFINITION_CREATED_AT,
             "semantic_config_sha256": _SEMANTIC_CONFIG_SHA256,
-            "service_account_emails": _RUNTIME_EMAILS,
             "source_revision": _SOURCE_REVISION,
         },
     ),
 )
+
+
+def _configure_deployment(profile: DeploymentProfile) -> None:
+    global _APPLY_EMAIL
+    global _APPLY_MEMBER
+    global _AUDIENCES
+    global _BILLING_ACCOUNT
+    global _CANARY_BASELINE_IDENTITY
+    global _CANARY_BASELINE_REVISION
+    global _COMMON_RUNTIME_ENVIRONMENT
+    global _CUSTOM_ROLE_EXPECTED
+    global _IMAGE_REFERENCE
+    global _IAM_EXPECTED
+    global _OPERATOR_MEMBER
+    global _OWNER
+    global _PROJECT
+    global _PROJECT_NUMBER
+    global _RECOVERY_PAYLOAD_SHA256
+    global _RUNTIME_ADDRESSES
+    global _RUNTIME_EMAILS
+    global _RUNTIME_ENVIRONMENT
+    global _STACKS
+    global _STATE_BUCKET
+    global _TARGET_BUCKET
+
+    _PROJECT = profile.project_id
+    _PROJECT_NUMBER = profile.project_number
+    _BILLING_ACCOUNT = profile.billing_account_id
+    _OWNER = f"user:{profile.owner_account}"
+    _STATE_BUCKET = f"{_PROJECT}-p5-state"
+    _TARGET_BUCKET = f"{_PROJECT}-p5-target"
+    _APPLY_EMAIL = f"rec-p5-apply@{_PROJECT}.iam.gserviceaccount.com"
+    _APPLY_MEMBER = f"serviceAccount:{_APPLY_EMAIL}"
+    _OPERATOR_MEMBER = _APPLY_MEMBER
+    _IMAGE_REFERENCE = (
+        f"{_REGION}-docker.pkg.dev/{_PROJECT}/reconcile-p5/reconcile@{_IMAGE_DIGEST}"
+    )
+    _RUNTIME_EMAILS = {
+        "api": f"rec-p5-api@{_PROJECT}.iam.gserviceaccount.com",
+        "canary": f"rec-p5-canary@{_PROJECT}.iam.gserviceaccount.com",
+        "controller": f"rec-p5-controller@{_PROJECT}.iam.gserviceaccount.com",
+        "fault_proxy": f"rec-p5-fault@{_PROJECT}.iam.gserviceaccount.com",
+        "sandbox": f"rec-p5-sandbox@{_PROJECT}.iam.gserviceaccount.com",
+    }
+    _AUDIENCES = {
+        component: (
+            f"https://reconcile.invalid/phase5/{_PROJECT}/{component.replace('_', '-')}"
+        )
+        for component in _RUNTIME_EMAILS
+    }
+    _CANARY_BASELINE_IDENTITY = _canary_baseline_identity(
+        image_digest=_IMAGE_DIGEST,
+        infrastructure_revision=_INFRASTRUCTURE_REVISION,
+        semantic_config_sha256=_SEMANTIC_CONFIG_SHA256,
+        source_revision=_SOURCE_REVISION,
+    )
+    _CANARY_BASELINE_REVISION = (
+        f"reconcile-p5-canary-b-{_CANARY_BASELINE_IDENTITY[:16]}"
+    )
+    _RECOVERY_PAYLOAD_SHA256 = _recovery_payload_sha256(
+        image_digest=_IMAGE_DIGEST,
+        infrastructure_revision=_INFRASTRUCTURE_REVISION,
+        semantic_config_sha256=_SEMANTIC_CONFIG_SHA256,
+        source_revision=_SOURCE_REVISION,
+    )
+    _COMMON_RUNTIME_ENVIRONMENT = {
+        "GOOGLE_CLOUD_PROJECT": _PROJECT,
+        "RECONCILE_IMAGE_DIGEST": _IMAGE_DIGEST,
+        "RECONCILE_INFRA_REVISION": _INFRASTRUCTURE_REVISION,
+        "RECONCILE_SEMANTIC_CONFIG_SHA256": _SEMANTIC_CONFIG_SHA256,
+        "RECONCILE_SOURCE_REVISION": _SOURCE_REVISION,
+    }
+    _RUNTIME_ENVIRONMENT = {
+        "api": _COMMON_RUNTIME_ENVIRONMENT
+        | {
+            "RECONCILE_ACCEPTANCE_PARTIAL_READ_OUTAGE_ENABLED": "true",
+            "RECONCILE_ALLOWED_CALLER_EMAILS": _APPLY_EMAIL,
+            "RECONCILE_AUTH_AUDIENCE": _AUDIENCES["api"],
+            "RECONCILE_COMPONENT": "api",
+            "RECONCILE_CONTROLLER_AUDIENCE": _AUDIENCES["controller"],
+            "RECONCILE_CONTROLLER_URL": None,
+            "RECONCILE_FAULT_PROXY_AUDIENCE": _AUDIENCES["fault_proxy"],
+            "RECONCILE_FAULT_PROXY_URL": None,
+            "RECONCILE_RUNTIME_DATABASE": "reconcile-p5-runtime",
+            "RECONCILE_TARGET_BUCKET": _TARGET_BUCKET,
+        },
+        "canary": _COMMON_RUNTIME_ENVIRONMENT
+        | {
+            "RECONCILE_CANARY_CONFIGURATION_SHA256": _SEMANTIC_CONFIG_SHA256,
+            "RECONCILE_CANARY_RELEASE_ID": "baseline",
+        },
+        "controller": _COMMON_RUNTIME_ENVIRONMENT
+        | {
+            "RECONCILE_ACCEPTANCE_PARTIAL_READ_OUTAGE_ENABLED": "true",
+            "RECONCILE_ALLOWED_CALLER_EMAILS": _RUNTIME_EMAILS["api"],
+            "RECONCILE_AUTH_AUDIENCE": _AUDIENCES["controller"],
+            "RECONCILE_CANARY_AUDIENCE": _AUDIENCES["canary"],
+            "RECONCILE_CANARY_BASELINE_REVISION": _CANARY_BASELINE_REVISION,
+            "RECONCILE_CANARY_LOCATION": _REGION,
+            "RECONCILE_CANARY_SERVICE": "reconcile-p5-canary",
+            "RECONCILE_COMPONENT": "controller",
+            "RECONCILE_FAULT_PROXY_AUDIENCE": _AUDIENCES["fault_proxy"],
+            "RECONCILE_FAULT_PROXY_URL": None,
+            "RECONCILE_RECOVERY_DEFINITION_CREATED_AT": (
+                _RECOVERY_DEFINITION_CREATED_AT
+            ),
+            "RECONCILE_RECOVERY_EXECUTION_TIMEOUT_SECONDS": "240",
+            "RECONCILE_RECOVERY_PAYLOAD_SHA256": _RECOVERY_PAYLOAD_SHA256,
+            "RECONCILE_RECOVERY_RELEASE_ID": _RECOVERY_RELEASE_ID,
+            "RECONCILE_RUNTIME_DATABASE": "reconcile-p5-runtime",
+            "RECONCILE_SANDBOX_AUDIENCE": _AUDIENCES["sandbox"],
+            "RECONCILE_SANDBOX_URL": None,
+            "RECONCILE_TARGET_BUCKET": _TARGET_BUCKET,
+            "RECONCILE_TARGET_DATABASE": "reconcile-p5-target",
+            "RECONCILE_VERTEX_LOCATION": "us",
+            "RECONCILE_VERTEX_MAX_COUNT_TOKENS_ATTEMPTS": "1",
+            "RECONCILE_VERTEX_MAX_GENERATION_ATTEMPTS": "1",
+            "RECONCILE_VERTEX_MAX_INPUT_TOKENS": "12000",
+            "RECONCILE_VERTEX_MAX_OUTPUT_TOKENS": "4096",
+            "RECONCILE_VERTEX_MODEL": "gemini-3.5-flash",
+            "RECONCILE_VERTEX_PROMPT_SHA256": _VERTEX_PROMPT_SHA256,
+            "RECONCILE_VERTEX_PROMPT_VERSION": _VERTEX_PROMPT_VERSION,
+            "RECONCILE_VERTEX_THINKING_LEVEL": "MINIMAL",
+        },
+        "fault_proxy": _COMMON_RUNTIME_ENVIRONMENT
+        | {
+            "RECONCILE_ACCEPTANCE_PARTIAL_READ_OUTAGE_ENABLED": "true",
+            "RECONCILE_ALLOWED_CALLER_EMAILS": _RUNTIME_EMAILS["api"],
+            "RECONCILE_AUTH_AUDIENCE": _AUDIENCES["fault_proxy"],
+            "RECONCILE_CANARY_AUDIENCE": _AUDIENCES["canary"],
+            "RECONCILE_CANARY_BASELINE_REVISION": _CANARY_BASELINE_REVISION,
+            "RECONCILE_CANARY_LOCATION": _REGION,
+            "RECONCILE_CANARY_SERVICE": "reconcile-p5-canary",
+            "RECONCILE_COMPONENT": "fault-proxy",
+            "RECONCILE_RECOVERY_ACTION_CALLER_EMAIL": (_RUNTIME_EMAILS["controller"]),
+            "RECONCILE_RUNTIME_DATABASE": "reconcile-p5-runtime",
+            "RECONCILE_SANDBOX_AUDIENCE": _AUDIENCES["sandbox"],
+            "RECONCILE_SANDBOX_URL": None,
+            "RECONCILE_TARGET_BUCKET": _TARGET_BUCKET,
+            "RECONCILE_TARGET_DATABASE": "reconcile-p5-target",
+        },
+        "sandbox": _COMMON_RUNTIME_ENVIRONMENT
+        | {
+            "RECONCILE_AUTH_AUDIENCE": _AUDIENCES["sandbox"],
+            "RECONCILE_COMPONENT": "sandbox",
+            "RECONCILE_RUNTIME_DATABASE": "reconcile-p5-runtime",
+            "RECONCILE_SANDBOX_MUTATION_CALLER_EMAIL": (_RUNTIME_EMAILS["fault_proxy"]),
+            "RECONCILE_SANDBOX_READ_CALLER_EMAIL": _RUNTIME_EMAILS["controller"],
+            "RECONCILE_TARGET_DATABASE": _SANDBOX_DATABASE,
+        },
+    }
+    _RUNTIME_ADDRESSES = frozenset(
+        address
+        for address in _RUNTIME_ADDRESSES
+        if not address.startswith(
+            "google_cloud_run_v2_service_iam_member.api_operator["
+        )
+    ) | frozenset(
+        {f'google_cloud_run_v2_service_iam_member.api_operator["{_OPERATOR_MEMBER}"]'}
+    )
+    _STACKS = (
+        _Stack(
+            "bootstrap",
+            _ROOT / "infra" / "bootstrap",
+            _BOOTSTRAP_ADDRESSES,
+            {
+                "billing_account_id": _BILLING_ACCOUNT,
+                "owner_principal": _OWNER,
+                "project_id": _PROJECT,
+            },
+        ),
+        _Stack(
+            "foundation",
+            _ROOT / "infra" / "environments" / "dev" / "foundation",
+            _FOUNDATION_ADDRESSES,
+            {
+                "billing_account_id": _BILLING_ACCOUNT,
+                "project_id": _PROJECT,
+                "project_number": _PROJECT_NUMBER,
+            },
+        ),
+        _Stack(
+            "runtime",
+            _ROOT / "infra" / "environments" / "dev" / "runtime",
+            _RUNTIME_ADDRESSES,
+            {
+                "acceptance_partial_read_outage_enabled": True,
+                "image_digest": _IMAGE_DIGEST,
+                "infrastructure_revision": _INFRASTRUCTURE_REVISION,
+                "project_id": _PROJECT,
+                "recovery_definition_created_at": (_RECOVERY_DEFINITION_CREATED_AT),
+                "semantic_config_sha256": _SEMANTIC_CONFIG_SHA256,
+                "source_revision": _SOURCE_REVISION,
+            },
+        ),
+    )
+    _IAM_EXPECTED = _iam_expectations()
+    _CUSTOM_ROLE_EXPECTED = _custom_role_expectations()
+
+
 _VARIABLE_NAMES = {
     "bootstrap": {
         "allow_state_bucket_destroy",
@@ -379,7 +602,6 @@ _VARIABLE_NAMES = {
         "owner_principal",
         "project_id",
         "region",
-        "state_bucket_name",
     },
     "foundation": {
         "billing_account_id",
@@ -389,7 +611,7 @@ _VARIABLE_NAMES = {
         "region",
     },
     "runtime": {
-        "api_invoker_members",
+        "acceptance_partial_read_outage_enabled",
         "image_digest",
         "infrastructure_revision",
         "project_id",
@@ -397,7 +619,6 @@ _VARIABLE_NAMES = {
         "request_timeout_seconds",
         "recovery_definition_created_at",
         "semantic_config_sha256",
-        "service_account_emails",
         "source_revision",
         "vertex_location",
         "vertex_model",
@@ -420,7 +641,7 @@ _OUTPUT_NAMES = {
 def _iam_expectations() -> dict[str, dict[str, Any]]:
     expected = {
         "google_billing_account_iam_member.phase5_apply": {
-            "billing_account_id": "000000-000000-000000",
+            "billing_account_id": _BILLING_ACCOUNT,
             "member": _APPLY_MEMBER,
             "role": "roles/billing.costsManager",
         },
@@ -588,29 +809,34 @@ def _iam_expectations() -> dict[str, dict[str, Any]]:
 
 _IAM_EXPECTED = _iam_expectations()
 
-_CUSTOM_ROLE_EXPECTED = {
-    "google_project_iam_custom_role.canary_operation_reader": {
-        "permissions": ["run.operations.get"],
-        "project": _PROJECT,
-        "role_id": "reconcileP5CanaryOperationReader",
-        "stage": "GA",
-    },
-    "google_project_iam_custom_role.canary_mutator": {
-        "permissions": [
-            "run.services.get",
-            "run.services.update",
-        ],
-        "project": _PROJECT,
-        "role_id": "reconcileP5CanaryMutator",
-        "stage": "GA",
-    },
-    "google_project_iam_custom_role.canary_revision_reader": {
-        "permissions": ["run.revisions.get"],
-        "project": _PROJECT,
-        "role_id": "reconcileP5CanaryRevisionReader",
-        "stage": "GA",
-    },
-}
+
+def _custom_role_expectations() -> dict[str, dict[str, Any]]:
+    return {
+        "google_project_iam_custom_role.canary_operation_reader": {
+            "permissions": ["run.operations.get"],
+            "project": _PROJECT,
+            "role_id": "reconcileP5CanaryOperationReader",
+            "stage": "GA",
+        },
+        "google_project_iam_custom_role.canary_mutator": {
+            "permissions": [
+                "run.services.get",
+                "run.services.update",
+            ],
+            "project": _PROJECT,
+            "role_id": "reconcileP5CanaryMutator",
+            "stage": "GA",
+        },
+        "google_project_iam_custom_role.canary_revision_reader": {
+            "permissions": ["run.revisions.get"],
+            "project": _PROJECT,
+            "role_id": "reconcileP5CanaryRevisionReader",
+            "stage": "GA",
+        },
+    }
+
+
+_CUSTOM_ROLE_EXPECTED = _custom_role_expectations()
 
 
 def _fail(message: str) -> None:
@@ -1309,7 +1535,7 @@ def _verify_foundation(resources: dict[str, dict[str, Any]]) -> None:
         budget,
         {
             "all_updates_rule": [],
-            "billing_account": "000000-000000-000000",
+            "billing_account": _BILLING_ACCOUNT,
             "budget_filter": [
                 {
                     "calendar_period": None,
@@ -1673,10 +1899,7 @@ def _copy_stack(stack: _Stack, destination: Path) -> None:
             _fail("bootstrap local backend block is not unique")
         block = matches[0]
         assignments = re.findall(r"(?m)^\s*([a-z_]+)\s*=", block)
-        if (
-            assignments != ["path"]
-            or _string_attribute(block, "path") != "terraform.tfstate"
-        ):
+        if assignments:
             _fail("bootstrap local backend path drifted")
         return
     backend = re.compile(r'(?ms)^\s*backend "gcs" \{.*?^\s*\}')
@@ -1684,19 +1907,23 @@ def _copy_stack(stack: _Stack, destination: Path) -> None:
     if len(matches) != 1:
         _fail(f"{stack.name} backend block is not unique")
     block = matches[0]
-    attributes = {
-        "bucket": _STATE_BUCKET,
-        "prefix": f"phase5/{stack.name}",
-        "impersonate_service_account": _APPLY_EMAIL,
-    }
-    if any(
-        _string_attribute(block, name) != value for name, value in attributes.items()
+    assignments = re.findall(r"(?m)^\s*([a-z_]+)\s*=", block)
+    if (
+        assignments != ["prefix"]
+        or _string_attribute(
+            block,
+            "prefix",
+        )
+        != f"phase5/{stack.name}"
     ):
         _fail(f"{stack.name} backend identity drifted")
     versions.write_text(backend.sub('\n  backend "local" {}', source), encoding="utf-8")
     provider = destination / "providers.tf"
     source = provider.read_text(encoding="utf-8")
-    impersonation = f'  impersonate_service_account = "{_APPLY_EMAIL}"\n'
+    impersonation = (
+        '  impersonate_service_account = "rec-p5-apply@'
+        '${var.project_id}.iam.gserviceaccount.com"\n'
+    )
     if source.count(impersonation) != 1:
         _fail(f"{stack.name} provider identity drifted")
     provider.write_text(source.replace(impersonation, ""), encoding="utf-8")
@@ -2123,6 +2350,7 @@ def _offline_create(
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
+    parser.add_argument("--deployment-profile", type=Path, required=True)
     parser.add_argument("--provider-mirror", type=Path)
     parser.add_argument("--terraform", type=Path, default=Path("terraform"))
     parser.add_argument("--artifact-output", type=Path)
@@ -2138,6 +2366,14 @@ def _parse_args() -> argparse.Namespace:
 
 def main() -> int:
     arguments = _parse_args()
+    try:
+        deployment_profile = load_sealed_deployment_profile_file(
+            arguments.deployment_profile,
+            repo_root=_ROOT,
+        )
+    except DeploymentProfileError as error:
+        raise RuntimeError(error.code) from error
+    _configure_deployment(deployment_profile)
     terraform = shutil.which(str(arguments.terraform))
     if terraform is None:
         raise RuntimeError("terraform executable was not found")
