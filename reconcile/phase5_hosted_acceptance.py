@@ -4385,20 +4385,25 @@ class CloudRunAcceptanceBackend:
                     is RecoveryRunFault.ACCEPTANCE_DROP_AFTER_ACCEPT_PARTIAL_READ_OUTAGE
                 ):
                     try:
-                        if len(current.reports) != 1 or len(current.witnesses) != 1:
+                        if len(current.reports) != 2 or len(current.witnesses) != 1:
+                            raise ValueError
+                        terminal_report = current.reports[-1]
+                        if current.witnesses[0].report_sha256 != canonical_sha256(
+                            terminal_report
+                        ):
                             raise ValueError
                         partial_read_outage = PartialReadOutageObservation(
-                            classification=current.reports[-1].classification,
+                            classification=terminal_report.classification,
                             lifecycle=current.lifecycle,
                             decision=current.decision,
                             witness=current.witnesses[0],
                             node_states=tuple(node.state for node in current.nodes),
                             probe_capabilities=tuple(
                                 item.capability_name
-                                for item in current.reports[-1].probe_audit
+                                for item in terminal_report.probe_audit
                             ),
                             probe_outcomes=tuple(
-                                item.outcome for item in current.reports[-1].probe_audit
+                                item.outcome for item in terminal_report.probe_audit
                             ),
                             certificate_count=len(current.certificates),
                             action_permit_count=len(current.action_permits),

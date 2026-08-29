@@ -404,7 +404,10 @@ def test_partial_read_outage_produces_a_replay_stable_ambiguity_witness(
     assert canonical_sha256(replay_snapshot.witnesses[0]) == canonical_sha256(witness)
     assert snapshot.lifecycle is RecoveryRunLifecycle.ESCALATED
     assert snapshot.decision.value == "ESCALATE"
+    assert len(snapshot.reports) == 2
+    assert tuple(len(report.probe_audit) for report in snapshot.reports) == (1, 3)
     assert type(witness) is AmbiguityWitness
+    assert witness.report_sha256 == canonical_sha256(stage_report)
     assert len(witness.possible_histories) == 2
     assert {history.history_id for history in witness.possible_histories} == {
         "effects-occurred",
