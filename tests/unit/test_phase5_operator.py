@@ -3175,6 +3175,18 @@ def test_snapshot_checkers_use_pinned_python_and_reverify_before_terraform(
         state.root / "terraform.rc",
         failure="TEST_WRITE_FAILED",
     )
+    dependency_root = state.root / "python-dependencies"
+    dependency_root.mkdir(mode=0o700)
+    python_dependencies = operator.PythonDependencyBinding(
+        root=str(dependency_root),
+        source_image_digest=f"sha256:{'b' * 64}",
+        source_archive_sha256="a" * 64,
+        python_lock_sha256="b" * 64,
+        file_count=1,
+        entry_count=1,
+        byte_count=1,
+        sha256="c" * 64,
+    )
     events: list[str] = []
     calls: list[tuple[tuple[str, ...], Path, dict[str, str], int]] = []
 
@@ -3217,6 +3229,14 @@ def test_snapshot_checkers_use_pinned_python_and_reverify_before_terraform(
 
     monkeypatch.setattr(operator, "_verify_python_interpreter", verify_python)
     monkeypatch.setattr(operator, "_verify_terraform_binary", verify_terraform)
+    monkeypatch.setattr(
+        operator,
+        "_verify_python_dependency_binding",
+        lambda binding: (
+            binding is python_dependencies
+            or pytest.fail("unexpected dependency binding")
+        ),
+    )
     runtime_identity = {
         "image_digest": f"sha256:{'b' * 64}",
         "infrastructure_revision": "c" * 64,
@@ -3238,6 +3258,7 @@ def test_snapshot_checkers_use_pinned_python_and_reverify_before_terraform(
         source_root=source,
         state_root=state.root,
         provider_mirror=None,
+        python_dependencies=python_dependencies,
         runtime_identity=runtime_identity,
         runner=runner,
     )
@@ -3265,7 +3286,7 @@ def test_snapshot_checkers_use_pinned_python_and_reverify_before_terraform(
         "scripts.check_phase5_terraform_plans",
     )
     assert cwd == source
-    assert environment["PYTHONPATH"] == str(source)
+    assert environment["PYTHONPATH"] == f"{source}:{dependency_root}"
     assert environment["TF_CLI_CONFIG_FILE"] == str(state.root / "terraform.rc")
     assert timeout == 7_200
 
