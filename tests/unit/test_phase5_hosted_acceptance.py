@@ -2385,10 +2385,16 @@ def test_gcloud_inspector_uses_only_exact_read_only_commands(tmp_path: Path) -> 
         if argv[1:4] == ("run", "services", "describe"):
             service = argv[4]
             component = service.removeprefix("reconcile-p5-")
+            value = json.loads(_description(component, accounts[service]))
+            if service == "reconcile-p5-canary":
+                value["status"]["latestCreatedRevisionName"] = (
+                    "reconcile-p5-canary-00008"
+                )
+                value["status"]["latestReadyRevisionName"] = "reconcile-p5-canary-00008"
             return subprocess.CompletedProcess(
                 argv,
                 0,
-                _description(component, accounts[service]),
+                json.dumps(value, separators=(",", ":"), sort_keys=True).encode(),
                 b"",
             )
         if argv[1:4] == ("run", "revisions", "describe"):
@@ -2427,12 +2433,21 @@ def test_gcloud_inspector_uses_only_exact_read_only_commands(tmp_path: Path) -> 
     diagnostics = inspector.lifecycle_diagnostics()
 
     assert tuple(item.component for item in deployments) == tuple(ServiceComponent)
+    canary = next(
+        item for item in deployments if item.component is ServiceComponent.CANARY
+    )
+    assert canary.latest_created_revision == "reconcile-p5-canary-00008"
+    assert canary.latest_ready_revision == "reconcile-p5-canary-00008"
+    assert canary.serving_revision == "reconcile-p5-canary-00007"
     assert all(
         item.generation == item.observed_generation == 7
         and item.ready
-        and item.latest_created_revision
-        == item.latest_ready_revision
-        == item.serving_revision
+        and (
+            item.component is ServiceComponent.CANARY
+            or item.latest_created_revision
+            == item.latest_ready_revision
+            == item.serving_revision
+        )
         and item.revision_generation == item.revision_observed_generation == 1
         and item.revision_ready
         and not item.invoker_iam_disabled
