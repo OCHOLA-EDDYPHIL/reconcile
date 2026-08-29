@@ -149,7 +149,7 @@ from reconcile.scenarios.storage import STORAGE_EFFECT_ID
 PHASE5_HOSTED_ACCEPTANCE_VERSION = "reconcile/phase5-hosted-acceptance/v2"
 PHASE5_ACCEPTANCE_ARTIFACT_VERSION = "reconcile/phase5-acceptance-artifact/v1"
 
-_PROJECT_ID = "reconcile-dev-260813-14fa6d"
+_PROJECT_ID = "example-project-id"
 _REGION = "us-central1"
 _API_AUDIENCE = f"https://reconcile.invalid/phase5/{_PROJECT_ID}/api"
 _CANARY_AUDIENCE = f"https://reconcile.invalid/phase5/{_PROJECT_ID}/canary"
@@ -164,9 +164,7 @@ _PROMPT_SHA256 = "a18ac5bbd22570562acc6dfbc49437a82f0db6a265a4de737c1371b6ef2ca2
 _GCLOUD = "/usr/bin/gcloud"
 _TERRAFORM = "/usr/local/libexec/reconcile/terraform-1.15.8"
 _TERRAFORM_SHA256 = "8b6cb96cd46080ee1287baf646c70078715a99123b9b3a6ce2a7fe3892ec703a"
-_APPLY_SERVICE_ACCOUNT = (
-    "rec-p5-apply@reconcile-dev-260813-14fa6d.iam.gserviceaccount.com"
-)
+_APPLY_SERVICE_ACCOUNT = "rec-p5-apply@example-project-id.iam.gserviceaccount.com"
 _MAX_COMMAND_BYTES = 1_048_576
 _MAX_TERRAFORM_PLAN_BYTES = 16 * 1_048_576
 _MAX_RECORD_BYTES = 8 * 1_048_576
@@ -278,16 +276,16 @@ class CandidateIdentity(StrictModel):
     image_digest: ImageDigest
     infrastructure_revision: Sha256Digest
     semantic_config_sha256: Sha256Digest
-    project_id: Literal["reconcile-dev-260813-14fa6d"] = _PROJECT_ID
+    project_id: Literal["example-project-id"] = _PROJECT_ID
     region: Literal["us-central1"] = _REGION
     operator_service_account: Literal[
-        "rec-p5-apply@reconcile-dev-260813-14fa6d.iam.gserviceaccount.com"
+        "rec-p5-apply@example-project-id.iam.gserviceaccount.com"
     ] = _APPLY_SERVICE_ACCOUNT
-    api_audience: Literal[
-        "https://reconcile.invalid/phase5/reconcile-dev-260813-14fa6d/api"
-    ] = _API_AUDIENCE
+    api_audience: Literal["https://reconcile.invalid/phase5/example-project-id/api"] = (
+        _API_AUDIENCE
+    )
     controller_audience: Literal[
-        "https://reconcile.invalid/phase5/reconcile-dev-260813-14fa6d/controller"
+        "https://reconcile.invalid/phase5/example-project-id/controller"
     ] = _CONTROLLER_AUDIENCE
     provider_source: Literal["registry.terraform.io/hashicorp/google"] = (
         _PROVIDER_SOURCE
@@ -2409,7 +2407,7 @@ def _minimal_environment(source: Mapping[str, str]) -> dict[str, str]:
         "HOME": str(home),
         "LANG": "C.UTF-8",
         "LC_ALL": "C.UTF-8",
-        "PATH": "/home/reconcile/.local/bin:/usr/bin:/bin",
+        "PATH": "/opt/reconcile/.local/bin:/usr/bin:/bin",
         "PYTHONNOUSERSITE": "1",
     }
     configuration = source.get("CLOUDSDK_ACTIVE_CONFIG_NAME")

@@ -1,83 +1,77 @@
 digraph ReconcileProof {
   graph [
     bgcolor="#07111f",
-    fontname="Arial",
-    label="One lost acknowledgement. Two unsafe defaults. One proof-bound recovery.",
+    fontname="Liberation Sans",
+    label=<<FONT POINT-SIZE="32"><B>RECONCILE</B> — EVIDENCE SUMMARY</FONT><BR/><FONT POINT-SIZE="18">One lost acknowledgement, compared across recovery policies.</FONT>>,
     labelloc="t",
+    labeljust="l",
     fontcolor="#f8fafc",
-    fontsize=25,
-    pad=0.32,
+    pad=0.42,
     rankdir=TB,
-    ranksep=0.55,
-    nodesep=0.55,
-    splines=polyline,
-    ratio=fill,
-    size="14.72,7.5!",
-    dpi=144
+    ranksep=0.611,
+    nodesep=0.72,
+    splines=polyline
   ];
   node [
     shape=box,
     style="rounded,filled",
-    fontname="Arial",
-    fontsize=13,
+    fontname="Liberation Sans",
+    fontsize=18,
     fontcolor="#e2e8f0",
     color="#475569",
     fillcolor="#111c2e",
-    margin="0.20,0.15",
-    penwidth=1.5
+    margin="0.24,0.18",
+    penwidth=1.8
   ];
   edge [
-    fontname="Arial",
-    fontsize=11,
+    fontname="Liberation Sans",
+    fontsize=15,
     fontcolor="#cbd5e1",
     color="#64748b",
-    arrowsize=0.8,
-    penwidth=1.5
+    arrowsize=0.85,
+    penwidth=1.8
   ];
 
   fault [
-    label="CLOUD RUN ACCEPTS THE STAGE\nTHE ACKNOWLEDGEMENT DISAPPEARS",
+    label="CLOUD RUN ACCEPTED THE STAGE\nTHE ACKNOWLEDGEMENT WAS LOST",
     shape=octagon,
     fillcolor="#451a1a",
     color="#fb7185",
-    fontsize=15
+    fontsize=21
   ];
 
   scripted [
     shape=plain,
-    label=<<TABLE BORDER="2" CELLBORDER="0" CELLSPACING="0" CELLPADDING="12" COLOR="#fb7185" BGCOLOR="#22131f">
-      <TR><TD><FONT COLOR="#fecdd3" POINT-SIZE="15"><B>SCRIPTED QUALIFICATION FIXTURE</B></FONT></TD></TR>
-      <TR><TD><FONT COLOR="#f8fafc"><B>BLIND RETRY</B></FONT></TD></TR>
-      <TR><TD><FONT COLOR="#fecdd3">2 revisions • 1 promotion • 1 Firestore record<BR/>duplicate release-labelled revision</FONT></TD></TR>
-      <TR><TD><FONT COLOR="#f8fafc"><B>BLIND ABORT</B></FONT></TD></TR>
-      <TR><TD><FONT COLOR="#fecdd3">1 staged revision • 0 promotions • 0 records<BR/>accepted work left incomplete</FONT></TD></TR>
+    label=<<TABLE BORDER="2" CELLBORDER="0" CELLSPACING="0" CELLPADDING="13" COLOR="#fb7185" BGCOLOR="#22131f">
+      <TR><TD><FONT COLOR="#fecdd3" POINT-SIZE="20"><B>SCRIPTED POLICY FIXTURE</B></FONT></TD></TR>
+      <TR><TD ALIGN="LEFT"><FONT COLOR="#f8fafc" POINT-SIZE="18"><B>BLIND RETRY</B></FONT><BR/><FONT COLOR="#fecdd3" POINT-SIZE="18">2 revisions • 1 promotion • 1 record<BR/>duplicate release revision</FONT></TD></TR>
+      <TR><TD ALIGN="LEFT"><FONT COLOR="#f8fafc" POINT-SIZE="18"><B>BLIND ABORT</B></FONT><BR/><FONT COLOR="#fecdd3" POINT-SIZE="18">1 staged revision • 0 promotions • 0 records<BR/>accepted work left incomplete</FONT></TD></TR>
     </TABLE>>
   ];
 
   provider [
     shape=plain,
-    label=<<TABLE BORDER="2" CELLBORDER="0" CELLSPACING="0" CELLPADDING="10" COLOR="#34d399" BGCOLOR="#092b2a">
-      <TR><TD><FONT COLOR="#a7f3d0" POINT-SIZE="15"><B>FRESH DIRECT GOOGLE CLOUD PROOF</B></FONT></TD></TR>
-      <TR><TD><FONT COLOR="#cbd5e1">source 4d626bb • run p5r-adaptive-b166… • 49 projected events</FONT></TD></TR>
-      <TR><TD><FONT COLOR="#fbbf24"><B>PASS 1 — UNKNOWN</B><BR/>CONTINUE denied • RETRY denied • 0 recovery-action permits</FONT></TD></TR>
-      <TR><TD><FONT COLOR="#ddd6fe">Gemini hypothesis + allowlisted read-only probes<BR/><B>advisory only</B></FONT></TD></TR>
-      <TR><TD><FONT COLOR="#a7f3d0"><B>PASS 2 — COMMITTED</B><BR/>exact correlated revision • deterministic certificates</FONT></TD></TR>
-      <TR><TD><FONT COLOR="#a7f3d0">exact max_uses=1 permits • 1 revision / 1 promotion / 1 record</FONT></TD></TR>
-      <TR><TD><FONT COLOR="#fecdd3"><B>REPLAY REJECTED BEFORE PROVIDER CONTACT</B></FONT></TD></TR>
+    label=<<TABLE BORDER="2" CELLBORDER="0" CELLSPACING="0" CELLPADDING="11" COLOR="#34d399" BGCOLOR="#092b2a">
+      <TR><TD><FONT COLOR="#a7f3d0" POINT-SIZE="20"><B>RECORDED GOOGLE CLOUD EVIDENCE</B></FONT></TD></TR>
+      <TR><TD ALIGN="LEFT"><FONT COLOR="#cbd5e1" POINT-SIZE="17">source 4d626bb • run p5r-adaptive-b166… • 49 events</FONT></TD></TR>
+      <TR><TD ALIGN="LEFT"><FONT COLOR="#fbbf24" POINT-SIZE="18"><B>PASS 1</B> • UNKNOWN • no recovery-action permit</FONT></TD></TR>
+      <TR><TD ALIGN="LEFT"><FONT COLOR="#a7f3d0" POINT-SIZE="18"><B>PASS 2</B> • COMMITTED • exact revision correlated</FONT></TD></TR>
+      <TR><TD ALIGN="LEFT"><FONT COLOR="#a7f3d0" POINT-SIZE="18"><B>EFFECTS</B> • 1 revision / 1 promotion / 1 record</FONT></TD></TR>
+      <TR><TD ALIGN="LEFT"><FONT COLOR="#fecdd3" POINT-SIZE="18"><B>REPLAY</B> • denied before provider contact</FONT></TD></TR>
     </TABLE>>
   ];
 
   boundary [
-    label="SEPARATE EVIDENCE LAYERS\nThe baseline is a provider-shaped fixture, not a live-cloud A/B.\nThe local command validates an offline fixture; it does not rerun the provider workflow.",
+    label="EVIDENCE BOUNDARY — Scripted policy comparison • recorded provider run • offline validation does not rerun Google Cloud",
     shape=note,
     fillcolor="#172554",
     color="#818cf8",
-    fontsize=12
+    fontsize=18.5
   ];
 
   { rank=same; scripted; provider; }
-  fault -> scripted [label="same drop-after-accept fault", color="#fb7185"];
-  fault -> provider [label="recorded provider trace", color="#34d399"];
+  fault -> scripted [label="unsafe defaults", color="#fb7185"];
+  fault -> provider [label="evidence-bound recovery", color="#34d399"];
   scripted -> boundary [style=invis, weight=4];
   provider -> boundary [style=invis, weight=4];
 }

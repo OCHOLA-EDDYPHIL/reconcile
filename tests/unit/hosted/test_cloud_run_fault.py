@@ -39,7 +39,7 @@ from reconcile.hosted.workflow import (
 
 pytestmark = pytest.mark.unit
 
-PROJECT = "reconcile-dev-260813-14fa6d"
+PROJECT = "example-project-id"
 CALLER = f"rec-p5-api@{PROJECT}.iam.gserviceaccount.com"
 SERVICE = "reconcile-p5-canary"
 BASELINE = f"{SERVICE}-baseline"

@@ -46,7 +46,7 @@ from reconcile.scenarios.service import ScenarioMode, ScenarioName, _request
 
 pytestmark = pytest.mark.unit
 
-_PROJECT = "reconcile-dev-260813-14fa6d"
+_PROJECT = "example-project-id"
 _BUCKET = f"{_PROJECT}-p5-target"
 _RUNTIME_DATABASE = "reconcile-p5-runtime"
 _SANDBOX_DATABASE = "reconcile-p5-sandbox"
@@ -79,9 +79,9 @@ def _config(component: Component) -> HostedConfig:
             ),
             "runtime_database": _RUNTIME_DATABASE,
             "target_bucket": _BUCKET,
-            "controller_url": "https://controller.example.run.app",
+            "controller_url": "https://controller.example.test",
             "controller_audience": _audience(Component.CONTROLLER),
-            "fault_proxy_url": "https://fault.example.run.app",
+            "fault_proxy_url": "https://fault.example.test",
             "fault_proxy_audience": _audience(Component.FAULT_PROXY),
         }
     elif component is Component.CONTROLLER:
@@ -90,9 +90,9 @@ def _config(component: Component) -> HostedConfig:
             "runtime_database": _RUNTIME_DATABASE,
             "target_database": _TARGET_DATABASE,
             "target_bucket": _BUCKET,
-            "fault_proxy_url": "https://fault.example.run.app",
+            "fault_proxy_url": "https://fault.example.test",
             "fault_proxy_audience": _audience(Component.FAULT_PROXY),
-            "sandbox_url": "https://sandbox.example.run.app",
+            "sandbox_url": "https://sandbox.example.test",
             "sandbox_audience": _audience(Component.SANDBOX),
             "canary_location": "us-central1",
             "canary_service": "reconcile-p5-canary",
@@ -118,7 +118,7 @@ def _config(component: Component) -> HostedConfig:
             "runtime_database": _RUNTIME_DATABASE,
             "target_database": _TARGET_DATABASE,
             "target_bucket": _BUCKET,
-            "sandbox_url": "https://sandbox.example.run.app",
+            "sandbox_url": "https://sandbox.example.test",
             "sandbox_audience": _audience(Component.SANDBOX),
             "canary_location": "us-central1",
             "canary_service": "reconcile-p5-canary",
@@ -344,7 +344,7 @@ def test_fixed_executor_routes_storage_and_firestore_to_fixed_connectors(
         executor = HostedFixedExecutor(
             storage_reader=storage_reader,  # type: ignore[arg-type]
             firestore_reader=firestore_reader,  # type: ignore[arg-type]
-            sandbox_url="https://sandbox.example.run.app",
+            sandbox_url="https://sandbox.example.test",
             sandbox_audience=_audience(Component.SANDBOX),
             transport=HostedHttpTransport(),
         )
@@ -395,7 +395,7 @@ def test_hybrid_executor_rejects_authoritative_routes_before_planner_constructio
     fixed = HostedFixedExecutor(
         storage_reader=object(),  # type: ignore[arg-type]
         firestore_reader=object(),  # type: ignore[arg-type]
-        sandbox_url="https://sandbox.example.run.app",
+        sandbox_url="https://sandbox.example.test",
         sandbox_audience=_audience(Component.SANDBOX),
         transport=HostedHttpTransport(),
     )
@@ -541,7 +541,7 @@ def test_hybrid_executor_rejects_nonexact_sandbox_scope_before_planner_construct
     fixed = HostedFixedExecutor(
         storage_reader=object(),  # type: ignore[arg-type]
         firestore_reader=object(),  # type: ignore[arg-type]
-        sandbox_url="https://sandbox.example.run.app",
+        sandbox_url="https://sandbox.example.test",
         sandbox_audience=_audience(Component.SANDBOX),
         transport=HostedHttpTransport(),
     )
@@ -600,7 +600,7 @@ def test_sandbox_operation_gateway_sends_only_the_exact_scope_once(
 
         monkeypatch.setattr(transport, "request", request)
         gateway = HostedSandboxOperationGateway(
-            sandbox_url="https://sandbox.example.run.app",
+            sandbox_url="https://sandbox.example.test",
             sandbox_audience=_audience(Component.SANDBOX),
             transport=transport,
         )
@@ -609,8 +609,8 @@ def test_sandbox_operation_gateway_sends_only_the_exact_scope_once(
         assert (await gateway.execute_fault(mutation)).scope_sha256 == mutation.sha256
         assert (await gateway.cleanup(cleanup)).scope_sha256 == cleanup.sha256
         assert [call[1] for call in calls] == [
-            "https://sandbox.example.run.app/internal/v1/mutations",
-            "https://sandbox.example.run.app/internal/v1/cleanup",
+            "https://sandbox.example.test/internal/v1/mutations",
+            "https://sandbox.example.test/internal/v1/cleanup",
         ]
         for _, _, _, content in calls:
             internal = decode_contract(content, InternalOperationRequest)

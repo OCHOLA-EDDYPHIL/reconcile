@@ -1,4 +1,4 @@
-"""Judge-readable contracts for the four-policy recovery release scenario."""
+"""Human-readable contracts for the four-policy recovery release scenario."""
 
 from __future__ import annotations
 

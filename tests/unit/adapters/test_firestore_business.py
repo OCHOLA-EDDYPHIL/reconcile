@@ -420,7 +420,7 @@ def test_cloud_profile_accepts_only_the_sealed_cloud_read_target() -> None:
             profile=FIRESTORE_BUSINESS_CLOUD_PROFILE,
         )
     cloud_targets = build_google_firestore_business_targets(
-        project_id="reconcile-dev-260813-14fa6d",
+        project_id="example-project-id",
         client_factory=lambda: object(),  # type: ignore[arg-type]
         server_timestamp_factory=object,
     )

@@ -441,7 +441,7 @@ def test_foundation_plan_requires_three_exact_database_boundaries() -> None:
                         ],
                     }
                 ],
-                "billing_account": "01029C-95939A-70E448",
+                "billing_account": "000000-000000-000000",
                 "budget_filter": [
                     {
                         "calendar_period": None,

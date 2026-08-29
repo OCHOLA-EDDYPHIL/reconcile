@@ -7,7 +7,7 @@ locals {
   runtime_database_name = "reconcile-p5-runtime"
   sandbox_database_name = "reconcile-p5-sandbox"
   target_database_name  = "reconcile-p5-target"
-  target_bucket_name    = "reconcile-dev-260813-14fa6d-p5-target"
+  target_bucket_name    = "example-project-id-p5-target"
 
   image_reference = "${var.region}-docker.pkg.dev/${var.project_id}/reconcile-p5/reconcile@${var.image_digest}"
 
@@ -44,7 +44,7 @@ locals {
   recovery_payload_sha256            = sha256(jsonencode(local.recovery_candidate_identity))
   recovery_execution_timeout_seconds = 240
 
-  audience_origin = join("", ["https:", "/", "/reconcile.invalid/phase5/reconcile-dev-260813-14fa6d"])
+  audience_origin = join("", ["https:", "/", "/reconcile.invalid/phase5/example-project-id"])
   audiences = {
     api         = "${local.audience_origin}/api"
     canary      = "${local.audience_origin}/canary"
@@ -54,7 +54,7 @@ locals {
   }
 
   caller_emails = {
-    operator    = "rec-p5-apply@reconcile-dev-260813-14fa6d.iam.gserviceaccount.com"
+    operator    = "rec-p5-apply@example-project-id.iam.gserviceaccount.com"
     api         = var.service_account_emails.api
     controller  = var.service_account_emails.controller
     fault_proxy = var.service_account_emails.fault_proxy

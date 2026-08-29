@@ -1,9 +1,9 @@
 variable "project_id" {
   type    = string
-  default = "reconcile-dev-260813-14fa6d"
+  default = "example-project-id"
 
   validation {
-    condition     = var.project_id == "reconcile-dev-260813-14fa6d"
+    condition     = var.project_id == "example-project-id"
     error_message = "The bootstrap stack is restricted to the approved project."
   }
 }
@@ -20,30 +20,30 @@ variable "region" {
 
 variable "state_bucket_name" {
   type    = string
-  default = "reconcile-dev-260813-14fa6d-p5-state"
+  default = "example-project-id-p5-state"
 
   validation {
-    condition     = var.state_bucket_name == "reconcile-dev-260813-14fa6d-p5-state"
+    condition     = var.state_bucket_name == "example-project-id-p5-state"
     error_message = "The state bucket name must match the approved deterministic name."
   }
 }
 
 variable "billing_account_id" {
   type    = string
-  default = "01029C-95939A-70E448"
+  default = "000000-000000-000000"
 
   validation {
-    condition     = var.billing_account_id == "01029C-95939A-70E448"
+    condition     = var.billing_account_id == "000000-000000-000000"
     error_message = "The billing account must match the approved project billing account."
   }
 }
 
 variable "owner_principal" {
   type    = string
-  default = "user:eddyphilochola13@gmail.com"
+  default = "user:owner@example.invalid"
 
   validation {
-    condition     = var.owner_principal == "user:eddyphilochola13@gmail.com"
+    condition     = var.owner_principal == "user:owner@example.invalid"
     error_message = "The bootstrap impersonator must be the approved owner principal."
   }
 }

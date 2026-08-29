@@ -13,9 +13,7 @@ from collections.abc import Mapping
 from pathlib import Path
 
 _GCLOUD = "/usr/bin/gcloud"
-_OPERATOR_SERVICE_ACCOUNT = (
-    "rec-p5-apply@reconcile-dev-260813-14fa6d.iam.gserviceaccount.com"
-)
+_OPERATOR_SERVICE_ACCOUNT = "rec-p5-apply@example-project-id.iam.gserviceaccount.com"
 _MAX_TOKEN_BYTES = 16_384
 _AUDIENCE = re.compile(r"^[\x21-\x7e]{1,2048}$")
 _CONFIGURATION = re.compile(r"^[a-z][a-z0-9-]{0,62}$")

@@ -389,7 +389,7 @@ def evaluate_evidence(
         classification = Classification.PARTIAL
     elif operation_failed:
         # A terminal provider failure does not prove that no effect occurred.
-        # Keep incomplete evidence pending, but do not let that uncertainty hide
+        # Retain the incomplete-evidence state, but do not let that uncertainty hide
         # an otherwise complete, explicit mixture of established and absent
         # effects (handled as PARTIAL immediately above).
         classification = Classification.PENDING

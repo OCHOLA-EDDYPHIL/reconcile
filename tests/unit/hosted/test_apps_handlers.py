@@ -30,7 +30,7 @@ from reconcile.hosted.identity import IdentityVerificationError, VerifiedCaller
 
 pytestmark = pytest.mark.unit
 
-_PROJECT = "reconcile-dev-260813-14fa6d"
+_PROJECT = "example-project-id"
 _CALLER_EMAIL = f"rec-p5-api@{_PROJECT}.iam.gserviceaccount.com"
 _CALLER = VerifiedCaller(
     email=_CALLER_EMAIL,

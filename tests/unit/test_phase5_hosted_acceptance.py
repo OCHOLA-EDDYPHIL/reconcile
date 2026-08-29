@@ -169,7 +169,7 @@ SHA_B = "b" * 64
 SHA_C = "c" * 64
 IMAGE = f"sha256:{SHA_B}"
 SOURCE = "1" * 40
-PROJECT = "reconcile-dev-260813-14fa6d"
+PROJECT = "example-project-id"
 
 
 def _candidate() -> CandidateIdentity:
@@ -2214,7 +2214,7 @@ def test_gcloud_inspector_uses_only_exact_read_only_commands(tmp_path: Path) -> 
     assert all("--quiet" in item[0] and "--format=json" in item[0] for item in calls)
     assert all(
         "--impersonate-service-account="
-        "rec-p5-apply@reconcile-dev-260813-14fa6d.iam.gserviceaccount.com" in item[0]
+        "rec-p5-apply@example-project-id.iam.gserviceaccount.com" in item[0]
         for item in calls
     )
     assert all(item[2]["HOME"] == str(tmp_path) for item in calls)
@@ -2484,7 +2484,7 @@ def test_gcloud_service_failure_is_mandatory_but_log_failure_is_diagnostic(
     assert all("--quiet" in argv for argv in calls)
     assert all(
         "--impersonate-service-account="
-        "rec-p5-apply@reconcile-dev-260813-14fa6d.iam.gserviceaccount.com" in argv
+        "rec-p5-apply@example-project-id.iam.gserviceaccount.com" in argv
         for argv in calls
     )
 

@@ -61,7 +61,7 @@ pytestmark = pytest.mark.unit
 
 NOW = datetime(2026, 8, 18, 3, 0, tzinfo=UTC)
 CALLER = VerifiedCaller(
-    email="rec-p5-api@reconcile-dev-260813-14fa6d.iam.gserviceaccount.com",
+    email="rec-p5-api@example-project-id.iam.gserviceaccount.com",
     subject="caller-subject",
     issuer="https://accounts.google.com",
     audience="https://reconcile.invalid/phase5/controller",
@@ -119,10 +119,10 @@ def _api_config() -> HostedConfig:
     return HostedConfig(
         component=Component.API,
         port=8080,
-        project_id="reconcile-dev-260813-14fa6d",
+        project_id="example-project-id",
         auth_audience="https://reconcile.invalid/phase5/api",
         allowed_caller_emails=(
-            "rec-p5-apply@reconcile-dev-260813-14fa6d.iam.gserviceaccount.com",
+            "rec-p5-apply@example-project-id.iam.gserviceaccount.com",
         ),
         source_revision="1" * 40,
         image_digest=f"sha256:{'2' * 64}",

@@ -37,21 +37,19 @@ from reconcile.contracts.base import AwareDatetime, Sha256Digest, StrictModel
 from reconcile.evidence.recovery_rules import deterministic_stage_revision
 
 _SCHEMA = "reconcile/phase5-operator/v1"
-_PROJECT_ID = "reconcile-dev-260813-14fa6d"
-_PROJECT_NUMBER = "669727977920"
+_PROJECT_ID = "example-project-id"
+_PROJECT_NUMBER = "000000000000"
 _REGION = "us-central1"
 _ORIGIN_URL = "git@github.com:OCHOLA-EDDYPHIL/reconcile.git"
-_OWNER = "user:eddyphilochola13@gmail.com"
-_OWNER_ACCOUNT = "eddyphilochola13@gmail.com"
+_OWNER = "user:owner@example.invalid"
+_OWNER_ACCOUNT = "owner@example.invalid"
 _STATE_BUCKET = f"{_PROJECT_ID}-p5-state"
 _EMPTY_STATE_BUCKET_CLEANUP_STDERR = (
     "Removing objects:\n"
     "ERROR: (gcloud.storage.rm) The following URLs matched no objects or files:\n"
     f"gs://{_STATE_BUCKET}/**\n"
 ).encode("ascii")
-_OPERATOR_SERVICE_ACCOUNT = (
-    "rec-p5-apply@reconcile-dev-260813-14fa6d.iam.gserviceaccount.com"
-)
+_OPERATOR_SERVICE_ACCOUNT = "rec-p5-apply@example-project-id.iam.gserviceaccount.com"
 _OPERATOR_PRINCIPAL = f"serviceAccount:{_OPERATOR_SERVICE_ACCOUNT}"
 _TERRAFORM_VERSION = "1.15.8"
 _GCLOUD_VERSION = "580.0.0"
@@ -86,7 +84,7 @@ _GIT_VERSION = "2.43.0"
 _PYTHON = "/usr/local/libexec/reconcile/python-3.12.13/bin/python3.12"
 _PYTHON_SHA256 = "021044895e95be79dc2f110367607e684119afbc8ce75f6f0eec94844e0acec7"
 _PYTHON_VERSION = "3.12.13"
-_OPERATOR_HOME = "/home/reconcile"
+_OPERATOR_HOME = "/opt/reconcile"
 _OCI_REFERENCE_ANNOTATION = "org.opencontainers.image.ref.name"
 _LEGACY_IMAGE_ID_SOURCE_REVISIONS = frozenset(
     {"e7ccaab5268d31172b3a5efa5e754b0beb3b1a79"}
@@ -565,8 +563,8 @@ class Phase5ApprovalManifest(_HasRecordHash):
     resource_inventory_sha256: Sha256Digest
     iam_inventory_sha256: Sha256Digest
     plan_inventory_sha256: Sha256Digest
-    project_id: Literal["reconcile-dev-260813-14fa6d"]
-    project_number: Literal["669727977920"]
+    project_id: Literal["example-project-id"]
+    project_number: Literal["000000000000"]
     region: Literal["us-central1"]
     authenticated_exposure: tuple[ExposureBinding, ...]
     terraform_version: Literal["1.15.8"]
@@ -792,7 +790,7 @@ class Phase5Approval(_HasRecordHash):
     record_type: Literal["approval"] = "approval"
     manifest_sha256: Sha256Digest
     decision: Literal["APPROVE_EXACT_MANIFEST"]
-    approved_by: Literal["user:eddyphilochola13@gmail.com"]
+    approved_by: Literal["user:owner@example.invalid"]
     approved_at: AwareDatetime
     work_deadline: AwareDatetime
     approval_expires_at: AwareDatetime

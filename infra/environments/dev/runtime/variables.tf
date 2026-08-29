@@ -1,9 +1,9 @@
 variable "project_id" {
   type    = string
-  default = "reconcile-dev-260813-14fa6d"
+  default = "example-project-id"
 
   validation {
-    condition     = var.project_id == "reconcile-dev-260813-14fa6d"
+    condition     = var.project_id == "example-project-id"
     error_message = "The runtime stack is restricted to the approved project."
   }
 }
@@ -29,11 +29,11 @@ variable "service_account_emails" {
 
   validation {
     condition = var.service_account_emails == {
-      api         = "rec-p5-api@reconcile-dev-260813-14fa6d.iam.gserviceaccount.com"
-      canary      = "rec-p5-canary@reconcile-dev-260813-14fa6d.iam.gserviceaccount.com"
-      controller  = "rec-p5-controller@reconcile-dev-260813-14fa6d.iam.gserviceaccount.com"
-      fault_proxy = "rec-p5-fault@reconcile-dev-260813-14fa6d.iam.gserviceaccount.com"
-      sandbox     = "rec-p5-sandbox@reconcile-dev-260813-14fa6d.iam.gserviceaccount.com"
+      api         = "rec-p5-api@example-project-id.iam.gserviceaccount.com"
+      canary      = "rec-p5-canary@example-project-id.iam.gserviceaccount.com"
+      controller  = "rec-p5-controller@example-project-id.iam.gserviceaccount.com"
+      fault_proxy = "rec-p5-fault@example-project-id.iam.gserviceaccount.com"
+      sandbox     = "rec-p5-sandbox@example-project-id.iam.gserviceaccount.com"
     }
     error_message = "Runtime service accounts must match the foundation stack outputs."
   }
@@ -92,7 +92,7 @@ variable "api_invoker_members" {
 
   validation {
     condition = var.api_invoker_members == toset([
-      "serviceAccount:rec-p5-apply@reconcile-dev-260813-14fa6d.iam.gserviceaccount.com",
+      "serviceAccount:rec-p5-apply@example-project-id.iam.gserviceaccount.com",
     ])
     error_message = "The API invoker must be the exact approval-bound operator identity."
   }

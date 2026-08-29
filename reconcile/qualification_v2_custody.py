@@ -709,7 +709,7 @@ def _runtime_prices(runtime: dict[str, object]) -> tuple[int, int]:
     _require_equal(
         runtime,
         provider_name="google-vertex-ai",
-        provider_project="reconcile-dev-260813-14fa6d",
+        provider_project="example-project-id",
         configured_model="gemini-3.5-flash",
         model_revision="UNKNOWN",
         location="global",

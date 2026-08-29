@@ -54,7 +54,7 @@ from reconcile.scenarios.local_order import (
 
 pytestmark = pytest.mark.unit
 
-_PROJECT = "reconcile-dev-260813-14fa6d"
+_PROJECT = "example-project-id"
 _DATABASE = "reconcile-p5-sandbox"
 _SANDBOX = "sandbox-run-7"
 _NOW = datetime(2026, 8, 17, 20, 0, tzinfo=UTC)

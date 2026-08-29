@@ -62,7 +62,7 @@ def _synthetic_custody(tmp_path: Path) -> _SyntheticCustody:
     runtime: dict[str, object] = {
         "schema_version": "reconcile/qualification-runtime-identity/v2",
         "provider_name": "google-vertex-ai",
-        "provider_project": "reconcile-dev-260813-14fa6d",
+        "provider_project": "example-project-id",
         "configured_model": "gemini-3.5-flash",
         "model_revision": "UNKNOWN",
         "location": "global",

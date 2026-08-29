@@ -21,7 +21,7 @@ from reconcile.phase5_hosted_acceptance import (
 
 pytestmark = pytest.mark.unit
 
-PROJECT = "reconcile-dev-260813-14fa6d"
+PROJECT = "example-project-id"
 SOURCE = "1" * 40
 IMAGE = f"sha256:{'2' * 64}"
 INFRASTRUCTURE = "3" * 64

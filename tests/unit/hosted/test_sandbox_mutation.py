@@ -33,7 +33,7 @@ from reconcile.scenarios.local_order import HiddenOrderOutcome
 
 pytestmark = pytest.mark.unit
 
-_PROJECT = "reconcile-dev-260813-14fa6d"
+_PROJECT = "example-project-id"
 _SANDBOX = "sandbox-order-hosted-7"
 _OWNER = "sandbox-owner-0123456789abcdef"
 _ITEM = "widget-blue"

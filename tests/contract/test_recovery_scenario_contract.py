@@ -1,4 +1,4 @@
-"""Contract invariants for judge-facing release-policy comparisons."""
+"""Contract invariants for human-readable release-policy comparisons."""
 
 from __future__ import annotations
 

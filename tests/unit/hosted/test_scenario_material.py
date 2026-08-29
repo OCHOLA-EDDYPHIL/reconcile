@@ -34,7 +34,7 @@ from reconcile.scenarios.service import ScenarioName, _request
 pytestmark = pytest.mark.unit
 
 _RUN_ID = "hosted-material-7"
-_TARGET_BUCKET = "reconcile-dev-260813-14fa6d-p5-target"
+_TARGET_BUCKET = "example-project-id-p5-target"
 _INVOKED_AT = datetime(2026, 8, 18, 1, 2, 3, tzinfo=UTC)
 
 
