@@ -873,6 +873,8 @@ class _Runner:
         image_id: str | None = None,
         remote_digest: str | None = None,
         source_root: Path | None = None,
+        current_source: str | None = None,
+        source_is_ancestor: bool = True,
     ) -> None:
         self.action_result = action_result or subprocess.CompletedProcess(
             ["fixed"], 0, b"ok", b""
@@ -885,6 +887,8 @@ class _Runner:
         self.image_id = image_id
         self.remote_digest = remote_digest
         self.source_root = source_root
+        self.current_source = current_source or _SOURCE
+        self.source_is_ancestor = source_is_ancestor
         self.source_tree = _snapshot_tree(source_root) if source_root else None
         self.calls: list[tuple[str, ...]] = []
         self.cwds: list[Path] = []
@@ -903,6 +907,7 @@ class _Runner:
         self.cwds.append(cwd)
         self.environments.append(dict(environment))
         if argv[0] == "/usr/bin/git":
+            returncode = 0
             if argv[1:] == ("--version",):
                 output = b"git version 2.43.0\n"
             elif argv[1:] == ("branch", "--show-current"):
@@ -910,7 +915,15 @@ class _Runner:
             elif argv[1:] == ("rev-parse", "--show-object-format"):
                 output = b"sha1\n"
             elif argv[1:3] == ("rev-parse", "--verify"):
-                output = f"{_SOURCE}\n".encode()
+                revision = (
+                    self.current_source
+                    if argv[3] in {"HEAD", "origin/main"}
+                    else _SOURCE
+                )
+                output = f"{revision}\n".encode()
+            elif argv[1:3] == ("merge-base", "--is-ancestor"):
+                output = b""
+                returncode = 0 if self.source_is_ancestor else 1
             elif argv[1:4] == ("show", "-s", "--format=%ct"):
                 output = b"1787032800\n"
             elif argv[1:5] == ("ls-tree", "-r", "-z", "--full-tree"):
@@ -933,11 +946,13 @@ class _Runner:
             elif argv[1:] == ("remote", "get-url", "origin"):
                 output = b"git@github.com:OCHOLA-EDDYPHIL/reconcile.git\n"
             elif argv[1:3] == ("ls-remote", "--exit-code"):
-                revision = "f" * 40 if self.wrong_remote else _SOURCE
+                revision = (
+                    "f" * 40 if self.wrong_remote else self.current_source
+                )
                 output = f"{revision}\trefs/heads/main\n".encode()
             else:  # pragma: no cover - the closed git inventory is asserted below
                 raise AssertionError(argv)
-            return subprocess.CompletedProcess(list(argv), 0, output, b"")
+            return subprocess.CompletedProcess(list(argv), returncode, output, b"")
         if argv == (operator._TERRAFORM, "version", "-json"):
             return subprocess.CompletedProcess(
                 list(argv), 0, b'{"terraform_version":"1.15.8"}', b""
@@ -3375,6 +3390,76 @@ def test_remote_main_drift_blocks_before_any_mutating_command(tmp_path: Path) ->
         )
 
     assert _mutating_calls(runner) == []
+
+
+def test_teardown_accepts_manifest_source_ancestor_of_current_main(
+    tmp_path: Path,
+) -> None:
+    state, manifest, approval, _ = _records(tmp_path)
+    current_source = "b" * 40
+    runner = _Runner(
+        current_source=current_source,
+        source_root=Path(manifest.execution_source.root),
+    )
+
+    admission = operator.authorize_action(
+        action=operator.Phase5Action.RUNTIME_TEARDOWN,
+        manifest=manifest,
+        approval=approval,
+        state=state,
+        repo_root=_REPO_ROOT,
+        now=_NOW + timedelta(minutes=2),
+        runner=runner,
+    )
+
+    assert admission.action is operator.Phase5Action.RUNTIME_TEARDOWN
+    assert (
+        "/usr/bin/git",
+        "merge-base",
+        "--is-ancestor",
+        manifest.source_revision,
+        current_source,
+    ) in runner.calls
+
+
+def test_teardown_rejects_manifest_source_outside_current_main(
+    tmp_path: Path,
+) -> None:
+    state, manifest, approval, _ = _records(tmp_path)
+    runner = _Runner(current_source="b" * 40, source_is_ancestor=False)
+
+    with pytest.raises(operator.OperatorError, match="EXACT_MAIN_CHECK_FAILED"):
+        operator.authorize_action(
+            action=operator.Phase5Action.RUNTIME_TEARDOWN,
+            manifest=manifest,
+            approval=approval,
+            state=state,
+            repo_root=_REPO_ROOT,
+            now=_NOW + timedelta(minutes=2),
+            runner=runner,
+        )
+
+    assert state.inspect()["unfinished_admission_sha256"] is None
+
+
+def test_non_teardown_still_requires_manifest_source_at_current_main(
+    tmp_path: Path,
+) -> None:
+    state, manifest, approval, _ = _records(tmp_path)
+    runner = _Runner(current_source="b" * 40)
+
+    with pytest.raises(operator.OperatorError, match="EXACT_MAIN_CHECK_FAILED"):
+        operator.authorize_action(
+            action=operator.Phase5Action.BOOTSTRAP_APPLY,
+            manifest=manifest,
+            approval=approval,
+            state=state,
+            repo_root=_REPO_ROOT,
+            now=_NOW + timedelta(minutes=2),
+            runner=runner,
+        )
+
+    assert not any(call[1:3] == ("merge-base", "--is-ancestor") for call in runner.calls)
 
 
 def test_immutable_plan_byte_drift_blocks_before_mutation(tmp_path: Path) -> None:
