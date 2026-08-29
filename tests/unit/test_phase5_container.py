@@ -559,6 +559,31 @@ def test_artifact_mode_seals_the_exact_smoked_archive_and_reports_identity(
     assert json.loads(rendered)["archive_sha256"] == result.archive_sha256
 
 
+def test_artifact_mode_uses_the_explicit_image_project(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    parent = tmp_path / "private"
+    parent.mkdir(mode=0o700)
+    destination = parent / "reconcile.oci.tar"
+    _, smoke_tags, _ = _mock_gate_runtime(monkeypatch)
+    project_id = "reconcile-live-test"
+
+    result = container.run_gate(
+        artifact_output=destination,
+        image_project_id=project_id,
+    )
+
+    expected = container._image_source_tag(_REVISION, project_id)
+    assert result.source_tag == expected
+    assert smoke_tags == [expected] * 4
+
+
+def test_image_source_tag_rejects_an_invalid_project() -> None:
+    with pytest.raises(container.ContainerGateError, match="image project id"):
+        container._image_source_tag(_REVISION, "INVALID")
+
+
 def test_default_gate_remains_ephemeral(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
