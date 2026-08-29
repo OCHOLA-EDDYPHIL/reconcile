@@ -4641,6 +4641,12 @@ class CloudRunAcceptanceBackend:
             raise HostedAcceptanceError("CLI_IMPORT_PATH_INVALID")
         environment = dict(self._environment)
         environment["RECONCILE_API_AUDIENCE"] = self._candidate.api_audience
+        if self._recovery_binding is not None:
+            environment["RECONCILE_DEPLOYMENT_PROFILE"] = str(
+                Path(self._recovery_binding.state_root)
+                / "bindings"
+                / "deployment-profile.json"
+            )
         environment["PYTHONDONTWRITEBYTECODE"] = "1"
         environment["PYTHONNOUSERSITE"] = "1"
         environment["PYTHONPATH"] = pythonpath
