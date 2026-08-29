@@ -40,7 +40,7 @@ Prerequisites: Git, Python 3.12.13, and
 git clone https://github.com/OCHOLA-EDDYPHIL/reconcile.git
 cd reconcile
 uv sync --locked --all-groups
-uv run --no-sync python scripts/validate_evidence.py
+uv run --no-sync python -m scripts.validate_evidence
 uv run --no-sync python scripts/check_public_package.py
 ```
 

@@ -373,7 +373,8 @@ def test_export_cli_accepts_only_explicit_absolute_inputs(
     validated = subprocess.run(
         [
             sys.executable,
-            "scripts/validate_evidence.py",
+            "-m",
+            "scripts.validate_evidence",
             "--evidence",
             str(output / "proof-to-permit.json"),
             "--json",
