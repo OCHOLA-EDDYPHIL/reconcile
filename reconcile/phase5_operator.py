@@ -3980,11 +3980,17 @@ def _prepare_terraform_from_snapshot(
     source_root: Path,
     state_root: Path,
     provider_mirror: Path | None,
+    python_dependencies: PythonDependencyBinding,
     deployment_profile_path: Path | None = None,
     runtime_identity: Mapping[str, str],
     runner: CommandRunner,
 ) -> None:
     cli_config = state_root / "terraform.rc"
+    _verify_python_dependency_binding(python_dependencies)
+    dependency_root = _canonical_absolute_path(
+        Path(python_dependencies.root),
+        require_exists=True,
+    )
     _verify_python_interpreter()
     _verify_terraform_binary(source_root, runner, cli_config=cli_config)
     command = [
@@ -4019,7 +4025,10 @@ def _prepare_terraform_from_snapshot(
                 cwd=source_root,
                 environment=_minimal_subprocess_environment(
                     (
-                        EnvironmentBinding(name="PYTHONPATH", value=str(source_root)),
+                        EnvironmentBinding(
+                            name="PYTHONPATH",
+                            value=f"{source_root}:{dependency_root}",
+                        ),
                         EnvironmentBinding(
                             name="TF_CLI_CONFIG_FILE", value=str(cli_config)
                         ),
@@ -4145,6 +4154,7 @@ def prepare_phase5_artifacts(
         source_root=source_root,
         state_root=state.root,
         provider_mirror=provider_mirror,
+        python_dependencies=python_dependencies,
         deployment_profile_path=Path(profile_binding.path),
         runtime_identity=runtime_identity,
         runner=_default_runner,
