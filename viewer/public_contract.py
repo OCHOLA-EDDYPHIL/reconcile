@@ -425,7 +425,6 @@ def render_html(snapshot: dict[str, Any]) -> bytes:
     validate_snapshot(snapshot)
     recovery = snapshot["recovery"]
     advisory = snapshot["advisory_planning"]
-    evidence = snapshot["evidence"]
     effects = recovery["effects"]
     ambiguity = snapshot["ambiguity"]
     ambiguity_html = ""
@@ -499,13 +498,10 @@ a {{ color: #145f40; }}
 {html.escape(advisory["planner_outcome"])}. Its authority was limited to
 read-only probe planning.</p></section>
 <section><h2>Limitations</h2><ul>{limitations}</ul></section>
-<section class="identity"><h2>Identity</h2>
-<p>Viewer source <code>{html.escape(snapshot["viewer_source_revision"])}</code></p>
-<p>Evidence source <code>{html.escape(snapshot["evidence_source_revision"])}</code></p>
+<section class="identity"><h2>Verification</h2>
+<p>Viewer and evidence identities were verified before this bundle was built.</p>
 <p>Evidence version <code>{html.escape(snapshot["evidence_version"])}</code></p>
-<p>Runtime image <code>{html.escape(evidence["image_digest"])}</code></p>
-<p>Evidence manifest <code>{html.escape(evidence["manifest_sha256"])}</code></p>
-<p>Projection <code>{html.escape(snapshot["projection_sha256"])}</code></p>
+<p>Exact integrity metadata remains available in the machine-readable files.</p>
 <p><a href="/snapshot.json">Machine-readable snapshot</a> ·
 <a href="/bundle-manifest.json">Bundle manifest</a></p>
 </section>

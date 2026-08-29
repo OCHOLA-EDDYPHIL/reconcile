@@ -45,8 +45,8 @@ uv run --no-sync python scripts/check_public_package.py
 ```
 
 The first command performs offline evidence validation. It checks the frozen
-classifications, counts, hashes, permit constraints, replay result, and cleanup
-inventory in the checked-in evidence bundle. It does not rerun the recovery
+classifications, evidence integrity, permit constraints, replay result, and
+cleanup inventory in the checked-in evidence bundle. It does not rerun the recovery
 workflow, invoke Gemini, or contact Google Cloud. It does not depend on a public
 endpoint.
 
@@ -153,29 +153,13 @@ uv run --no-sync python -m viewer.export \
   --evidence "$PUBLIC_EVIDENCE" \
   --output "$VIEWER_BUNDLE" \
   --build-context-output "$VIEWER_CONTEXT"
-
-VIEWER_SOURCE_REVISION="$(uv run --no-sync python -c \
-  'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["viewer_source_revision"])' \
-  "$VIEWER_BUNDLE/snapshot.json")"
-EVIDENCE_SOURCE_REVISION="$(uv run --no-sync python -c \
-  'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["evidence_source_revision"])' \
-  "$VIEWER_BUNDLE/snapshot.json")"
-SNAPSHOT_SHA256="$(sha256sum "$VIEWER_BUNDLE/snapshot.json" | awk '{print $1}')"
-
-docker build \
-  --file "$VIEWER_CONTEXT/Dockerfile" \
-  --build-arg VIEWER_SOURCE_REVISION="$VIEWER_SOURCE_REVISION" \
-  --build-arg EVIDENCE_SOURCE_REVISION="$EVIDENCE_SOURCE_REVISION" \
-  --build-arg SNAPSHOT_SHA256="$SNAPSHOT_SHA256" \
-  --tag reconcile-viewer:"$VIEWER_SOURCE_REVISION" \
-  "$VIEWER_CONTEXT"
 ```
 
 The exporter refuses a dirty checkout, a non-`main` branch, or a local `main`
 that differs from `origin/main`; the runtime sources are read from that verified
 commit. The runtime serves only the generated HTML, snapshot, bundle manifest,
 and health response over `GET` and `HEAD`. Other methods are rejected. The
-complete digest-pinned Cloud Run deployment sequence is in the
+complete Cloud Run deployment sequence is in the
 [hosted runbook](docs/hosted-runbook.md#static-viewer-boundary).
 
 ## Interfaces

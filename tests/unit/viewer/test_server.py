@@ -62,8 +62,16 @@ def test_closed_routes_emit_security_headers(viewer: int) -> None:
 
     assert status == 200
     assert b"Recorded evidence - not a live operation" in payload
-    assert b"Viewer source" in payload
-    assert b"Evidence source" in payload
+    assert b"Viewer and evidence identities were verified" in payload
+    snapshot = decode_snapshot(_request(viewer, "GET", "/snapshot.json")[2])
+    hidden_identifiers = (
+        snapshot["viewer_source_revision"],
+        snapshot["evidence_source_revision"],
+        snapshot["evidence"]["image_digest"],
+        snapshot["evidence"]["manifest_sha256"],
+        snapshot["projection_sha256"],
+    )
+    assert all(value.encode() not in payload for value in hidden_identifiers)
     assert headers["Cache-Control"] == "no-store, max-age=0, must-revalidate"
     assert headers["Content-Security-Policy"].startswith("default-src 'none'")
     assert headers["Permissions-Policy"] == ("camera=(), microphone=(), geolocation=()")
