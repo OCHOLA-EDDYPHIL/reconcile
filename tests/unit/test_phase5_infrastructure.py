@@ -230,12 +230,10 @@ def test_three_stacks_have_separate_pinned_backends() -> None:
         assert len(backend) == 1
         assignments = set(re.findall(r"(?m)^\s*([a-z_]+)\s*=", backend[0][-1]))
         assert assignments == {"bucket", "impersonate_service_account", "prefix"}
-        assert _attribute(backend[0][-1], "bucket") == (
-            '"reconcile-dev-260813-14fa6d-p5-state"'
-        )
+        assert _attribute(backend[0][-1], "bucket") == ('"example-project-id-p5-state"')
         assert _attribute(backend[0][-1], "prefix") == f'"{prefix}"'
         assert _attribute(backend[0][-1], "impersonate_service_account") == (
-            '"rec-p5-apply@reconcile-dev-260813-14fa6d.iam.gserviceaccount.com"'
+            '"rec-p5-apply@example-project-id.iam.gserviceaccount.com"'
         )
     assert re.search(r'prefix\s*=\s*"phase5/foundation"', foundation) is not None
     assert re.search(r'prefix\s*=\s*"phase5/runtime"', runtime) is not None
@@ -252,7 +250,7 @@ def test_three_stacks_have_separate_pinned_backends() -> None:
         assignments = set(re.findall(r"(?m)^\s*([a-z_]+)\s*=", provider_block))
         assert assignments == {"impersonate_service_account", "project", "region"}
         assert _attribute(provider_block, "impersonate_service_account") == (
-            '"rec-p5-apply@reconcile-dev-260813-14fa6d.iam.gserviceaccount.com"'
+            '"rec-p5-apply@example-project-id.iam.gserviceaccount.com"'
         )
 
 
@@ -318,7 +316,7 @@ def test_public_principals_and_secret_values_are_absent() -> None:
         is None
     )
     assert (
-        '"serviceAccount:rec-p5-apply@reconcile-dev-260813-14fa6d.iam.gserviceaccount.com"'
+        '"serviceAccount:rec-p5-apply@example-project-id.iam.gserviceaccount.com"'
         in invokers
     )
     assert "var.api_invoker_members == toset" in invokers
@@ -763,7 +761,7 @@ def test_apply_identity_and_runtime_iam_graph_are_closed_world() -> None:
     assert _attribute(act_as, "for_each") == "local.service_accounts"
     assert _attribute(act_as, "role") == '"roles/iam.serviceAccountUser"'
     assert _attribute(act_as, "member") == (
-        '"serviceAccount:rec-p5-apply@reconcile-dev-260813-14fa6d.iam.gserviceaccount.com"'
+        '"serviceAccount:rec-p5-apply@example-project-id.iam.gserviceaccount.com"'
     )
     canary_act_as = service_account_iam["canary_mutator_act_as"].body
     assert _attribute(canary_act_as, "service_account_id") == (

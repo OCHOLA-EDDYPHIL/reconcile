@@ -17,7 +17,7 @@ from reconcile.hosted.provider import (
 
 pytestmark = pytest.mark.unit
 
-_PROJECT = "reconcile-dev-260813-14fa6d"
+_PROJECT = "example-project-id"
 _API_CALLER = f"rec-p5-apply@{_PROJECT}.iam.gserviceaccount.com"
 _INTERNAL_CALLER = f"rec-p5-api@{_PROJECT}.iam.gserviceaccount.com"
 _SANDBOX_READ_CALLER = f"rec-p5-controller@{_PROJECT}.iam.gserviceaccount.com"
@@ -85,9 +85,9 @@ def _environment(component: Component) -> dict[str, str]:
                 "RECONCILE_ALLOWED_CALLER_EMAILS": _API_CALLER,
                 "RECONCILE_RUNTIME_DATABASE": "reconcile-p5-runtime",
                 "RECONCILE_TARGET_BUCKET": f"{_PROJECT}-p5-target",
-                "RECONCILE_CONTROLLER_URL": "https://controller.example.run.app",
+                "RECONCILE_CONTROLLER_URL": "https://controller.example.test",
                 "RECONCILE_CONTROLLER_AUDIENCE": _audience(Component.CONTROLLER),
-                "RECONCILE_FAULT_PROXY_URL": ("https://fault-proxy.example.run.app"),
+                "RECONCILE_FAULT_PROXY_URL": ("https://fault-proxy.example.test"),
                 "RECONCILE_FAULT_PROXY_AUDIENCE": _audience(Component.FAULT_PROXY),
             }
         )
@@ -98,9 +98,9 @@ def _environment(component: Component) -> dict[str, str]:
                 "RECONCILE_RUNTIME_DATABASE": "reconcile-p5-runtime",
                 "RECONCILE_TARGET_DATABASE": "reconcile-p5-target",
                 "RECONCILE_TARGET_BUCKET": f"{_PROJECT}-p5-target",
-                "RECONCILE_FAULT_PROXY_URL": "https://fault-proxy.example.run.app",
+                "RECONCILE_FAULT_PROXY_URL": "https://fault-proxy.example.test",
                 "RECONCILE_FAULT_PROXY_AUDIENCE": _audience(Component.FAULT_PROXY),
-                "RECONCILE_SANDBOX_URL": "https://sandbox.example.run.app",
+                "RECONCILE_SANDBOX_URL": "https://sandbox.example.test",
                 "RECONCILE_SANDBOX_AUDIENCE": _audience(Component.SANDBOX),
                 "RECONCILE_CANARY_LOCATION": "us-central1",
                 "RECONCILE_CANARY_SERVICE": "reconcile-p5-canary",
@@ -130,7 +130,7 @@ def _environment(component: Component) -> dict[str, str]:
                 "RECONCILE_RUNTIME_DATABASE": "reconcile-p5-runtime",
                 "RECONCILE_TARGET_DATABASE": "reconcile-p5-target",
                 "RECONCILE_TARGET_BUCKET": f"{_PROJECT}-p5-target",
-                "RECONCILE_SANDBOX_URL": "https://sandbox.example.run.app",
+                "RECONCILE_SANDBOX_URL": "https://sandbox.example.test",
                 "RECONCILE_SANDBOX_AUDIENCE": _audience(Component.SANDBOX),
                 "RECONCILE_CANARY_LOCATION": "us-central1",
                 "RECONCILE_CANARY_SERVICE": "reconcile-p5-canary",
@@ -185,15 +185,15 @@ def test_every_component_loads_only_its_exact_fields(component: Component) -> No
         assert config.allowed_caller_emails == (_API_CALLER,)
         assert config.runtime_database == "reconcile-p5-runtime"
         assert config.target_bucket == f"{_PROJECT}-p5-target"
-        assert config.controller_url == "https://controller.example.run.app"
+        assert config.controller_url == "https://controller.example.test"
         assert config.controller_audience == _audience(Component.CONTROLLER)
-        assert config.fault_proxy_url == "https://fault-proxy.example.run.app"
+        assert config.fault_proxy_url == "https://fault-proxy.example.test"
         assert config.target_database is None
     elif component is Component.CONTROLLER:
         assert config.allowed_caller_emails == (_INTERNAL_CALLER,)
-        assert config.fault_proxy_url == "https://fault-proxy.example.run.app"
+        assert config.fault_proxy_url == "https://fault-proxy.example.test"
         assert config.fault_proxy_audience == _audience(Component.FAULT_PROXY)
-        assert config.sandbox_url == "https://sandbox.example.run.app"
+        assert config.sandbox_url == "https://sandbox.example.test"
         assert config.canary_location == "us-central1"
         assert config.canary_service == "reconcile-p5-canary"
         assert config.canary_baseline_revision == _canary_baseline()
@@ -256,16 +256,16 @@ def test_every_declared_field_is_required_for_its_component(
 @pytest.mark.parametrize(
     ("component", "irrelevant_name", "irrelevant_value"),
     (
-        (Component.API, "RECONCILE_SANDBOX_URL", "https://sandbox.example.run.app"),
+        (Component.API, "RECONCILE_SANDBOX_URL", "https://sandbox.example.test"),
         (
             Component.CONTROLLER,
             "RECONCILE_CONTROLLER_URL",
-            "https://controller.example.run.app",
+            "https://controller.example.test",
         ),
         (
             Component.FAULT_PROXY,
             "RECONCILE_CONTROLLER_URL",
-            "https://controller.example.run.app",
+            "https://controller.example.test",
         ),
         (Component.SANDBOX, "RECONCILE_ALLOWED_CALLER_EMAILS", _INTERNAL_CALLER),
     ),
@@ -347,13 +347,13 @@ def test_component_database_boundaries_cannot_be_crossed(
 @pytest.mark.parametrize(
     "value",
     (
-        "http://api.example.run.app",
-        "https://user@api.example.run.app",
-        "https://api.example.run.app/path",
-        "https://api.example.run.app?token=value",
-        "https://api.example.run.app:443",
-        "https://api.example.run.app/",
-        "https://reconcile.invalid/phase5/reconcile-dev-260813-14fa6d/api/",
+        "http://api.example.test",
+        "https://user@api.example.test",
+        "https://api.example.test/path",
+        "https://api.example.test?token=value",
+        "https://api.example.test:443",
+        "https://api.example.test/",
+        "https://reconcile.invalid/phase5/example-project-id/api/",
     ),
 )
 def test_stable_audience_is_the_exact_frozen_value(value: str) -> None:
@@ -367,13 +367,13 @@ def test_stable_audience_is_the_exact_frozen_value(value: str) -> None:
 @pytest.mark.parametrize(
     "value",
     (
-        "http://controller.example.run.app",
-        "https://user@controller.example.run.app",
-        "https://controller.example.run.app/path",
-        "https://controller.example.run.app?value=1",
-        "https://controller.example.run.app:443",
-        "https://CONTROLLER.example.run.app",
-        "https://controller.example.run.app/",
+        "http://controller.example.test",
+        "https://user@controller.example.test",
+        "https://controller.example.test/path",
+        "https://controller.example.test?value=1",
+        "https://controller.example.test:443",
+        "https://CONTROLLER.example.test",
+        "https://controller.example.test/",
     ),
 )
 def test_destination_url_is_a_canonical_https_origin(value: str) -> None:

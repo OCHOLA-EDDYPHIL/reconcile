@@ -115,7 +115,7 @@ from reconcile.security import is_sensitive_key
 _ARTIFACT_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 _GIT_COMMIT_SHA1 = re.compile(r"^[0-9a-f]{40}$")
 _MAX_SIGNED_64 = 2**63 - 1
-_FROZEN_PROVIDER_PROJECT = "reconcile-dev-260813-14fa6d"
+_FROZEN_PROVIDER_PROJECT = "example-project-id"
 _FROZEN_PROVIDER_NAME = "google-vertex-ai"
 _FROZEN_MODEL_NAME = "gemini-3.5-flash"
 _FROZEN_MODEL_REVISION = "UNKNOWN"

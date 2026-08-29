@@ -292,7 +292,7 @@ def _targets(client: _Client, factory_calls: list[int] | None = None):
         return client
 
     return build_google_firestore_business_targets(
-        project_id="reconcile-dev-260813-14fa6d",
+        project_id="example-project-id",
         client_factory=factory,
         server_timestamp_factory=lambda: _SERVER_TIMESTAMP,
     )

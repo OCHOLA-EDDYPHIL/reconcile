@@ -1,0 +1,119 @@
+digraph ReconcileDeployment {
+  graph [
+    bgcolor="#07111f",
+    fontname="Liberation Sans",
+    label=<<FONT POINT-SIZE="32"><B>RECONCILE</B> — GOOGLE CLOUD TRUST TOPOLOGY</FONT><BR/><FONT POINT-SIZE="18">Five Cloud Run identities. Controller reads evidence; fault proxy performs permitted mutations.</FONT>>,
+    labelloc="t",
+    labeljust="l",
+    fontcolor="#f8fafc",
+    pad=0.42,
+    rankdir=TB,
+    ranksep=2.40,
+    nodesep=0.62,
+    newrank=true,
+    splines=polyline,
+    compound=true
+  ];
+  node [
+    shape=box,
+    style="rounded,filled",
+    fontname="Liberation Sans",
+    fontsize=19,
+    fontcolor="#e2e8f0",
+    color="#60a5fa",
+    fillcolor="#13253d",
+    margin="0.22,0.17",
+    penwidth=1.7
+  ];
+  edge [
+    fontname="Liberation Sans",
+    fontsize=16,
+    fontcolor="#cbd5e1",
+    color="#64748b",
+    arrowsize=0.80,
+    penwidth=1.7
+  ];
+
+  subgraph cluster_run {
+    label="CLOUD RUN • ONE SERVICE ACCOUNT PER SERVICE";
+    fontname="Liberation Sans";
+    fontsize=19;
+    fontcolor="#cbd5e1";
+    color="#475569";
+    style="rounded";
+    margin=22;
+
+    api [
+      label="API\noperator entry\ncalls controller / proxy",
+      group="api"
+    ];
+    controller [
+      label="CONTROLLER\nGemini + read-only evidence\ncalls proxy / sandbox",
+      group="controller"
+    ];
+    proxy [
+      label="FAULT PROXY\npermit-gated mutation\ncalls canary / sandbox",
+      fillcolor="#172554",
+      color="#818cf8",
+      group="proxy"
+    ];
+    canary [
+      label="CANARY\ncontroller reads\nfault proxy mutates"
+    ];
+    sandbox [
+      label="SANDBOX\ncontroller reads\nfault proxy mutates",
+      group="controller"
+    ];
+
+    { rank=same; api; controller; proxy; }
+    { rank=same; sandbox; canary; }
+    api -> controller [label="investigate", weight=20];
+    controller -> proxy [label="exact permit", color="#34d399", weight=20];
+    proxy -> canary [label="stage / promote", color="#34d399", weight=20];
+    controller -> sandbox [label="read", style=dashed, color="#38bdf8"];
+    proxy -> sandbox [label="mutate", color="#34d399"];
+    sandbox -> canary [style=invis, weight=20];
+  }
+
+  subgraph cluster_managed {
+    label="MANAGED SERVICES • IAM-SCOPED ACCESS";
+    fontname="Liberation Sans";
+    fontsize=19;
+    fontcolor="#cbd5e1";
+    color="#475569";
+    style="rounded";
+    margin=22;
+
+    vertex [
+      label="VERTEX AI\ncontroller only\nGemini planning",
+      shape=component,
+      fillcolor="#2e1065",
+      color="#c4b5fd"
+    ];
+    runtime_db [
+      label="RUNTIME FIRESTORE\nusers: API / controller / fault proxy\nviewer: sandbox\nauthority + permit claims",
+      shape=cylinder,
+      fillcolor="#082f49",
+      color="#38bdf8"
+    ];
+    target_db [
+      label="TARGET FIRESTORE\nviewer: controller\nuser: fault proxy\nrelease evidence",
+      shape=cylinder,
+      fillcolor="#082f49",
+      color="#38bdf8"
+    ];
+    sandbox_db [
+      label="SANDBOX FIRESTORE\nuser: sandbox\nisolated state",
+      shape=cylinder,
+      fillcolor="#082f49",
+      color="#38bdf8"
+    ];
+
+    { rank=same; runtime_db; vertex; sandbox_db; target_db; }
+  }
+
+  controller -> vertex [label="advisory", color="#a78bfa"];
+  controller -> runtime_db [label="authority", color="#38bdf8"];
+  proxy -> target_db [label="permitted write", color="#34d399"];
+  sandbox -> sandbox_db [label="isolated state", color="#38bdf8"];
+}

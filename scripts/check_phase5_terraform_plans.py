@@ -16,13 +16,13 @@ from pathlib import Path
 from typing import Any
 
 _ROOT = Path(__file__).parents[1]
-_PROJECT = "reconcile-dev-260813-14fa6d"
-_PROJECT_NUMBER = "669727977920"
+_PROJECT = "example-project-id"
+_PROJECT_NUMBER = "000000000000"
 _REGION = "us-central1"
 _STATE_BUCKET = f"{_PROJECT}-p5-state"
 _TARGET_BUCKET = f"{_PROJECT}-p5-target"
 _SANDBOX_DATABASE = "reconcile-p5-sandbox"
-_OWNER = "user:eddyphilochola13@gmail.com"
+_OWNER = "user:owner@example.invalid"
 _APPLY_EMAIL = f"rec-p5-apply@{_PROJECT}.iam.gserviceaccount.com"
 _APPLY_MEMBER = f"serviceAccount:{_APPLY_EMAIL}"
 _OPERATOR_MEMBER = _APPLY_MEMBER
@@ -420,7 +420,7 @@ _OUTPUT_NAMES = {
 def _iam_expectations() -> dict[str, dict[str, Any]]:
     expected = {
         "google_billing_account_iam_member.phase5_apply": {
-            "billing_account_id": "01029C-95939A-70E448",
+            "billing_account_id": "000000-000000-000000",
             "member": _APPLY_MEMBER,
             "role": "roles/billing.costsManager",
         },
@@ -1309,7 +1309,7 @@ def _verify_foundation(resources: dict[str, dict[str, Any]]) -> None:
         budget,
         {
             "all_updates_rule": [],
-            "billing_account": "01029C-95939A-70E448",
+            "billing_account": "000000-000000-000000",
             "budget_filter": [
                 {
                     "calendar_period": None,

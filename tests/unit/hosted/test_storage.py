@@ -37,8 +37,8 @@ from reconcile.hosted.storage import (
 
 pytestmark = pytest.mark.unit
 
-_PROJECT = "reconcile-dev-260813-14fa6d"
-_BUCKET = "reconcile-dev-260813-14fa6d-p5-target"
+_PROJECT = "example-project-id"
+_BUCKET = "example-project-id-p5-target"
 _NAME = "runs/storage-run-1/object.json"
 _OPERATION = "operation-storage-1"
 _CONTENT = b'{"operation":"operation-storage-1"}'

@@ -1,19 +1,19 @@
 variable "project_id" {
   type    = string
-  default = "reconcile-dev-260813-14fa6d"
+  default = "example-project-id"
 
   validation {
-    condition     = var.project_id == "reconcile-dev-260813-14fa6d"
+    condition     = var.project_id == "example-project-id"
     error_message = "The foundation stack is restricted to the approved project."
   }
 }
 
 variable "project_number" {
   type    = string
-  default = "669727977920"
+  default = "000000000000"
 
   validation {
-    condition     = var.project_number == "669727977920"
+    condition     = var.project_number == "000000000000"
     error_message = "The project number must match the approved project."
   }
 }
@@ -30,10 +30,10 @@ variable "region" {
 
 variable "billing_account_id" {
   type    = string
-  default = "01029C-95939A-70E448"
+  default = "000000-000000-000000"
 
   validation {
-    condition     = var.billing_account_id == "01029C-95939A-70E448"
+    condition     = var.billing_account_id == "000000-000000-000000"
     error_message = "The billing account must match the approved project billing account."
   }
 }

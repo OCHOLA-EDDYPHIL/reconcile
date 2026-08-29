@@ -4,6 +4,8 @@ import hashlib
 import importlib.util
 import json
 import shutil
+import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -11,12 +13,13 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
 EVIDENCE_SOURCE = ROOT / "demo" / "evidence"
-REPLAY_PATH = ROOT / "scripts" / "replay_gate_g5r.py"
+VALIDATOR_PATH = ROOT / "scripts" / "validate_evidence.py"
+LEGACY_VALIDATOR_PATH = ROOT / "scripts" / "replay_gate_g5r.py"
 
-SPEC = importlib.util.spec_from_file_location("replay_gate_g5r", REPLAY_PATH)
+SPEC = importlib.util.spec_from_file_location("validate_evidence", VALIDATOR_PATH)
 assert SPEC is not None and SPEC.loader is not None
-REPLAY = importlib.util.module_from_spec(SPEC)
-SPEC.loader.exec_module(REPLAY)
+VALIDATOR = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(VALIDATOR)
 
 
 @pytest.fixture
@@ -35,12 +38,12 @@ def _rewrite(path: Path, key_path: tuple[str | int, ...], value: Any) -> None:
     path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
 
 
-def test_final_candidate_bundle_is_coherent() -> None:
-    payload = REPLAY.load_and_validate(EVIDENCE_SOURCE / "proof-to-permit.json")
+def test_offline_evidence_bundle_is_coherent() -> None:
+    payload = VALIDATOR.load_and_validate(EVIDENCE_SOURCE / "proof-to-permit.json")
 
     provider = payload["provider_proof"]
-    assert provider["candidate"]["source_revision"] == REPLAY.SOURCE_REVISION
-    assert provider["run_id"] == REPLAY.RUN_ID
+    assert provider["candidate"]["source_revision"] == VALIDATOR.SOURCE_REVISION
+    assert provider["run_id"] == VALIDATOR.RUN_ID
     assert provider["acceptance"]["event_count"] == 49
     assert (
         payload["live_corroboration"]["firestore"]["durable_recovery_event_count"]
@@ -117,7 +120,7 @@ def test_final_candidate_bundle_is_coherent() -> None:
         ),
     ],
 )
-def test_candidate_or_cross_file_tampering_is_rejected(
+def test_evidence_or_cross_file_tampering_is_rejected(
     evidence_path: Path,
     filename: str,
     key_path: tuple[str | int, ...],
@@ -125,30 +128,36 @@ def test_candidate_or_cross_file_tampering_is_rejected(
 ) -> None:
     _rewrite(evidence_path.parent / filename, key_path, replacement)
 
-    with pytest.raises(REPLAY.EvidenceError):
-        REPLAY.load_and_validate(evidence_path)
+    with pytest.raises(VALIDATOR.EvidenceError):
+        VALIDATOR.load_and_validate(evidence_path)
 
 
 def test_provider_projection_hash_covers_exact_bytes(evidence_path: Path) -> None:
     provider_path = evidence_path.parent / "provider-proof.json"
     provider_path.write_bytes(provider_path.read_bytes() + b" ")
 
-    with pytest.raises(REPLAY.EvidenceError, match="provider proof bytes"):
-        REPLAY.load_and_validate(evidence_path)
+    with pytest.raises(
+        VALIDATOR.EvidenceError,
+        match="provider evidence record bytes",
+    ):
+        VALIDATOR.load_and_validate(evidence_path)
 
 
 def test_manifest_digest_tampering_is_rejected(evidence_path: Path) -> None:
     _rewrite(evidence_path, ("live_gate", "cleanup_verification_sha256"), "0" * 64)
 
-    with pytest.raises(REPLAY.EvidenceError):
-        REPLAY.load_and_validate(evidence_path)
+    with pytest.raises(VALIDATOR.EvidenceError):
+        VALIDATOR.load_and_validate(evidence_path)
 
 
 def test_unexpected_generated_from_metadata_is_rejected(evidence_path: Path) -> None:
     _rewrite(evidence_path, ("generated_from",), {"source": "private-placeholder"})
 
-    with pytest.raises(REPLAY.EvidenceError, match="evidence index fields changed"):
-        REPLAY.load_and_validate(evidence_path)
+    with pytest.raises(
+        VALIDATOR.EvidenceError,
+        match="evidence index fields changed",
+    ):
+        VALIDATOR.load_and_validate(evidence_path)
 
 
 def test_duplicate_json_key_is_rejected(evidence_path: Path) -> None:
@@ -163,8 +172,8 @@ def test_duplicate_json_key_is_rejected(evidence_path: Path) -> None:
         encoding="utf-8",
     )
 
-    with pytest.raises(REPLAY.EvidenceError, match="duplicate JSON key"):
-        REPLAY.load_and_validate(evidence_path)
+    with pytest.raises(VALIDATOR.EvidenceError, match="duplicate JSON key"):
+        VALIDATOR.load_and_validate(evidence_path)
 
 
 def test_nonfinite_json_number_is_rejected(evidence_path: Path) -> None:
@@ -175,8 +184,8 @@ def test_nonfinite_json_number_is_rejected(evidence_path: Path) -> None:
         encoding="utf-8",
     )
 
-    with pytest.raises(REPLAY.EvidenceError, match="non-standard JSON number"):
-        REPLAY.load_and_validate(evidence_path)
+    with pytest.raises(VALIDATOR.EvidenceError, match="non-standard JSON number"):
+        VALIDATOR.load_and_validate(evidence_path)
 
 
 @pytest.mark.parametrize("prefix", [b"\xef\xbb\xbf", b"\xff"])
@@ -184,5 +193,16 @@ def test_noncanonical_encoding_is_rejected(evidence_path: Path, prefix: bytes) -
     cleanup_path = evidence_path.parent / "cleanup-verification.json"
     cleanup_path.write_bytes(prefix + cleanup_path.read_bytes())
 
-    with pytest.raises(REPLAY.EvidenceError, match=r"strict JSON|BOM"):
-        REPLAY.load_and_validate(evidence_path)
+    with pytest.raises(VALIDATOR.EvidenceError, match=r"strict JSON|BOM"):
+        VALIDATOR.load_and_validate(evidence_path)
+
+
+def test_legacy_validator_entry_point_delegates_to_canonical_validator() -> None:
+    completed = subprocess.run(
+        [sys.executable, str(LEGACY_VALIDATOR_PATH), "--json"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert json.loads(completed.stdout)["status"] == "PASS"

@@ -293,7 +293,7 @@ def _runtime_values(repo_root: Path, image_digest: str) -> set[str]:
     )
     prompt_version, prompt_sha = operator._planner_prompt_identity(repo_root)
     immutable_reference = (
-        "us-central1-docker.pkg.dev/reconcile-dev-260813-14fa6d/"
+        "us-central1-docker.pkg.dev/example-project-id/"
         f"reconcile-p5/reconcile@{image_digest}"
     )
     return {
@@ -315,17 +315,15 @@ def _plan_json(filename: str, runtime_values: set[str]) -> bytes:
         else "create"
     )
     iam_value = {
-        "member": (
-            "serviceAccount:fixture@reconcile-dev-260813-14fa6d.iam.gserviceaccount.com"
-        ),
+        "member": ("serviceAccount:fixture@example-project-id.iam.gserviceaccount.com"),
         "name": None,
-        "project": "reconcile-dev-260813-14fa6d",
+        "project": "example-project-id",
         "role": "roles/viewer",
     }
     bucket_value = {
         "id": None,
         "name": f"fixture-{filename}",
-        "project": "reconcile-dev-260813-14fa6d",
+        "project": "example-project-id",
     }
 
     def change(value: dict[str, object], unknown: dict[str, bool]) -> dict[str, object]:
@@ -358,7 +356,7 @@ def _plan_json(filename: str, runtime_values: set[str]) -> bytes:
                 "change": change(
                     {
                         "id": None,
-                        "project": "reconcile-dev-260813-14fa6d",
+                        "project": "example-project-id",
                         "service": service,
                     },
                     {"id": True},
@@ -388,7 +386,7 @@ def _plan_json(filename: str, runtime_values: set[str]) -> bytes:
             "id": None,
             "location": "us-central1",
             "name": "reconcile-p5-api",
-            "project": "reconcile-dev-260813-14fa6d",
+            "project": "example-project-id",
             "template": [{"service_account": "rec-p5-api@example.invalid"}],
         }
         runtime_changes = [
@@ -406,11 +404,11 @@ def _plan_json(filename: str, runtime_values: set[str]) -> bytes:
                     {
                         "location": "us-central1",
                         "member": (
-                            "serviceAccount:fixture@reconcile-dev-260813-14fa6d."
+                            "serviceAccount:fixture@example-project-id."
                             "iam.gserviceaccount.com"
                         ),
                         "name": None,
-                        "project": "reconcile-dev-260813-14fa6d",
+                        "project": "example-project-id",
                         "role": "roles/run.invoker",
                     },
                     {"name": True},
@@ -805,7 +803,7 @@ def _records(
     state.write_manifest(manifest)
     approval = operator.build_approval(
         manifest,
-        approved_by="user:eddyphilochola13@gmail.com",
+        approved_by="user:owner@example.invalid",
         approved_at=_NOW + timedelta(minutes=1),
     )
     state.write_approval(approval)
@@ -1322,7 +1320,7 @@ def test_manifest_freezes_exact_identity_limits_estimates_and_commands(
             f"{Path(manifest.operator_state_root) / 'python-dependencies'}"
         ),
         "RECONCILE_API_AUDIENCE": (
-            "https://reconcile.invalid/phase5/reconcile-dev-260813-14fa6d/api"
+            "https://reconcile.invalid/phase5/example-project-id/api"
         ),
     }
     assert provider.commands[0][4:6] == (
@@ -1370,8 +1368,7 @@ def test_manifest_freezes_exact_identity_limits_estimates_and_commands(
         item for item in manifest.authenticated_exposure if item.service == "api"
     )
     assert api.allowed_callers == (
-        "serviceAccount:rec-p5-apply@"
-        "reconcile-dev-260813-14fa6d.iam.gserviceaccount.com",
+        "serviceAccount:rec-p5-apply@example-project-id.iam.gserviceaccount.com",
     )
     assert manifest.gcloud_version == "580.0.0"
     image_push = manifest.command_for(operator.Phase5Action.IMAGE_PUSH)
@@ -1382,8 +1379,8 @@ def test_manifest_freezes_exact_identity_limits_estimates_and_commands(
         "services",
         "enable",
         "cloudresourcemanager.googleapis.com",
-        "--project=reconcile-dev-260813-14fa6d",
-        "--account=eddyphilochola13@gmail.com",
+        "--project=example-project-id",
+        "--account=owner@example.invalid",
         "--quiet",
     )
     assert "init" in bootstrap.commands[1]
@@ -1401,9 +1398,9 @@ def test_manifest_freezes_exact_identity_limits_estimates_and_commands(
         "storage",
         "rm",
         "--all-versions",
-        "gs://reconcile-dev-260813-14fa6d-p5-state/**",
-        "--project=reconcile-dev-260813-14fa6d",
-        "--account=eddyphilochola13@gmail.com",
+        "gs://example-project-id-p5-state/**",
+        "--project=example-project-id",
+        "--account=owner@example.invalid",
         "--quiet",
     )
     assert "init" in teardown.commands[1]
@@ -1451,7 +1448,7 @@ def test_manifest_freezes_exact_identity_limits_estimates_and_commands(
     image = manifest.command_for(operator.Phase5Action.IMAGE_PUSH)
     assert {item.name: item.value for item in image.environment} == {
         "CLOUDSDK_AUTH_IMPERSONATE_SERVICE_ACCOUNT": (
-            "rec-p5-apply@reconcile-dev-260813-14fa6d.iam.gserviceaccount.com"
+            "rec-p5-apply@example-project-id.iam.gserviceaccount.com"
         ),
         "DOCKER_CONFIG": str(Path(manifest.operator_state_root) / "docker"),
         "DOCKER_HOST": operator._DOCKER_HOST,
@@ -1463,7 +1460,7 @@ def test_manifest_freezes_exact_identity_limits_estimates_and_commands(
         "us-central1-docker.pkg.dev",
         (
             "--impersonate-service-account=rec-p5-apply@"
-            "reconcile-dev-260813-14fa6d.iam.gserviceaccount.com"
+            "example-project-id.iam.gserviceaccount.com"
         ),
         "--quiet",
     )
@@ -1509,7 +1506,7 @@ def test_legacy_manifest_is_read_only_even_when_allowlisted(
     legacy = _legacy_image_id_manifest(manifest)
     approval = operator.build_approval(
         legacy,
-        approved_by="user:eddyphilochola13@gmail.com",
+        approved_by="user:owner@example.invalid",
         approved_at=_NOW + timedelta(minutes=1),
     )
 
@@ -2437,7 +2434,7 @@ def test_no_cloud_preparation_builds_complete_private_manifest_inputs(
         artifact_output = values["state_root"] / "plans"
         required = set(runtime_identity.values()) | {
             (
-                "us-central1-docker.pkg.dev/reconcile-dev-260813-14fa6d/"
+                "us-central1-docker.pkg.dev/example-project-id/"
                 f"reconcile-p5/reconcile@{runtime_identity['image_digest']}"
             )
         }
@@ -3598,7 +3595,7 @@ def test_teardown_verifier_accepts_observed_provider_normalization_only() -> Non
         "default_uri_disabled": None,
         "location": "us-central1",
         "name": "reconcile-p5-api",
-        "project": "reconcile-dev-260813-14fa6d",
+        "project": "example-project-id",
         "template": [
             {
                 "annotations": None,
@@ -3612,10 +3609,10 @@ def test_teardown_verifier_accepts_observed_provider_normalization_only() -> Non
         "default_uri_disabled": False,
         "location": "us-central1",
         "name": (
-            "projects/reconcile-dev-260813-14fa6d/locations/us-central1/"
+            "projects/example-project-id/locations/us-central1/"
             "services/reconcile-p5-api"
         ),
-        "project": "reconcile-dev-260813-14fa6d",
+        "project": "example-project-id",
         "template": [{"annotations": {}, "containers": [{"args": [], "command": []}]}],
     }
 
@@ -3632,11 +3629,11 @@ def test_teardown_verifier_accepts_observed_provider_normalization_only() -> Non
         (("name",), "projects/wrong/locations/us-central1/services/reconcile-p5-api"),
         (
             ("name",),
-            "projects/reconcile-dev-260813-14fa6d/locations/europe-west1/services/reconcile-p5-api",
+            "projects/example-project-id/locations/europe-west1/services/reconcile-p5-api",
         ),
         (
             ("name",),
-            "projects/reconcile-dev-260813-14fa6d/locations/us-central1/services/other",
+            "projects/example-project-id/locations/us-central1/services/other",
         ),
         (("template", 0, "containers", 0, "args"), ["unexpected"]),
     ):
@@ -3672,14 +3669,14 @@ def test_teardown_verifier_accepts_observed_provider_normalization_only() -> Non
             "google_artifact_registry_repository_iam_member",
             {
                 "location": "us-central1",
-                "project": "reconcile-dev-260813-14fa6d",
+                "project": "example-project-id",
                 "repository": "reconcile-p5",
             },
             {
                 "location": "us-central1",
-                "project": "reconcile-dev-260813-14fa6d",
+                "project": "example-project-id",
                 "repository": (
-                    "projects/reconcile-dev-260813-14fa6d/locations/us-central1/"
+                    "projects/example-project-id/locations/us-central1/"
                     "repositories/reconcile-p5"
                 ),
             },
@@ -3838,12 +3835,12 @@ def test_bootstrap_teardown_rejects_unscoped_or_nearby_bucket_state(
             "google_artifact_registry_repository_iam_member",
             {
                 "location": "us-central1",
-                "project": "reconcile-dev-260813-14fa6d",
+                "project": "example-project-id",
                 "repository": "reconcile-p5",
             },
             {
                 "location": "us-central1",
-                "project": "reconcile-dev-260813-14fa6d",
+                "project": "example-project-id",
                 "repository": (
                     "projects/other-project/locations/us-central1/"
                     "repositories/reconcile-p5"
@@ -3980,10 +3977,9 @@ def test_runtime_teardown_verifier_accepts_exact_post_recovery_provider_state(
         "condition": [],
         "location": "us-central1",
         "member": (
-            "serviceAccount:rec-p5-fault@reconcile-dev-260813-14fa6d."
-            "iam.gserviceaccount.com"
+            "serviceAccount:rec-p5-fault@example-project-id.iam.gserviceaccount.com"
         ),
-        "project": "reconcile-dev-260813-14fa6d",
+        "project": "example-project-id",
         "repository": "reconcile-p5",
         "role": "roles/artifactregistry.reader",
     }
@@ -5154,10 +5150,10 @@ def test_image_push_proves_source_tag_resolves_to_remote_manifest_digest(
         "images",
         "describe",
         manifest.image_artifact.source_tag,
-        "--project=reconcile-dev-260813-14fa6d",
+        "--project=example-project-id",
         (
             "--impersonate-service-account=rec-p5-apply@"
-            "reconcile-dev-260813-14fa6d.iam.gserviceaccount.com"
+            "example-project-id.iam.gserviceaccount.com"
         ),
         "--format=value(image_summary.digest)",
         "--quiet",

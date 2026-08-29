@@ -47,7 +47,7 @@ def _candidate(**updates: object) -> HostedCandidateIdentity:
         "image_digest": f"sha256:{'b' * 64}",
         "infrastructure_revision": "c" * 64,
         "semantic_config_sha256": "d" * 64,
-        "project_id": "reconcile-dev-260813-14fa6d",
+        "project_id": "example-project-id",
         "vertex_location": "us",
         "configured_model": "gemini-3.5-flash",
         "prompt_version": "hosted-acquisition-v1",

@@ -17,7 +17,7 @@ pytestmark = pytest.mark.unit
 
 NOW = 2_000_000_000
 AUDIENCE = "https://controller.example.test"
-CALLER = "api@project.example.iam.gserviceaccount.com"
+CALLER = "api@example.invalid"
 TOKEN = "header.payload.signature"
 
 

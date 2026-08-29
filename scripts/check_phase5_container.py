@@ -19,7 +19,7 @@ from uuid import uuid4
 _ROOT = Path(__file__).parents[1]
 _DOCKERFILE = _ROOT / "Dockerfile"
 _DOCKERIGNORE = _ROOT / ".dockerignore"
-_PROJECT = "reconcile-dev-260813-14fa6d"
+_PROJECT = "example-project-id"
 _REGION = "us-central1"
 _SOURCE_REVISION = re.compile(r"[0-9a-f]{40}")
 _IMAGE_DIGEST = re.compile(r"sha256:[0-9a-f]{64}")

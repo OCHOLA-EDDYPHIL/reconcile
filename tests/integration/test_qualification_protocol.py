@@ -1289,7 +1289,7 @@ def test_historical_and_consumed_v2_custody_are_canonical_and_add_once() -> None
 def test_runtime_identity_freezes_project_provider_versions_and_pricing() -> None:
     provider = _provider()
     config = VertexAdcPlannerConfig(
-        project="reconcile-dev-260813-14fa6d",
+        project="example-project-id",
         location="global",
         model="gemini-3.5-flash",
         timeout_seconds=30,
@@ -1301,9 +1301,9 @@ def test_runtime_identity_freezes_project_provider_versions_and_pricing() -> Non
         identity = qualification_runtime_identity(planner)
         assert identity == frozen_qualification_runtime_identity()
         assert canonical_sha256(identity) == (
-            "ebcccd85ec30ce87fa88d478715865d5962392719b5f10a045374db9bb4a6a34"
+            "5ea37d4fce1e8c95864ee2dd62d69ec9f378135365d48456ca41765848011545"
         )
-        assert identity.provider_project == "reconcile-dev-260813-14fa6d"
+        assert identity.provider_project == "example-project-id"
         assert identity.configured_model == "gemini-3.5-flash"
         assert identity.model_revision == "UNKNOWN"
         assert identity.input_cost_nano_units_per_token == 1_500
@@ -1347,7 +1347,7 @@ def test_deterministic_rejects_live_planner_and_failed_count_is_persisted(
     planner = build_vertex_qualification_planner(
         manifest.provider,
         VertexAdcPlannerConfig(
-            project="reconcile-dev-260813-14fa6d",
+            project="example-project-id",
             location="global",
             model="gemini-3.5-flash",
             timeout_seconds=30,

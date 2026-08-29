@@ -207,11 +207,11 @@ _UTC_TIMESTAMP_PATTERN = re.compile(
     r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}"
     r"(?:\.[0-9]{6})?Z"
 )
-_APPROVED_PROJECT_ID = "reconcile-dev-260813-14fa6d"
+_APPROVED_PROJECT_ID = "example-project-id"
 _APPROVED_RUNTIME_DATABASE = "reconcile-p5-runtime"
 _APPROVED_SANDBOX_DATABASE = "reconcile-p5-sandbox"
 _APPROVED_TARGET_DATABASE = "reconcile-p5-target"
-_APPROVED_TARGET_BUCKET = "reconcile-dev-260813-14fa6d-p5-target"
+_APPROVED_TARGET_BUCKET = "example-project-id-p5-target"
 _APPROVED_VERTEX_PROMPT_VERSION = "adaptive-planner-v3"
 _APPROVED_VERTEX_PROMPT_SHA256 = (
     "a18ac5bbd22570562acc6dfbc49437a82f0db6a265a4de737c1371b6ef2ca2d3"
@@ -223,25 +223,21 @@ _APPROVED_AUDIENCES = {
     for component in Component
 }
 _APPROVED_CALLERS = {
-    Component.API: ("rec-p5-apply@reconcile-dev-260813-14fa6d.iam.gserviceaccount.com"),
-    Component.CONTROLLER: (
-        "rec-p5-api@reconcile-dev-260813-14fa6d.iam.gserviceaccount.com"
-    ),
-    Component.FAULT_PROXY: (
-        "rec-p5-api@reconcile-dev-260813-14fa6d.iam.gserviceaccount.com"
-    ),
+    Component.API: ("rec-p5-apply@example-project-id.iam.gserviceaccount.com"),
+    Component.CONTROLLER: ("rec-p5-api@example-project-id.iam.gserviceaccount.com"),
+    Component.FAULT_PROXY: ("rec-p5-api@example-project-id.iam.gserviceaccount.com"),
 }
 _APPROVED_SANDBOX_READ_CALLER = (
-    "rec-p5-controller@reconcile-dev-260813-14fa6d.iam.gserviceaccount.com"
+    "rec-p5-controller@example-project-id.iam.gserviceaccount.com"
 )
 _APPROVED_SANDBOX_MUTATION_CALLER = (
-    "rec-p5-fault@reconcile-dev-260813-14fa6d.iam.gserviceaccount.com"
+    "rec-p5-fault@example-project-id.iam.gserviceaccount.com"
 )
 _APPROVED_CANARY_AUDIENCE = (
     f"https://reconcile.invalid/phase5/{_APPROVED_PROJECT_ID}/canary"
 )
 _APPROVED_CANARY_SERVICE_ACCOUNT = (
-    "rec-p5-canary@reconcile-dev-260813-14fa6d.iam.gserviceaccount.com"
+    "rec-p5-canary@example-project-id.iam.gserviceaccount.com"
 )
 
 

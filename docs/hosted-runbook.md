@@ -1,20 +1,20 @@
-# Hosted Proof-to-Permit runbook
+# Hosted recovery runbook
 
-This is a maintainer-operated path for an authorized Google Cloud candidate. It
-does not authorize a deployment, release, or external submission. The accepted
-G5R environment was ephemeral and has been cleaned up.
+This runbook describes the maintainer-operated path for an authorized Google
+Cloud environment. The recorded environment was ephemeral and was removed after
+evidence capture.
 
 ## What is portable and what is sealed
 
-The application contracts, container, evidence rules, and operator state machine
-are in the repository. The Phase 5 Terraform backends, service identities, billing
-bindings, and budget are intentionally sealed to one maintainer environment. Do
-not copy those identifiers into another project or treat the current IaC as a
+Application contracts, the container, evidence rules, and the operator state
+machine are in the repository. Terraform backends, service identities, billing
+bindings, and budgets are sealed to a maintainer environment. Do not copy those
+identifiers into another project or treat the current infrastructure as a
 turnkey template.
 
-An operator targeting a different project must first parameterize and review all
-backend, identity, IAM, billing, region, database, and service assumptions. That is
-new infrastructure work, not part of this demo candidate.
+An operator targeting another project must parameterize and review every
+backend, identity, IAM, billing, region, database, and service assumption. That
+is separate infrastructure work.
 
 ## Prerequisites
 
@@ -35,7 +35,7 @@ outside the checkout and an external secret store.
 
 ## Sealed operator sequence
 
-Discover the exact interface without mutating cloud state:
+Discover the interface without mutating cloud state:
 
 ```bash
 uv run --no-sync python scripts/phase5_operator.py --help
@@ -45,18 +45,18 @@ uv run --no-sync python scripts/phase5_operator.py inspect \
 
 The state machine is:
 
-1. `prepare-artifacts` records toolchain, source, dependency, container, Terraform,
-   semantic configuration, cost, and action-plan custody.
-2. `seal-manifest` refuses a dirty or mismatched candidate.
-3. `record-approval` binds a named approver and timestamp to the manifest hash.
+1. `prepare-artifacts` records toolchain, source, dependency, container,
+   Terraform, semantic configuration, cost, and action-plan custody.
+2. `seal-manifest` refuses a dirty or mismatched source tree.
+3. `record-approval` binds an approver and timestamp to the manifest hash.
 4. `run` accepts only the sealed manifest and approval for one named action:
-   bootstrap, foundation, image, runtime, provider acceptance, hosted acceptance,
-   or a corresponding teardown action.
-5. `inspect` reads the durable action/evidence chain after every boundary.
+   bootstrap, foundation, image, runtime, provider acceptance, hosted
+   acceptance, or a corresponding teardown action.
+5. `inspect` reads the durable action and evidence chain after every boundary.
 
-The operator intentionally has no “deploy everything” shortcut. Obtain a reviewed
-plan before every apply and use the exact manifest and approval hashes printed by
-the preceding commands.
+There is no “deploy everything” shortcut. Obtain a reviewed plan before every
+apply and use the exact manifest and approval hashes printed by the preceding
+commands.
 
 ## Recovery invocation
 
@@ -72,39 +72,39 @@ uv run --no-sync reconcile recovery run cloud-run-rollout \
   --run-id <unique-run-id>
 ```
 
-The command is remote-only. The default loopback API does not provision Cloud Run
-or Firestore and must not be presented as a hosted recovery demonstration.
+The command is remote-only. The default loopback API does not provision Cloud
+Run or Firestore and must not be presented as a hosted recovery demonstration.
 
-## Outcome-based acceptance
+## Acceptance criteria
 
-Accept one candidate only when the same trace proves all of these outcomes:
+Accept a recorded run only when one trace establishes all of these outcomes:
 
-1. Initial ambiguity is `UNKNOWN`; both continuation and retry are denied; no
-   action permit exists.
+1. Initial ambiguity is `UNKNOWN`; continuation and retry are denied; no action
+   permit exists.
 2. A later pass observes one exact correlated and settled revision.
 3. Deterministic verification issues the exact certificate and `max_uses=1`
    permit for each continuation.
 4. Exactly one revision, one promotion, and one Firestore release record exist.
-5. Reusing the consumed authority is rejected before provider contact.
-6. Raw evidence is sealed, a sanitized public record is linked, and cleanup leaves
-   zero scoped cloud resources.
+5. Reusing consumed authority is rejected before provider contact.
+6. Raw evidence is sealed, a sanitized provider evidence record is linked, and
+   cleanup leaves zero scoped cloud resources.
 
-Probe order, probe count, arbitrary wall-clock thresholds, GitHub Actions, broad
-regression suites, release publication, and submission are not part of this gate.
+These criteria cover the hosted recovery path. They do not establish model
+superiority, performance, portability, or a general exactly-once guarantee.
 
 ## Provider degradation and safe stop
 
-If Gemini, Cloud Run, Firestore, identity, or an authoritative read is unavailable,
-do not widen authority or infer success from a timeout. Preserve the evidence,
-emit `UNKNOWN` or an ambiguity witness, deny mutation, and stop the candidate.
+If Gemini, Cloud Run, Firestore, identity, or an authoritative read is
+unavailable, do not widen authority or infer success from a timeout. Preserve
+the evidence, emit `UNKNOWN` or an ambiguity witness, deny mutation, and stop.
 
-If teardown automation returns an unknown result, do not blindly replay it. Read
-provider state, use an exact reviewed cleanup plan, preserve both records, and
-independently inventory the scoped project afterward.
+If teardown automation returns an unknown result, do not blindly replay it.
+Read provider state, use an exact reviewed cleanup plan, preserve both records,
+and independently inventory the scoped project afterward.
 
-## Accepted reference
+## Evidence references
 
-The canonical accepted candidate, evidence hashes, and exact outcomes are in the
-[sanitized provider proof](../demo/evidence/provider-proof.json). The teardown
-evidence and zero-resource inventory are in the hash-bound
+The recorded outcomes and evidence hashes are in the
+[provider evidence record](../demo/evidence/provider-proof.json). Teardown
+evidence and the zero-resource inventory are in
 [cleanup verification](../demo/evidence/cleanup-verification.json).
