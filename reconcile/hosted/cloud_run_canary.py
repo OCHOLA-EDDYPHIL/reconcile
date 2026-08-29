@@ -38,7 +38,7 @@ _LOCATION = re.compile(r"[a-z][a-z0-9-]{0,62}")
 _SERVICE = re.compile(r"[a-z][a-z0-9-]{0,47}")
 _REVISION = re.compile(r"[a-z][a-z0-9-]{0,62}")
 _RELEASE = re.compile(r"[a-z][a-z0-9_-]{0,62}")
-_TIMEOUT_SECONDS = 5.0
+_TIMEOUT_SECONDS = 15.0
 _HEALTH_BODY_CEILING = 4_096
 
 

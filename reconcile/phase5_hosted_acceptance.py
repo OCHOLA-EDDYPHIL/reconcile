@@ -4180,7 +4180,6 @@ class CloudRunAcceptanceBackend:
             ),
             baseline_revision=baseline_revision,
             health_audience=_CANARY_AUDIENCE,
-            timeout_seconds=5.0,
         )
 
         def services_factory():
