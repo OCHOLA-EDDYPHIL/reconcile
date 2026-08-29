@@ -42,6 +42,7 @@ from reconcile.contracts import (
     RecoveryRunRequest,
     RecoveryRunSnapshot,
     VerifiedCertificate,
+    canonical_sha256,
 )
 from reconcile.controller.permits import PermitAuthority
 from reconcile.evidence.recovery_verification import verify_recovery
@@ -137,6 +138,8 @@ class _CloudState:
         self.pending_reset_reads = 0
         self.pending_reset_traffic = None
         self.service_read_count = 0
+        self.post_stage_service_read_count = 0
+        self.stale_service_read_numbers_after_stage: set[int] = set()
         self.stage_pending = False
         self.ready_on_revision_read = None
         self.revisions = {
@@ -260,6 +263,13 @@ class _Services:
         ):
             raise api_exceptions.ServiceUnavailable("provider unavailable")
         self.state.service_read_count += 1
+        stale_read = False
+        if self.state.update_count:
+            self.state.post_stage_service_read_count += 1
+            read_number = self.state.post_stage_service_read_count
+            if read_number in self.state.stale_service_read_numbers_after_stage:
+                self.state.stale_service_read_numbers_after_stage.remove(read_number)
+                stale_read = True
         if self.state.pending_reset_traffic is not None:
             self.state.pending_reset_reads -= 1
             if self.state.pending_reset_reads <= 0:
@@ -267,7 +277,12 @@ class _Services:
                 self.state.pending_reset_traffic = None
                 self.state.service.reconciling = False
                 self.state.service.terminal_condition = _ready()
-        return run_v2.Service(self.state.service)
+        result = run_v2.Service(self.state.service)
+        if stale_read:
+            result.reconciling = True
+            result.terminal_condition = _pending()
+            result.observed_generation = max(0, result.generation - 1)
+        return result
 
     def update_service(self, **kwargs):
         return self.state.update(kwargs["request"])
@@ -1176,10 +1191,120 @@ def test_missing_or_conflicting_evidence_witnesses_without_an_extra_mutation(
     snapshot = asyncio.run(exercise())
 
     assert snapshot.lifecycle is RecoveryRunLifecycle.ESCALATED
+    assert len(snapshot.reports) == 2
     assert len(snapshot.witnesses) == 1
     assert snapshot.action_permits == ()
     assert state.update_count == 1
     assert state.service.traffic_statuses[0].revision == BASELINE
+
+
+def test_fixed_workflow_reobserves_one_transient_provider_conflict(tmp_path) -> None:
+    settings = _settings()
+    state, _adapter, action, reader, firestore, firestore_client = _provider(settings)
+    state.stale_service_read_numbers_after_stage = {1}
+    store = InMemoryRecoveryRunStore()
+    authority = PermitAuthority(
+        SqliteDurableRuntimeStore(tmp_path / "transient-conflict.sqlite3"),
+        clock=lambda: NOW + timedelta(seconds=2),
+    )
+    workflow = build_release_chain_workflow(
+        settings=settings,
+        invoked_at=NOW,
+        store=store,
+        permit_authority=authority,
+        recovery_agent=RecoveryAgent(_Planner(output=_output(probe_count=0))),
+        cloud_action=action,
+        cloud_reader=reader,
+        firestore=firestore,
+        clock=lambda: NOW + timedelta(seconds=2),
+    )
+    request = RecoveryRunRequest(
+        schema_version=RECOVERY_RUN_REQUEST_VERSION,
+        run_id="fixed-transient-provider-conflict",
+        scenario="cloud-run-rollout",
+        policy=RecoveryRunPolicy.FIXED,
+        fault=RecoveryRunFault.DROP_AFTER_ACCEPT,
+    )
+
+    async def exercise():
+        definition = await workflow.definition(request)
+        await store.create(request, definition.chain, created_at=NOW)
+        return await workflow.run(request.run_id), definition
+
+    snapshot, definition = asyncio.run(exercise())
+    stage_reports = tuple(
+        report
+        for report in snapshot.reports
+        if report.investigation_id == definition.envelopes["stage"].investigation_id
+    )
+    stage_certificate = next(
+        certificate
+        for certificate in snapshot.certificates
+        if certificate.node_id == "stage"
+    )
+
+    assert snapshot.lifecycle is RecoveryRunLifecycle.COMPLETED
+    assert len(stage_reports) == 4
+    assert tuple(len(report.probe_audit) for report in stage_reports) == (1, 4, 1, 3)
+    assert stage_reports[0].classification is Classification.PENDING
+    assert stage_reports[-1].classification is Classification.COMMITTED
+    assert stage_certificate.report_sha256 == canonical_sha256(stage_reports[-1])
+    assert snapshot.witnesses == ()
+    assert len(snapshot.certificates) == 3
+    assert len(snapshot.action_permits) == 2
+    assert state.update_count == 2
+    assert state.stale_service_read_numbers_after_stage == set()
+    assert firestore_client.document("releases", settings.release_id).create_count == 1
+
+
+def test_fixed_workflow_escalates_a_persistent_provider_conflict(tmp_path) -> None:
+    settings = _settings()
+    state, _adapter, action, reader, firestore, firestore_client = _provider(settings)
+    state.stale_service_read_numbers_after_stage = {1, 4}
+    store = InMemoryRecoveryRunStore()
+    authority = PermitAuthority(
+        SqliteDurableRuntimeStore(tmp_path / "persistent-conflict.sqlite3"),
+        clock=lambda: NOW + timedelta(seconds=2),
+    )
+    workflow = build_release_chain_workflow(
+        settings=settings,
+        invoked_at=NOW,
+        store=store,
+        permit_authority=authority,
+        recovery_agent=RecoveryAgent(_Planner(output=_output(probe_count=0))),
+        cloud_action=action,
+        cloud_reader=reader,
+        firestore=firestore,
+        clock=lambda: NOW + timedelta(seconds=2),
+    )
+    request = RecoveryRunRequest(
+        schema_version=RECOVERY_RUN_REQUEST_VERSION,
+        run_id="fixed-persistent-provider-conflict",
+        scenario="cloud-run-rollout",
+        policy=RecoveryRunPolicy.FIXED,
+        fault=RecoveryRunFault.DROP_AFTER_ACCEPT,
+    )
+
+    async def exercise():
+        definition = await workflow.definition(request)
+        await store.create(request, definition.chain, created_at=NOW)
+        return await workflow.run(request.run_id)
+
+    snapshot = asyncio.run(exercise())
+
+    assert snapshot.lifecycle is RecoveryRunLifecycle.ESCALATED
+    assert len(snapshot.reports) == 4
+    assert len(snapshot.witnesses) == 1
+    assert {
+        history.history_id for history in snapshot.witnesses[0].possible_histories
+    } == {"provider-state-1", "provider-state-2"}
+    assert snapshot.witnesses[0].report_sha256 == canonical_sha256(snapshot.reports[-1])
+    assert snapshot.certificates == ()
+    assert snapshot.action_permits == ()
+    assert state.update_count == 1
+    assert state.stale_service_read_numbers_after_stage == set()
+    assert state.service.traffic_statuses[0].revision == BASELINE
+    assert firestore_client.document("releases", settings.release_id).create_count == 0
 
 
 @pytest.mark.parametrize(

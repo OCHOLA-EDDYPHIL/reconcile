@@ -56,7 +56,12 @@ from reconcile.controller.permits import (
     dispatch_precondition_sha256,
 )
 from reconcile.evidence.classification import CoreEvaluation
-from reconcile.evidence.recovery_rules import validate_recovery_dispatch
+from reconcile.evidence.recovery_rules import (
+    RecoveryRuleViolation,
+    recovery_provider_conflict_pairs,
+    resolve_recovery_action_profile,
+    validate_recovery_dispatch,
+)
 from reconcile.evidence.recovery_verification import (
     RecoveryVerificationResult,
     verify_recovery,
@@ -202,6 +207,33 @@ def _node(chain: RecoveryChain, node_id: str) -> RecoveryActionNode:
     if len(matches) != 1:
         raise RecoveryDefinitionError("recovery node is not unique")
     return matches[0]
+
+
+def _is_provider_conflict_witness(
+    node: RecoveryActionNode,
+    state: RecoveryEvidenceState,
+    artifact: RecoveryVerificationResult,
+) -> bool:
+    if not isinstance(artifact, AmbiguityWitness):
+        return False
+    bound_evidence_ids = {binding.evidence_id for binding in artifact.evidence}
+    evidence = tuple(
+        item
+        for item in state.evaluation.evidence
+        if item.evidence_id in bound_evidence_ids
+    )
+    if {item.evidence_id for item in evidence} != bound_evidence_ids:
+        return False
+    try:
+        profile = resolve_recovery_action_profile(node.semantic_action)
+        conflicts = recovery_provider_conflict_pairs(
+            profile,
+            node.semantic_action,
+            evidence,
+        )
+    except RecoveryRuleViolation:
+        return False
+    return tuple(artifact.conflicting_evidence_ids) in conflicts
 
 
 def _successor_envelope(
@@ -699,7 +731,19 @@ class ProofToPermitWorkflow:
             except Exception as error:
                 raise RecoveryEvidenceUnavailable from error
             await self._record_evidence(run_id, state)
-            return state, self._verify(definition, node, state)
+            artifact = self._verify(definition, node, state)
+            if _is_provider_conflict_witness(node, state, artifact):
+                try:
+                    state = await self._evidence.current(run_id, node, envelope)
+                    await self._record_evidence(run_id, state)
+                    state = await self._evidence.fixed(run_id, node, envelope)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as error:
+                    raise RecoveryEvidenceUnavailable from error
+                await self._record_evidence(run_id, state)
+                artifact = self._verify(definition, node, state)
+            return state, artifact
         if snapshot.request.policy is not RecoveryRunPolicy.ADAPTIVE:
             raise RecoveryDefinitionError("baseline policies are implemented by #171")
 
