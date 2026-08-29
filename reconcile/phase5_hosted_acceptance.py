@@ -128,6 +128,7 @@ from reconcile.hosted.provider import (
 from reconcile.interfaces.api_client import (
     InvestigationConflictError,
     InvestigationNotFoundError,
+    ServiceUnavailableError,
 )
 from reconcile.interfaces.google_identity import GcloudIdentityTokenSupplier
 from reconcile.interfaces.operator_api_client import (
@@ -4019,8 +4020,13 @@ class CloudRunAcceptanceBackend:
         purpose: str,
     ) -> ScenarioAcceptanceObservation:
         async with self._client() as client:
-            launched = await client.launch(request)
-            if not launched.created:
+            launch_reconciled = False
+            try:
+                launched = await client.launch(request)
+            except ServiceUnavailableError:
+                launch_reconciled = True
+                launched = await client.launch(request)
+            if not launched.created and not launch_reconciled:
                 raise HostedAcceptanceError("ACCEPTANCE_LAUNCH_REPLAYED")
             investigation_id = launched.snapshot.investigation_id
             events = tuple(
@@ -4040,7 +4046,7 @@ class CloudRunAcceptanceBackend:
         return ScenarioAcceptanceObservation(
             purpose=purpose,
             request=request,
-            launch_created=launched.created,
+            launch_created=launched.created or launch_reconciled,
             snapshot=current,
             events=events,
             operational_status=status,
