@@ -367,6 +367,7 @@ def _plan_json(filename: str, runtime_values: set[str]) -> bytes:
             "artifactregistry.googleapis.com",
             "cloudbuild.googleapis.com",
             "firestore.googleapis.com",
+            "orgpolicy.googleapis.com",
             "run.googleapis.com",
             "storage.googleapis.com",
         )

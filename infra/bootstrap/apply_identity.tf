@@ -91,6 +91,8 @@ resource "google_project_default_service_accounts" "phase5" {
 }
 
 resource "google_project_organization_policy" "disable_automatic_default_service_account_grants" {
+  count = var.operating_profile == "production" ? 1 : 0
+
   project    = var.project_id
   constraint = "iam.automaticIamGrantsForDefaultServiceAccounts"
 

@@ -644,6 +644,9 @@ def test_production_profile_protects_firestore_and_default_compute_identity() ->
     assert _attribute(organization_policies[0].body, "constraint") == (
         '"iam.automaticIamGrantsForDefaultServiceAccounts"'
     )
+    assert _attribute(organization_policies[0].body, "count") == (
+        'var.operating_profile == "production" ? 1 : 0'
+    )
     assert _attribute(organization_policies[0].body, "enforced") == "true"
 
     guards = [
@@ -659,7 +662,7 @@ def test_production_profile_protects_firestore_and_default_compute_identity() ->
         for guard in guards
     )
 
-    for stack in _STACKS[1:]:
+    for stack in _STACKS:
         profile = _named_block(stack / "variables.tf", "variable", "operating_profile")
         assert re.search(r"(?m)^\s*default\s*=", profile) is None
 
