@@ -43,6 +43,8 @@ resource "google_project_iam_custom_role" "cloud_run_deployer" {
     "run.locations.list",
     "run.operations.get",
     "run.operations.list",
+    "run.revisions.get",
+    "run.revisions.list",
     "run.services.create",
     "run.services.delete",
     "run.services.get",

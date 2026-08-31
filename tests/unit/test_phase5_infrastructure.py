@@ -845,6 +845,8 @@ def test_apply_identity_and_runtime_iam_graph_are_closed_world() -> None:
         "run.locations.list",
         "run.operations.get",
         "run.operations.list",
+        "run.revisions.get",
+        "run.revisions.list",
         "run.services.create",
         "run.services.delete",
         "run.services.get",

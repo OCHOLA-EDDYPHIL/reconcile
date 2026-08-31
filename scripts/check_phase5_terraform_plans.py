@@ -946,6 +946,8 @@ def _custom_role_expectations() -> dict[str, dict[str, Any]]:
                 "run.locations.list",
                 "run.operations.get",
                 "run.operations.list",
+                "run.revisions.get",
+                "run.revisions.list",
                 "run.services.create",
                 "run.services.delete",
                 "run.services.get",
