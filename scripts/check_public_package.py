@@ -448,9 +448,18 @@ def _check_release_package() -> int:
         source_manifest = json.loads(
             (output / SOURCE_MANIFEST_NAME).read_text(encoding="utf-8")
         )
+        project_version = source_manifest.get("project_version")
+        expected_status = (
+            "candidate" if project_version == CURRENT_VERSION else "staged-evidence"
+        )
         _require(
-            source_manifest.get("package_status") == "candidate"
+            source_manifest.get("schema_version")
+            == "reconcile/public-release-source/v2"
+            and source_manifest.get("release_version") == CURRENT_VERSION
+            and source_manifest.get("package_status") == expected_status
             and source_manifest.get("source_tag") is None
+            and isinstance(project_version, str)
+            and EVIDENCE_VERSION.fullmatch(project_version) is not None
             and SOURCE_REVISION.fullmatch(
                 str(source_manifest.get("source_revision", ""))
             )

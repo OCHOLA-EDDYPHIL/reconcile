@@ -67,6 +67,13 @@ def _project_version(source_revision: str) -> str:
     return f"v{value}"
 
 
+def _version_tuple(version: str) -> tuple[int, int, int]:
+    match = RELEASE_TAG.fullmatch(version)
+    if match is None:
+        raise ReleaseBuildError("project or release version is invalid")
+    return tuple(int(part) for part in version.removeprefix("v").split("."))
+
+
 def _resolve_git_ref(reference: str) -> str:
     try:
         completed = subprocess.run(
@@ -151,7 +158,17 @@ def build_release(
         raise ReleaseBuildError("release output parent must exist")
 
     resolved_revision = _resolve_source_revision(source_revision)
-    if _project_version(resolved_revision) != RELEASE_VERSION:
+    project_version = _project_version(resolved_revision)
+    if project_version == RELEASE_VERSION:
+        package_status = "tagged-release" if required_tag is not None else "candidate"
+    elif required_tag is None and _version_tuple(project_version) > _version_tuple(
+        RELEASE_VERSION
+    ):
+        # Main may contain the next runtime while the preceding immutable evidence
+        # release remains current. Such a package exercises the builder but is
+        # explicitly not eligible for publication or tag verification.
+        package_status = "staged-evidence"
+    else:
         raise ReleaseBuildError("project and release versions differ")
     _verify_loaded_implementation(resolved_revision)
     if required_tag is not None:
@@ -177,11 +194,10 @@ def build_release(
                     "assets": [
                         {"name": path.name, "sha256": _sha256(path)} for path in copied
                     ],
-                    "package_status": (
-                        "tagged-release" if required_tag is not None else "candidate"
-                    ),
+                    "package_status": package_status,
+                    "project_version": project_version,
                     "release_version": RELEASE_VERSION,
-                    "schema_version": "reconcile/public-release-source/v1",
+                    "schema_version": "reconcile/public-release-source/v2",
                     "source_repository": SOURCE_REPOSITORY,
                     "source_revision": resolved_revision,
                     "source_tag": required_tag,

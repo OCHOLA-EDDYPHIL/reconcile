@@ -33,6 +33,7 @@ def test_release_package_copies_exact_current_evidence_and_diagrams(
     source_manifest = json.loads(
         (output / release.SOURCE_MANIFEST_NAME).read_text(encoding="utf-8")
     )
+    project_version = release._project_version("HEAD")
     assert source_manifest == {
         "assets": [
             {
@@ -41,9 +42,14 @@ def test_release_package_copies_exact_current_evidence_and_diagrams(
             }
             for _, name in release.ASSETS
         ],
-        "package_status": "candidate",
+        "package_status": (
+            "candidate"
+            if project_version == release.RELEASE_VERSION
+            else "staged-evidence"
+        ),
+        "project_version": project_version,
         "release_version": release.RELEASE_VERSION,
-        "schema_version": "reconcile/public-release-source/v1",
+        "schema_version": "reconcile/public-release-source/v2",
         "source_repository": release.SOURCE_REPOSITORY,
         "source_revision": release._resolve_source_revision("HEAD"),
         "source_tag": None,
