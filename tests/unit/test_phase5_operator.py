@@ -583,6 +583,160 @@ def _live_runtime_update_plan(qualification: dict[str, Any]) -> dict[str, Any]:
     return rendered
 
 
+def _observability_plan_resources(action: str) -> list[dict[str, Any]]:
+    assert action in {"create", "delete"}
+    dashboard_json = json.dumps(
+        {
+            "displayName": "Reconcile operational signals",
+            "labels": {"service": "reconcile"},
+            "mosaicLayout": {
+                "columns": 12,
+                "tiles": [
+                    {"height": 4, "width": 4, "xPos": 0, "yPos": 0},
+                    {"height": 4, "width": 4, "xPos": 4, "yPos": 0},
+                ],
+            },
+        },
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    values = (
+        (
+            'google_logging_metric.operational_failure["failed_run"]',
+            "google_logging_metric",
+            {
+                "id": None,
+                "name": "reconcile_p5_failed_run",
+                "project": "example-project-id",
+            },
+        ),
+        (
+            'google_monitoring_alert_policy.operational_failure["failed_run"]',
+            "google_monitoring_alert_policy",
+            {
+                "conditions": [
+                    {
+                        "condition_threshold": [
+                            {"trigger": [{"count": 1, "percent": None}]}
+                        ]
+                    }
+                ],
+                "display_name": "Reconcile failed-run",
+                "id": None,
+                "project": "example-project-id",
+            },
+        ),
+        (
+            "google_monitoring_dashboard.operational",
+            "google_monitoring_dashboard",
+            {
+                "dashboard_json": dashboard_json,
+                "id": None,
+                "project": "example-project-id",
+            },
+        ),
+    )
+    resources: list[dict[str, Any]] = []
+    for address, resource_type, value in values:
+        change = (
+            {
+                "actions": ["create"],
+                "after": value,
+                "after_unknown": {"id": True},
+                "before": None,
+            }
+            if action == "create"
+            else {
+                "actions": ["delete"],
+                "after": None,
+                "before": value,
+                "reconcile_before_unknown": {"id": True},
+            }
+        )
+        resources.append(
+            {
+                "address": address,
+                "change": change,
+                "provider_name": "registry.terraform.io/hashicorp/google",
+                "type": resource_type,
+            }
+        )
+    return resources
+
+
+def _plan_binding_with_additional_resources(
+    tmp_path: Path,
+    *,
+    action: operator.Phase5Action,
+    resources: list[dict[str, Any]],
+) -> tuple[operator.TerraformPlanBinding, dict[str, Any]]:
+    records = tmp_path / "records"
+    records.mkdir()
+    _, manifest, _, _ = _records(records)
+    original = manifest.terraform_plan_for(action)
+    assert original is not None
+    qualification = json.loads(Path(original.qualification_path).read_bytes())
+    qualification["resource_changes"].extend(resources)
+    stem = (
+        "runtime-create"
+        if action is operator.Phase5Action.RUNTIME_APPLY
+        else "runtime-destroy"
+    )
+    plan_root = tmp_path / "custom-plan"
+    plans = plan_root / "plans"
+    plans.mkdir(parents=True)
+    qualification_path = plans / f"{stem}.tfplan.json"
+    qualification_path.write_bytes(operator._canonical_value_bytes(qualification))
+    qualification_path.chmod(0o400)
+    variables_path = plans / f"{stem}.tfvars.json"
+    variables_path.write_bytes(Path(original.variables_path).read_bytes())
+    variables_path.chmod(0o400)
+    binding = operator._capture_plan(
+        action=action,
+        state_root=plan_root,
+        required_runtime_values=set(),
+    )
+    return binding, qualification
+
+
+def _apply_observability_provider_normalization(
+    rendered: dict[str, Any],
+    *,
+    dashboard_action: str,
+) -> None:
+    for resource in rendered["resource_changes"]:
+        change = resource["change"]
+        if resource["type"] == "google_monitoring_alert_policy":
+            value = (
+                change["after"] if dashboard_action == "update" else change["before"]
+            )
+            trigger = value["conditions"][0]["condition_threshold"][0]["trigger"][0]
+            trigger["percent"] = 0
+            if dashboard_action == "update":
+                change["before"]["conditions"][0]["condition_threshold"][0]["trigger"][
+                    0
+                ]["percent"] = 0
+        if resource["type"] != "google_monitoring_dashboard":
+            continue
+        if dashboard_action == "update":
+            change["actions"] = ["update"]
+            dashboard_value = change["before"]
+        else:
+            dashboard_value = change["before"]
+        dashboard = json.loads(dashboard_value["dashboard_json"])
+        dashboard["name"] = "projects/123456789012/dashboards/fixture"
+        dashboard["etag"] = "fixture-etag"
+        for tile in dashboard["mosaicLayout"]["tiles"]:
+            for coordinate in ("xPos", "yPos"):
+                if tile[coordinate] == 0:
+                    tile.pop(coordinate)
+        dashboard_value["dashboard_json"] = json.dumps(
+            dashboard,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+
+
 def _write_dependency_tree(root: Path) -> None:
     root.mkdir(mode=0o700)
     for package in ("grpc", "pydantic_core", "textual"):
@@ -3650,6 +3804,114 @@ def test_runtime_update_verifier_accepts_exact_service_updates_and_iam_noops(
     )
     operator._verify_rendered_plan(
         json.dumps(rendered, separators=(",", ":"), sort_keys=True).encode(),
+        binding,
+    )
+
+
+def test_runtime_update_verifier_accepts_provider_normalized_observability(
+    tmp_path: Path,
+) -> None:
+    binding, qualification = _plan_binding_with_additional_resources(
+        tmp_path,
+        action=operator.Phase5Action.RUNTIME_APPLY,
+        resources=_observability_plan_resources("create"),
+    )
+    rendered = _live_runtime_update_plan(qualification)
+    _apply_observability_provider_normalization(
+        rendered,
+        dashboard_action="update",
+    )
+
+    operator._verify_rendered_plan(
+        operator._canonical_value_bytes(rendered),
+        binding,
+    )
+
+
+def test_runtime_update_verifier_rejects_alert_percent_drift(tmp_path: Path) -> None:
+    binding, qualification = _plan_binding_with_additional_resources(
+        tmp_path,
+        action=operator.Phase5Action.RUNTIME_APPLY,
+        resources=_observability_plan_resources("create"),
+    )
+    rendered = _live_runtime_update_plan(qualification)
+    _apply_observability_provider_normalization(
+        rendered,
+        dashboard_action="update",
+    )
+    alert = next(
+        item
+        for item in rendered["resource_changes"]
+        if item["type"] == "google_monitoring_alert_policy"
+    )
+    for projection in (alert["change"]["before"], alert["change"]["after"]):
+        projection["conditions"][0]["condition_threshold"][0]["trigger"][0][
+            "percent"
+        ] = 1
+
+    with pytest.raises(operator.OperatorError, match="EXECUTION_PLAN_DRIFT"):
+        operator._verify_rendered_plan(
+            operator._canonical_value_bytes(rendered),
+            binding,
+        )
+
+
+@pytest.mark.parametrize("drift", ("display-name", "tile-position", "server-field"))
+def test_runtime_update_verifier_rejects_dashboard_semantic_drift(
+    tmp_path: Path,
+    drift: str,
+) -> None:
+    binding, qualification = _plan_binding_with_additional_resources(
+        tmp_path,
+        action=operator.Phase5Action.RUNTIME_APPLY,
+        resources=_observability_plan_resources("create"),
+    )
+    rendered = _live_runtime_update_plan(qualification)
+    _apply_observability_provider_normalization(
+        rendered,
+        dashboard_action="update",
+    )
+    dashboard = next(
+        item
+        for item in rendered["resource_changes"]
+        if item["type"] == "google_monitoring_dashboard"
+    )
+    before = json.loads(dashboard["change"]["before"]["dashboard_json"])
+    if drift == "display-name":
+        before["displayName"] = "Different dashboard"
+    elif drift == "tile-position":
+        before["mosaicLayout"]["tiles"][1]["xPos"] = 8
+    else:
+        before["serverCreatedField"] = "unexpected"
+    dashboard["change"]["before"]["dashboard_json"] = json.dumps(
+        before,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+
+    with pytest.raises(operator.OperatorError, match="EXECUTION_PLAN_DRIFT"):
+        operator._verify_rendered_plan(
+            operator._canonical_value_bytes(rendered),
+            binding,
+        )
+
+
+def test_runtime_teardown_verifier_accepts_provider_normalized_observability(
+    tmp_path: Path,
+) -> None:
+    binding, qualification = _plan_binding_with_additional_resources(
+        tmp_path,
+        action=operator.Phase5Action.RUNTIME_TEARDOWN,
+        resources=_observability_plan_resources("delete"),
+    )
+    rendered = _live_teardown_plan(qualification)
+    _apply_observability_provider_normalization(
+        rendered,
+        dashboard_action="delete",
+    )
+
+    operator._verify_rendered_plan(
+        operator._canonical_value_bytes(rendered),
         binding,
     )
 
