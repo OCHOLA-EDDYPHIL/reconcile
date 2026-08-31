@@ -181,6 +181,7 @@ _GCLOUD = "/usr/bin/gcloud"
 _TERRAFORM = "/usr/local/libexec/reconcile/terraform-1.15.8"
 _TERRAFORM_SHA256 = "8b6cb96cd46080ee1287baf646c70078715a99123b9b3a6ce2a7fe3892ec703a"
 _APPLY_SERVICE_ACCOUNT = "rec-p5-apply@example-project-id.iam.gserviceaccount.com"
+_OPERATOR_SERVICE_ACCOUNT = _APPLY_SERVICE_ACCOUNT
 _MAX_COMMAND_BYTES = 1_048_576
 _MAX_TERRAFORM_PLAN_BYTES = 16 * 1_048_576
 _MAX_RECORD_BYTES = 8 * 1_048_576
@@ -299,6 +300,14 @@ class CandidateIdentity(StrictModel):
     project_id: str = _PROJECT_ID
     region: Literal["us-central1"] = _REGION
     operator_service_account: ServiceAccountEmail = _APPLY_SERVICE_ACCOUNT
+    deployment_service_account: ServiceAccountEmail | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
+    operating_profile: Literal["evidence", "production"] = Field(
+        default="evidence",
+        exclude_if=lambda value: value == "evidence",
+    )
     api_audience: str = _API_AUDIENCE
     controller_audience: str = _CONTROLLER_AUDIENCE
     provider_source: Literal["registry.terraform.io/hashicorp/google"] = (
@@ -323,6 +332,8 @@ class CandidateIdentity(StrictModel):
                 self.project_id != "example-project-id"
                 or self.operator_service_account
                 != "rec-p5-apply@example-project-id.iam.gserviceaccount.com"
+                or self.deployment_service_account is not None
+                or self.operating_profile != "evidence"
                 or self.api_audience
                 != "https://reconcile.invalid/phase5/example-project-id/api"
                 or self.controller_audience
@@ -335,6 +346,8 @@ class CandidateIdentity(StrictModel):
                 re.fullmatch(r"[a-z][a-z0-9-]{4,28}[a-z0-9]", self.project_id) is None
                 or self.project_id == "example-project-id"
                 or self.operator_service_account
+                != f"rec-p5-operator@{self.project_id}.iam.gserviceaccount.com"
+                or self.deployment_service_account
                 != f"rec-p5-apply@{self.project_id}.iam.gserviceaccount.com"
                 or self.api_audience != f"{origin}/api"
                 or self.controller_audience != f"{origin}/controller"
@@ -347,6 +360,12 @@ class CandidateIdentity(StrictModel):
         if self.candidate_sha256 != expected:
             raise ValueError("candidate identity hash mismatch")
         return self
+
+    @property
+    def administrative_service_account(self) -> str:
+        """Return the deployer used for read-only acceptance administration."""
+
+        return self.deployment_service_account or self.operator_service_account
 
 
 class ServiceDeploymentObservation(StrictModel):
@@ -1324,6 +1343,7 @@ def configure_deployment_identity(identity: DeploymentIdentity) -> None:
     if type(identity) is not DeploymentIdentity:
         raise TypeError("hosted acceptance requires an exact deployment identity")
     global _APPLY_SERVICE_ACCOUNT
+    global _OPERATOR_SERVICE_ACCOUNT
     global _API_AUDIENCE
     global _CANARY_AUDIENCE
     global _CANARY_REPROVISION_IAM
@@ -1337,6 +1357,7 @@ def configure_deployment_identity(identity: DeploymentIdentity) -> None:
 
     _PROJECT_ID = identity.project_id
     _APPLY_SERVICE_ACCOUNT = identity.apply_service_account_email
+    _OPERATOR_SERVICE_ACCOUNT = identity.operator_service_account_email
     _API_AUDIENCE = identity.audiences.api
     _CANARY_AUDIENCE = identity.audiences.canary
     _CONTROLLER_AUDIENCE = identity.audiences.controller
@@ -1377,6 +1398,8 @@ def _legacy_deployment_identity() -> DeploymentIdentity:
     project = "example-project-id"
     return DeploymentIdentity.model_construct(
         deployment_profile_sha256="0" * 64,
+        deployment_profile_schema_version="reconcile/deployment-profile/v1",
+        operating_profile="evidence",
         project_id=project,
         project_number="000000000000",
         billing_account_id="000000-000000-000000",
@@ -1386,6 +1409,9 @@ def _legacy_deployment_identity() -> DeploymentIdentity:
         state_bucket_name=f"{project}-p5-state",
         target_bucket_name=f"{project}-p5-target",
         apply_service_account_email=(f"rec-p5-apply@{project}.iam.gserviceaccount.com"),
+        operator_service_account_email=(
+            f"rec-p5-apply@{project}.iam.gserviceaccount.com"
+        ),
         runtime_service_accounts=RuntimeServiceAccounts(
             api=f"rec-p5-api@{project}.iam.gserviceaccount.com",
             canary=f"rec-p5-canary@{project}.iam.gserviceaccount.com",
@@ -1420,6 +1446,7 @@ def _required_service_environment(
             "RECONCILE_INFRA_REVISION": candidate.infrastructure_revision,
             "RECONCILE_SEMANTIC_CONFIG_SHA256": candidate.semantic_config_sha256,
             "RECONCILE_SOURCE_REVISION": candidate.source_revision,
+            "RECONCILE_OPERATING_PROFILE": candidate.operating_profile,
         }
     required = {
         "GOOGLE_CLOUD_PROJECT": _PROJECT_ID,
@@ -1430,11 +1457,12 @@ def _required_service_environment(
         "RECONCILE_INFRA_REVISION": candidate.infrastructure_revision,
         "RECONCILE_RUNTIME_DATABASE": "reconcile-p5-runtime",
         "RECONCILE_SEMANTIC_CONFIG_SHA256": candidate.semantic_config_sha256,
+        "RECONCILE_OPERATING_PROFILE": candidate.operating_profile,
     }
     if component is ServiceComponent.API:
         required.update(
             {
-                "RECONCILE_ALLOWED_CALLER_EMAILS": _APPLY_SERVICE_ACCOUNT,
+                "RECONCILE_ALLOWED_CALLER_EMAILS": _OPERATOR_SERVICE_ACCOUNT,
                 "RECONCILE_CONTROLLER_AUDIENCE": _CONTROLLER_AUDIENCE,
                 "RECONCILE_CONTROLLER_URL": service_uris[ServiceComponent.CONTROLLER],
                 "RECONCILE_FAULT_PROXY_AUDIENCE": _FAULT_PROXY_AUDIENCE,
@@ -1519,7 +1547,9 @@ def _required_service_environment(
         ServiceComponent.CONTROLLER,
         ServiceComponent.FAULT_PROXY,
     }:
-        required["RECONCILE_ACCEPTANCE_PARTIAL_READ_OUTAGE_ENABLED"] = "true"
+        required["RECONCILE_ACCEPTANCE_PARTIAL_READ_OUTAGE_ENABLED"] = (
+            "true" if candidate.operating_profile == "evidence" else "false"
+        )
     return required
 
 
@@ -1539,7 +1569,7 @@ def build_candidate_identity(
         "semantic_config_sha256": semantic_config_sha256,
         "project_id": _PROJECT_ID,
         "region": _REGION,
-        "operator_service_account": _APPLY_SERVICE_ACCOUNT,
+        "operator_service_account": _OPERATOR_SERVICE_ACCOUNT,
         "api_audience": _API_AUDIENCE,
         "controller_audience": _CONTROLLER_AUDIENCE,
         "provider_source": _PROVIDER_SOURCE,
@@ -1554,6 +1584,9 @@ def build_candidate_identity(
     }
     if deployment is not None:
         values["deployment_profile_sha256"] = deployment.deployment_profile_sha256
+        values["deployment_service_account"] = deployment.apply_service_account_email
+        if deployment.operating_profile != "evidence":
+            values["operating_profile"] = deployment.operating_profile
     return CandidateIdentity(
         **values,  # type: ignore[arg-type]
         candidate_sha256=_json_hash(values),  # type: ignore[arg-type]
@@ -2908,12 +2941,17 @@ def _verify_runtime_backend(
     if type(backend) is not dict or backend.get("type") != "gcs":
         raise HostedAcceptanceError("CANARY_REPROVISION_BACKEND_INVALID")
     config = backend.get("config")
+    expected_prefix = (
+        "phase5/runtime"
+        if candidate.deployment_profile_sha256 is None
+        else f"phase5/runtime/{candidate.operating_profile}"
+    )
     if (
         type(config) is not dict
         or config.get("bucket") != f"{candidate.project_id}-p5-state"
-        or config.get("prefix") != "phase5/runtime"
+        or config.get("prefix") != expected_prefix
         or config.get("impersonate_service_account")
-        != candidate.operator_service_account
+        != candidate.administrative_service_account
     ):
         raise HostedAcceptanceError("CANARY_REPROVISION_BACKEND_INVALID")
 
@@ -3088,7 +3126,7 @@ class GcloudReadOnlyInspector:
                     f"--project={candidate.project_id}",
                     f"--region={candidate.region}",
                     "--impersonate-service-account="
-                    f"{candidate.operator_service_account}",
+                    f"{candidate.administrative_service_account}",
                     "--format=json",
                     "--quiet",
                 )
@@ -3109,7 +3147,7 @@ class GcloudReadOnlyInspector:
                     f"--project={candidate.project_id}",
                     f"--region={candidate.region}",
                     "--impersonate-service-account="
-                    f"{candidate.operator_service_account}",
+                    f"{candidate.administrative_service_account}",
                     "--format=json",
                     "--quiet",
                 )
@@ -3125,7 +3163,7 @@ class GcloudReadOnlyInspector:
                     f"--project={candidate.project_id}",
                     f"--region={candidate.region}",
                     "--impersonate-service-account="
-                    f"{candidate.operator_service_account}",
+                    f"{candidate.administrative_service_account}",
                     "--format=json",
                     "--quiet",
                 )
@@ -3174,7 +3212,7 @@ class GcloudReadOnlyInspector:
             "read",
             f'resource.type="cloud_run_revision" AND ({service_filter})',
             f"--project={candidate.project_id}",
-            f"--impersonate-service-account={candidate.operator_service_account}",
+            f"--impersonate-service-account={candidate.administrative_service_account}",
             "--freshness=1h",
             f"--limit={_MAX_LOG_ENTRIES}",
             "--order=asc",
@@ -3588,7 +3626,7 @@ class TerraformCanaryReprovisioner:
                 f"--project={self._candidate.project_id}",
                 f"--region={self._candidate.region}",
                 "--impersonate-service-account="
-                f"{self._candidate.operator_service_account}",
+                f"{self._candidate.administrative_service_account}",
                 "--format=json",
                 "--quiet",
             ),
@@ -4070,7 +4108,7 @@ class CloudRunAcceptanceBackend:
                 )
                 credentials = impersonated_credentials.Credentials(
                     source_credentials=source,
-                    target_principal=self._candidate.operator_service_account,
+                    target_principal=(self._candidate.administrative_service_account),
                     target_scopes=("https://www.googleapis.com/auth/cloud-platform",),
                     lifetime=3_600,
                 )

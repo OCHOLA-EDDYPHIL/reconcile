@@ -8,7 +8,5 @@ terraform {
     }
   }
 
-  backend "gcs" {
-    prefix = "phase5/foundation"
-  }
+  backend "gcs" {}
 }

@@ -18,6 +18,7 @@ from typing import Any
 import pytest
 
 from reconcile import phase5_operator as operator
+from reconcile.deployment_profile import DeploymentProfile, seal_deployment_profile
 
 pytestmark = pytest.mark.unit
 
@@ -190,13 +191,13 @@ def _write_oci_archive(
                 (f"{site_packages}/{relative}", "directory", None)
                 for relative in project_directories
             ),
-            (f"{site_packages}/reconcile-0.1.1.dist-info", "directory", None),
+            (f"{site_packages}/reconcile-0.2.0.dist-info", "directory", None),
             *(
                 (f"{site_packages}/{relative}", "file", payload)
                 for relative, payload in project_entries
             ),
             (
-                f"{site_packages}/reconcile-0.1.1.dist-info/RECORD",
+                f"{site_packages}/reconcile-0.2.0.dist-info/RECORD",
                 "file",
                 record_payload,
             ),
@@ -599,7 +600,7 @@ def _write_project_dependency_files(
         project_dependency_paths,
     )
     root.chmod(0o700)
-    metadata = root / "reconcile-0.1.1.dist-info"
+    metadata = root / "reconcile-0.2.0.dist-info"
     metadata.mkdir(mode=0o700)
     project_directories: set[Path] = set()
     for relative, payload in project_entries:
@@ -1400,7 +1401,7 @@ def test_manifest_freezes_exact_identity_limits_estimates_and_commands(
         item for item in manifest.authenticated_exposure if item.service == "api"
     )
     assert api.allowed_callers == (
-        "serviceAccount:rec-p5-apply@example-project-id.iam.gserviceaccount.com",
+        "serviceAccount:rec-p5-operator@example-project-id.iam.gserviceaccount.com",
     )
     assert manifest.gcloud_version == "580.0.0"
     image_push = manifest.command_for(operator.Phase5Action.IMAGE_PUSH)
@@ -2537,6 +2538,7 @@ def test_no_cloud_preparation_builds_complete_private_manifest_inputs(
         f'bucket = "{_DEPLOYMENT_PROJECT}-p5-state"\n'
         "impersonate_service_account = "
         f'"rec-p5-apply@{_DEPLOYMENT_PROJECT}.iam.gserviceaccount.com"\n'
+        'prefix = "phase5/foundation/evidence"\n'
     )
     assert len(tuple((tmp_path / "state" / "plans").iterdir())) == 14
     assert (
@@ -3418,6 +3420,75 @@ def test_teardown_accepts_manifest_source_ancestor_of_current_main(
         manifest.source_revision,
         current_source,
     ) in runner.calls
+
+
+@pytest.mark.parametrize(
+    ("action", "error_code"),
+    (
+        (
+            operator.Phase5Action.RUNTIME_TEARDOWN,
+            "PRODUCTION_TEARDOWN_FORBIDDEN",
+        ),
+        (
+            operator.Phase5Action.FOUNDATION_TEARDOWN,
+            "PRODUCTION_TEARDOWN_FORBIDDEN",
+        ),
+        (
+            operator.Phase5Action.STATE_PROTECTION_CHANGE,
+            "PRODUCTION_TEARDOWN_FORBIDDEN",
+        ),
+        (
+            operator.Phase5Action.BOOTSTRAP_TEARDOWN,
+            "PRODUCTION_TEARDOWN_FORBIDDEN",
+        ),
+        (
+            operator.Phase5Action.PROVIDER_ACCEPTANCE,
+            "PRODUCTION_ACCEPTANCE_FORBIDDEN",
+        ),
+        (
+            operator.Phase5Action.HOSTED_ACCEPTANCE,
+            "PRODUCTION_ACCEPTANCE_FORBIDDEN",
+        ),
+    ),
+)
+def test_production_profile_rejects_unsafe_actions_before_external_checks(
+    tmp_path: Path,
+    action: operator.Phase5Action,
+    error_code: str,
+) -> None:
+    state, manifest, approval, _ = _records(tmp_path)
+    production_binding = seal_deployment_profile(
+        DeploymentProfile(
+            schema_version="reconcile/deployment-profile/v2",
+            project_id=_DEPLOYMENT_PROJECT,
+            project_number="123456789012",
+            billing_account_id="ABCDEF-123456-ABCDEF",
+            owner_account="owner@example.com",
+            operating_profile="production",
+            notification_channel_ids=(
+                f"projects/{_DEPLOYMENT_PROJECT}/notificationChannels/123456",
+            ),
+        ),
+        state_root=state.root,
+    )
+    production_manifest = manifest.model_copy(
+        update={"deployment_profile": production_binding}
+    )
+    runner = _Runner(source_root=Path(manifest.execution_source.root))
+
+    with pytest.raises(operator.OperatorError, match=error_code):
+        operator.authorize_action(
+            action=action,
+            manifest=production_manifest,
+            approval=approval,
+            state=state,
+            repo_root=_REPO_ROOT,
+            now=_NOW + timedelta(minutes=2),
+            runner=runner,
+        )
+
+    assert runner.calls == []
+    assert state.inspect()["unfinished_admission_sha256"] is None
 
 
 def test_teardown_rejects_manifest_source_outside_current_main(

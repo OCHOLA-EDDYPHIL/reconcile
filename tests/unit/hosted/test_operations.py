@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from http import HTTPStatus
 
@@ -13,6 +14,7 @@ from reconcile.contracts import (
     RecoveryRunEventPayload,
     RecoveryRunEventType,
     RecoveryRunFailureCategory,
+    RecoveryRunFault,
     RecoveryRunLifecycle,
     RecoveryRunPolicy,
     canonical_sha256,
@@ -331,6 +333,91 @@ def test_recovery_handler_rejects_blind_policy_before_service_contact() -> None:
         with pytest.raises(HostedRecoveryGatewayError):
             await handler(CALLER, internal)
         assert service.calls == 0
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    "fault",
+    tuple(
+        fault for fault in RecoveryRunFault if fault is not RecoveryRunFault.NO_FAULT
+    ),
+)
+def test_production_recovery_handler_rejects_every_fault(
+    fault: RecoveryRunFault,
+) -> None:
+    async def scenario() -> None:
+        request = make_recovery_run_examples()[0].model_copy(
+            update={
+                "run_id": f"p5w-fixed-{'a' * 32}",
+                "fault": fault,
+                "policy": RecoveryRunPolicy.FIXED,
+            }
+        )
+
+        class Service:
+            calls = 0
+
+            async def launch_and_wait_result(self, _received):
+                self.calls += 1
+                raise AssertionError("production fault reached recovery service")
+
+        service = Service()
+        handler = HostedRecoveryHandler(
+            expected_caller_email=CALLER.email,
+            service=service,
+            operating_profile="production",
+        )
+        internal = InternalOperationRequest(
+            schema_version=INTERNAL_OPERATION_REQUEST_VERSION,
+            request_id="hosted-production-recover-request-7",
+            operation=InternalOperation.RECOVER,
+            payload=request.model_dump(mode="json"),
+        )
+
+        with pytest.raises(HostedRecoveryGatewayError):
+            await handler(CALLER, internal)
+        assert service.calls == 0
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    "fault",
+    tuple(
+        fault for fault in RecoveryRunFault if fault is not RecoveryRunFault.NO_FAULT
+    ),
+)
+def test_production_recovery_gateway_rejects_every_fault(
+    monkeypatch: pytest.MonkeyPatch,
+    fault: RecoveryRunFault,
+) -> None:
+    async def scenario() -> None:
+        request = make_recovery_run_examples()[0].model_copy(
+            update={
+                "run_id": f"p5w-fixed-{'a' * 32}",
+                "fault": fault,
+                "policy": RecoveryRunPolicy.FIXED,
+            }
+        )
+        transport = HostedHttpTransport()
+        calls = 0
+
+        async def send(*_args, **_kwargs):
+            nonlocal calls
+            calls += 1
+            raise AssertionError("production fault reached controller transport")
+
+        monkeypatch.setattr(transport, "request", send)
+        gateway = HostedRecoveryRunGateway(
+            replace(_api_config(), operating_profile="production"),
+            transport,
+            InMemoryRecoveryRunStore(),
+        )
+
+        with pytest.raises(HostedRecoveryGatewayError):
+            await gateway.launch_and_wait_result(request)
+        assert calls == 0
 
     asyncio.run(scenario())
 

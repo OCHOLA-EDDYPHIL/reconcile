@@ -20,6 +20,40 @@ variable "region" {
 variable "acceptance_partial_read_outage_enabled" {
   type    = bool
   default = false
+
+  validation {
+    condition     = !var.acceptance_partial_read_outage_enabled || var.operating_profile == "evidence"
+    error_message = "Acceptance-only partial-read outage injection is forbidden in production."
+  }
+}
+
+variable "operating_profile" {
+  type = string
+
+  validation {
+    condition     = contains(["evidence", "production"], var.operating_profile)
+    error_message = "The operating profile must be evidence or production."
+  }
+}
+
+variable "notification_channel_ids" {
+  type    = set(string)
+  default = []
+
+  validation {
+    condition = alltrue([
+      for channel in var.notification_channel_ids : can(regex("^projects/${var.project_id}/notificationChannels/[0-9]+$", channel))
+    ])
+    error_message = "Notification channels must be canonical IDs in the deployment project."
+  }
+
+  validation {
+    condition = (
+      (var.operating_profile == "production" && length(var.notification_channel_ids) > 0) ||
+      (var.operating_profile == "evidence" && length(var.notification_channel_ids) == 0)
+    )
+    error_message = "Production requires notification channels; evidence forbids them."
+  }
 }
 
 variable "source_revision" {

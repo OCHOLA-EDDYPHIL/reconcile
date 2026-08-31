@@ -35,9 +35,12 @@ def test_non_placeholder_profile_rebuilds_all_identity_expectations(
         "_IAM_EXPECTED",
         "_IMAGE_REFERENCE",
         "_OPERATOR_MEMBER",
+        "_OPERATOR_EMAIL",
+        "_NOTIFICATION_CHANNEL_IDS",
         "_OWNER",
         "_PROJECT",
         "_PROJECT_NUMBER",
+        "_FOUNDATION_ADDRESSES",
         "_RECOVERY_PAYLOAD_SHA256",
         "_RUNTIME_ADDRESSES",
         "_RUNTIME_EMAILS",
@@ -67,8 +70,73 @@ def test_non_placeholder_profile_rebuilds_all_identity_expectations(
     )
     assert "example-project-id" not in expectations
     assert profile.project_id in expectations
+    assert plans._OPERATOR_EMAIL == (
+        f"rec-p5-operator@{profile.project_id}.iam.gserviceaccount.com"
+    )
+    assert plans._OPERATOR_MEMBER != plans._APPLY_MEMBER
+    assert (
+        plans._RUNTIME_ENVIRONMENT["api"]["RECONCILE_ALLOWED_CALLER_EMAILS"]
+        == plans._OPERATOR_EMAIL
+    )
+    foundation = next(item for item in plans._STACKS if item.name == "foundation")
     runtime = next(item for item in plans._STACKS if item.name == "runtime")
+    assert foundation.variables["operating_profile"] == "evidence"
+    assert runtime.variables["operating_profile"] == "evidence"
+    assert runtime.variables["notification_channel_ids"] == []
     assert runtime.variables["acceptance_partial_read_outage_enabled"] is True
+
+    production = DeploymentProfile(
+        schema_version="reconcile/deployment-profile/v2",
+        project_id=profile.project_id,
+        project_number=profile.project_number,
+        billing_account_id=profile.billing_account_id,
+        owner_account=profile.owner_account,
+        operating_profile="production",
+        notification_channel_ids=(
+            f"projects/{profile.project_id}/notificationChannels/123456",
+        ),
+    )
+    plans._configure_deployment(production)
+    runtime = next(item for item in plans._STACKS if item.name == "runtime")
+    assert runtime.variables["operating_profile"] == "production"
+    assert runtime.variables["acceptance_partial_read_outage_enabled"] is False
+    for component in ("api", "controller", "fault_proxy"):
+        assert (
+            plans._RUNTIME_ENVIRONMENT[component][
+                "RECONCILE_ACCEPTANCE_PARTIAL_READ_OUTAGE_ENABLED"
+            ]
+            == "false"
+        )
+
+
+@pytest.mark.parametrize("stack_name", ("foundation", "runtime"))
+def test_production_plan_requires_exact_state_guard(stack_name: str) -> None:
+    stack = plans._Stack(stack_name, Path("."), frozenset(), {})
+    address = f"terraform_data.{stack_name}_production_guard[0]"
+    plan = {"variables": {"operating_profile": {"value": "production"}}}
+    resources = {
+        address: _resource(
+            address,
+            {
+                "input": {
+                    "operating_profile": "production",
+                    "project_id": plans._PROJECT,
+                    "stack": stack_name,
+                },
+                "triggers_replace": None,
+            },
+        )
+    }
+
+    plans._verify_production_guard(stack, resources, plan)
+
+    with pytest.raises(ValueError, match="lacks its destruction guard"):
+        plans._verify_production_guard(stack, {}, plan)
+
+    changed = deepcopy(resources)
+    changed[address]["change"]["after"]["input"]["stack"] = "other"
+    with pytest.raises(ValueError, match="unexpected input"):
+        plans._verify_production_guard(stack, changed, plan)
 
 
 def test_recovery_payload_hash_is_the_canonical_hosted_candidate_identity() -> None:
@@ -311,6 +379,7 @@ def _runtime_service_resources() -> dict[str, dict[str, Any]]:
                     "app": "reconcile",
                     "component": component.replace("_", "-"),
                     "environment": "phase5",
+                    "operating_profile": "evidence",
                 },
                 "location": plans._REGION,
                 "name": plans._SERVICE_NAMES[component],
@@ -474,6 +543,7 @@ def test_foundation_plan_requires_three_exact_database_boundaries() -> None:
                     "app": "reconcile",
                     "component": "runtime-images",
                     "environment": "phase5",
+                    "operating_profile": "evidence",
                 },
                 "location": plans._REGION,
                 "mode": "STANDARD_REPOSITORY",

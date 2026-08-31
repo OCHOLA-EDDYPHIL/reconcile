@@ -752,7 +752,9 @@ def _deployments(
             revision_ready=True,
             invoker_iam_disabled=False,
             api_invoker_iam_sha256=(
-                _api_invoker_iam_sha256() if component is ServiceComponent.API else None
+                _api_invoker_iam_sha256(candidate.operator_service_account)
+                if component is ServiceComponent.API
+                else None
             ),
             image_reference=image,
             service_account_email=accounts[component],
@@ -2165,6 +2167,7 @@ def _description(component: str, account: str) -> bytes:
             "RECONCILE_INFRA_REVISION": SHA_A,
             "RECONCILE_SEMANTIC_CONFIG_SHA256": SHA_C,
             "RECONCILE_SOURCE_REVISION": SOURCE,
+            "RECONCILE_OPERATING_PROFILE": "evidence",
         }
     else:
         environment = {
@@ -2176,6 +2179,7 @@ def _description(component: str, account: str) -> bytes:
             "RECONCILE_INFRA_REVISION": SHA_A,
             "RECONCILE_RUNTIME_DATABASE": "reconcile-p5-runtime",
             "RECONCILE_SEMANTIC_CONFIG_SHA256": SHA_C,
+            "RECONCILE_OPERATING_PROFILE": "evidence",
         }
     if component == "api":
         environment.update(
@@ -2356,13 +2360,13 @@ def _api_invoker_iam_policy() -> bytes:
     ).encode()
 
 
-def _api_invoker_iam_sha256() -> str:
+def _api_invoker_iam_sha256(
+    operator_service_account: str = (f"rec-p5-apply@{PROJECT}.iam.gserviceaccount.com"),
+) -> str:
     return hashlib.sha256(
         json.dumps(
             {
-                "members": [
-                    f"serviceAccount:rec-p5-apply@{PROJECT}.iam.gserviceaccount.com"
-                ],
+                "members": [f"serviceAccount:{operator_service_account}"],
                 "role": "roles/run.invoker",
             },
             separators=(",", ":"),

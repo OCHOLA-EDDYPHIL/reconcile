@@ -3,14 +3,16 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import os
 import re
 import stat
 from collections.abc import AsyncIterator, Awaitable
 from contextlib import asynccontextmanager
+from datetime import datetime
 from http import HTTPStatus
 from pathlib import Path
-from typing import Protocol, cast
+from typing import Literal, Protocol, cast
 
 import uvicorn
 from fastapi import FastAPI, Request
@@ -93,6 +95,18 @@ from reconcile.security import contains_sensitive_material
 
 _MAX_REQUEST_BYTES = 1_048_576
 _IDENTIFIER_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
+
+
+class OperationalSignalPublisher(Protocol):
+    async def __call__(
+        self,
+        signal: str,
+        correlation_id: str,
+        *,
+        source_event_cursor: int | None = None,
+        source_event_sha256: str | None = None,
+        occurred_at: datetime | None = None,
+    ) -> None: ...
 
 
 class _CreateResult(Protocol):
@@ -215,6 +229,10 @@ class _ApiBoundaryError(Exception):
 
 
 class _InvalidApiRequest(_ApiBoundaryError):
+    pass
+
+
+class _OperationalSignalUnavailable(_ApiBoundaryError):
     pass
 
 
@@ -485,12 +503,19 @@ def _validated_investigation_id(value: object) -> str | None:
 
 
 def _request_investigation_id(request: Request) -> str | None:
-    path_identity = _validated_investigation_id(
-        request.path_params.get("investigation_id")
-    )
-    if path_identity is not None:
-        return path_identity
+    for name in ("investigation_id", "run_id"):
+        path_identity = _validated_investigation_id(request.path_params.get(name))
+        if path_identity is not None:
+            return path_identity
     return _validated_investigation_id(getattr(request.state, "investigation_id", None))
+
+
+def _request_correlation_id(request: Request) -> str:
+    investigation_id = _request_investigation_id(request)
+    if investigation_id is not None:
+        return investigation_id
+    material = f"{request.method}\0{request.url.path}".encode()
+    return f"request-{hashlib.sha256(material).hexdigest()}"
 
 
 def _api_error_response(
@@ -524,13 +549,25 @@ def _register_error_handler(
     code: ApiErrorCode,
     status_code: int,
     message: str,
+    operational_signal: str | None = None,
+    publisher: OperationalSignalPublisher | None = None,
 ) -> None:
     async def handler(request: Request, error: Exception) -> Response:
-        investigation_id = _request_investigation_id(request)
+        investigation_id = _validated_investigation_id(
+            getattr(error, "investigation_id", None)
+        )
         if investigation_id is None:
-            investigation_id = _validated_investigation_id(
-                getattr(error, "investigation_id", None)
-            )
+            investigation_id = _request_investigation_id(request)
+        if operational_signal is not None and publisher is not None:
+            try:
+                await publisher(
+                    operational_signal,
+                    investigation_id or _request_correlation_id(request),
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                pass
         return _api_error_response(
             code,
             status_code,
@@ -541,7 +578,10 @@ def _register_error_handler(
     application.add_exception_handler(exception_type, handler)
 
 
-def _install_error_handlers(application: FastAPI) -> None:
+def _install_error_handlers(
+    application: FastAPI,
+    publisher: OperationalSignalPublisher | None = None,
+) -> None:
     _register_error_handler(
         application,
         _InvalidApiRequest,
@@ -618,6 +658,8 @@ def _install_error_handlers(application: FastAPI) -> None:
         code=ApiErrorCode.DUPLICATE_INVESTIGATION_ID,
         status_code=HTTPStatus.CONFLICT,
         message="The investigation identity conflicts with an existing envelope.",
+        operational_signal="replay-denial",
+        publisher=publisher,
     )
     _register_error_handler(
         application,
@@ -625,6 +667,8 @@ def _install_error_handlers(application: FastAPI) -> None:
         code=ApiErrorCode.DUPLICATE_INVESTIGATION_ID,
         status_code=HTTPStatus.CONFLICT,
         message="The investigation identity conflicts with an existing envelope.",
+        operational_signal="replay-denial",
+        publisher=publisher,
     )
     _register_error_handler(
         application,
@@ -632,6 +676,8 @@ def _install_error_handlers(application: FastAPI) -> None:
         code=ApiErrorCode.DUPLICATE_INVESTIGATION_ID,
         status_code=HTTPStatus.CONFLICT,
         message="The scenario launch identity conflicts with an existing run.",
+        operational_signal="replay-denial",
+        publisher=publisher,
     )
     _register_error_handler(
         application,
@@ -639,6 +685,8 @@ def _install_error_handlers(application: FastAPI) -> None:
         code=ApiErrorCode.DUPLICATE_INVESTIGATION_ID,
         status_code=HTTPStatus.CONFLICT,
         message="The recovery run identity conflicts with an existing run.",
+        operational_signal="replay-denial",
+        publisher=publisher,
     )
     _register_error_handler(
         application,
@@ -646,6 +694,8 @@ def _install_error_handlers(application: FastAPI) -> None:
         code=ApiErrorCode.DEPENDENCY_UNAVAILABLE,
         status_code=HTTPStatus.SERVICE_UNAVAILABLE,
         message="A required dependency is unavailable.",
+        operational_signal="provider-unavailable",
+        publisher=publisher,
     )
     _register_error_handler(
         application,
@@ -653,6 +703,8 @@ def _install_error_handlers(application: FastAPI) -> None:
         code=ApiErrorCode.DEPENDENCY_UNAVAILABLE,
         status_code=HTTPStatus.SERVICE_UNAVAILABLE,
         message="A required dependency is unavailable.",
+        operational_signal="provider-unavailable",
+        publisher=publisher,
     )
     for exception_type in (
         DurableDependencyDrift,
@@ -667,6 +719,8 @@ def _install_error_handlers(application: FastAPI) -> None:
             code=ApiErrorCode.DEPENDENCY_UNAVAILABLE,
             status_code=HTTPStatus.SERVICE_UNAVAILABLE,
             message="A required dependency is unavailable.",
+            operational_signal="provider-unavailable",
+            publisher=publisher,
         )
     for exception_type in (
         OperatorCapacityExceeded,
@@ -680,6 +734,8 @@ def _install_error_handlers(application: FastAPI) -> None:
             code=ApiErrorCode.DEPENDENCY_UNAVAILABLE,
             status_code=HTTPStatus.SERVICE_UNAVAILABLE,
             message="A required dependency is unavailable.",
+            operational_signal="worker-failure",
+            publisher=publisher,
         )
     for exception_type in (
         _InternalApiFailure,
@@ -696,7 +752,16 @@ def _install_error_handlers(application: FastAPI) -> None:
             code=ApiErrorCode.INTERNAL_FAILURE,
             status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
             message="The request could not be completed.",
+            operational_signal="worker-failure",
+            publisher=publisher,
         )
+    _register_error_handler(
+        application,
+        _OperationalSignalUnavailable,
+        code=ApiErrorCode.DEPENDENCY_UNAVAILABLE,
+        status_code=HTTPStatus.SERVICE_UNAVAILABLE,
+        message="Operational event delivery is temporarily unavailable.",
+    )
 
 
 async def _read_contract_body(request: Request) -> bytes:
@@ -1167,12 +1232,16 @@ def create_app(
     operator_service: _OperatorService | None = None,
     recovery_service: _RecoveryRunService | None = None,
     hosted: bool = False,
+    operating_profile: Literal["evidence", "production"] = "evidence",
     acceptance_partial_read_outage_enabled: bool = False,
+    operational_signal_publisher: OperationalSignalPublisher | None = None,
 ) -> FastAPI:
     """Create the isolated single-process API and own its service lifetime."""
 
     if type(hosted) is not bool:
         raise TypeError("API hosted profile must be a boolean")
+    if operating_profile not in {"evidence", "production"}:
+        raise ValueError("API operating profile is invalid")
     if type(acceptance_partial_read_outage_enabled) is not bool:
         raise TypeError("partial-read acceptance state must be boolean")
 
@@ -1240,7 +1309,7 @@ def create_app(
     application.state.investigation_service = service
     application.state.operator_service = operator_service
     application.state.recovery_service = recovery_service
-    _install_error_handlers(application)
+    _install_error_handlers(application, operational_signal_publisher)
 
     @application.get("/health", response_model=None)
     async def health() -> Response:
@@ -1266,6 +1335,12 @@ def create_app(
         }:
             raise _InvalidApiRequest
         if (
+            hosted
+            and operating_profile == "production"
+            and launch.fault is not RecoveryRunFault.NO_FAULT
+        ):
+            raise _InvalidApiRequest
+        if (
             launch.fault
             is RecoveryRunFault.ACCEPTANCE_DROP_AFTER_ACCEPT_PARTIAL_READ_OUTAGE
             and not acceptance_partial_read_outage_enabled
@@ -1287,6 +1362,47 @@ def create_app(
             raise _InternalApiFailure
         if hosted and snapshot.lifecycle not in _TERMINAL_RECOVERY_LIFECYCLES:
             raise _InternalApiFailure
+        signal = None
+        if snapshot.lifecycle is RecoveryRunLifecycle.FAILED:
+            signal = "failed-run"
+        elif (
+            snapshot.lifecycle is RecoveryRunLifecycle.ESCALATED and snapshot.witnesses
+        ):
+            signal = "unresolved-ambiguity"
+        if signal is not None:
+            event_snapshot = _validated_recovery_event_snapshot(
+                await _call_service(service.snapshot(launch.run_id, after=0)),
+                run_id=launch.run_id,
+                after=0,
+            )
+            terminal_events = tuple(
+                event
+                for event in event_snapshot.events
+                if event.type is RecoveryRunEventType.LIFECYCLE
+                and event.payload.lifecycle in _TERMINAL_RECOVERY_LIFECYCLES
+            )
+            if (
+                len(terminal_events) != 1
+                or terminal_events[0].payload.lifecycle is not snapshot.lifecycle
+            ):
+                raise _InternalApiFailure
+            terminal_event = terminal_events[0]
+            if operational_signal_publisher is None:
+                if hosted:
+                    raise _OperationalSignalUnavailable
+            else:
+                try:
+                    await operational_signal_publisher(
+                        signal,
+                        snapshot.request.run_id,
+                        source_event_cursor=terminal_event.cursor,
+                        source_event_sha256=canonical_sha256(terminal_event),
+                        occurred_at=terminal_event.occurred_at,
+                    )
+                except asyncio.CancelledError:
+                    raise
+                except Exception as error:
+                    raise _OperationalSignalUnavailable from error
         return Response(
             content=canonical_json_bytes(snapshot),
             status_code=HTTPStatus.ACCEPTED if created else HTTPStatus.OK,
@@ -1383,6 +1499,11 @@ def create_app(
     async def launch_scenario(request: Request) -> Response:
         _reject_query_parameters(request, allowed=set())
         launch = _decode_scenario_launch(await _read_contract_body(request))
+        investigation_id = scenario_investigation_id(
+            ScenarioName(launch.scenario.value),
+            launch.launch_id,
+        )
+        request.state.investigation_id = investigation_id
         operator = _operator_service(application)
         operation = operator.launch_and_wait_result if hosted else operator.launch
         result = await _call_service(operation(launch))
@@ -1395,17 +1516,13 @@ def create_app(
             raise _InternalApiFailure
         snapshot = _validated_scenario_snapshot(
             result_snapshot,
-            investigation_id=scenario_investigation_id(
-                ScenarioName(launch.scenario.value),
-                launch.launch_id,
-            ),
+            investigation_id=investigation_id,
             launch_id=launch.launch_id,
             scenario=launch.scenario,
             mode=launch.mode,
         )
         if hosted and snapshot.lifecycle not in _TERMINAL_SCENARIO_LIFECYCLES:
             raise _InternalApiFailure
-        request.state.investigation_id = snapshot.investigation_id
         return Response(
             content=canonical_json_bytes(snapshot),
             status_code=(HTTPStatus.ACCEPTED if created else HTTPStatus.OK),

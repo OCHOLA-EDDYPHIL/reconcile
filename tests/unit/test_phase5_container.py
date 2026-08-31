@@ -12,6 +12,7 @@ from typing import Any
 
 import pytest
 
+from reconcile import __version__
 from reconcile.hosted.config import load_config
 from scripts import check_phase5_container as container
 
@@ -111,6 +112,7 @@ def _archive(
 def test_static_container_contract_is_closed_and_nonroot() -> None:
     container.verify_static_contract()
 
+    assert __version__ == container._PACKAGE_VERSION == "0.2.0"
     dockerfile = container._DOCKERFILE.read_text(encoding="utf-8")
     dockerignore = container._DOCKERIGNORE.read_text(encoding="utf-8")
     assert container._PYTHON_MANIFEST in dockerfile

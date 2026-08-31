@@ -61,6 +61,7 @@ from reconcile.hosted.firestore_business import (
     build_google_firestore_business_targets,
 )
 from reconcile.hosted.firestore_cas import GoogleFirestoreCasStore
+from reconcile.hosted.firestore_observability import FirestoreOperationalEventOutbox
 from reconcile.hosted.firestore_permits import FirestoreActionPermitStore
 from reconcile.hosted.firestore_provider_ledger import FirestoreHostedProviderLedger
 from reconcile.hosted.firestore_recovery_runs import FirestoreRecoveryRunStore
@@ -1003,6 +1004,15 @@ def create_runtime_component_app(
         raise TypeError("hosted runtime requires exact configuration")
     candidate = build_hosted_candidate(config)
     cas = _cas(config)
+    operational_event_cas = (
+        GoogleFirestoreCasStore(
+            project_id=config.project_id,
+            database_id=_required(config.target_database, "target database"),
+        )
+        if config.component is Component.SANDBOX
+        else cas
+    )
+    operational_event_outbox = FirestoreOperationalEventOutbox(operational_event_cas)
     scenario_store = FirestoreScenarioStore(cas, candidate)
     selected_transport = transport or HostedHttpTransport(
         request_timeout_seconds=(
@@ -1046,6 +1056,7 @@ def create_runtime_component_app(
         )
         return create_component_app(
             config,
+            operational_event_outbox=operational_event_outbox,
             transport=selected_transport,
             operator_service=operator,
             recovery_service=recovery,
@@ -1172,6 +1183,7 @@ def create_runtime_component_app(
         recovery_service = _LazyRecoveryRunService(recovery_service_factory)
         return create_component_app(
             config,
+            operational_event_outbox=operational_event_outbox,
             transport=selected_transport,
             internal_operation_handlers=_handlers(
                 (InternalOperation.INVESTIGATE, handler),
@@ -1180,6 +1192,7 @@ def create_runtime_component_app(
                     HostedRecoveryHandler(
                         expected_caller_email=config.allowed_caller_emails[0],
                         service=recovery_service,
+                        operating_profile=config.operating_profile,
                         acceptance_partial_read_outage_enabled=(
                             config.acceptance_partial_read_outage_enabled
                         ),
@@ -1235,6 +1248,7 @@ def create_runtime_component_app(
         )
         return create_component_app(
             config,
+            operational_event_outbox=operational_event_outbox,
             transport=selected_transport,
             cloud_run_canary_fault_proxy=canary_proxy,
             cloud_run_canary_action_authorizer=RecoveryCloudRunCanaryActionAuthorizer(
@@ -1303,6 +1317,7 @@ def create_runtime_component_app(
     )
     return create_component_app(
         config,
+        operational_event_outbox=operational_event_outbox,
         transport=selected_transport,
         sandbox_evidence_reader=FirestoreSandboxEvidenceReader(
             project_id=config.project_id,

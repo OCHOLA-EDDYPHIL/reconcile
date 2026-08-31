@@ -41,8 +41,10 @@ from reconcile.phase5_operator import (
 PUBLIC_EVIDENCE_INDEX_VERSION = "reconcile/public-evidence/v1"
 PUBLIC_PROVIDER_PROOF_VERSION = "reconcile/provider-proof/v2"
 PUBLIC_LIVE_CORROBORATION_VERSION = "reconcile/live-corroboration/v2"
-PUBLIC_CLEANUP_VERSION = "reconcile/cleanup-verification/v2"
-POST_TEARDOWN_CAPTURE_VERSION = "reconcile/post-teardown-capture/v1"
+PUBLIC_CLEANUP_VERSION = "reconcile/cleanup-verification/v3"
+POST_TEARDOWN_CAPTURE_VERSION = "reconcile/post-teardown-capture/v2"
+_LEGACY_PUBLIC_CLEANUP_VERSION = "reconcile/cleanup-verification/v2"
+_LEGACY_POST_TEARDOWN_CAPTURE_VERSION = "reconcile/post-teardown-capture/v1"
 
 PUBLIC_EVIDENCE_FILES = frozenset(
     {
@@ -67,6 +69,10 @@ _INVENTORY_KINDS = (
     "custom-roles",
     "phase5-project-iam-members",
     "phase5-budgets",
+    "phase5-log-metrics",
+    "phase5-alert-policies",
+    "phase5-dashboards",
+    "phase5-project-org-policies",
 )
 
 GitRevision = Annotated[
@@ -91,8 +97,8 @@ class PublicEvidenceError(RuntimeError):
         super().__init__(code)
 
 
-class PostTeardownInventory(StrictModel):
-    """Closed inventory that must be empty after the accepted teardown."""
+class _PostTeardownInventoryV1(StrictModel):
+    """Legacy closed inventory retained for exact historical validation."""
 
     cloud_run_services: Literal[0]
     cloud_run_jobs: Literal[0]
@@ -105,6 +111,15 @@ class PostTeardownInventory(StrictModel):
     phase5_budgets: Literal[0]
 
 
+class PostTeardownInventory(_PostTeardownInventoryV1):
+    """Closed inventory that must be empty after the accepted teardown."""
+
+    phase5_log_metrics: Literal[0]
+    phase5_alert_policies: Literal[0]
+    phase5_dashboards: Literal[0]
+    phase5_project_org_policies: Literal[0]
+
+
 class TeardownActionBindings(StrictModel):
     """Digests of the four accepted teardown action records."""
 
@@ -114,10 +129,23 @@ class TeardownActionBindings(StrictModel):
     bootstrap_sha256: Sha256Digest
 
 
+class _PostTeardownCaptureV1(StrictModel):
+    """Legacy sanitized capture retained for exact historical validation."""
+
+    schema_version: Literal["reconcile/post-teardown-capture/v1"]
+    status: Literal["PASS"]
+    source_revision: GitRevision
+    candidate_sha256: Sha256Digest
+    captured_at: AwareDatetime
+    teardown_actions: TeardownActionBindings
+    inventory: _PostTeardownInventoryV1
+    observations_sha256: Sha256Digest
+
+
 class PostTeardownCapture(StrictModel):
     """Strict, sanitized operator input captured after hosted teardown."""
 
-    schema_version: Literal["reconcile/post-teardown-capture/v1"]
+    schema_version: Literal["reconcile/post-teardown-capture/v2"]
     status: Literal["PASS"]
     source_revision: GitRevision
     candidate_sha256: Sha256Digest
@@ -140,6 +168,10 @@ class InventoryQueryObservation(StrictModel):
         "custom-roles",
         "phase5-project-iam-members",
         "phase5-budgets",
+        "phase5-log-metrics",
+        "phase5-alert-policies",
+        "phase5-dashboards",
+        "phase5-project-org-policies",
     ]
     command_sha256: Sha256Digest
     response_sha256: Sha256Digest
@@ -155,7 +187,7 @@ class InventoryQueryObservation(StrictModel):
 class PostTeardownInventoryObservation(StrictModel):
     """Canonical private capture produced by fixed read-only gcloud queries."""
 
-    schema_version: Literal["reconcile/post-teardown-inventory/v1"]
+    schema_version: Literal["reconcile/post-teardown-inventory/v2"]
     operator_manifest_sha256: Sha256Digest
     source_revision: GitRevision
     image_digest: ImageDigest
@@ -173,6 +205,10 @@ class PostTeardownInventoryObservation(StrictModel):
     ]
     captured_at: AwareDatetime
     queries: tuple[
+        InventoryQueryObservation,
+        InventoryQueryObservation,
+        InventoryQueryObservation,
+        InventoryQueryObservation,
         InventoryQueryObservation,
         InventoryQueryObservation,
         InventoryQueryObservation,
@@ -333,8 +369,20 @@ class PublicLiveCorroboration(StrictModel):
         return self
 
 
-class PublicCleanupVerification(StrictModel):
+class _PublicCleanupVerificationV2(StrictModel):
     schema_version: Literal["reconcile/cleanup-verification/v2"]
+    status: Literal["PASS"]
+    source_revision: GitRevision
+    candidate_sha256: Sha256Digest
+    captured_at: AwareDatetime
+    post_teardown_capture_sha256: Sha256Digest
+    observations_sha256: Sha256Digest
+    teardown_actions: TeardownActionBindings
+    inventory: _PostTeardownInventoryV1
+
+
+class PublicCleanupVerification(StrictModel):
+    schema_version: Literal["reconcile/cleanup-verification/v3"]
     status: Literal["PASS"]
     source_revision: GitRevision
     candidate_sha256: Sha256Digest
@@ -396,7 +444,7 @@ class PublicEvidenceBundle(StrictModel):
     index: PublicEvidenceIndex
     provider_proof: PublicProviderProof
     live_corroboration: PublicLiveCorroboration
-    cleanup_verification: PublicCleanupVerification
+    cleanup_verification: PublicCleanupVerification | _PublicCleanupVerificationV2
 
 
 def _file_sha256(payload: bytes) -> str:
@@ -490,6 +538,30 @@ def _inventory_commands(
                 "budgets",
                 "list",
                 f"--billing-account={billing_account_id}",
+                output,
+                quiet,
+            ),
+        ),
+        (
+            "phase5-log-metrics",
+            (_GCLOUD, "logging", "metrics", "list", project, output, quiet),
+        ),
+        (
+            "phase5-alert-policies",
+            (_GCLOUD, "monitoring", "policies", "list", project, output, quiet),
+        ),
+        (
+            "phase5-dashboards",
+            (_GCLOUD, "monitoring", "dashboards", "list", project, output, quiet),
+        ),
+        (
+            "phase5-project-org-policies",
+            (
+                _GCLOUD,
+                "resource-manager",
+                "org-policies",
+                "list",
+                project,
                 output,
                 quiet,
             ),
@@ -592,6 +664,40 @@ def _matched_resource_ids(
                 if display_name == "RECONCILE Phase 5 USD 5"
                 else None
             )
+        elif kind == "phase5-log-metrics":
+            name = _nested_text(item, "name")
+            resource = (
+                name
+                if name is not None
+                and name.rsplit("/", 1)[-1].startswith("reconcile_p5_")
+                else None
+            )
+        elif kind == "phase5-alert-policies":
+            display_name = _nested_text(item, "displayName") or _nested_text(
+                item, "display_name"
+            )
+            resource = (
+                _nested_text(item, "name")
+                if display_name is not None and display_name.startswith("Reconcile ")
+                else None
+            )
+        elif kind == "phase5-dashboards":
+            display_name = _nested_text(item, "displayName") or _nested_text(
+                item, "display_name"
+            )
+            resource = (
+                _nested_text(item, "name")
+                if display_name == "Reconcile Phase 5 operational signals"
+                else None
+            )
+        elif kind == "phase5-project-org-policies":
+            name = _nested_text(item, "name") or _nested_text(item, "constraint")
+            resource = (
+                name
+                if name is not None
+                and name.endswith("/iam.automaticIamGrantsForDefaultServiceAccounts")
+                else None
+            )
         else:
             resource = _nested_text(item, "name") or _nested_text(item, "id")
         if resource is not None:
@@ -686,7 +792,7 @@ def capture_post_teardown_inventory(
         )
     try:
         observation = PostTeardownInventoryObservation(
-            schema_version="reconcile/post-teardown-inventory/v1",
+            schema_version="reconcile/post-teardown-inventory/v2",
             operator_manifest_sha256=operator_manifest_sha256,
             source_revision=source_revision,
             image_digest=image_digest,
@@ -935,6 +1041,10 @@ def _validated_teardown_capture(
             custom_roles=counts["custom-roles"],
             phase5_project_iam_members=counts["phase5-project-iam-members"],
             phase5_budgets=counts["phase5-budgets"],
+            phase5_log_metrics=counts["phase5-log-metrics"],
+            phase5_alert_policies=counts["phase5-alert-policies"],
+            phase5_dashboards=counts["phase5-dashboards"],
+            phase5_project_org_policies=counts["phase5-project-org-policies"],
         ),
         observations_sha256=_file_sha256(inventory_raw),
     )
@@ -1399,9 +1509,16 @@ def load_public_evidence(path: Path) -> PublicEvidenceBundle:
         PublicLiveCorroboration,
         code="PUBLIC_EVIDENCE_INVALID",
     )
+    cleanup_version = public_evidence_schema_version(raw["cleanup-verification.json"])
+    if cleanup_version == PUBLIC_CLEANUP_VERSION:
+        cleanup_model = PublicCleanupVerification
+    elif cleanup_version == _LEGACY_PUBLIC_CLEANUP_VERSION:
+        cleanup_model = _PublicCleanupVerificationV2
+    else:
+        raise PublicEvidenceError("PUBLIC_EVIDENCE_INVALID")
     cleanup = _decode_canonical(
         raw["cleanup-verification.json"],
-        PublicCleanupVerification,
+        cleanup_model,
         code="PUBLIC_EVIDENCE_INVALID",
     )
     if not isinstance(index, PublicEvidenceIndex):
@@ -1410,7 +1527,10 @@ def load_public_evidence(path: Path) -> PublicEvidenceBundle:
         raise PublicEvidenceError("PUBLIC_EVIDENCE_INVALID")
     if not isinstance(live, PublicLiveCorroboration):
         raise PublicEvidenceError("PUBLIC_EVIDENCE_INVALID")
-    if not isinstance(cleanup, PublicCleanupVerification):
+    if not isinstance(
+        cleanup,
+        (PublicCleanupVerification, _PublicCleanupVerificationV2),
+    ):
         raise PublicEvidenceError("PUBLIC_EVIDENCE_INVALID")
 
     expected_files = tuple(
@@ -1478,7 +1598,14 @@ def canonical_post_teardown_capture(value: dict[str, Any]) -> bytes:
             separators=(",", ":"),
             sort_keys=True,
         ).encode("utf-8")
-        capture = decode_contract(payload, PostTeardownCapture)
+        version = value.get("schema_version")
+        if version == POST_TEARDOWN_CAPTURE_VERSION:
+            capture_model = PostTeardownCapture
+        elif version == _LEGACY_POST_TEARDOWN_CAPTURE_VERSION:
+            capture_model = _PostTeardownCaptureV1
+        else:
+            raise ValueError("unsupported post-teardown capture version")
+        capture = decode_contract(payload, capture_model)
         return canonical_json_bytes(capture)
     except (TypeError, ValueError) as error:
         raise PublicEvidenceError("POST_TEARDOWN_CAPTURE_INVALID") from error

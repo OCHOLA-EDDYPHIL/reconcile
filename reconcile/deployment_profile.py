@@ -13,7 +13,8 @@ from pydantic import Field, StringConstraints, model_validator
 
 from reconcile.contracts.base import Sha256Digest, StrictModel
 
-_PROFILE_SCHEMA = "reconcile/deployment-profile/v1"
+_PROFILE_SCHEMA_V1 = "reconcile/deployment-profile/v1"
+_PROFILE_SCHEMA_V2 = "reconcile/deployment-profile/v2"
 _MAX_PROFILE_BYTES = 16_384
 _MAX_BACKEND_BYTES = 4_096
 _REGION = "us-central1"
@@ -50,6 +51,14 @@ SafePath = Annotated[
     str,
     StringConstraints(min_length=1, max_length=4096, pattern=r"^[^\x00-\x1f\x7f]+$"),
 ]
+NotificationChannelId = Annotated[
+    str,
+    StringConstraints(
+        min_length=1,
+        max_length=256,
+        pattern=r"^projects/[a-z][a-z0-9-]{4,28}[a-z0-9]/notificationChannels/[0-9]+$",
+    ),
+]
 
 
 class DeploymentProfileError(RuntimeError):
@@ -63,14 +72,41 @@ class DeploymentProfileError(RuntimeError):
 class DeploymentProfile(StrictModel):
     """The complete environment-specific input accepted by deployment tooling."""
 
-    schema_version: Literal["reconcile/deployment-profile/v1"]
+    schema_version: Literal[
+        "reconcile/deployment-profile/v1",
+        "reconcile/deployment-profile/v2",
+    ]
     project_id: ProjectId
     project_number: ProjectNumber
     billing_account_id: BillingAccountId
     owner_account: OwnerAccount
+    operating_profile: Literal["evidence", "production"] = "evidence"
+    notification_channel_ids: tuple[NotificationChannelId, ...] = ()
 
     @model_validator(mode="after")
     def _reject_public_placeholders(self) -> DeploymentProfile:
+        if self.schema_version == _PROFILE_SCHEMA_V1:
+            if self.operating_profile != "evidence" or self.notification_channel_ids:
+                raise ValueError("v1 deployment profiles are disposable evidence")
+        elif "operating_profile" not in self.model_fields_set:
+            raise ValueError("v2 deployment profiles require an operating profile")
+        if self.notification_channel_ids != tuple(
+            sorted(set(self.notification_channel_ids))
+        ):
+            raise ValueError("notification channels must be unique and sorted")
+        if any(
+            not channel.startswith(f"projects/{self.project_id}/notificationChannels/")
+            for channel in self.notification_channel_ids
+        ):
+            raise ValueError(
+                "notification channels must belong to the deployment project"
+            )
+        if self.operating_profile == "production" and not self.notification_channel_ids:
+            raise ValueError(
+                "production deployment profiles require notification channels"
+            )
+        if self.operating_profile == "evidence" and self.notification_channel_ids:
+            raise ValueError("evidence deployment profiles cannot notify channels")
         if (
             self.project_id == "example-project-id"
             or self.project_number == "000000000000"
@@ -101,15 +137,22 @@ class DeploymentIdentity(StrictModel):
     """Deterministic, manifest-private expansion of one deployment profile."""
 
     deployment_profile_sha256: Sha256Digest
+    deployment_profile_schema_version: Literal[
+        "reconcile/deployment-profile/v1",
+        "reconcile/deployment-profile/v2",
+    ]
+    operating_profile: Literal["evidence", "production"]
     project_id: ProjectId
     project_number: ProjectNumber
     billing_account_id: BillingAccountId
     owner_account: OwnerAccount
+    notification_channel_ids: tuple[NotificationChannelId, ...]
     owner_principal: str
     region: Literal["us-central1"]
     state_bucket_name: str
     target_bucket_name: str
     apply_service_account_email: str
+    operator_service_account_email: str
     runtime_service_accounts: RuntimeServiceAccounts
     audiences: RuntimeAudiences
 
@@ -117,11 +160,13 @@ class DeploymentIdentity(StrictModel):
     def _validate_derivation(self) -> DeploymentIdentity:
         expected = resolve_deployment_identity(
             DeploymentProfile(
-                schema_version=_PROFILE_SCHEMA,
+                schema_version=self.deployment_profile_schema_version,
                 project_id=self.project_id,
                 project_number=self.project_number,
                 billing_account_id=self.billing_account_id,
                 owner_account=self.owner_account,
+                operating_profile=self.operating_profile,
+                notification_channel_ids=self.notification_channel_ids,
             )
         )
         if self != expected:
@@ -171,8 +216,12 @@ def _reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
 
 
 def canonical_profile_bytes(profile: DeploymentProfile) -> bytes:
+    payload = profile.model_dump(mode="json")
+    if profile.schema_version == _PROFILE_SCHEMA_V1:
+        payload.pop("operating_profile", None)
+        payload.pop("notification_channel_ids", None)
     return json.dumps(
-        profile.model_dump(mode="json"),
+        payload,
         allow_nan=False,
         ensure_ascii=False,
         separators=(",", ":"),
@@ -186,6 +235,9 @@ def parse_deployment_profile(data: bytes) -> DeploymentProfile:
         value = json.loads(text, object_pairs_hook=_reject_duplicate_keys)
         if not isinstance(value, dict):
             raise DeploymentProfileError("DEPLOYMENT_PROFILE_NOT_OBJECT")
+        channels = value.get("notification_channel_ids")
+        if isinstance(channels, list):
+            value["notification_channel_ids"] = tuple(channels)
         return DeploymentProfile.model_validate(value, strict=True)
     except DeploymentProfileError:
         raise
@@ -206,15 +258,21 @@ def resolve_deployment_identity(profile: DeploymentProfile) -> DeploymentIdentit
     origin = f"https://reconcile.invalid/phase5/{project}"
     return DeploymentIdentity.model_construct(
         deployment_profile_sha256=digest,
+        deployment_profile_schema_version=profile.schema_version,
+        operating_profile=profile.operating_profile,
         project_id=project,
         project_number=profile.project_number,
         billing_account_id=profile.billing_account_id,
         owner_account=profile.owner_account,
+        notification_channel_ids=profile.notification_channel_ids,
         owner_principal=f"user:{profile.owner_account}",
         region=_REGION,
         state_bucket_name=f"{project}-p5-state",
         target_bucket_name=f"{project}-p5-target",
         apply_service_account_email=(f"rec-p5-apply@{project}.iam.gserviceaccount.com"),
+        operator_service_account_email=(
+            f"rec-p5-operator@{project}.iam.gserviceaccount.com"
+        ),
         runtime_service_accounts=service_accounts,
         audiences=RuntimeAudiences(
             api=f"{origin}/api",
@@ -461,6 +519,7 @@ def backend_config_bytes(
         value = (
             f'bucket = "{identity.state_bucket_name}"\n'
             f'impersonate_service_account = "{identity.apply_service_account_email}"\n'
+            f'prefix = "phase5/{stack}/{identity.operating_profile}"\n'
         )
     return value.encode("utf-8")
 

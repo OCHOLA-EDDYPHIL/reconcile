@@ -21,6 +21,7 @@ _BOOTSTRAP_SERVICES = {
     "cloudresourcemanager.googleapis.com",
     "iam.googleapis.com",
     "iamcredentials.googleapis.com",
+    "orgpolicy.googleapis.com",
     "serviceusage.googleapis.com",
     "storage.googleapis.com",
 }
@@ -30,6 +31,7 @@ _FOUNDATION_SERVICES = {
     "billingbudgets.googleapis.com",
     "firestore.googleapis.com",
     "logging.googleapis.com",
+    "monitoring.googleapis.com",
     "run.googleapis.com",
 }
 _EXPECTED_RESOURCE_BLOCKS = {
@@ -52,6 +54,7 @@ _EXPECTED_RESOURCE_BLOCKS = {
     ("google_cloud_run_v2_service_iam_member", "internal"),
     ("google_firestore_database", "phase5"),
     ("google_project_iam_member", "phase5_apply"),
+    ("google_project_iam_member", "phase5_cloud_run_deployer"),
     ("google_project_iam_member", "canary_operation_reader"),
     ("google_project_iam_member", "canary_revision_reader"),
     ("google_project_iam_member", "runtime_database_user"),
@@ -60,29 +63,43 @@ _EXPECTED_RESOURCE_BLOCKS = {
     ("google_project_iam_member", "target_database_user"),
     ("google_project_iam_member", "target_database_viewer"),
     ("google_project_iam_member", "vertex_user"),
+    ("google_project_default_service_accounts", "phase5"),
+    (
+        "google_project_organization_policy",
+        "disable_automatic_default_service_account_grants",
+    ),
     ("google_project_iam_custom_role", "canary_operation_reader"),
     ("google_project_iam_custom_role", "canary_revision_reader"),
     ("google_project_iam_custom_role", "canary_mutator"),
+    ("google_project_iam_custom_role", "cloud_run_deployer"),
     ("google_project_service", "bootstrap_required"),
     ("google_project_service", "required"),
     ("google_service_account", "phase5_apply"),
+    ("google_service_account", "phase5_operator"),
     ("google_service_account", "runtime"),
     ("google_service_account_iam_member", "apply_act_as"),
     ("google_service_account_iam_member", "canary_mutator_act_as"),
     ("google_service_account_iam_member", "owner_impersonation"),
+    ("google_service_account_iam_member", "owner_operator_impersonation"),
+    ("google_logging_metric", "operational_failure"),
+    ("google_monitoring_alert_policy", "operational_failure"),
+    ("google_monitoring_dashboard", "operational"),
     ("google_storage_bucket", "target"),
     ("google_storage_bucket", "terraform_state"),
     ("google_storage_bucket_iam_member", "target_mutator"),
     ("google_storage_bucket_iam_member", "target_viewer"),
     ("terraform_data", "canary_baseline"),
+    ("terraform_data", "foundation_production_guard"),
+    ("terraform_data", "runtime_production_guard"),
 }
 _APPLY_PROJECT_ROLES = {
     "roles/artifactregistry.admin",
     "roles/datastore.owner",
     "roles/iam.serviceAccountAdmin",
+    "roles/logging.configWriter",
     "roles/logging.viewer",
+    "roles/monitoring.editor",
     "roles/resourcemanager.projectIamAdmin",
-    "roles/run.admin",
     "roles/serviceusage.serviceUsageAdmin",
     "roles/storage.admin",
 }
@@ -219,17 +236,13 @@ def test_three_stacks_have_separate_pinned_backends() -> None:
     )
     assert len(bootstrap_backend) == 1
     assert not re.findall(r"(?m)^\s*([a-z_]+)\s*=", bootstrap_backend[0][-1])
-    for path, prefix in (
-        (_STACKS[1] / "versions.tf", "phase5/foundation"),
-        (_STACKS[2] / "versions.tf", "phase5/runtime"),
-    ):
+    for path in (_STACKS[1] / "versions.tf", _STACKS[2] / "versions.tf"):
         backend = _matching_blocks(path, re.compile(r'(?m)^\s*backend\s+"gcs"\s*\{'))
         assert len(backend) == 1
         assignments = set(re.findall(r"(?m)^\s*([a-z_]+)\s*=", backend[0][-1]))
-        assert assignments == {"prefix"}
-        assert _attribute(backend[0][-1], "prefix") == f'"{prefix}"'
-    assert re.search(r'prefix\s*=\s*"phase5/foundation"', foundation) is not None
-    assert re.search(r'prefix\s*=\s*"phase5/runtime"', runtime) is not None
+        assert assignments == set()
+    assert "prefix" not in foundation
+    assert "prefix" not in runtime
 
     bootstrap_provider = _named_block(_STACKS[0] / "providers.tf", "provider", "google")
     assert set(re.findall(r"(?m)^\s*([a-z_]+)\s*=", bootstrap_provider)) == {
@@ -307,7 +320,7 @@ def test_public_principals_and_secret_values_are_absent() -> None:
         is None
     )
     assert (
-        '"serviceAccount:rec-p5-apply@${var.project_id}.iam.gserviceaccount.com"'
+        '"serviceAccount:rec-p5-operator@${var.project_id}.iam.gserviceaccount.com"'
         in runtime_locals
     )
     assert 'variable "api_invoker_members"' not in source
@@ -325,9 +338,12 @@ def test_public_principals_and_secret_values_are_absent() -> None:
         member = _attribute(resource.body, "member")
         if resource.name == "api_operator":
             assert member == "each.value"
-        elif resource.name == "owner_impersonation":
+        elif resource.name in {
+            "owner_impersonation",
+            "owner_operator_impersonation",
+        }:
             assert member == "var.owner_principal"
-        elif resource.name == "phase5_apply":
+        elif resource.name in {"phase5_apply", "phase5_cloud_run_deployer"}:
             assert member == "google_service_account.phase5_apply.member"
         else:
             assert member.startswith('"serviceAccount:')
@@ -490,7 +506,7 @@ def test_artifact_registry_uses_immutable_tags_without_claiming_a_maximum() -> N
     assert 'id     = "keep-two-recent"' not in repository.body
 
 
-def test_cloud_run_capacity_is_frozen_to_single_zero_minimum_instances() -> None:
+def test_cloud_run_capacity_is_profile_bound_and_production_can_scale() -> None:
     run_resources = [
         resource
         for resource in _resources()
@@ -499,9 +515,24 @@ def test_cloud_run_capacity_is_frozen_to_single_zero_minimum_instances() -> None
 
     assert {resource.name for resource in run_resources} == _CLOUD_RUN_SERVICES
     for resource in run_resources:
-        assert _attribute(resource.body, "max_instance_request_concurrency") == "1"
-        assert _attribute(resource.body, "min_instance_count") == "0"
-        assert _attribute(resource.body, "max_instance_count") == "1"
+        assert (
+            _attribute(resource.body, "max_instance_request_concurrency")
+            == f"local.service_profiles.{resource.name}.concurrency"
+        )
+        assert (
+            _attribute(resource.body, "min_instance_count")
+            == f"local.service_profiles.{resource.name}.min_count"
+        )
+        assert (
+            _attribute(resource.body, "max_instance_count")
+            == f"local.service_profiles.{resource.name}.max_count"
+        )
+    profiles = _compact((_STACKS[2] / "locals.tf").read_text(encoding="utf-8"))
+    assert 'production_profile = var.operating_profile == "production"' in profiles
+    assert "INGRESS_TRAFFIC_INTERNAL_ONLY" not in profiles
+    assert profiles.count('ingress = "INGRESS_TRAFFIC_ALL"') == 5
+    assert profiles.count("max_count = local.production_profile ? 3 : 1") == 2
+    assert profiles.count("concurrency = local.production_profile ? 8 : 1") == 2
 
 
 def test_budget_is_fixed_to_five_us_dollars_without_credits() -> None:
@@ -542,7 +573,7 @@ def test_firestore_database_inventory_separates_runtime_sandbox_and_target() -> 
     assert 'target_database_name = "reconcile-p5-target"' in foundation_locals
 
 
-def test_only_the_disposable_target_bucket_has_destructive_defaults() -> None:
+def test_target_bucket_destructive_behavior_is_evidence_profile_only() -> None:
     buckets = {
         resource.name: resource
         for resource in _resources()
@@ -553,8 +584,17 @@ def test_only_the_disposable_target_bucket_has_destructive_defaults() -> None:
     )
 
     assert set(buckets) == {"target", "terraform_state"}
-    assert _attribute(buckets["target"].body, "force_destroy") == "true"
-    assert _attribute(buckets["target"].body, "retention_duration_seconds") == "0"
+    assert _attribute(buckets["target"].body, "force_destroy") == (
+        "!local.production_profile"
+    )
+    assert (
+        _attribute(buckets["target"].body, "retention_duration_seconds")
+        == "local.production_profile ? 604800 : 0"
+    )
+    assert _attribute(buckets["target"].body, "deletion_policy") == (
+        'local.production_profile ? "PREVENT" : "DELETE"'
+    )
+    assert _attribute(buckets["target"].body, "enabled") == ("local.production_profile")
     assert _attribute(buckets["terraform_state"].body, "force_destroy") == (
         "var.allow_state_bucket_destroy"
     )
@@ -565,6 +605,58 @@ def test_only_the_disposable_target_bucket_has_destructive_defaults() -> None:
     assert (
         _attribute(buckets["terraform_state"].body, "retention_duration_seconds") == "0"
     )
+
+
+def test_production_profile_protects_firestore_and_default_compute_identity() -> None:
+    databases = [
+        resource
+        for resource in _resources()
+        if resource.resource_type == "google_firestore_database"
+    ]
+    default_accounts = [
+        resource
+        for resource in _resources()
+        if resource.resource_type == "google_project_default_service_accounts"
+    ]
+
+    assert len(databases) == 1
+    assert _attribute(databases[0].body, "delete_protection_state") == (
+        'local.production_profile ? "DELETE_PROTECTION_ENABLED" : '
+        '"DELETE_PROTECTION_DISABLED"'
+    )
+    assert _attribute(databases[0].body, "deletion_policy") == (
+        'local.production_profile ? "ABANDON" : "DELETE"'
+    )
+    assert len(default_accounts) == 1
+    assert _attribute(default_accounts[0].body, "action") == '"DEPRIVILEGE"'
+    assert _attribute(default_accounts[0].body, "restore_policy") == '"REVERT"'
+    organization_policies = [
+        resource
+        for resource in _resources()
+        if resource.resource_type == "google_project_organization_policy"
+    ]
+    assert len(organization_policies) == 1
+    assert _attribute(organization_policies[0].body, "constraint") == (
+        '"iam.automaticIamGrantsForDefaultServiceAccounts"'
+    )
+    assert _attribute(organization_policies[0].body, "enforced") == "true"
+
+    guards = [
+        resource
+        for resource in _resources()
+        if resource.resource_type == "terraform_data"
+        and resource.name.endswith("production_guard")
+    ]
+    assert len(guards) == 2
+    assert all(_attribute(guard.body, "prevent_destroy") == "true" for guard in guards)
+    assert all(
+        _attribute(guard.body, "count") == "local.production_profile ? 1 : 0"
+        for guard in guards
+    )
+
+    for stack in _STACKS[1:]:
+        profile = _named_block(stack / "variables.tf", "variable", "operating_profile")
+        assert re.search(r"(?m)^\s*default\s*=", profile) is None
 
 
 def test_every_project_level_database_role_is_resource_conditioned() -> None:
@@ -624,6 +716,7 @@ def test_apply_identity_and_runtime_iam_graph_are_closed_world() -> None:
 
     assert set(project_iam) == {
         "phase5_apply",
+        "phase5_cloud_run_deployer",
         "canary_operation_reader",
         "canary_revision_reader",
         "runtime_database_user",
@@ -711,6 +804,7 @@ def test_apply_identity_and_runtime_iam_graph_are_closed_world() -> None:
         "canary_mutator",
         "canary_operation_reader",
         "canary_revision_reader",
+        "cloud_run_deployer",
     }
     operation_role = custom_roles["canary_operation_reader"].body
     assert _attribute(operation_role, "role_id") == (
@@ -729,6 +823,34 @@ def test_apply_identity_and_runtime_iam_graph_are_closed_world() -> None:
         "run.services.update",
     }
     assert _attribute(mutator_role, "stage") == '"GA"'
+
+    deployer_binding = project_iam["phase5_cloud_run_deployer"].body
+    assert _attribute(deployer_binding, "role") == (
+        '"projects/${var.project_id}/roles/reconcileP5CloudRunDeployer"'
+    )
+    assert _attribute(deployer_binding, "member") == (
+        "google_service_account.phase5_apply.member"
+    )
+    deployer_role = custom_roles["cloud_run_deployer"].body
+    deployer_permissions = set(re.findall(r'"(run\.[A-Za-z.]+)"', deployer_role))
+    assert deployer_permissions == {
+        "run.locations.list",
+        "run.operations.get",
+        "run.operations.list",
+        "run.services.create",
+        "run.services.delete",
+        "run.services.get",
+        "run.services.getIamPolicy",
+        "run.services.list",
+        "run.services.setIamPolicy",
+        "run.services.update",
+    }
+    assert "run.routes.invoke" not in deployer_permissions
+    assert not any(
+        permission.startswith("run.jobs.") for permission in deployer_permissions
+    )
+    assert "*" not in _attribute(deployer_role, "permissions")
+    assert _attribute(deployer_role, "stage") == '"GA"'
 
     assert set(artifact_iam) == {"canary_mutator_image_reader"}
     image_reader = artifact_iam["canary_mutator_image_reader"].body
@@ -759,10 +881,16 @@ def test_apply_identity_and_runtime_iam_graph_are_closed_world() -> None:
         "apply_act_as",
         "canary_mutator_act_as",
         "owner_impersonation",
+        "owner_operator_impersonation",
     }
     owner = service_account_iam["owner_impersonation"].body
     assert _attribute(owner, "role") == '"roles/iam.serviceAccountTokenCreator"'
     assert _attribute(owner, "member") == "var.owner_principal"
+    operator_owner = service_account_iam["owner_operator_impersonation"].body
+    assert _attribute(operator_owner, "role") == (
+        '"roles/iam.serviceAccountTokenCreator"'
+    )
+    assert _attribute(operator_owner, "member") == "var.owner_principal"
     act_as = service_account_iam["apply_act_as"].body
     assert _attribute(act_as, "for_each") == "local.service_accounts"
     assert _attribute(act_as, "role") == '"roles/iam.serviceAccountUser"'
@@ -852,6 +980,31 @@ def test_apply_identity_and_runtime_iam_graph_are_closed_world() -> None:
     assert _compact(invocation_locals[0][-1]) == _compact(expected_invocations)
 
 
+def test_apply_identity_has_no_cloud_run_invocation_authority() -> None:
+    bootstrap = (_STACKS[0] / "apply_identity.tf").read_text(encoding="utf-8")
+    runtime_locals = (_STACKS[2] / "locals.tf").read_text(encoding="utf-8")
+    cloud_run = (_STACKS[2] / "cloud_run.tf").read_text(encoding="utf-8")
+
+    custom_roles = (_STACKS[0] / "canary_operation_role.tf").read_text(encoding="utf-8")
+
+    assert '"roles/run.admin"' not in bootstrap
+    assert "run.routes.invoke" not in bootstrap
+    assert "run.routes.invoke" not in custom_roles
+    assert "rec-p5-apply@" not in runtime_locals
+    assert "rec-p5-apply@" not in cloud_run
+    assert cloud_run.count("RECONCILE_ALLOWED_CALLER_EMAILS") == 3
+    assert (
+        "RECONCILE_ALLOWED_CALLER_EMAILS                  = "
+        "local.caller_emails.operator"
+    ) in cloud_run
+    assert (
+        cloud_run.count(
+            "RECONCILE_ALLOWED_CALLER_EMAILS                  = local.caller_emails.api"
+        )
+        == 2
+    )
+
+
 def test_every_label_capable_resource_has_phase5_labels() -> None:
     label_capable_types = {
         "google_artifact_registry_repository",
@@ -869,11 +1022,38 @@ def test_every_label_capable_resource_has_phase5_labels() -> None:
         assert re.search(r"(?m)^\s*labels\s*=", resource.body) is not None
 
 
+def test_operational_metrics_alerts_and_dashboard_cover_the_closed_signal_set() -> None:
+    source = (_STACKS[2] / "observability.tf").read_text(encoding="utf-8")
+    expected_signals = {
+        "failed-run",
+        "permit-denial",
+        "provider-unavailable",
+        "replay-denial",
+        "unresolved-ambiguity",
+        "worker-failure",
+    }
+
+    assert set(re.findall(r'= "([a-z]+(?:-[a-z]+)+)"', source)) >= expected_signals
+    assert 'jsonPayload.schema_version=\\"reconcile/operational-event/v2\\"' in source
+    assert 'resource "google_logging_metric" "operational_failure"' in source
+    assert 'resource "google_monitoring_alert_policy" "operational_failure"' in source
+    assert 'resource "google_monitoring_dashboard" "operational"' in source
+    assert (
+        "notification_channels = local.production_profile ? "
+        "sort(tolist(var.notification_channel_ids)) : []"
+    ) in source
+    assert 'failed_run           = "ERROR"' in source
+    assert 'worker_failure       = "ERROR"' in source
+
+
 def test_outputs_are_closed_world_and_non_sensitive() -> None:
     expected = {
         _STACKS[0] / "outputs.tf": {
             "apply_service_account_email": (
                 "value = google_service_account.phase5_apply.email"
+            ),
+            "operator_service_account_email": (
+                "value = google_service_account.phase5_operator.email"
             ),
             "state_bucket_name": ("value = google_storage_bucket.terraform_state.name"),
         },

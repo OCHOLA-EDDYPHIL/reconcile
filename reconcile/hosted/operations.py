@@ -439,6 +439,7 @@ class HostedRecoveryHandler:
         *,
         expected_caller_email: str,
         service: HostedRecoveryService,
+        operating_profile: Literal["evidence", "production"] = "evidence",
         acceptance_partial_read_outage_enabled: bool = False,
     ) -> None:
         if type(expected_caller_email) is not str or not expected_caller_email:
@@ -447,8 +448,11 @@ class HostedRecoveryHandler:
             raise TypeError("hosted recovery service is invalid")
         if type(acceptance_partial_read_outage_enabled) is not bool:
             raise TypeError("partial-read acceptance state must be boolean")
+        if operating_profile not in {"evidence", "production"}:
+            raise ValueError("hosted recovery operating profile is invalid")
         self._expected_caller_email = expected_caller_email
         self._service = service
+        self._operating_profile = operating_profile
         self._acceptance_partial_read_outage_enabled = (
             acceptance_partial_read_outage_enabled
         )
@@ -464,6 +468,11 @@ class HostedRecoveryHandler:
             RecoveryRunPolicy.FIXED,
             RecoveryRunPolicy.ADAPTIVE,
         }:
+            raise HostedRecoveryGatewayError from None
+        if (
+            self._operating_profile == "production"
+            and recovery.fault is not RecoveryRunFault.NO_FAULT
+        ):
             raise HostedRecoveryGatewayError from None
         if (
             recovery.fault
@@ -705,6 +714,7 @@ class HostedRecoveryRunGateway:
         self._transport = transport
         self._store = store
         self._poll = float(poll_interval_seconds)
+        self._operating_profile = config.operating_profile
         self._acceptance_partial_read_outage_enabled = (
             acceptance_partial_read_outage_enabled
         )
@@ -721,6 +731,11 @@ class HostedRecoveryRunGateway:
     ) -> RecoveryRunLaunchResult:
         if type(recovery) is not RecoveryRunRequest:
             raise TypeError("hosted recovery launch requires an exact request")
+        if (
+            self._operating_profile == "production"
+            and recovery.fault is not RecoveryRunFault.NO_FAULT
+        ):
+            raise HostedRecoveryGatewayError from None
         if (
             recovery.fault
             is RecoveryRunFault.ACCEPTANCE_DROP_AFTER_ACCEPT_PARTIAL_READ_OUTAGE

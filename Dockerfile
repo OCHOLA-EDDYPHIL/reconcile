@@ -17,20 +17,20 @@ COPY pyproject.toml uv.lock ./
 COPY reconcile ./reconcile
 RUN set -eu; \
     uv sync --locked --no-dev --no-editable; \
-    metadata=/opt/reconcile/lib/python3.12/site-packages/reconcile-0.1.1.dist-info; \
+    metadata=/opt/reconcile/lib/python3.12/site-packages/reconcile-0.2.0.dist-info; \
     record="$metadata/RECORD"; \
     cache="$metadata/uv_cache.json"; \
     test -f "$cache"; \
-    test "$(grep -F -c 'reconcile-0.1.1.dist-info/uv_cache.json,' "$record")" = 1; \
+    test "$(grep -F -c 'reconcile-0.2.0.dist-info/uv_cache.json,' "$record")" = 1; \
     rm "$cache"; \
-    sed -i '/^reconcile-0[.]1[.]1[.]dist-info\/uv_cache[.]json,/d' "$record"
+    sed -i '/^reconcile-0[.]2[.]0[.]dist-info\/uv_cache[.]json,/d' "$record"
 
 FROM ${PYTHON_IMAGE} AS runtime
 ARG SOURCE_REVISION
 ARG SOURCE_DATE_EPOCH
 LABEL org.opencontainers.image.source="https://github.com/OCHOLA-EDDYPHIL/reconcile" \
       org.opencontainers.image.revision="${SOURCE_REVISION}" \
-      org.opencontainers.image.version="0.1.1"
+      org.opencontainers.image.version="0.2.0"
 ENV HOME=/tmp \
     PATH=/opt/reconcile/bin:/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin \
     PYTHONDONTWRITEBYTECODE=1 \

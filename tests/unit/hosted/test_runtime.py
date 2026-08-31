@@ -24,6 +24,11 @@ from reconcile.hosted.contracts import (
     InternalOperationResponse,
     canonical_internal_json_bytes,
 )
+from reconcile.hosted.firestore_cas import (
+    FIRESTORE_RUNTIME_DATABASE,
+    FIRESTORE_SANDBOX_DATABASE,
+)
+from reconcile.hosted.firestore_observability import FirestoreOperationalEventOutbox
 from reconcile.hosted.runtime import (
     HostedControllerDispatcher,
     HostedFixedExecutor,
@@ -211,7 +216,6 @@ def test_runtime_transport_timeouts_are_component_scoped() -> None:
             Component.SANDBOX,
         )
     }
-
     assert {
         component: (
             transport._request_timeout_seconds,
@@ -224,6 +228,32 @@ def test_runtime_transport_timeouts_are_component_scoped() -> None:
         Component.FAULT_PROXY: (10.0, 15.0),
         Component.SANDBOX: (10.0, 15.0),
     }
+
+
+@pytest.mark.parametrize("component", tuple(Component))
+def test_runtime_uses_an_authorized_database_for_durable_signal_delivery(
+    monkeypatch: pytest.MonkeyPatch,
+    component: Component,
+) -> None:
+    captured: dict[str, object] = {}
+    sentinel = object()
+
+    def capture(_config: HostedConfig, **kwargs: object) -> object:
+        captured.update(kwargs)
+        return sentinel
+
+    monkeypatch.setattr(hosted_runtime, "create_component_app", capture)
+
+    assert create_runtime_component_app(_config(component)) is sentinel
+    outbox = captured["operational_event_outbox"]
+    assert type(outbox) is FirestoreOperationalEventOutbox
+    if component is Component.SANDBOX:
+        assert outbox._cas.database_id == FIRESTORE_SANDBOX_DATABASE
+        assert hosted_runtime._cas(_config(component)).database_id == (
+            FIRESTORE_RUNTIME_DATABASE
+        )
+    else:
+        assert outbox._cas.database_id == FIRESTORE_RUNTIME_DATABASE
 
 
 def test_recovery_provider_timeout_preserves_fixed_fallback_budget() -> None:

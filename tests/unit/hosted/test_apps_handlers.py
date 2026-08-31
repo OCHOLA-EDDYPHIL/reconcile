@@ -27,6 +27,7 @@ from reconcile.hosted.contracts import (
     canonical_internal_json_bytes,
 )
 from reconcile.hosted.identity import IdentityVerificationError, VerifiedCaller
+from reconcile.hosted.observability import OperationalEvent, OperationalSignal
 
 pytestmark = pytest.mark.unit
 
@@ -327,27 +328,31 @@ def test_handler_mapping_and_entries_are_strict() -> None:
 
 
 @pytest.mark.parametrize(
-    ("failure", "expected_status", "expected_content"),
+    ("failure", "expected_status", "expected_content", "expected_signal"),
     (
         (
             "returned-denial",
             HTTPStatus.FORBIDDEN,
             b'{"code":"operation-denied"}',
+            OperationalSignal.PERMIT_DENIAL,
         ),
         (
             "raised-denial",
             HTTPStatus.FORBIDDEN,
             b'{"code":"operation-denied"}',
+            OperationalSignal.PERMIT_DENIAL,
         ),
         (
             "dependency-failure",
             HTTPStatus.SERVICE_UNAVAILABLE,
             b'{"code":"operation-unavailable"}',
+            OperationalSignal.WORKER_FAILURE,
         ),
         (
             "raised-conflict",
             HTTPStatus.CONFLICT,
             b'{"code":"operation-conflict"}',
+            OperationalSignal.REPLAY_DENIAL,
         ),
     ),
 )
@@ -355,7 +360,10 @@ def test_handler_denial_and_failure_are_sanitized_and_not_cached(
     failure: str,
     expected_status: HTTPStatus,
     expected_content: bytes,
+    expected_signal: OperationalSignal,
 ) -> None:
+    events: list[OperationalEvent] = []
+
     async def handler(
         caller: VerifiedCaller,
         internal: InternalOperationRequest,
@@ -374,6 +382,7 @@ def test_handler_denial_and_failure_are_sanitized_and_not_cached(
         _config(Component.CONTROLLER),
         verifier=_Verifier(),
         internal_operation_handlers={InternalOperation.INVESTIGATE: handler},
+        operational_event_sink=events.append,
     )
 
     response = _post(
@@ -386,6 +395,11 @@ def test_handler_denial_and_failure_are_sanitized_and_not_cached(
     assert response.content == expected_content
     assert response.headers["cache-control"] == "no-store"
     assert b"private" not in response.content
+    assert len(events) == 1
+    assert events[0].signal is expected_signal
+    assert events[0].component is Component.CONTROLLER
+    assert events[0].correlation_id == "request-investigate"
+    assert "private dependency failure" not in events[0].model_dump_json()
 
 
 @pytest.mark.parametrize(

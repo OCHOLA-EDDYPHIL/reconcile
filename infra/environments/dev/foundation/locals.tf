@@ -1,8 +1,11 @@
 locals {
   labels = {
-    app         = "reconcile"
-    environment = "phase5"
+    app               = "reconcile"
+    environment       = "phase5"
+    operating_profile = var.operating_profile
   }
+
+  production_profile = var.operating_profile == "production"
 
   required_services = toset([
     "aiplatform.googleapis.com",
@@ -10,6 +13,7 @@ locals {
     "billingbudgets.googleapis.com",
     "firestore.googleapis.com",
     "logging.googleapis.com",
+    "monitoring.googleapis.com",
     "run.googleapis.com",
   ])
 
