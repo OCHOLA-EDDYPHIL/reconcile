@@ -5072,10 +5072,41 @@ def _copy_bootstrap_state(source: Path, destination: Path) -> tuple[str, int]:
 
 
 def _plan_continuation_identity(plan: TerraformPlanBinding) -> dict[str, Any]:
+    excluded = {"qualification_path", "variables_path", "execution_plan_path"}
+    if plan.stack == "bootstrap":
+        # The local backend embeds the state-root path, which is required to
+        # change for an independent successor continuation.
+        excluded.add("backend_config_sha256")
     return plan.model_dump(
         mode="json",
-        exclude={"qualification_path", "variables_path", "execution_plan_path"},
+        exclude=excluded,
     )
+
+
+def _deployment_profile_continuation_identity(
+    binding: DeploymentProfileBinding | None,
+) -> dict[str, Any] | None:
+    if binding is None:
+        return None
+    return binding.model_dump(mode="json", exclude={"path", "device", "inode"})
+
+
+def _terraform_backend_continuation_identity(
+    bindings: tuple[TerraformBackendBinding, ...],
+) -> tuple[dict[str, Any], ...]:
+    identities: list[dict[str, Any]] = []
+    for binding in bindings:
+        identity: dict[str, Any] = {
+            "kind": binding.kind,
+            "stack": binding.stack,
+        }
+        # The local bootstrap backend embeds the successor state root, while
+        # remote backend content must remain byte-identical across continuations.
+        if binding.kind == "gcs":
+            identity["byte_count"] = binding.byte_count
+            identity["sha256"] = binding.sha256
+        identities.append(identity)
+    return tuple(identities)
 
 
 def _source_changes(
@@ -5160,8 +5191,6 @@ def _validate_continuation_bounds(
     )
     fixed_fields = (
         "origin_url",
-        "deployment_profile",
-        "terraform_backends",
         "project_id",
         "project_number",
         "region",
@@ -5203,6 +5232,11 @@ def _validate_continuation_bounds(
     if any(
         getattr(predecessor, field) != getattr(successor, field)
         for field in fixed_fields
+    ) or (
+        _deployment_profile_continuation_identity(predecessor.deployment_profile)
+        != _deployment_profile_continuation_identity(successor.deployment_profile)
+        or _terraform_backend_continuation_identity(predecessor.terraform_backends)
+        != _terraform_backend_continuation_identity(successor.terraform_backends)
     ):
         raise OperatorError("CONTINUATION_BOUND_DRIFT")
     execution_changes = _source_changes(

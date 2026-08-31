@@ -18,7 +18,11 @@ from typing import Any
 import pytest
 
 from reconcile import phase5_operator as operator
-from reconcile.deployment_profile import DeploymentProfile, seal_deployment_profile
+from reconcile.deployment_profile import (
+    DeploymentProfile,
+    seal_backend_configs,
+    seal_deployment_profile,
+)
 
 pytestmark = pytest.mark.unit
 
@@ -2025,6 +2029,57 @@ def test_continuation_restarts_candidate_after_provider_acceptance_failure(
         admitted_at=_NOW + timedelta(minutes=8),
     )
     assert image.action is operator.Phase5Action.IMAGE_PUSH
+
+
+def test_continuation_allows_resealed_deployment_bindings(tmp_path: Path) -> None:
+    (tmp_path / "predecessor").mkdir()
+    predecessor_state, predecessor, _, _ = _records(tmp_path / "predecessor")
+    _, successor_state, successor, _, _ = _continuation_successor(tmp_path)
+    profile = DeploymentProfile(
+        schema_version="reconcile/deployment-profile/v1",
+        project_id=_DEPLOYMENT_PROJECT,
+        project_number="123456789012",
+        billing_account_id="ABCDEF-123456-ABCDEF",
+        owner_account="owner@example.com",
+    )
+
+    bindings = []
+    for state in (predecessor_state, successor_state):
+        (state.root / "bindings" / "backends").mkdir(parents=True, exist_ok=True)
+        deployment = seal_deployment_profile(profile, state_root=state.root)
+        backends = seal_backend_configs(
+            state_root=state.root,
+            identity=deployment.identity,
+        )
+        bindings.append((deployment, backends))
+
+    manifests = []
+    for manifest, (deployment, backends) in zip(
+        (predecessor, successor), bindings, strict=True
+    ):
+        backends_by_stack = {binding.stack: binding for binding in backends}
+        plans = tuple(
+            plan.model_copy(
+                update={"backend_config_sha256": backends_by_stack[plan.stack].sha256}
+            )
+            for plan in manifest.terraform_plans
+        )
+        manifests.append(
+            manifest.model_copy(
+                update={
+                    "deployment_profile": deployment,
+                    "terraform_backends": backends,
+                    "terraform_plans": plans,
+                }
+            )
+        )
+    predecessor, successor = manifests
+
+    assert predecessor.deployment_profile.path != successor.deployment_profile.path
+    assert predecessor.terraform_backends[0].sha256 != (
+        successor.terraform_backends[0].sha256
+    )
+    operator._validate_continuation_bounds(predecessor, successor)
 
 
 def test_continuation_can_restart_a_chained_provider_failure(tmp_path: Path) -> None:
