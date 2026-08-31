@@ -78,8 +78,14 @@ def test_non_placeholder_profile_rebuilds_all_identity_expectations(
         plans._RUNTIME_ENVIRONMENT["api"]["RECONCILE_ALLOWED_CALLER_EMAILS"]
         == plans._OPERATOR_EMAIL
     )
+    bootstrap = next(item for item in plans._STACKS if item.name == "bootstrap")
     foundation = next(item for item in plans._STACKS if item.name == "foundation")
     runtime = next(item for item in plans._STACKS if item.name == "runtime")
+    assert bootstrap.variables["operating_profile"] == "evidence"
+    assert not any(
+        address.startswith("google_project_organization_policy.")
+        for address in bootstrap.addresses
+    )
     assert foundation.variables["operating_profile"] == "evidence"
     assert runtime.variables["operating_profile"] == "evidence"
     assert runtime.variables["apply_service_account_email"] == plans._APPLY_EMAIL
@@ -98,7 +104,13 @@ def test_non_placeholder_profile_rebuilds_all_identity_expectations(
         ),
     )
     plans._configure_deployment(production)
+    bootstrap = next(item for item in plans._STACKS if item.name == "bootstrap")
     runtime = next(item for item in plans._STACKS if item.name == "runtime")
+    assert bootstrap.variables["operating_profile"] == "production"
+    assert (
+        "google_project_organization_policy."
+        "disable_automatic_default_service_account_grants[0]"
+    ) in bootstrap.addresses
     assert runtime.variables["operating_profile"] == "production"
     assert runtime.variables["acceptance_partial_read_outage_enabled"] is False
     for component in ("api", "controller", "fault_proxy"):

@@ -319,7 +319,6 @@ _BOOTSTRAP_ADDRESSES = frozenset(
         "google_service_account.phase5_apply",
         "google_service_account.phase5_operator",
         "google_project_default_service_accounts.phase5",
-        "google_project_organization_policy.disable_automatic_default_service_account_grants",
         "google_project_iam_member.phase5_cloud_run_deployer",
         "google_service_account_iam_member.owner_impersonation",
         "google_service_account_iam_member.owner_operator_impersonation",
@@ -395,6 +394,7 @@ _STACKS = (
         _BOOTSTRAP_ADDRESSES,
         {
             "billing_account_id": _BILLING_ACCOUNT,
+            "operating_profile": "evidence",
             "owner_principal": _OWNER,
             "project_id": _PROJECT,
         },
@@ -447,6 +447,7 @@ def _configure_deployment(profile: DeploymentProfile) -> None:
     global _OWNER
     global _PROJECT
     global _PROJECT_NUMBER
+    global _BOOTSTRAP_ADDRESSES
     global _FOUNDATION_ADDRESSES
     global _RECOVERY_PAYLOAD_SHA256
     global _RUNTIME_ADDRESSES
@@ -612,6 +613,19 @@ def _configure_deployment(profile: DeploymentProfile) -> None:
             ),
         }
     )
+    organization_policy_prefix = (
+        "google_project_organization_policy."
+        "disable_automatic_default_service_account_grants"
+    )
+    _BOOTSTRAP_ADDRESSES = frozenset(
+        address
+        for address in _BOOTSTRAP_ADDRESSES
+        if not address.startswith(organization_policy_prefix)
+    ) | frozenset(
+        {f"{organization_policy_prefix}[0]"}
+        if profile.operating_profile == "production"
+        else set()
+    )
     _FOUNDATION_ADDRESSES = frozenset(
         address
         for address in _FOUNDATION_ADDRESSES
@@ -628,6 +642,7 @@ def _configure_deployment(profile: DeploymentProfile) -> None:
             _BOOTSTRAP_ADDRESSES,
             {
                 "billing_account_id": _BILLING_ACCOUNT,
+                "operating_profile": profile.operating_profile,
                 "owner_principal": _OWNER,
                 "project_id": _PROJECT,
             },
@@ -671,6 +686,7 @@ _VARIABLE_NAMES = {
     "bootstrap": {
         "allow_state_bucket_destroy",
         "billing_account_id",
+        "operating_profile",
         "owner_principal",
         "project_id",
         "region",
@@ -1158,7 +1174,7 @@ def _verify_default_service_account_policy(
 ) -> None:
     address = (
         "google_project_organization_policy."
-        "disable_automatic_default_service_account_grants"
+        "disable_automatic_default_service_account_grants[0]"
     )
     policy = resources.get(address)
     if policy is None:

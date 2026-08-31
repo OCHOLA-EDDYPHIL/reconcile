@@ -35,6 +35,15 @@ variable "owner_principal" {
   }
 }
 
+variable "operating_profile" {
+  type = string
+
+  validation {
+    condition     = contains(["evidence", "production"], var.operating_profile)
+    error_message = "The operating profile must be evidence or production."
+  }
+}
+
 variable "allow_state_bucket_destroy" {
   type    = bool
   default = false

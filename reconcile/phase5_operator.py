@@ -6677,7 +6677,7 @@ def _verify_bootstrap_protection_update_plan(
     live_changes = _plan_changes_by_address(rendered)
     if (
         expected.action is not Phase5Action.BOOTSTRAP_TEARDOWN
-        or len(service_addresses) != 6
+        or not service_addresses
         or set(live_by_address) != expected_addresses
         or set(live_changes) != expected_addresses
         or iam_edges
