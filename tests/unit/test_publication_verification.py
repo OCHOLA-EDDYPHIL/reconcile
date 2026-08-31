@@ -303,6 +303,66 @@ def test_publication_verifier_binds_release_and_viewer(tmp_path: Path) -> None:
     )
 
 
+def test_publication_verifier_accepts_304_without_content_length(
+    tmp_path: Path,
+) -> None:
+    directory, client = _publication_fixture(tmp_path)
+    original = client._viewer_response
+
+    def without_content_length(
+        url: str,
+        *,
+        method: str,
+        request_headers: dict[str, str],
+    ) -> publication.HttpResponse:
+        response = original(url, method=method, request_headers=request_headers)
+        if response.status == 304:
+            headers = dict(response.headers)
+            headers.pop("content-length")
+            return replace(response, headers=headers)
+        return response
+
+    client._viewer_response = without_content_length  # type: ignore[method-assign]
+
+    publication.verify_publication(directory, client=client)
+
+
+def test_publication_verifier_rejects_nonzero_304_content_length(
+    tmp_path: Path,
+) -> None:
+    directory, client = _publication_fixture(tmp_path)
+    identity, _ = publication._load_local_release(
+        directory,
+        version=release.RELEASE_VERSION,
+    )
+    original = client._viewer_response
+
+    def with_nonzero_content_length(
+        url: str,
+        *,
+        method: str,
+        request_headers: dict[str, str],
+    ) -> publication.HttpResponse:
+        response = original(url, method=method, request_headers=request_headers)
+        if response.status == 304:
+            headers = dict(response.headers)
+            headers["content-length"] = "1"
+            return replace(response, headers=headers)
+        return response
+
+    client._viewer_response = with_nonzero_content_length  # type: ignore[method-assign]
+
+    with pytest.raises(
+        publication.PublicationVerificationError,
+        match="viewer conditional response identity differs",
+    ):
+        publication.verify_viewer(
+            client,
+            identity,
+            viewer_url=publication.DEFAULT_VIEWER_URL,
+        )
+
+
 def test_publication_verifier_rejects_changed_downloaded_asset(tmp_path: Path) -> None:
     directory, client = _publication_fixture(tmp_path)
     client.release_payloads["architecture.png"] += b"changed"

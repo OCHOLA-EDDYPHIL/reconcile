@@ -811,7 +811,7 @@ def verify_viewer(
     )
     _require(
         conditional.headers.get("etag") == head.headers.get("etag")
-        and conditional.headers.get("content-length") == "0",
+        and conditional.headers.get("content-length") in {None, "0"},
         "viewer conditional response identity differs",
     )
 
