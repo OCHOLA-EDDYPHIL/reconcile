@@ -255,8 +255,13 @@ def test_three_stacks_have_separate_pinned_backends() -> None:
         provider_block = _named_block(provider_path, "provider", "google")
         assignments = set(re.findall(r"(?m)^\s*([a-z_]+)\s*=", provider_block))
         assert assignments == {"impersonate_service_account", "project", "region"}
-        assert _attribute(provider_block, "impersonate_service_account") == (
+        expected_deployer = (
             '"rec-p5-apply@${var.project_id}.iam.gserviceaccount.com"'
+            if stack.name == "foundation"
+            else "var.apply_service_account_email"
+        )
+        assert _attribute(provider_block, "impersonate_service_account") == (
+            expected_deployer
         )
 
 

@@ -82,6 +82,7 @@ def test_non_placeholder_profile_rebuilds_all_identity_expectations(
     runtime = next(item for item in plans._STACKS if item.name == "runtime")
     assert foundation.variables["operating_profile"] == "evidence"
     assert runtime.variables["operating_profile"] == "evidence"
+    assert runtime.variables["apply_service_account_email"] == plans._APPLY_EMAIL
     assert runtime.variables["notification_channel_ids"] == []
     assert runtime.variables["acceptance_partial_read_outage_enabled"] is True
 
