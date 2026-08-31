@@ -416,6 +416,7 @@ _STACKS = (
         _RUNTIME_ADDRESSES,
         {
             "acceptance_partial_read_outage_enabled": True,
+            "apply_service_account_email": _APPLY_EMAIL,
             "image_digest": _IMAGE_DIGEST,
             "infrastructure_revision": _INFRASTRUCTURE_REVISION,
             "notification_channel_ids": [],
@@ -650,6 +651,7 @@ def _configure_deployment(profile: DeploymentProfile) -> None:
                 "acceptance_partial_read_outage_enabled": (
                     acceptance_partial_read_outage_enabled
                 ),
+                "apply_service_account_email": _APPLY_EMAIL,
                 "image_digest": _IMAGE_DIGEST,
                 "infrastructure_revision": _INFRASTRUCTURE_REVISION,
                 "notification_channel_ids": list(_NOTIFICATION_CHANNEL_IDS),
@@ -683,6 +685,7 @@ _VARIABLE_NAMES = {
     },
     "runtime": {
         "acceptance_partial_read_outage_enabled",
+        "apply_service_account_email",
         "image_digest",
         "infrastructure_revision",
         "notification_channel_ids",
@@ -2341,8 +2344,12 @@ def _copy_stack(stack: _Stack, destination: Path) -> None:
     provider = destination / "providers.tf"
     source = provider.read_text(encoding="utf-8")
     impersonation = (
-        '  impersonate_service_account = "rec-p5-apply@'
-        '${var.project_id}.iam.gserviceaccount.com"\n'
+        "  impersonate_service_account = var.apply_service_account_email\n"
+        if stack.name == "runtime"
+        else (
+            '  impersonate_service_account = "rec-p5-apply@'
+            '${var.project_id}.iam.gserviceaccount.com"\n'
+        )
     )
     if source.count(impersonation) != 1:
         _fail(f"{stack.name} provider identity drifted")

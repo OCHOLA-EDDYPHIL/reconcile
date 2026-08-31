@@ -7,6 +7,15 @@ variable "project_id" {
   }
 }
 
+variable "apply_service_account_email" {
+  type = string
+
+  validation {
+    condition     = var.apply_service_account_email == "rec-p5-apply@${var.project_id}.iam.gserviceaccount.com"
+    error_message = "The runtime deployer must be the dedicated Phase 5 apply service account."
+  }
+}
+
 variable "region" {
   type    = string
   default = "us-central1"
