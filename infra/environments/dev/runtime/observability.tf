@@ -88,7 +88,9 @@ resource "google_monitoring_dashboard" "operational" {
           widget = {
             title = local.operational_failure_signals[key]
             scorecard = {
-              sparkChartType = "SPARK_LINE"
+              sparkChartView = {
+                sparkChartType = "SPARK_LINE"
+              }
               timeSeriesQuery = {
                 timeSeriesFilter = {
                   filter = "resource.type = \"cloud_run_revision\" AND metric.type = \"logging.googleapis.com/user/${google_logging_metric.operational_failure[key].name}\""

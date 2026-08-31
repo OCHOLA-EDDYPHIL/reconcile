@@ -1046,6 +1046,7 @@ def test_operational_metrics_alerts_and_dashboard_cover_the_closed_signal_set() 
     assert 'resource "google_logging_metric" "operational_failure"' in source
     assert 'resource "google_monitoring_alert_policy" "operational_failure"' in source
     assert 'resource "google_monitoring_dashboard" "operational"' in source
+    assert "sparkChartView" in source
     assert (
         "notification_channels = local.production_profile ? "
         "sort(tolist(var.notification_channel_ids)) : []"

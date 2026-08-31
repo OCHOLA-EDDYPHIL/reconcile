@@ -1995,7 +1995,8 @@ def _verify_observability(
             if (
                 tile["width"] != 4
                 or tile["height"] != 4
-                or scorecard["sparkChartType"] != "SPARK_LINE"
+                or set(scorecard) != {"sparkChartView", "timeSeriesQuery"}
+                or scorecard["sparkChartView"] != {"sparkChartType": "SPARK_LINE"}
                 or query["aggregation"]
                 != {
                     "alignmentPeriod": "300s",
