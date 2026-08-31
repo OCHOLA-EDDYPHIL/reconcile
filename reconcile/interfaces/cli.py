@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import os
 import sys
+import tempfile
 from enum import StrEnum
 from typing import Annotated
 from uuid import uuid4
@@ -67,6 +68,7 @@ from reconcile.interfaces.google_identity import (
     operator_client_identity,
 )
 from reconcile.interfaces.operator_api_client import OperatorApiClient
+from reconcile.recovery_utility import execute_recovery_utility
 from reconcile.scenarios.service import (
     ScenarioMode,
     ScenarioName,
@@ -804,6 +806,77 @@ def recovery_run(
         _fail(FailureCategory.INVALID_INPUT)
     except Exception as error:
         _client_failure(error)
+
+
+@recovery_app.command("smoke")
+def recovery_smoke(
+    output: Annotated[StructuredOutput, typer.Option("--output")] = (
+        StructuredOutput.HUMAN
+    ),
+) -> None:
+    """Run the short local recovery comparison through the shared core."""
+
+    try:
+        with tempfile.TemporaryDirectory(prefix="reconcile-recovery-") as directory:
+            report = asyncio.run(execute_recovery_utility(state_directory=directory))
+        if output is StructuredOutput.JSON:
+            _emit(canonical_json_output(report))
+            return
+        naive, stable = report.baselines
+        lines = (
+            f"Reconcile recovery utility: {report.report_id}",
+            f"Case: {report.case_id}",
+            f"Execution basis: {report.execution_basis.value}",
+            (f"Naive retry revisions: {naive.distinct_revision_count} (new identity)"),
+            (
+                "Stable retry revisions: "
+                f"{stable.distinct_revision_count} (ETag precondition)"
+            ),
+            f"Fixed probes: {report.fixed.probe_count}",
+            f"Fixed verification: {report.fixed.verification_mode.value}",
+            f"Adaptive probes: {report.adaptive.probe_count}",
+            f"Adaptive verification: {report.adaptive.verification_mode.value}",
+            f"Fixed provider contacts: {report.fixed.provider_contact_count}",
+            f"Adaptive provider contacts: {report.adaptive.provider_contact_count}",
+            f"Smoke provider contacts: {report.smoke.provider_contact_count}",
+            (
+                "Adaptive scripted model calls: "
+                f"{report.adaptive.model_usage.model_call_count}"
+            ),
+            f"Smoke scripted model calls: {report.smoke.model_usage.model_call_count}",
+            (
+                "Smoke terminal effects: "
+                f"{report.smoke.effects.revisions_created}/"
+                f"{report.smoke.effects.promotions_accepted}/"
+                f"{report.smoke.effects.release_records_created}"
+            ),
+            f"Smoke terminal chain completed: {report.smoke.terminal_chain_completed}",
+            (
+                "Fixed simulated controller ticks to sufficient evidence: "
+                f"{report.fixed.simulated_controller_ticks_to_sufficient_evidence}"
+            ),
+            (
+                "Adaptive simulated controller ticks to sufficient evidence: "
+                f"{report.adaptive.simulated_controller_ticks_to_sufficient_evidence}"
+            ),
+            (
+                "Observed initial dispatch: "
+                f"{report.smoke.initial_outcome.value} "
+                "after "
+                f"{report.smoke.initial_provider_contact_receipt_count} "
+                f"provider contact under {report.smoke.fault.value}"
+            ),
+            f"Deterministic action: {report.smoke.deterministic_action.value}",
+            f"Replay denied: {str(report.smoke.replay_denied).lower()}",
+            f"Conclusion: {report.conclusion.value}",
+        )
+        _emit(("\n".join(lines) + "\n").encode("utf-8"))
+    except KeyboardInterrupt:
+        raise typer.Exit(code=ExitCode.INTERRUPTED) from None
+    except (ContractError, TypeError, ValueError):
+        _fail(FailureCategory.INVALID_INPUT)
+    except Exception:
+        _fail(FailureCategory.INTERNAL_FAILURE)
 
 
 async def _remote_scenario_launch(

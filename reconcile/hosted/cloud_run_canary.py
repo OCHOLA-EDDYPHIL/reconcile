@@ -683,8 +683,9 @@ class CloudRunCanaryActionAdapter(_ClientBoundary):
         release_id: str,
         image_digest: str,
         configuration_sha256: str,
+        expected_service_etag: str | None = None,
     ) -> CloudRunAcceptedOperation:
-        """Create one immutable revision while pinning all serving traffic."""
+        """Create one immutable revision under an optional caller-held ETag."""
 
         release = _release(release_id)
         digest = _digest(image_digest)
@@ -692,11 +693,16 @@ class CloudRunCanaryActionAdapter(_ClientBoundary):
         revision = _revision_for_attempt(self._target.service, operation_id)
         current = self._get_service()
         current_ready = _serving_revision(current)
-        if current_ready == revision:
-            raise CloudRunCanaryError(CloudRunCanaryErrorCode.INVALID_CONFIGURATION)
         etag = getattr(current, "etag", None)
         if type(etag) is not str or not etag:
             raise CloudRunCanaryError(CloudRunCanaryErrorCode.PROVIDER_UNAVAILABLE)
+        if expected_service_etag is not None:
+            if type(expected_service_etag) is not str or not expected_service_etag:
+                raise CloudRunCanaryError(CloudRunCanaryErrorCode.INVALID_CONFIGURATION)
+            if etag != expected_service_etag:
+                raise CloudRunCanaryError(CloudRunCanaryErrorCode.STALE_ETAG)
+        if current_ready == revision:
+            raise CloudRunCanaryError(CloudRunCanaryErrorCode.INVALID_CONFIGURATION)
 
         template = run_v2.RevisionTemplate(current.template)
         template.revision = revision
@@ -843,12 +849,14 @@ class CloudRunCanaryFaultProxy:
         release_id: str,
         image_digest: str,
         configuration_sha256: str,
+        expected_service_etag: str | None = None,
     ) -> CloudRunAcceptedOperation:
         receipt = self._adapter.stage_revision(
             operation_id=operation_id,
             release_id=release_id,
             image_digest=image_digest,
             configuration_sha256=configuration_sha256,
+            expected_service_etag=expected_service_etag,
         )
         return self._after_accept(receipt, mode)
 

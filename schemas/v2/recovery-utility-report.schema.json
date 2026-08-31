@@ -1,0 +1,714 @@
+{
+  "$defs": {
+    "PermitAction": {
+      "enum": [
+        "CONTINUE",
+        "RETRY"
+      ],
+      "title": "PermitAction",
+      "type": "string"
+    },
+    "RecoveryDecision": {
+      "enum": [
+        "CONTINUE",
+        "RETRY",
+        "OBSERVE",
+        "ESCALATE"
+      ],
+      "title": "RecoveryDecision",
+      "type": "string"
+    },
+    "RecoveryQualificationArtifactKind": {
+      "enum": [
+        "NONE",
+        "VERIFIED_CERTIFICATE",
+        "AMBIGUITY_WITNESS"
+      ],
+      "title": "RecoveryQualificationArtifactKind",
+      "type": "string"
+    },
+    "RecoveryQualificationModelUsage": {
+      "additionalProperties": false,
+      "properties": {
+        "input_cost_nano_units_per_token": {
+          "maximum": 9223372036854775807,
+          "minimum": 0,
+          "title": "Input Cost Nano Units Per Token",
+          "type": "integer"
+        },
+        "input_token_count": {
+          "maximum": 9223372036854775807,
+          "minimum": 0,
+          "title": "Input Token Count",
+          "type": "integer"
+        },
+        "live_vertex_backed": {
+          "title": "Live Vertex Backed",
+          "type": "boolean"
+        },
+        "model_call_count": {
+          "maximum": 9223372036854775807,
+          "minimum": 0,
+          "title": "Model Call Count",
+          "type": "integer"
+        },
+        "model_cost_nano_units": {
+          "maximum": 9223372036854775807,
+          "minimum": 0,
+          "title": "Model Cost Nano Units",
+          "type": "integer"
+        },
+        "model_name": {
+          "anyOf": [
+            {
+              "maxLength": 128,
+              "minLength": 1,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Model Name"
+        },
+        "output_cost_nano_units_per_token": {
+          "maximum": 9223372036854775807,
+          "minimum": 0,
+          "title": "Output Cost Nano Units Per Token",
+          "type": "integer"
+        },
+        "output_token_count": {
+          "maximum": 9223372036854775807,
+          "minimum": 0,
+          "title": "Output Token Count",
+          "type": "integer"
+        },
+        "provider_name": {
+          "anyOf": [
+            {
+              "maxLength": 128,
+              "minLength": 1,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Provider Name"
+        },
+        "status": {
+          "$ref": "#/$defs/RecoveryQualificationModelUsageStatus"
+        },
+        "total_token_count": {
+          "maximum": 9223372036854775807,
+          "minimum": 0,
+          "title": "Total Token Count",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "status",
+        "model_call_count",
+        "input_token_count",
+        "output_token_count",
+        "total_token_count",
+        "input_cost_nano_units_per_token",
+        "output_cost_nano_units_per_token",
+        "model_cost_nano_units",
+        "live_vertex_backed"
+      ],
+      "title": "RecoveryQualificationModelUsage",
+      "type": "object"
+    },
+    "RecoveryQualificationModelUsageStatus": {
+      "enum": [
+        "NOT_APPLICABLE",
+        "SCRIPTED",
+        "MEASURED",
+        "UNAVAILABLE"
+      ],
+      "title": "RecoveryQualificationModelUsageStatus",
+      "type": "string"
+    },
+    "RecoveryQualificationProviderMutations": {
+      "additionalProperties": false,
+      "properties": {
+        "outbound_call_count": {
+          "maximum": 48,
+          "minimum": 0,
+          "title": "Outbound Call Count",
+          "type": "integer"
+        },
+        "promote_calls": {
+          "maximum": 16,
+          "minimum": 0,
+          "title": "Promote Calls",
+          "type": "integer"
+        },
+        "record_calls": {
+          "maximum": 16,
+          "minimum": 0,
+          "title": "Record Calls",
+          "type": "integer"
+        },
+        "stage_calls": {
+          "maximum": 16,
+          "minimum": 0,
+          "title": "Stage Calls",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "stage_calls",
+        "promote_calls",
+        "record_calls",
+        "outbound_call_count"
+      ],
+      "title": "RecoveryQualificationProviderMutations",
+      "type": "object"
+    },
+    "RecoveryRetryBaselineKind": {
+      "enum": [
+        "naive-new-identity",
+        "stable-identity-precondition"
+      ],
+      "title": "RecoveryRetryBaselineKind",
+      "type": "string"
+    },
+    "RecoveryRetryBaselineResult": {
+      "additionalProperties": false,
+      "properties": {
+        "accepted_stage_mutation_count": {
+          "maximum": 16,
+          "minimum": 0,
+          "title": "Accepted Stage Mutation Count",
+          "type": "integer"
+        },
+        "baseline": {
+          "$ref": "#/$defs/RecoveryRetryBaselineKind"
+        },
+        "chain_completed": {
+          "title": "Chain Completed",
+          "type": "boolean"
+        },
+        "deterministic_authority_used": {
+          "const": false,
+          "title": "Deterministic Authority Used",
+          "type": "boolean"
+        },
+        "distinct_revision_count": {
+          "maximum": 16,
+          "minimum": 0,
+          "title": "Distinct Revision Count",
+          "type": "integer"
+        },
+        "initial_operation_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Initial Operation Id",
+          "type": "string"
+        },
+        "initial_outcome": {
+          "const": "ACKNOWLEDGEMENT_LOST",
+          "title": "Initial Outcome",
+          "type": "string"
+        },
+        "provider_mutation_contact_count": {
+          "maximum": 16,
+          "minimum": 0,
+          "title": "Provider Mutation Contact Count",
+          "type": "integer"
+        },
+        "provider_precondition": {
+          "$ref": "#/$defs/RecoveryRetryPrecondition"
+        },
+        "provider_precondition_sha256": {
+          "anyOf": [
+            {
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Provider Precondition Sha256"
+        },
+        "provider_read_contact_count": {
+          "maximum": 16,
+          "minimum": 0,
+          "title": "Provider Read Contact Count",
+          "type": "integer"
+        },
+        "retry_identity_stable": {
+          "title": "Retry Identity Stable",
+          "type": "boolean"
+        },
+        "retry_operation_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Retry Operation Id",
+          "type": "string"
+        },
+        "retry_outcome": {
+          "enum": [
+            "ACCEPTED",
+            "PRECONDITION_REJECTED"
+          ],
+          "title": "Retry Outcome",
+          "type": "string"
+        },
+        "sealed_inputs_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Sealed Inputs Sha256",
+          "type": "string"
+        },
+        "stage_attempt_count": {
+          "const": 2,
+          "title": "Stage Attempt Count",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "baseline",
+        "sealed_inputs_sha256",
+        "initial_operation_id",
+        "retry_operation_id",
+        "retry_identity_stable",
+        "provider_precondition",
+        "provider_precondition_sha256",
+        "initial_outcome",
+        "retry_outcome",
+        "stage_attempt_count",
+        "provider_read_contact_count",
+        "provider_mutation_contact_count",
+        "accepted_stage_mutation_count",
+        "distinct_revision_count",
+        "chain_completed",
+        "deterministic_authority_used"
+      ],
+      "title": "RecoveryRetryBaselineResult",
+      "type": "object"
+    },
+    "RecoveryRetryPrecondition": {
+      "enum": [
+        "none",
+        "cloud-run-service-etag"
+      ],
+      "title": "RecoveryRetryPrecondition",
+      "type": "string"
+    },
+    "RecoveryUtilityEffects": {
+      "additionalProperties": false,
+      "properties": {
+        "promotions_accepted": {
+          "maximum": 16,
+          "minimum": 0,
+          "title": "Promotions Accepted",
+          "type": "integer"
+        },
+        "release_records_created": {
+          "maximum": 16,
+          "minimum": 0,
+          "title": "Release Records Created",
+          "type": "integer"
+        },
+        "revisions_created": {
+          "maximum": 16,
+          "minimum": 0,
+          "title": "Revisions Created",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "revisions_created",
+        "promotions_accepted",
+        "release_records_created"
+      ],
+      "title": "RecoveryUtilityEffects",
+      "type": "object"
+    },
+    "RecoveryUtilityLaneResult": {
+      "additionalProperties": false,
+      "properties": {
+        "authority_path_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Authority Path Sha256",
+          "type": "string"
+        },
+        "budget_catalog_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Budget Catalog Sha256",
+          "type": "string"
+        },
+        "capability_catalog_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Capability Catalog Sha256",
+          "type": "string"
+        },
+        "case_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Case Sha256",
+          "type": "string"
+        },
+        "comparison_policy_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Comparison Policy Sha256",
+          "type": "string"
+        },
+        "conditionally_skipped_capabilities": {
+          "items": {
+            "maxLength": 128,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+            "type": "string"
+          },
+          "maxItems": 64,
+          "title": "Conditionally Skipped Capabilities",
+          "type": "array"
+        },
+        "deterministic_artifact_kind": {
+          "$ref": "#/$defs/RecoveryQualificationArtifactKind"
+        },
+        "deterministic_decision": {
+          "$ref": "#/$defs/RecoveryDecision"
+        },
+        "effects": {
+          "$ref": "#/$defs/RecoveryUtilityEffects"
+        },
+        "initial_classification": {
+          "const": "UNKNOWN",
+          "title": "Initial Classification",
+          "type": "string"
+        },
+        "model_can_classify": {
+          "const": false,
+          "title": "Model Can Classify",
+          "type": "boolean"
+        },
+        "model_can_contact_mutation_provider": {
+          "const": false,
+          "title": "Model Can Contact Mutation Provider",
+          "type": "boolean"
+        },
+        "model_can_issue_authority": {
+          "const": false,
+          "title": "Model Can Issue Authority",
+          "type": "boolean"
+        },
+        "model_usage": {
+          "$ref": "#/$defs/RecoveryQualificationModelUsage"
+        },
+        "permit_action": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PermitAction"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "policy": {
+          "$ref": "#/$defs/RecoveryUtilityPolicy"
+        },
+        "probe_capabilities": {
+          "items": {
+            "maxLength": 128,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+            "type": "string"
+          },
+          "maxItems": 64,
+          "minItems": 1,
+          "title": "Probe Capabilities",
+          "type": "array"
+        },
+        "probe_count": {
+          "maximum": 64,
+          "minimum": 1,
+          "title": "Probe Count",
+          "type": "integer"
+        },
+        "provider_contact_count": {
+          "maximum": 9223372036854775807,
+          "minimum": 1,
+          "title": "Provider Contact Count",
+          "type": "integer"
+        },
+        "provider_contacts": {
+          "$ref": "#/$defs/RecoveryQualificationProviderMutations"
+        },
+        "provider_read_contact_count": {
+          "maximum": 9223372036854775807,
+          "minimum": 0,
+          "title": "Provider Read Contact Count",
+          "type": "integer"
+        },
+        "sealed_inputs_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Sealed Inputs Sha256",
+          "type": "string"
+        },
+        "selection_condition": {
+          "$ref": "#/$defs/RecoveryUtilitySelectionCondition"
+        },
+        "simulated_controller_ticks_to_sufficient_evidence": {
+          "maximum": 9223372036854775807,
+          "minimum": 0,
+          "title": "Simulated Controller Ticks To Sufficient Evidence",
+          "type": "integer"
+        },
+        "verification_mode": {
+          "$ref": "#/$defs/RecoveryUtilityVerificationMode"
+        },
+        "verifier_policy_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Verifier Policy Sha256",
+          "type": "string"
+        }
+      },
+      "required": [
+        "policy",
+        "case_sha256",
+        "sealed_inputs_sha256",
+        "capability_catalog_sha256",
+        "budget_catalog_sha256",
+        "verifier_policy_sha256",
+        "authority_path_sha256",
+        "comparison_policy_sha256",
+        "selection_condition",
+        "verification_mode",
+        "probe_capabilities",
+        "conditionally_skipped_capabilities",
+        "probe_count",
+        "simulated_controller_ticks_to_sufficient_evidence",
+        "provider_contacts",
+        "provider_read_contact_count",
+        "provider_contact_count",
+        "model_usage",
+        "initial_classification",
+        "deterministic_decision",
+        "deterministic_artifact_kind",
+        "permit_action",
+        "effects",
+        "model_can_classify",
+        "model_can_issue_authority",
+        "model_can_contact_mutation_provider"
+      ],
+      "title": "RecoveryUtilityLaneResult",
+      "type": "object"
+    },
+    "RecoveryUtilityPolicy": {
+      "enum": [
+        "fixed",
+        "adaptive"
+      ],
+      "title": "RecoveryUtilityPolicy",
+      "type": "string"
+    },
+    "RecoveryUtilitySelectionCondition": {
+      "enum": [
+        "fixed-order",
+        "service-traffic-established-revision-readiness-unverified"
+      ],
+      "title": "RecoveryUtilitySelectionCondition",
+      "type": "string"
+    },
+    "RecoveryUtilitySmokeResult": {
+      "additionalProperties": false,
+      "properties": {
+        "deterministic_action": {
+          "const": "CONTINUE",
+          "title": "Deterministic Action",
+          "type": "string"
+        },
+        "effects": {
+          "$ref": "#/$defs/RecoveryUtilityEffects"
+        },
+        "fault": {
+          "const": "drop-after-accept",
+          "title": "Fault",
+          "type": "string"
+        },
+        "initial_classification": {
+          "const": "UNKNOWN",
+          "title": "Initial Classification",
+          "type": "string"
+        },
+        "initial_launch_permit_state": {
+          "const": "COMPLETED",
+          "title": "Initial Launch Permit State",
+          "type": "string"
+        },
+        "initial_outcome": {
+          "const": "OUTCOME_UNKNOWN",
+          "title": "Initial Outcome",
+          "type": "string"
+        },
+        "initial_provider_contact_receipt_count": {
+          "const": 1,
+          "title": "Initial Provider Contact Receipt Count",
+          "type": "integer"
+        },
+        "model_usage": {
+          "$ref": "#/$defs/RecoveryQualificationModelUsage"
+        },
+        "provider_contact_count": {
+          "maximum": 9223372036854775807,
+          "minimum": 1,
+          "title": "Provider Contact Count",
+          "type": "integer"
+        },
+        "provider_contacts": {
+          "$ref": "#/$defs/RecoveryQualificationProviderMutations"
+        },
+        "provider_read_contact_count": {
+          "maximum": 9223372036854775807,
+          "minimum": 0,
+          "title": "Provider Read Contact Count",
+          "type": "integer"
+        },
+        "replay_denied": {
+          "const": true,
+          "title": "Replay Denied",
+          "type": "boolean"
+        },
+        "replay_provider_contact_delta": {
+          "const": 0,
+          "title": "Replay Provider Contact Delta",
+          "type": "integer"
+        },
+        "replay_provider_mutation_contact_delta": {
+          "const": 0,
+          "title": "Replay Provider Mutation Contact Delta",
+          "type": "integer"
+        },
+        "replay_provider_read_contact_delta": {
+          "const": 0,
+          "title": "Replay Provider Read Contact Delta",
+          "type": "integer"
+        },
+        "shared_recovery_core": {
+          "const": true,
+          "title": "Shared Recovery Core",
+          "type": "boolean"
+        },
+        "terminal_chain_completed": {
+          "const": true,
+          "title": "Terminal Chain Completed",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "shared_recovery_core",
+        "fault",
+        "initial_launch_permit_state",
+        "initial_outcome",
+        "initial_provider_contact_receipt_count",
+        "initial_classification",
+        "deterministic_action",
+        "terminal_chain_completed",
+        "provider_contacts",
+        "provider_read_contact_count",
+        "provider_contact_count",
+        "effects",
+        "replay_denied",
+        "replay_provider_read_contact_delta",
+        "replay_provider_mutation_contact_delta",
+        "replay_provider_contact_delta",
+        "model_usage"
+      ],
+      "title": "RecoveryUtilitySmokeResult",
+      "type": "object"
+    },
+    "RecoveryUtilityVerificationMode": {
+      "enum": [
+        "fixed-batch-then-verify",
+        "incremental-after-each-probe"
+      ],
+      "title": "RecoveryUtilityVerificationMode",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "adaptive": {
+      "$ref": "#/$defs/RecoveryUtilityLaneResult"
+    },
+    "baselines": {
+      "maxItems": 2,
+      "minItems": 2,
+      "prefixItems": [
+        {
+          "$ref": "#/$defs/RecoveryRetryBaselineResult"
+        },
+        {
+          "$ref": "#/$defs/RecoveryRetryBaselineResult"
+        }
+      ],
+      "title": "Baselines",
+      "type": "array"
+    },
+    "case_id": {
+      "maxLength": 128,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+      "title": "Case Id",
+      "type": "string"
+    },
+    "conclusion": {
+      "const": "MEASUREMENTS_ONLY",
+      "title": "Conclusion",
+      "type": "string"
+    },
+    "execution_basis": {
+      "const": "deterministic-local-scripted",
+      "title": "Execution Basis",
+      "type": "string"
+    },
+    "fixed": {
+      "$ref": "#/$defs/RecoveryUtilityLaneResult"
+    },
+    "observed_at": {
+      "format": "date-time",
+      "title": "Observed At",
+      "type": "string"
+    },
+    "report_id": {
+      "maxLength": 128,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+      "title": "Report Id",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": "reconcile/recovery-utility-report/v2",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "smoke": {
+      "$ref": "#/$defs/RecoveryUtilitySmokeResult"
+    }
+  },
+  "required": [
+    "schema_version",
+    "report_id",
+    "case_id",
+    "baselines",
+    "fixed",
+    "adaptive",
+    "smoke",
+    "execution_basis",
+    "conclusion",
+    "observed_at"
+  ],
+  "title": "RecoveryUtilityReport",
+  "type": "object"
+}

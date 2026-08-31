@@ -73,9 +73,13 @@ from reconcile.contracts import (
     RecoveryAuthorityKind,
     RecoveryChain,
     RecoveryDecision,
+    RecoveryDispatchOutcome,
     RecoveryHypothesisDisposition,
+    RecoveryLaunchPermitState,
     RecoveryPreparedAction,
+    RecoveryReceiptOutcome,
     RecoveryRunFault,
+    RecoveryRunLifecycle,
     RecoveryRunPolicy,
     RecoveryRunRequest,
     RecoveryRunSnapshot,
@@ -125,11 +129,12 @@ from reconcile.hosted.firestore_release import (
     FirestoreReleaseOutcomeUnknown,
     FirestoreReleaseProviderUnavailable,
 )
-from reconcile.persistence.permits import ActionPermitStore
+from reconcile.persistence.permits import ActionPermitStore, PermitClaimDenied
 from reconcile.persistence.recovery_runs import RecoveryRunEventSnapshot
 from reconcile.recovery_agents import (
     RecoveryAgent,
     RecoveryAgentTurn,
+    RecoveryDispatchGateway,
     RecoveryDispatchReceipt,
     RecoveryHypothesisAgent,
     RolloutAgent,
@@ -144,6 +149,12 @@ from reconcile.recovery_qualification_provider import (
     build_recovery_qualification_foundation,
 )
 from reconcile.recovery_scenario import (
+    RECOVERY_FIXED_STAGE_PROBE_SEQUENCE,
+    RECOVERY_OBSERVATION_STAGE_FALSE_SEQUENCE,
+    RECOVERY_OBSERVATION_STAGE_PROBE_CONDITION,
+    RECOVERY_OBSERVATION_STAGE_REQUIRED_EFFECT_STATES,
+    RECOVERY_OBSERVATION_STAGE_REQUIRED_MISSING_EFFECTS,
+    RECOVERY_OBSERVATION_STAGE_TRUE_SEQUENCE,
     RecoveryRunReceiptReader,
     ReleaseChainActionPreparer,
     ReleaseChainBlindMutator,
@@ -163,6 +174,14 @@ _WRONG_VARIANTS = (
     "wrong-effect-state",
     "wrong-alternative-history",
 )
+_UTILITY_FIXED_SELECTION_MODE = "utility-production-fixed"
+_UTILITY_OBSERVATION_SELECTION_MODE = "utility-observation-conditioned"
+_UTILITY_SELECTION_MODES = frozenset(
+    {_UTILITY_FIXED_SELECTION_MODE, _UTILITY_OBSERVATION_SELECTION_MODE}
+)
+_FIXED_SELECTION_CONDITION = "fixed-order"
+_OBSERVED_SELECTION_CONDITION = RECOVERY_OBSERVATION_STAGE_PROBE_CONDITION
+_UNMATCHED_SELECTION_CONDITION = "service-state-condition-not-met"
 _UNSUPPORTED_STOP_REASONS = frozenset(
     {
         ProbeStopReason.INVALID_REQUEST,
@@ -200,6 +219,7 @@ class RecoveryQualificationWrongExecution:
 class RecoveryQualificationProofExecution:
     policy: RecoveryQualificationPolicy
     resolution: RecoveryQualificationResolution
+    deterministic_decision: RecoveryDecision
     permit_action: PermitAction | None
     permit_sha256: str | None
     raw_permit_sha256: str | None
@@ -213,6 +233,11 @@ class RecoveryQualificationProofExecution:
     time_to_sufficient_evidence_ms: int
     unsupported_probe_count: int
     provider_mutations: RecoveryQualificationProviderMutations
+    provider_read_contact_count: int
+    provider_contact_count: int
+    stage_accepts: int
+    promote_accepts: int
+    record_commits: int
     model_usage: RecoveryQualificationModelUsage
     snapshot_sha256: str
     restarted_snapshot_sha256: str | None
@@ -224,6 +249,32 @@ class RecoveryQualificationProofExecution:
     reordered_witness_semantic_sha256: str | None
     replayed_witness_semantic_sha256: str | None
     witness_replay_kind: RecoveryQualificationWitnessReplayKind | None
+    initial_classification: Classification | None
+    probe_capabilities: tuple[str, ...]
+    selection_condition: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class RecoveryQualificationSmokeExecution:
+    fault: RecoveryRunFault
+    initial_launch_permit_state: RecoveryLaunchPermitState
+    initial_outcome: RecoveryDispatchOutcome
+    initial_provider_contact_receipt_count: int
+    initial_classification: Classification
+    deterministic_decision: RecoveryDecision
+    permit_action: PermitAction | None
+    terminal_chain_completed: bool
+    provider_mutations: RecoveryQualificationProviderMutations
+    provider_read_contact_count: int
+    provider_contact_count: int
+    stage_accepts: int
+    promote_accepts: int
+    record_commits: int
+    replay_denied: bool
+    replay_provider_read_contact_delta: int
+    replay_provider_mutation_contact_delta: int
+    replay_provider_contact_delta: int
+    model_usage: RecoveryQualificationModelUsage
 
 
 @dataclass(frozen=True, slots=True)
@@ -301,9 +352,14 @@ class _ScriptedPlanner:
         variant: str = "normal",
         *,
         target_node_id: str | None = None,
+        utility_selection_mode: str | None = None,
     ) -> None:
+        if utility_selection_mode not in {None, *_UTILITY_SELECTION_MODES}:
+            raise ValueError("unknown recovery utility selection mode")
         self.variant = variant
         self.target_node_id = target_node_id
+        self.utility_selection_mode = utility_selection_mode
+        self.selection_conditions_by_tool: dict[str, str] = {}
         self.turns: list[AdvisoryPlannerTurn] = []
         self.call_tools: list[str] = []
         self.calls_by_tool: dict[str, int] = {}
@@ -321,11 +377,61 @@ class _ScriptedPlanner:
         )
 
     @staticmethod
-    def _normal_capability(planner_input: AdaptivePlannerInput) -> str | None:
+    def _service_state_requires_revision(
+        planner_input: AdaptivePlannerInput,
+    ) -> bool:
+        service_evidence = tuple(
+            item
+            for item in planner_input.admitted_evidence
+            if item.capability_name == CLOUD_RUN_SERVICE_CAPABILITY
+        )
+        if len(service_evidence) != 1:
+            return False
+        states = {
+            assertion.effect_id: assertion.state
+            for assertion in service_evidence[0].effect_assertions
+        }
+        missing = {item.effect_id for item in planner_input.missing_evidence}
+        return (
+            all(
+                states.get(effect_id) is expected_state
+                for effect_id, expected_state in (
+                    RECOVERY_OBSERVATION_STAGE_REQUIRED_EFFECT_STATES
+                )
+            )
+            and RECOVERY_OBSERVATION_STAGE_REQUIRED_MISSING_EFFECTS <= missing
+        )
+
+    def _normal_capability(self, planner_input: AdaptivePlannerInput) -> str | None:
         envelope = planner_input.envelope
         tool_name = envelope.context.invocation.tool_name
         prior_count = len(planner_input.prior_executable_request_hashes)
         if tool_name == "stage-cloud-run-revision":
+            if self.utility_selection_mode == _UTILITY_FIXED_SELECTION_MODE:
+                if prior_count == 0:
+                    self.selection_conditions_by_tool[tool_name] = (
+                        _FIXED_SELECTION_CONDITION
+                    )
+                # The utility comparator must be the exact production fixed
+                # policy after the shared service observation, not a synthetic
+                # ordering chosen to favor the adaptive lane.
+                sequence = RECOVERY_FIXED_STAGE_PROBE_SEQUENCE[1:]
+                return sequence[prior_count] if prior_count < len(sequence) else None
+            if self.utility_selection_mode == _UTILITY_OBSERVATION_SELECTION_MODE:
+                if prior_count == 0:
+                    observed = self._service_state_requires_revision(planner_input)
+                    self.selection_conditions_by_tool[tool_name] = (
+                        _OBSERVED_SELECTION_CONDITION
+                        if observed
+                        else _UNMATCHED_SELECTION_CONDITION
+                    )
+                sequence = (
+                    RECOVERY_OBSERVATION_STAGE_TRUE_SEQUENCE
+                    if self.selection_conditions_by_tool.get(tool_name)
+                    == _OBSERVED_SELECTION_CONDITION
+                    else RECOVERY_OBSERVATION_STAGE_FALSE_SEQUENCE
+                )
+                return sequence[prior_count] if prior_count < len(sequence) else None
             service_observations = sum(
                 item.capability_name == CLOUD_RUN_SERVICE_CAPABILITY
                 for item in planner_input.admitted_evidence
@@ -773,7 +879,7 @@ class _CrashAfterCompletedTargetDispatch:
 
     def __init__(
         self,
-        delegate: ReleaseChainDispatchGateway,
+        delegate: RecoveryDispatchGateway,
         target_node_id: str,
     ) -> None:
         self._delegate = delegate
@@ -829,6 +935,26 @@ class _StopBeforeTargetDispatch:
             and prepared.source_node_id == self._target_node_id
         ):
             raise _QualificationDispatchHeld
+        return await self._delegate.dispatch(prepared, scope)
+
+
+class _RecordingDispatchGateway:
+    """Capture exact controller-built dispatch inputs without changing execution."""
+
+    def __init__(
+        self,
+        delegate: ReleaseChainDispatchGateway,
+        records: list[tuple[RecoveryPreparedAction, RecoveryActionScope]],
+    ) -> None:
+        self._delegate = delegate
+        self._records = records
+
+    async def dispatch(
+        self,
+        prepared: RecoveryPreparedAction,
+        scope: RecoveryActionScope,
+    ) -> RecoveryDispatchReceipt:
+        self._records.append((prepared, scope))
         return await self._delegate.dispatch(prepared, scope)
 
 
@@ -899,9 +1025,8 @@ async def _blind_attempt(
         return False
 
 
-def _slice_definition(
+def build_recovery_qualification_definition(
     provider: RecoveryQualificationProviderResources,
-    _fixture: RecoveryQualificationFixture,
 ) -> RecoveryRunDefinition:
     # Recovery verification deliberately rejects partial chains.  Keeping the
     # complete production path also makes later-node cases exercise their real
@@ -1533,7 +1658,7 @@ async def _wrong_hypotheses(
         provider = foundation.provider
         provider.require_supported()
         target_node_id = _target_node_id(fixture)
-        definition = _slice_definition(provider, fixture)
+        definition = build_recovery_qualification_definition(provider)
         if fixture.archetype.archetype_id == "record-predispatch-conflict":
             record_node = next(
                 node for node in definition.chain.nodes if node.node_id == "record"
@@ -2041,6 +2166,8 @@ def _build_workflow(
     stop_before_target_dispatch: bool = False,
     target_replay_state: RecoveryEvidenceState | None = None,
     recovery_agent: RecoveryHypothesisAgent | None = None,
+    dispatch_records: list[tuple[RecoveryPreparedAction, RecoveryActionScope]]
+    | None = None,
 ) -> tuple[ProofToPermitWorkflow, _RecordingEvidenceSource]:
     provider = foundation.provider
     evidence = _RecordingEvidenceSource(
@@ -2068,12 +2195,15 @@ def _build_workflow(
     )
     if crash_after_completed_target_dispatch and stop_before_target_dispatch:
         raise ValueError("qualification dispatch boundaries are mutually exclusive")
+    dispatch_gateway: RecoveryDispatchGateway
     if crash_after_completed_target_dispatch:
         dispatch_gateway = _CrashAfterCompletedTargetDispatch(gateway, target_node_id)
     elif stop_before_target_dispatch:
         dispatch_gateway = _StopBeforeTargetDispatch(gateway, target_node_id)
     else:
         dispatch_gateway = gateway
+    if dispatch_records is not None:
+        dispatch_gateway = _RecordingDispatchGateway(dispatch_gateway, dispatch_records)
     workflow = ProofToPermitWorkflow(
         store=stores.run_store,
         definition_factory=lambda _request: definition,
@@ -2109,7 +2239,7 @@ async def prepare_recovery_qualification_contention_dispatch(
     )
     provider = foundation.provider
     provider.require_supported()
-    definition = _slice_definition(provider, fixture)
+    definition = build_recovery_qualification_definition(provider)
     planner = _ScriptedPlanner()
     stores = foundation.stores.open()
     target_node_id = _target_node_id(fixture)
@@ -2256,12 +2386,23 @@ async def execute_recovery_qualification_proof_lane(
     restart: bool,
     _crash_after_provider: bool = False,
     _include_safety_replays: bool = True,
+    _utility_selection_mode: str | None = None,
 ) -> RecoveryQualificationProofExecution:
     if policy not in {
         RecoveryQualificationPolicy.FIXED,
         RecoveryQualificationPolicy.ADAPTIVE,
     }:
         raise ValueError("proof execution requires fixed or adaptive policy")
+    if _utility_selection_mode not in {None, *_UTILITY_SELECTION_MODES}:
+        raise ValueError("unknown recovery utility selection mode")
+    if (
+        _utility_selection_mode == _UTILITY_FIXED_SELECTION_MODE
+        and policy is not RecoveryQualificationPolicy.FIXED
+    ) or (
+        _utility_selection_mode == _UTILITY_OBSERVATION_SELECTION_MODE
+        and policy is not RecoveryQualificationPolicy.ADAPTIVE
+    ):
+        raise ValueError("recovery utility selection mode differs from lane identity")
     foundation = build_recovery_qualification_foundation(
         fixture,
         state_directory=state_directory,
@@ -2269,6 +2410,13 @@ async def execute_recovery_qualification_proof_lane(
     provider = foundation.provider
     provider.require_supported()
     target_node_id = _target_node_id(fixture)
+    if _utility_selection_mode is not None and target_node_id != "stage":
+        raise ValueError("recovery utility selection requires the stage target")
+    workflow_policy = (
+        RecoveryRunPolicy.ADAPTIVE
+        if _utility_selection_mode == _UTILITY_OBSERVATION_SELECTION_MODE
+        else RecoveryRunPolicy(policy.value)
+    )
     crash_after_completed_target_dispatch = False
     if _crash_after_provider:
         if target_node_id == "stage":
@@ -2284,7 +2432,7 @@ async def execute_recovery_qualification_proof_lane(
             crash_after_completed_target_dispatch = True
         else:
             provider.release_client.arm_crash_after_attempt()
-    definition = _slice_definition(provider, fixture)
+    definition = build_recovery_qualification_definition(provider)
     if fixture.archetype.archetype_id == "record-predispatch-conflict":
         record_node = next(
             node for node in definition.chain.nodes if node.node_id == "record"
@@ -2293,7 +2441,7 @@ async def execute_recovery_qualification_proof_lane(
             semantic_action_sha256=record_node.semantic_action.semantic_action_sha256,
             conflicting=True,
         )
-    planner = _ScriptedPlanner()
+    planner = _ScriptedPlanner(utility_selection_mode=_utility_selection_mode)
     stores = foundation.stores.open()
     workflow, source = _build_workflow(
         foundation=foundation,
@@ -2308,7 +2456,7 @@ async def execute_recovery_qualification_proof_lane(
         schema_version=RECOVERY_RUN_REQUEST_VERSION,
         run_id=f"{fixture.case_id}-{policy.value}",
         scenario="cloud-run-rollout",
-        policy=RecoveryRunPolicy(policy.value),
+        policy=workflow_policy,
         fault=_fault(fixture),
     )
     await stores.run_store.create(
@@ -2319,6 +2467,7 @@ async def execute_recovery_qualification_proof_lane(
     restarted_snapshot_sha256 = None
     restarted_decision_sha256 = None
     restarted_permit_sha256 = None
+    prior_model_call_count = 0
     if _crash_after_provider:
         try:
             await workflow.run(request.run_id)
@@ -2329,8 +2478,9 @@ async def execute_recovery_qualification_proof_lane(
             pass
         else:  # pragma: no cover - guarded by the deterministic fault boundary
             raise AssertionError("qualification restart boundary did not interrupt")
+        prior_model_call_count = sum(planner.calls_by_tool.values())
         stores = foundation.stores.open()
-        planner = _ScriptedPlanner()
+        planner = _ScriptedPlanner(utility_selection_mode=_utility_selection_mode)
         workflow, source = _build_workflow(
             foundation=foundation,
             stores=stores,
@@ -2341,7 +2491,7 @@ async def execute_recovery_qualification_proof_lane(
         )
     snapshot = await workflow.run(request.run_id)
     events = await stores.run_store.events(request.run_id)
-    if policy is RecoveryQualificationPolicy.ADAPTIVE:
+    if workflow_policy is RecoveryRunPolicy.ADAPTIVE:
         planner_events = tuple(
             event
             for event in events.events
@@ -2433,6 +2583,11 @@ async def execute_recovery_qualification_proof_lane(
             baseline=artifact,
         )
     target_tool_name = definition.envelopes[target_node_id].context.invocation.tool_name
+    probe_capabilities = tuple(
+        record.capability_name
+        for record in state.report.probe_audit
+        if record.capability_name is not None
+    )
     artifact_kind = (
         RecoveryQualificationArtifactKind.VERIFIED_CERTIFICATE
         if isinstance(artifact, VerifiedCertificate)
@@ -2441,6 +2596,7 @@ async def execute_recovery_qualification_proof_lane(
     result = RecoveryQualificationProofExecution(
         policy=policy,
         resolution=resolution,
+        deterministic_decision=decision,
         permit_action=permit_action,
         permit_sha256=semantic_permit,
         raw_permit_sha256=None if permit is None else canonical_sha256(permit),
@@ -2458,8 +2614,15 @@ async def execute_recovery_qualification_proof_lane(
         time_to_sufficient_evidence_ms=elapsed_ms,
         unsupported_probe_count=unsupported_probe_count,
         provider_mutations=provider.counters.provider_mutations(),
+        provider_read_contact_count=provider.counters.provider_read_contact_count,
+        provider_contact_count=provider.counters.provider_contact_count,
+        stage_accepts=provider.counters.stage_accepts,
+        promote_accepts=provider.counters.promote_accepts,
+        record_commits=provider.counters.record_commits,
         model_usage=(
-            _scripted_usage(planner.calls_by_tool.get(target_tool_name, 0))
+            _scripted_usage(
+                prior_model_call_count + sum(planner.calls_by_tool.values())
+            )
             if policy is RecoveryQualificationPolicy.ADAPTIVE
             else _not_applicable_usage()
         ),
@@ -2473,6 +2636,15 @@ async def execute_recovery_qualification_proof_lane(
         reordered_witness_semantic_sha256=witness_values[1],
         replayed_witness_semantic_sha256=witness_values[2],
         witness_replay_kind=witness_values[3],
+        initial_classification=(
+            source.states[0].report.classification if source.states else None
+        ),
+        probe_capabilities=probe_capabilities,
+        selection_condition=(
+            _FIXED_SELECTION_CONDITION
+            if _utility_selection_mode == _UTILITY_FIXED_SELECTION_MODE
+            else planner.selection_conditions_by_tool.get(target_tool_name)
+        ),
     )
     if restart:
         if _crash_after_provider:
@@ -2484,6 +2656,7 @@ async def execute_recovery_qualification_proof_lane(
             restart=False,
             _crash_after_provider=True,
             _include_safety_replays=False,
+            _utility_selection_mode=_utility_selection_mode,
         )
         if (
             restarted.resolution is not result.resolution
@@ -2504,6 +2677,135 @@ async def execute_recovery_qualification_proof_lane(
             restarted_provider_mutations=restarted.provider_mutations,
         )
     return result
+
+
+async def execute_recovery_qualification_smoke(
+    fixture: RecoveryQualificationFixture,
+    *,
+    state_directory: str | Path,
+) -> RecoveryQualificationSmokeExecution:
+    """Exercise ambiguity, recovery authority, exact effects, and replay denial."""
+
+    if fixture.archetype.archetype_id != "stage-drop-committed":
+        raise ValueError("smoke execution requires the committed stage-drop case")
+    foundation = build_recovery_qualification_foundation(
+        fixture,
+        state_directory=state_directory,
+    )
+    provider = foundation.provider
+    provider.require_supported()
+    definition = build_recovery_qualification_definition(provider)
+    planner = _ScriptedPlanner()
+    stores = foundation.stores.open()
+    dispatch_records: list[tuple[RecoveryPreparedAction, RecoveryActionScope]] = []
+    workflow, source = _build_workflow(
+        foundation=foundation,
+        stores=stores,
+        definition=definition,
+        planner=planner,
+        target_node_id="stage",
+        fixture=fixture,
+        dispatch_records=dispatch_records,
+    )
+    request = RecoveryRunRequest(
+        schema_version=RECOVERY_RUN_REQUEST_VERSION,
+        run_id=f"{fixture.case_id}-utility-smoke",
+        scenario="cloud-run-rollout",
+        policy=RecoveryRunPolicy.ADAPTIVE,
+        fault=RecoveryRunFault.DROP_AFTER_ACCEPT,
+    )
+    await stores.run_store.create(
+        request,
+        definition.chain,
+        created_at=provider.invoked_at,
+    )
+    snapshot = await workflow.run(request.run_id)
+    if snapshot.lifecycle is not RecoveryRunLifecycle.COMPLETED:
+        raise AssertionError("smoke recovery did not complete its release chain")
+    launch = snapshot.launch_permit
+    initial_provider_contact_receipts = tuple(
+        receipt
+        for receipt in snapshot.dispatch_receipts
+        if receipt.node_id == "stage"
+        and receipt.attempt == 1
+        and receipt.provider_contact
+        and receipt.outcome is RecoveryReceiptOutcome.PROVIDER_CONTACTED
+        and launch is not None
+        and receipt.authority_id == launch.launch_permit_id
+        and receipt.claim_id == launch.claim_id
+        and receipt.action_request_sha256 == launch.action_request_sha256
+    )
+    if (
+        launch is None
+        or launch.state is not RecoveryLaunchPermitState.COMPLETED
+        or launch.outcome is not RecoveryDispatchOutcome.OUTCOME_UNKNOWN
+        or len(initial_provider_contact_receipts) != 1
+    ):
+        raise AssertionError(
+            "smoke recovery did not observe one provider-contacted dispatch "
+            "with an unknown launch outcome"
+        )
+    events = await stores.run_store.events(request.run_id)
+    decision, artifact = _target_decision(events, "stage")
+    permit_action = (
+        artifact.transition.action
+        if isinstance(artifact, VerifiedCertificate) and artifact.transition is not None
+        else None
+    )
+    if not source.states or source.states[0].report.classification is None:
+        raise AssertionError("smoke recovery lacks its initial classification")
+    replay_candidates = tuple(
+        item
+        for item in dispatch_records
+        if item[1].authority_kind is RecoveryAuthorityKind.ACTION_PERMIT
+    )
+    if not replay_candidates:
+        raise AssertionError("smoke recovery did not retain a permitted dispatch")
+    prepared, scope = replay_candidates[-1]
+    replay_gateway = ReleaseChainDispatchGateway(
+        settings=provider.settings,
+        store=stores.run_store,
+        permit_authority=stores.permit_authority,
+        cloud_run=provider.cloud_action,
+        firestore=provider.firestore,
+        clock=provider.clock,
+    )
+    before_replay_reads = provider.counters.provider_read_contact_count
+    before_replay_mutations = provider.counters.outbound_call_count
+    before_replay_contacts = provider.counters.provider_contact_count
+    replay_denied = False
+    try:
+        await RolloutAgent(replay_gateway).execute(prepared, scope)
+    except PermitClaimDenied:
+        replay_denied = True
+    after_replay_reads = provider.counters.provider_read_contact_count
+    after_replay_mutations = provider.counters.outbound_call_count
+    after_replay_contacts = provider.counters.provider_contact_count
+    if not replay_denied:
+        raise AssertionError("completed recovery permit was accepted twice")
+    return RecoveryQualificationSmokeExecution(
+        fault=snapshot.request.fault,
+        initial_launch_permit_state=launch.state,
+        initial_outcome=launch.outcome,
+        initial_provider_contact_receipt_count=len(initial_provider_contact_receipts),
+        initial_classification=source.states[0].report.classification,
+        deterministic_decision=decision,
+        permit_action=permit_action,
+        terminal_chain_completed=True,
+        provider_mutations=provider.counters.provider_mutations(),
+        provider_read_contact_count=provider.counters.provider_read_contact_count,
+        provider_contact_count=provider.counters.provider_contact_count,
+        stage_accepts=provider.counters.stage_accepts,
+        promote_accepts=provider.counters.promote_accepts,
+        record_commits=provider.counters.record_commits,
+        replay_denied=replay_denied,
+        replay_provider_read_contact_delta=after_replay_reads - before_replay_reads,
+        replay_provider_mutation_contact_delta=(
+            after_replay_mutations - before_replay_mutations
+        ),
+        replay_provider_contact_delta=after_replay_contacts - before_replay_contacts,
+        model_usage=_scripted_usage(sum(planner.calls_by_tool.values())),
+    )
 
 
 async def execute_recovery_qualification_blind_lane(
@@ -2612,8 +2914,11 @@ __all__ = [
     "RecoveryQualificationBlindExecution",
     "RecoveryQualificationContentionDispatch",
     "RecoveryQualificationProofExecution",
+    "RecoveryQualificationSmokeExecution",
     "RecoveryQualificationWrongExecution",
+    "build_recovery_qualification_definition",
     "execute_recovery_qualification_blind_lane",
     "execute_recovery_qualification_proof_lane",
+    "execute_recovery_qualification_smoke",
     "prepare_recovery_qualification_contention_dispatch",
 ]
