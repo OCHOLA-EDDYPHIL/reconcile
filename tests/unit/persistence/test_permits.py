@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import sqlite3
+import time
 from datetime import timedelta
 
 import pytest
 
+import reconcile.persistence.sqlite_runtime as sqlite_runtime
 from reconcile.contracts import (
     ActionPermit,
     ActionPermitState,
@@ -30,6 +32,7 @@ from reconcile.persistence.permits import (
     PermitConflict,
     PermitCorruptState,
     PermitDenialReason,
+    PermitStoreUnavailable,
 )
 from reconcile.persistence.sqlite_runtime import SqliteDurableRuntimeStore
 from tests._permit_support import (
@@ -101,6 +104,7 @@ def test_certificate_derives_one_stable_exact_permit_and_no_transition_issues_no
 
 def test_sqlite_thirty_two_concurrent_claims_have_exactly_one_winner(
     tmp_path,
+    monkeypatch,
 ) -> None:
     async def scenario() -> None:
         certificate, semantic_action, arguments, precondition = (
@@ -122,6 +126,20 @@ def test_sqlite_thirty_two_concurrent_claims_have_exactly_one_winner(
         assert permit is not None
         assert all(item == permit for item in issued)
         assert len(await store.permit_audit_events(permit.permit_id)) == 1
+
+        original_append = SqliteDurableRuntimeStore._append_permit_audit_locked
+
+        def delayed_winner(connection, event) -> None:
+            if event.kind is PermitAuditKind.CLAIMED:
+                time.sleep(0.05)
+            original_append(connection, event)
+
+        monkeypatch.setattr(sqlite_runtime, "_BUSY_TIMEOUT_MS", 1)
+        monkeypatch.setattr(
+            SqliteDurableRuntimeStore,
+            "_append_permit_audit_locked",
+            staticmethod(delayed_winner),
+        )
 
         async def claim(index: int) -> ActionPermit:
             authority = PermitAuthority(
@@ -156,6 +174,31 @@ def test_sqlite_thirty_two_concurrent_claims_have_exactly_one_winner(
         assert events[0].kind is PermitAuditKind.ISSUED
         assert sum(event.kind is PermitAuditKind.CLAIMED for event in events) == 1
         assert sum(event.kind is PermitAuditKind.BLOCKED for event in events) == 31
+
+    asyncio.run(scenario())
+
+
+def test_sqlite_external_writer_contention_is_unavailable(
+    tmp_path, monkeypatch
+) -> None:
+    async def scenario() -> None:
+        certificate, _semantic_action, _arguments, _precondition = (
+            make_permit_certificate()
+        )
+        database = tmp_path / "locked.sqlite3"
+        store = SqliteDurableRuntimeStore(database)
+        permit = await PermitAuthority(
+            store,
+            clock=lambda: NOW + timedelta(seconds=6),
+        ).issue_permit(certificate)
+        assert permit is not None
+
+        monkeypatch.setattr(sqlite_runtime, "_BUSY_TIMEOUT_MS", 1)
+        with sqlite3.connect(database, isolation_level=None) as writer:
+            writer.execute("BEGIN IMMEDIATE")
+            with pytest.raises(PermitStoreUnavailable):
+                await store.claim_permit(_claim_request(permit))
+            writer.rollback()
 
     asyncio.run(scenario())
 
