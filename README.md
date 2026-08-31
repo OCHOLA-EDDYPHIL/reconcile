@@ -11,7 +11,7 @@ next exact action—or refuses to mutate.
 **Gemini investigates. Deterministic evidence decides.**
 
 [Validate the offline evidence bundle](#validate-the-offline-evidence-bundle) ·
-[Inspect the provider evidence record](evidence/v0.1.1/provider-proof.json) ·
+[Inspect the provider evidence record](evidence/v0.2.0/provider-proof.json) ·
 [Read the claims and limitations](docs/claims-and-limitations.md) ·
 [Open the static evidence viewer](https://reconcile-evidence-g6fwwrme5a-uc.a.run.app)
 
@@ -27,10 +27,10 @@ the acknowledgement disappears. The agent sees a timeout, not the outcome.
 | Evidence-bound recovery | Holds retry and continuation until admitted provider evidence authorizes one exact action. |
 
 The recovery protocol separates advisory investigation from deterministic
-authorization. Its scripted baseline and recorded Google Cloud runs are
-separate evidence layers: the baseline compares policies under one controlled
-fault, while the provider records demonstrate the hosted recovery and
-fail-closed paths.
+authorization. Its deterministic local comparison and recorded Google Cloud
+runs are separate evidence layers. The local comparison makes retry identity
+and probe selection visible. The provider records demonstrate the hosted
+recovery and fail-closed paths.
 
 ## Validate the offline evidence bundle
 
@@ -51,11 +51,11 @@ cleanup inventory in the checked-in evidence bundle. It does not rerun the recov
 workflow, invoke Gemini, or contact Google Cloud. It does not depend on a public
 endpoint.
 
-The default validator selects the current `v0.1.1` evidence. Its summary is:
+The default validator selects the current `v0.2.0` evidence. Its summary is:
 
 ```text
 Reconcile - offline evidence validation
-Gemini guides evidence acquisition. Deterministic evidence decides.
+Gemini investigates. Deterministic evidence decides.
 
 Recorded adaptive recovery
   effects      -> 1 revision / 1 promotion / 1 release record
@@ -65,12 +65,32 @@ Recorded partial-read outage
   result       -> UNKNOWN / ESCALATED; no action permit
   histories    -> effects-occurred / effects-not-occurred
   effects      -> 1 staged revision / 0 promotions / 0 records
-  cleanup      -> zero retained cloud resources
+  cleanup      -> zero retained operational resources
 
 RESULT: PASS
 ```
 
 This result validates recorded, sanitized evidence. It is not a provider run.
+
+## Run the recovery core locally
+
+The short smoke command runs the production recovery workflow against an
+isolated deterministic provider-shaped fixture:
+
+```bash
+uv run --no-sync reconcile recovery smoke
+```
+
+The fixed and adaptive lanes share the same sealed case, capability catalog,
+budgets, verifier, and authority path. In the conditional-evidence case, the
+fixed lane uses three probes and 12 provider contacts. The adaptive lane stops
+after two probes and 10 contacts. The same run contrasts a naive retry with a
+new identity, which creates two revisions, against a stable-identity retry with
+an ETag precondition, which leaves one revision. It also completes one exact
+recovery chain and rejects replay before provider contact.
+
+These are deterministic local scripted measurements, not a live-provider
+benchmark or a model-superiority claim.
 
 ## Recovery path
 
@@ -84,8 +104,9 @@ This result validates recorded, sanitized evidence. It is not a provider run.
 5. [Deterministic verification](reconcile/evidence/recovery_verification.py)
    produces a hash-bound verified certificate or an ambiguity witness. Model
    text is never an authorization input.
-6. The [recovery workflow](reconcile/recovery_workflow.py) may issue an expiring
-   permit for one exact semantic action with `max_uses=1`.
+6. The [recovery workflow](reconcile/recovery_workflow.py) selects `OBSERVE`,
+   `RETRY`, `CONTINUE`, or `ESCALATE`. Only a mutating retry or continuation can
+   receive an expiring permit for one exact semantic action with `max_uses=1`.
 7. The [Firestore permit store](reconcile/hosted/firestore_permits.py) claims that
    permit before the [dispatcher](reconcile/hosted/recovery_dispatch.py) contacts
    the provider. Replay is denied before another call can leave the process.
@@ -113,36 +134,48 @@ durable authority state across narrowly scoped services and identities.
 | Cloud Run | Hosts API, controller, fault proxy, sandbox, and canary services. |
 | Firestore | Separates runtime authority, sandbox state, and release records. |
 | Cloud Storage | Holds sealed operator and infrastructure artifacts. |
-| Google IAM | Gives each service only the authority needed for its role. |
+| Google IAM | Separates deployment, API invocation, and per-service runtime authority. |
+| Cloud Logging and Monitoring | Receive correlated operational signals and expose bounded metrics, alerts, and a dashboard. |
 
 Gemini improves the investigation surface; it does not decide whether an effect
 occurred. That separation is the central trust boundary.
 
+The infrastructure defines separate disposable evidence and protected
+production profiles. The production profile enables deletion protection,
+point-in-time recovery, retained object versions, notification channels, and
+bounded multi-instance API and controller scaling. Acceptance-only fault
+injection remains confined to the evidence profile.
+
 ## Evidence
 
-The [v0.1.1 evidence release](https://github.com/OCHOLA-EDDYPHIL/reconcile/releases/tag/v0.1.1)
+The [v0.2.0 evidence release](https://github.com/OCHOLA-EDDYPHIL/reconcile/releases/tag/v0.2.0)
 is the current release. Its checksum-bound asset set is built from the exact
-checked-in evidence bytes and the two checked diagrams. The `v0.1.0` directory
-remains an immutable historical bundle.
+checked-in evidence bytes, two checked diagrams, and the human-readable proof
+image. The `v0.1.0` and `v0.1.1` directories remain immutable historical
+bundles.
+
+[![Recorded v0.2.0 recovery evidence](docs/evidence-proof.png)](docs/evidence-proof.png)
+
+[Evidence proof source](docs/evidence-proof.dot)
 
 | Evidence layer | Purpose |
 | --- | --- |
-| [Provider evidence record](evidence/v0.1.1/provider-proof.json) | Records the completed adaptive recovery, exact bounded effects, and zero-contact replay rejection. |
-| [Live corroboration](evidence/v0.1.1/live-corroboration.json) | Records the advisory planner result and the fail-closed partial-read outage with two compatible histories. |
-| [Cleanup verification](evidence/v0.1.1/cleanup-verification.json) | Records the post-capture zero-resource inventory. |
-| [Evidence bundle manifest](evidence/v0.1.1/proof-to-permit.json) | Hash-links the current provider, corroboration, and cleanup records for offline validation. |
+| [Provider evidence record](evidence/v0.2.0/provider-proof.json) | Records the completed adaptive recovery, exact bounded effects, and zero-contact replay rejection. |
+| [Live corroboration](evidence/v0.2.0/live-corroboration.json) | Records the advisory planner result and the fail-closed partial-read outage with two compatible histories. |
+| [Cleanup verification](evidence/v0.2.0/cleanup-verification.json) | Records the post-capture zero-resource inventory. |
+| [Evidence bundle manifest](evidence/v0.2.0/proof-to-permit.json) | Hash-links the current provider, corroboration, and cleanup records for offline validation. |
 
 Build a commit-bound review set in a new directory outside the repository,
 then verify its checksum manifest:
 
 ```bash
 uv run --no-sync python scripts/build_public_release.py \
-  --output /tmp/reconcile-v0.1.1
-(cd /tmp/reconcile-v0.1.1 && \
-  sha256sum --check --strict reconcile-v0.1.1-SHA256SUMS.txt)
+  --output /tmp/reconcile-v0.2.0
+(cd /tmp/reconcile-v0.2.0 && \
+  sha256sum --check --strict reconcile-v0.2.0-SHA256SUMS.txt)
 ```
 
-The generated `reconcile-v0.1.1-SOURCE.json` records the exact 40-character
+The generated `reconcile-v0.2.0-SOURCE.json` records the exact 40-character
 source commit and every packaged asset digest. The builder reads the asset bytes
 from that commit, refuses mismatched build code, and labels this output as a
 candidate. The tag-triggered gate adds `--require-tag`; only that path emits a
@@ -157,7 +190,7 @@ preregistered 25% threshold. The exact authorized wording is recorded in the
 ## Static evidence viewer
 
 The [public viewer](https://reconcile-evidence-g6fwwrme5a-uc.a.run.app) is a
-read-only static projection of the `v0.1.1` evidence. It is not a live recovery
+read-only static projection of the `v0.2.0` evidence. It is not a live recovery
 service and has no connection to the removed operational environment.
 
 The viewer exports a closed, immutable bundle from one validated versioned
@@ -167,7 +200,7 @@ runs under a role-free identity with no outbound application calls to the
 operational API or provider targets.
 
 ```bash
-PUBLIC_EVIDENCE=/absolute/path/outside-repo/public-evidence/v0.1.1
+PUBLIC_EVIDENCE=/absolute/path/outside-repo/public-evidence/v0.2.0
 VIEWER_BUNDLE=/absolute/path/outside-repo/viewer-bundle
 VIEWER_CONTEXT=/absolute/path/outside-repo/viewer-context
 
@@ -189,6 +222,7 @@ complete Cloud Run deployment sequence is in the
 ```bash
 uv run --no-sync reconcile --help
 uv run --no-sync reconcile recovery run --help
+uv run --no-sync reconcile recovery smoke
 uv run --no-sync reconcile-api
 ```
 

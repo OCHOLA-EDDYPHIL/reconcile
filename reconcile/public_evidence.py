@@ -1472,7 +1472,7 @@ def export_public_evidence(
 
 
 def load_public_evidence(path: Path) -> PublicEvidenceBundle:
-    """Load and cross-check one canonical v0.1.1-style public evidence bundle."""
+    """Load and cross-check one canonical public evidence bundle."""
 
     if not isinstance(path, Path) or not path.is_absolute():
         raise PublicEvidenceError("PUBLIC_EVIDENCE_INVALID")

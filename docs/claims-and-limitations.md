@@ -13,17 +13,23 @@ must not broaden it.
 | The recorded provider run failed closed before settlement. | The initial pass was `UNKNOWN`; continuation and retry were denied; no recovery-action permit was issued. |
 | The settled provider pass continued the exact chain. | One correlated revision, hash-bound deterministic certificates, two `max_uses=1` permits, one promotion, and one Firestore record. |
 | Permit replay stopped before provider contact. | Replay outcome `REJECTED_BEFORE_PROVIDER_CONTACT`, contact delta zero. |
+| A stable-identity retry with an ETag precondition avoided the duplicate shown by a naive new-identity retry in the controlled fixture. | The deterministic local run retained one revision for stable identity and created two for a new retry identity. |
+| Conditional adaptive selection removed one unnecessary read in the controlled fixture. | With identical sealed inputs, capabilities, budgets, verifier, and authority path, fixed used three probes and 12 provider contacts while adaptive used two probes and 10 contacts. |
 
-The scripted matrix compares policies under one declared fault. The provider
-evidence record demonstrates the recovery path against Google Cloud. The
-provider run did not execute live blind-retry, blind-abort, or fixed comparison
-lanes.
+The scripted matrix compares policies under one declared fault. The short local
+utility run adds a fair stable-identity retry baseline and one conditional
+evidence case. The hosted acceptance uses isolated blind-retry, blind-abort,
+fixed, and adaptive lanes. The sanitized evidence bundle publishes the adaptive
+recovery result and a separate fail-closed partial-read result; it is not a
+general provider benchmark.
 
 ## Withheld claims
 
-- No claim that Gemini or adaptive planning outperforms the fixed planner. The
-  scripted adaptive lane used 325 probes versus 370 fixed, with medians of 2 and
-  2.5. The 20% median reduction missed the preregistered 25% threshold.
+- No general claim that Gemini or adaptive planning outperforms the fixed
+  planner. The frozen 100-case qualification measured a 20% median probe
+  reduction, below its preregistered 25% threshold. The focused conditional
+  case measured two adaptive probes versus three fixed probes, but it is a
+  deterministic local scripted measurement, not a live model benchmark.
 - No claim that model use reduced latency, tokens, or cost. Scripted model calls
   did not measure provider token or billing data.
 - No general exactly-once guarantee. The observed result is one exact bounded
@@ -96,9 +102,9 @@ artifacts and identity material outside the repository.
 
 ## Evidence index
 
-- [Provider evidence record](../evidence/v0.1.1/provider-proof.json)
-- [Hash-linked live corroboration](../evidence/v0.1.1/live-corroboration.json)
-- [Cleanup verification](../evidence/v0.1.1/cleanup-verification.json)
-- [Evidence bundle manifest](../evidence/v0.1.1/proof-to-permit.json)
-- [v0.1.1 evidence release](https://github.com/OCHOLA-EDDYPHIL/reconcile/releases/tag/v0.1.1)
+- [Provider evidence record](../evidence/v0.2.0/provider-proof.json)
+- [Hash-linked live corroboration](../evidence/v0.2.0/live-corroboration.json)
+- [Cleanup verification](../evidence/v0.2.0/cleanup-verification.json)
+- [Evidence bundle manifest](../evidence/v0.2.0/proof-to-permit.json)
+- [v0.2.0 evidence release](https://github.com/OCHOLA-EDDYPHIL/reconcile/releases/tag/v0.2.0)
 - [Static evidence viewer](https://reconcile-evidence-g6fwwrme5a-uc.a.run.app)

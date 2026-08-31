@@ -15,7 +15,7 @@ from typing import Any
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
-DEFAULT_EVIDENCE = ROOT / "evidence" / "v0.1.1" / "proof-to-permit.json"
+DEFAULT_EVIDENCE = ROOT / "evidence" / "v0.2.0" / "proof-to-permit.json"
 
 SOURCE_REVISION = "4d626bb67739ca51c7569124724ea5d7ac8f5c0e"
 IMAGE_DIGEST = "sha256:160471416779de06923cf5addb622206c3a5281b1858a2e2a111077218a423ef"
@@ -799,7 +799,7 @@ def _print_human(payload: dict[str, Any]) -> None:
         adaptive = provider["adaptive_recovery"]
         ambiguity = payload["live_corroboration"]["ambiguity_proof"]
         print("Reconcile - offline evidence validation")
-        print("Gemini guides evidence acquisition. Deterministic evidence decides.\n")
+        print("Gemini investigates. Deterministic evidence decides.\n")
         print("Recorded adaptive recovery")
         print(
             "  effects      -> "
@@ -812,7 +812,7 @@ def _print_human(payload: dict[str, Any]) -> None:
         print("  result       -> UNKNOWN / ESCALATED; no action permit")
         print("  histories    -> " + " / ".join(ambiguity["history_ids"]))
         print("  effects      -> 1 staged revision / 0 promotions / 0 records")
-        print("  cleanup      -> zero retained cloud resources")
+        print("  cleanup      -> zero retained operational resources")
         print("\nRESULT: PASS")
         return
     baseline = payload["scripted_baseline"]["policies"]
@@ -839,7 +839,7 @@ def _print_human(payload: dict[str, Any]) -> None:
     print("  evidence     -> 49 durable events; provider/corroboration hashes linked")
     print("  effects      -> 1 revision / 1 promotion / 1 Firestore record")
     print("  replay       -> rejected before provider contact; contact delta 0")
-    print("  cleanup      -> zero retained cloud resources")
+    print("  cleanup      -> zero retained operational resources")
     print("\nClaim boundary")
     print("  Safety on the frozen matrix: authorized")
     print("  Adaptive efficiency/superiority: not authorized")

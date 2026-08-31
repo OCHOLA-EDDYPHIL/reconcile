@@ -40,7 +40,7 @@ def test_versioned_evidence_projects_distinct_source_identities() -> None:
         snapshot["evidence_source_revision"] == provider["candidate"]["source_revision"]
     )
     assert snapshot["viewer_source_revision"] != snapshot["evidence_source_revision"]
-    assert snapshot["evidence_version"] == "v0.1.1"
+    assert snapshot["evidence_version"] == "v0.2.0"
     assert snapshot["schema_version"] == SNAPSHOT_VERSION
     assert snapshot["recovery"] == {
         "policy": adaptive["policy"],
@@ -112,7 +112,7 @@ def test_export_writes_one_closed_immutable_bundle(
 
 
 def test_export_rejects_changed_or_extra_evidence(tmp_path: Path) -> None:
-    copied = tmp_path / "v0.1.1"
+    copied = tmp_path / "v0.2.0"
     shutil.copytree(EVIDENCE_ROOT, copied)
     provider_path = copied / "provider-proof.json"
     provider = json.loads(provider_path.read_bytes())

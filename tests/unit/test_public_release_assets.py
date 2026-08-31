@@ -29,6 +29,8 @@ def test_release_package_copies_exact_current_evidence_and_diagrams(
     assert all(stat.S_IMODE(path.stat().st_mode) == 0o444 for path in assets)
     for source, name in release.ASSETS:
         assert (output / name).read_bytes() == source.read_bytes()
+    proof_name = f"reconcile-{release.RELEASE_VERSION}-proof.png"
+    assert (output / proof_name).read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
 
     source_manifest = json.loads(
         (output / release.SOURCE_MANIFEST_NAME).read_text(encoding="utf-8")

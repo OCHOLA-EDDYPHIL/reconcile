@@ -39,14 +39,14 @@ else:
     from validate_evidence import DEFAULT_EVIDENCE, EvidenceError, load_and_validate
 
 ROOT = Path(__file__).resolve().parents[1]
-CURRENT_VERSION = "v0.1.1"
+CURRENT_VERSION = "v0.2.0"
 BASELINE_VERSION = "v0.1.0"
 EVIDENCE_ROOT = ROOT / "evidence" / CURRENT_VERSION
 BASELINE_EVIDENCE_ROOT = ROOT / "evidence" / BASELINE_VERSION
 EVIDENCE_DIRECTORY = ROOT / "evidence"
 WORKFLOW = ROOT / ".github" / "workflows" / "public-verification.yml"
 PUBLIC_VIEWER = "https://reconcile-evidence-g6fwwrme5a-uc.a.run.app"
-CURRENT_RELEASE = "https://github.com/OCHOLA-EDDYPHIL/reconcile/releases/tag/v0.1.1"
+CURRENT_RELEASE = "https://github.com/OCHOLA-EDDYPHIL/reconcile/releases/tag/v0.2.0"
 DURABLE_EXTERNAL_LINKS = frozenset(
     {
         "https://docs.astral.sh/uv/",
@@ -68,6 +68,8 @@ REQUIRED = (
     ROOT / "docs" / "architecture.png",
     ROOT / "docs" / "deployment.dot",
     ROOT / "docs" / "deployment.png",
+    ROOT / "docs" / "evidence-proof.dot",
+    ROOT / "docs" / "evidence-proof.png",
     ROOT / "docs" / "claims-and-limitations.md",
     ROOT / "docs" / "hosted-runbook.md",
     WORKFLOW,
@@ -98,6 +100,10 @@ MARKDOWN = (
 DIAGRAMS = (
     (ROOT / "docs" / "architecture.dot", ROOT / "docs" / "architecture.png"),
     (ROOT / "docs" / "deployment.dot", ROOT / "docs" / "deployment.png"),
+)
+EVIDENCE_PROOF = (
+    ROOT / "docs" / "evidence-proof.dot",
+    ROOT / "docs" / "evidence-proof.png",
 )
 LINK = re.compile(r"!?(?:\[[^]]*\])\(([^)]+)\)")
 PRIVATE_PATH = re.compile(r"(?:/home/|/Users/|file://|[A-Za-z]:\\\\Users\\\\)")
@@ -413,7 +419,9 @@ def _check_workflow() -> int:
         "ruff check .",
         "python -m scripts.validate_evidence",
         "python scripts/check_public_package.py",
+        "python scripts/check_public_package.py --offline",
         "python scripts/build_public_release.py",
+        "python scripts/verify_publication.py",
         "sha256sum --check --strict",
         "terraform fmt -check -recursive infra",
         "python scripts/check_phase5_terraform_plans.py",
@@ -497,7 +505,7 @@ def _check_diagrams() -> str:
             prefix="reconcile-diagram-check-"
         ) as directory:
             temporary = Path(directory)
-            for source, export in DIAGRAMS:
+            for source, export in (*DIAGRAMS, EVIDENCE_PROOF):
                 rendered = temporary / export.name
                 subprocess.run(
                     [
@@ -517,12 +525,21 @@ def _check_diagrams() -> str:
                     f"stale diagram export: {export.relative_to(ROOT)}",
                 )
 
-    for _, export in DIAGRAMS:
+    for _, export in (*DIAGRAMS, EVIDENCE_PROOF):
         width, height = _png_dimensions(export)
         _require(
             width >= 1280 and height >= 720 and 1.6 <= width / height <= 1.8,
             f"diagram is not a readable widescreen export: {export.relative_to(ROOT)}",
         )
+    proof_source = EVIDENCE_PROOF[0].read_text(encoding="utf-8")
+    _require(CURRENT_VERSION in proof_source, "evidence proof version is stale")
+    for statement in (
+        "UNKNOWN\\n0 action permits",
+        "1 revision • 1 promotion\\n1 release record",
+        "Denied before provider contact",
+        "Zero retained operational resources",
+    ):
+        _require(statement in proof_source, "evidence proof claim surface drifted")
     return (
         "source/export parity checked"
         if executable is not None

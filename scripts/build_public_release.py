@@ -21,7 +21,7 @@ if __package__:
 else:
     from validate_evidence import EvidenceError, load_and_validate
 
-RELEASE_VERSION = "v0.1.1"
+RELEASE_VERSION = "v0.2.0"
 EVIDENCE_ROOT = ROOT / "evidence" / RELEASE_VERSION
 CHECKSUM_NAME = f"reconcile-{RELEASE_VERSION}-SHA256SUMS.txt"
 SOURCE_MANIFEST_NAME = f"reconcile-{RELEASE_VERSION}-SOURCE.json"
@@ -31,6 +31,10 @@ RELEASE_TAG = re.compile(r"^v[0-9]+[.][0-9]+[.][0-9]+$")
 ASSETS = (
     (ROOT / "docs" / "architecture.png", "architecture.png"),
     (ROOT / "docs" / "deployment.png", "deployment.png"),
+    (
+        ROOT / "docs" / "evidence-proof.png",
+        f"reconcile-{RELEASE_VERSION}-proof.png",
+    ),
     (EVIDENCE_ROOT / "cleanup-verification.json", "cleanup-verification.json"),
     (EVIDENCE_ROOT / "live-corroboration.json", "live-corroboration.json"),
     (EVIDENCE_ROOT / "proof-to-permit.json", "proof-to-permit.json"),

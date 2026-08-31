@@ -2,7 +2,7 @@ digraph ReconcileDeployment {
   graph [
     bgcolor="#07111f",
     fontname="Liberation Sans",
-    label=<<FONT POINT-SIZE="32"><B>Reconcile</B> — GOOGLE CLOUD TRUST TOPOLOGY</FONT><BR/><FONT POINT-SIZE="18">Operational authority is isolated from the static evidence viewer.</FONT>>,
+    label=<<FONT POINT-SIZE="34"><B>Reconcile</B> — GOOGLE CLOUD TRUST TOPOLOGY</FONT><BR/><FONT POINT-SIZE="20">Operator, deployment, runtime, and public evidence authority stay separate.</FONT>>,
     labelloc="t",
     labeljust="l",
     fontcolor="#f8fafc",
@@ -20,7 +20,7 @@ digraph ReconcileDeployment {
     shape=box,
     style="rounded,filled",
     fontname="Liberation Sans",
-    fontsize=18,
+    fontsize=20,
     fontcolor="#e2e8f0",
     color="#60a5fa",
     fillcolor="#13253d",
@@ -29,11 +29,22 @@ digraph ReconcileDeployment {
   ];
   edge [
     fontname="Liberation Sans",
-    fontsize=14,
+    fontsize=15,
     fontcolor="#cbd5e1",
     color="#64748b",
     arrowsize=0.80,
     penwidth=1.7
+  ];
+
+  operator [
+    label="OPERATOR IDENTITY\nInvoke the API only",
+    fillcolor="#172554",
+    color="#818cf8"
+  ];
+  deployer [
+    label="DEPLOYMENT IDENTITY\nProvision infrastructure only",
+    fillcolor="#3f2d14",
+    color="#fbbf24"
   ];
 
   subgraph cluster_core {
@@ -82,7 +93,7 @@ digraph ReconcileDeployment {
       color="#c4b5fd"
     ];
     authority [
-      label="FIRESTORE AUTHORITY\nRecovery state and permit claims",
+      label="FIRESTORE AUTHORITY\nRecovery state • permit claims\nEvent journal • delivery state",
       shape=cylinder,
       fillcolor="#082f49",
       color="#38bdf8"
@@ -99,8 +110,15 @@ digraph ReconcileDeployment {
       fillcolor="#3f2d14",
       color="#fbbf24"
     ];
+    observability [
+      label="CLOUD LOGGING + MONITORING\nStructured signals\nMetrics • alerts • dashboard",
+      shape=component,
+      fillcolor="#052e2b",
+      color="#34d399"
+    ];
 
-    { rank=same; authority; vertex; provider_state; custody; }
+    { rank=same; authority; vertex; provider_state; }
+    { rank=same; custody; observability; }
   }
 
   subgraph cluster_public {
@@ -129,9 +147,13 @@ digraph ReconcileDeployment {
     viewer -> public [label="read-only response", dir=back];
   }
 
+  { rank=same; operator; deployer; }
+  operator -> api [label="authenticated invocation", color="#818cf8"];
+  deployer -> api [label="provision only", style=dashed, color="#fbbf24"];
   controller -> vertex [label="advisory request", color="#a78bfa"];
   controller -> authority [label="authority state", color="#38bdf8"];
   controller -> provider_state [label="evidence reads", color="#38bdf8"];
+  controller -> observability [label="correlated signals", style=dashed, color="#34d399"];
   proxy -> provider_state [label="permitted write", color="#34d399"];
   custody -> versioned [label="sanitized export", style=dashed, color="#fbbf24"];
 }

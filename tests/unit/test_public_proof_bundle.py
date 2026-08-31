@@ -13,7 +13,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
 EVIDENCE_SOURCE = ROOT / "evidence" / "v0.1.0"
-CURRENT_EVIDENCE_SOURCE = ROOT / "evidence" / "v0.1.1"
+CURRENT_EVIDENCE_SOURCE = ROOT / "evidence" / "v0.2.0"
 VALIDATOR_PATH = ROOT / "scripts" / "validate_evidence.py"
 PACKAGE_CHECK_PATH = ROOT / "scripts" / "check_public_package.py"
 
@@ -71,16 +71,16 @@ def test_default_validator_selects_exact_current_evidence() -> None:
 
     expected = {
         "cleanup-verification.json": (
-            "59b4d5d2f1ef7be880f992d4696e375e74e7acc1c96752b7f97ea159545627d5"
+            "29bc3e4392d09ad825c7e3fb5d8483846e18a797f29c6e2e33b56455bcbdf9d4"
         ),
         "live-corroboration.json": (
-            "ee193f77e195c7d2b0801141770d42df9305e43662f297e20dbe9047f0e577ba"
+            "0f1496a8f08d3740c217e0d7282468b59e54bffd2e6ab3a22ae0bae040204c0a"
         ),
         "proof-to-permit.json": (
-            "63c46b683ade4b4071479b21f15382fa96eb5cc8ba6ed567965a6bd7b7172262"
+            "d758574af60df14394c03b2eb0fa469a3084cc1091e99bd024260a4e1d7ada00"
         ),
         "provider-proof.json": (
-            "4e72ffcb5bfb3a868abb7408699bf51b09c1461347683b115785cf708d5c2687"
+            "734571bcd1d60cc16de12adb59883f8c34e42b638b8e95e5b35366ae008fbb43"
         ),
     }
     for filename, digest in expected.items():

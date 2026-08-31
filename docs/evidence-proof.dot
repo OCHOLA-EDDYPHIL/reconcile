@@ -1,0 +1,91 @@
+digraph ReconcileEvidenceProof {
+  graph [
+    bgcolor="#07111f",
+    fontname="Liberation Sans",
+    label=<<FONT POINT-SIZE="34"><B>Reconcile v0.2.0</B> — RECORDED RECOVERY EVIDENCE</FONT><BR/><FONT POINT-SIZE="20">Validated, sanitized evidence. Not a live operation.</FONT>>,
+    labelloc="t",
+    labeljust="l",
+    fontcolor="#f8fafc",
+    pad=0.42,
+    rankdir=TB,
+    ranksep=0.74,
+    nodesep=0.42,
+    newrank=true,
+    ratio=fill,
+    size="14.3,8.0!",
+    splines=polyline
+  ];
+  node [
+    shape=box,
+    style="rounded,filled",
+    fontname="Liberation Sans",
+    fontsize=21,
+    fontcolor="#e2e8f0",
+    color="#475569",
+    fillcolor="#111c2e",
+    margin="0.22,0.16",
+    penwidth=1.8
+  ];
+  edge [
+    fontname="Liberation Sans",
+    fontsize=16,
+    fontcolor="#cbd5e1",
+    color="#64748b",
+    arrowsize=0.80,
+    penwidth=1.8
+  ];
+
+  fault [
+    label="LOST ACKNOWLEDGEMENT\nProvider outcome is uncertain",
+    shape=octagon,
+    fillcolor="#451a1a",
+    color="#fb7185"
+  ];
+  hold [
+    label="INITIAL DECISION\nUNKNOWN\n0 action permits",
+    fillcolor="#451a1a",
+    color="#fb7185"
+  ];
+  evidence [
+    label="CORRELATED PROVIDER EVIDENCE\nAdmitted by deterministic rules",
+    fillcolor="#082f49",
+    color="#38bdf8"
+  ];
+  recovery [
+    label="RECORDED RECOVERY\n1 revision • 1 promotion\n1 release record",
+    fillcolor="#052e2b",
+    color="#34d399"
+  ];
+  replay [
+    label="REPLAY\nDenied before provider contact\nContact delta 0",
+    fillcolor="#172554",
+    color="#818cf8"
+  ];
+  outage [
+    label="PARTIAL READ OUTAGE\nUNKNOWN / ESCALATED\n0 action permits",
+    fillcolor="#451a1a",
+    color="#fb7185"
+  ];
+  cleanup [
+    label="TEARDOWN VERIFIED\nZero retained operational resources",
+    fillcolor="#3f2d14",
+    color="#fbbf24"
+  ];
+  authority [
+    label="Gemini proposes bounded read-only probes\nDeterministic evidence controls action",
+    shape=note,
+    fillcolor="#2e1065",
+    color="#c4b5fd"
+  ];
+
+  { rank=same; fault; hold; evidence; recovery; }
+  { rank=same; replay; outage; cleanup; }
+
+  fault -> hold [label="response lost", color="#fb7185"];
+  hold -> evidence [label="observe only", color="#38bdf8"];
+  evidence -> recovery [label="exact continuation", color="#34d399"];
+  recovery -> replay [label="consumed authority", color="#818cf8"];
+  outage -> cleanup [label="no mutation", color="#fbbf24"];
+  replay -> cleanup [label="verified state", color="#fbbf24"];
+  authority -> evidence [label="advisory", style=dashed, color="#a78bfa"];
+}

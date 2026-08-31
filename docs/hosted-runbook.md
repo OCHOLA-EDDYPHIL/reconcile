@@ -8,10 +8,12 @@ evidence capture.
 
 Application contracts, the container, evidence rules, and the operator state
 machine are in the repository. Environment identity enters through one strict
-deployment profile outside the checkout. The profile contains exactly
-`schema_version`, `project_id`, `project_number`, `billing_account_id`, and
-`owner_account`; the operator derives service identities, audiences, buckets,
-and backend configuration from those values.
+deployment profile outside the checkout. A current v2 profile contains exactly
+`schema_version`, `project_id`, `project_number`, `billing_account_id`,
+`owner_account`, `operating_profile`, and `notification_channel_ids`. The
+operator derives service identities, audiences, buckets, and backend
+configuration from those values. Legacy v1 profiles remain valid only as
+disposable evidence profiles.
 
 The input must be canonical JSON in an absolute, owner-only `0600` regular file.
 `prepare-artifacts` rejects symlinks, placeholders, duplicate or extra fields,
@@ -37,6 +39,14 @@ or operator state.
 
 Never commit credentials or raw operator state. Use an operator-owned directory
 outside the checkout and an external secret store.
+
+The `evidence` profile forbids notification channels and keeps resources sized
+for a disposable acceptance run. The `production` profile requires at least one
+project-local notification channel. It enables data and service deletion
+protection, Firestore point-in-time recovery, object versioning and retention,
+and bounded multi-instance API and controller capacity. Production rejects
+acceptance-only fault injection. The deployment identity provisions resources;
+a separate operator identity has only authenticated API invocation authority.
 
 ## Sealed operator sequence
 
@@ -112,9 +122,9 @@ and independently inventory the scoped project afterward.
 ## Evidence references
 
 The recorded outcomes and evidence hashes are in the
-[provider evidence record](../evidence/v0.1.1/provider-proof.json). Teardown
+[provider evidence record](../evidence/v0.2.0/provider-proof.json). Teardown
 evidence and the zero-resource inventory are in
-[cleanup verification](../evidence/v0.1.1/cleanup-verification.json).
+[cleanup verification](../evidence/v0.2.0/cleanup-verification.json).
 
 For a new accepted revision, capture the fixed post-teardown inventory from the
 sealed manifest and export only after the capture returns `PASS`. A non-empty
@@ -134,7 +144,7 @@ uv run --no-sync python -m scripts.export_public_evidence \
   --state-protection-evidence <state-protection-record> \
   --bootstrap-teardown-evidence <bootstrap-teardown-record> \
   --post-teardown-inventory <private-output>/post-teardown-inventory.json \
-  --output <private-output>/public-evidence/v0.1.1
+  --output <private-output>/public-evidence/v0.2.0
 ```
 
 The exporter accepts one exact provider record, one exact hosted record, and
@@ -160,7 +170,7 @@ outside the checkout, and each output path must not exist before the command
 that creates it. Stage and build the exact validated projection as follows:
 
 ```bash
-PUBLIC_EVIDENCE=/absolute/path/outside-repo/public-evidence/v0.1.1
+PUBLIC_EVIDENCE=/absolute/path/outside-repo/public-evidence/v0.2.0
 VIEWER_BUNDLE=/absolute/path/outside-repo/viewer-bundle
 VIEWER_CONTEXT=/absolute/path/outside-repo/viewer-context
 
@@ -225,4 +235,18 @@ gcloud run services describe "$VIEWER_SERVICE" \
   --project "$VIEWER_PROJECT" \
   --region "$VIEWER_REGION" \
   --format='value(status.url)'
+```
+
+## Published evidence verification
+
+Build the tagged release from the exact tag before publication. After the
+release assets and retained viewer are public, verify their shared source and
+evidence identities, every downloaded byte, the viewer projection, security
+headers, read-only routes, and rejected mutation methods:
+
+```bash
+uv run --no-sync python scripts/verify_publication.py \
+  --release-directory <downloaded-release-directory> \
+  --version v0.2.0 \
+  --viewer-url https://reconcile-evidence-g6fwwrme5a-uc.a.run.app
 ```

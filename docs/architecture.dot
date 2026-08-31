@@ -2,7 +2,7 @@ digraph ReconcileArchitecture {
   graph [
     bgcolor="#07111f",
     fontname="Liberation Sans",
-    label=<<FONT POINT-SIZE="32"><B>Reconcile</B> — RECOVERY AUTHORITY</FONT><BR/><FONT POINT-SIZE="18">Advisory investigation proposes evidence. Deterministic verification controls action.</FONT>>,
+    label=<<FONT POINT-SIZE="34"><B>Reconcile</B> — RECOVERY AUTHORITY</FONT><BR/><FONT POINT-SIZE="20">Advisory investigation proposes evidence. Deterministic verification controls action.</FONT>>,
     labelloc="t",
     labeljust="l",
     fontcolor="#f8fafc",
@@ -19,7 +19,7 @@ digraph ReconcileArchitecture {
     shape=box,
     style="rounded,filled",
     fontname="Liberation Sans",
-    fontsize=18,
+    fontsize=21,
     fontcolor="#e2e8f0",
     color="#475569",
     fillcolor="#111c2e",
@@ -28,7 +28,7 @@ digraph ReconcileArchitecture {
   ];
   edge [
     fontname="Liberation Sans",
-    fontsize=14,
+    fontsize=16,
     fontcolor="#cbd5e1",
     color="#64748b",
     arrowsize=0.82,
@@ -56,18 +56,18 @@ digraph ReconcileArchitecture {
     fillcolor="#052e2b",
     color="#34d399"
   ];
-  ambiguity [
-    label="AMBIGUITY WITNESS\nCompatible histories\nNo mutation authority",
+  observe [
+    label="OBSERVE\nAllowlisted read only\nNo mutation permit",
+    fillcolor="#082f49",
+    color="#38bdf8"
+  ];
+  escalate [
+    label="ESCALATE\nAmbiguity witness\nNo mutation authority",
     fillcolor="#451a1a",
     color="#fb7185"
   ];
-  certificate [
-    label="EFFECT CERTIFICATE\nExact established effect",
-    fillcolor="#052e2b",
-    color="#34d399"
-  ];
   permit [
-    label="EXACT PERMIT\nOne semantic action\nExpiring and single-use",
+    label="RETRY OR CONTINUE\nCertificate-bound permit\nExact • expiring • single-use",
     fillcolor="#052e2b",
     color="#34d399"
   ];
@@ -88,17 +88,18 @@ digraph ReconcileArchitecture {
   ];
 
   { rank=same; fault; advisory; evidence; verifier; }
-  { rank=same; ambiguity; certificate; permit; dispatch; }
+  { rank=same; observe; escalate; permit; dispatch; }
   { rank=same; record; viewer; }
 
   fault -> advisory [label="investigate", color="#fbbf24"];
   advisory -> evidence [label="probe proposal", color="#a78bfa"];
   evidence -> verifier [label="admitted facts", color="#38bdf8"];
-  verifier -> ambiguity [label="proof incomplete", color="#fb7185"];
-  verifier -> certificate [label="effect established", color="#34d399"];
-  certificate -> permit [label="narrow authority", color="#34d399"];
+  verifier -> observe [label="more evidence", color="#38bdf8"];
+  observe -> evidence [label="bounded read", color="#38bdf8"];
+  verifier -> escalate [label="unsafe or unresolved", color="#fb7185"];
+  verifier -> permit [label="safe mutating step", color="#34d399"];
   permit -> dispatch [label="atomic claim", color="#34d399"];
-  ambiguity -> record [label="record", color="#fbbf24"];
+  escalate -> record [label="record", color="#fbbf24"];
   dispatch -> record [label="record", color="#fbbf24"];
   record -> viewer [label="static export", style=dashed, color="#94a3b8"];
 }
