@@ -6281,6 +6281,135 @@ def _matches_approved_before(
     return False
 
 
+def _normalize_observed_provider_resource(
+    actual: JsonValue,
+    expected: JsonValue,
+    *,
+    resource_type: str,
+) -> JsonValue:
+    if not isinstance(actual, dict) or not isinstance(expected, dict):
+        return actual
+    normalized = json.loads(_canonical_value_bytes(actual))
+    if not isinstance(normalized, dict):  # pragma: no cover - canonical object above
+        return actual
+
+    if resource_type == "google_monitoring_alert_policy":
+        conditions = normalized.get("conditions")
+        expected_conditions = expected.get("conditions")
+        if (
+            isinstance(conditions, list)
+            and isinstance(expected_conditions, list)
+            and len(conditions) == len(expected_conditions)
+        ):
+            for condition, expected_condition in zip(
+                conditions, expected_conditions, strict=True
+            ):
+                if not isinstance(condition, dict) or not isinstance(
+                    expected_condition, dict
+                ):
+                    continue
+                thresholds = condition.get("condition_threshold")
+                expected_thresholds = expected_condition.get("condition_threshold")
+                if (
+                    not isinstance(thresholds, list)
+                    or not isinstance(expected_thresholds, list)
+                    or len(thresholds) != len(expected_thresholds)
+                ):
+                    continue
+                for threshold, expected_threshold in zip(
+                    thresholds, expected_thresholds, strict=True
+                ):
+                    if not isinstance(threshold, dict) or not isinstance(
+                        expected_threshold, dict
+                    ):
+                        continue
+                    triggers = threshold.get("trigger")
+                    expected_triggers = expected_threshold.get("trigger")
+                    if (
+                        not isinstance(triggers, list)
+                        or not isinstance(expected_triggers, list)
+                        or len(triggers) != len(expected_triggers)
+                    ):
+                        continue
+                    for trigger, expected_trigger in zip(
+                        triggers, expected_triggers, strict=True
+                    ):
+                        if (
+                            isinstance(trigger, dict)
+                            and isinstance(expected_trigger, dict)
+                            and type(trigger.get("percent")) is int
+                            and trigger.get("percent") == 0
+                            and "percent" in expected_trigger
+                            and expected_trigger.get("percent") is None
+                        ):
+                            trigger["percent"] = None
+
+    if resource_type == "google_monitoring_dashboard":
+        dashboard_json = normalized.get("dashboard_json")
+        expected_dashboard_json = expected.get("dashboard_json")
+
+        def reject_constant(_: str) -> None:
+            raise ValueError("non-finite JSON number")
+
+        if isinstance(dashboard_json, str) and isinstance(expected_dashboard_json, str):
+            try:
+                dashboard = json.loads(
+                    dashboard_json,
+                    object_pairs_hook=_reject_duplicate_keys,
+                    parse_constant=reject_constant,
+                )
+                expected_dashboard = json.loads(
+                    expected_dashboard_json,
+                    object_pairs_hook=_reject_duplicate_keys,
+                    parse_constant=reject_constant,
+                )
+            except (OperatorError, RecursionError, TypeError, UnicodeError, ValueError):
+                dashboard = None
+                expected_dashboard = None
+            if isinstance(dashboard, dict) and isinstance(expected_dashboard, dict):
+                for key in ("name", "etag"):
+                    server_value = dashboard.get(key, _MISSING)
+                    if (
+                        key not in expected_dashboard
+                        and isinstance(server_value, str)
+                        and server_value
+                    ):
+                        dashboard.pop(key)
+
+                for document in (dashboard, expected_dashboard):
+                    mosaic = document.get("mosaicLayout")
+                    tiles = mosaic.get("tiles") if isinstance(mosaic, dict) else None
+                    if not isinstance(tiles, list):
+                        continue
+                    for tile in tiles:
+                        if not isinstance(tile, dict):
+                            continue
+                        for coordinate in ("xPos", "yPos"):
+                            tile.setdefault(coordinate, 0)
+
+                if _canonical_value_bytes(dashboard) == _canonical_value_bytes(
+                    expected_dashboard
+                ):
+                    normalized["dashboard_json"] = expected_dashboard_json
+
+    return normalized  # type: ignore[return-value]
+
+
+def _matches_approved_provider_resource(
+    actual: JsonValue,
+    expected: JsonValue,
+    unknown: JsonValue | None,
+    *,
+    resource_type: str,
+) -> bool:
+    normalized = _normalize_observed_provider_resource(
+        actual,
+        expected,
+        resource_type=resource_type,
+    )
+    return _matches_approved_before(normalized, expected, unknown)
+
+
 def _matches_approved_teardown_resource(
     actual: JsonValue,
     expected: JsonValue,
@@ -6331,7 +6460,11 @@ def _normalize_observed_teardown_resource(
 ) -> JsonValue:
     if not isinstance(actual, dict) or not isinstance(expected, dict):
         return actual
-    normalized = json.loads(_canonical_value_bytes(actual))
+    normalized = _normalize_observed_provider_resource(
+        actual,
+        expected,
+        resource_type=resource_type,
+    )
     if not isinstance(normalized, dict):  # pragma: no cover - canonical object above
         return actual
 
@@ -6629,7 +6762,11 @@ def _verify_runtime_update_plan(
             if reprovisioned
             else (
                 ("update",)
-                if item.resource_type == "google_cloud_run_v2_service"
+                if item.resource_type
+                in {
+                    "google_cloud_run_v2_service",
+                    "google_monitoring_dashboard",
+                }
                 else ("no-op",)
             )
         )
@@ -6647,10 +6784,11 @@ def _verify_runtime_update_plan(
             or (not reprovisioned and live_after_unknown not in (None, {}))
             or (
                 not iam_resource
-                and not _matches_approved_before(
+                and not _matches_approved_provider_resource(
                     live_change.get("after"),
                     approved_change.get("after"),
                     approved_change.get("after_unknown"),
+                    resource_type=item.resource_type,
                 )
             )
             or (
@@ -6658,18 +6796,25 @@ def _verify_runtime_update_plan(
                 and _canonical_value_bytes(live_change.get("before"))
                 != _canonical_value_bytes(live_change.get("after"))
             )
+            or (
+                item.resource_type == "google_monitoring_dashboard"
+                and not _matches_approved_provider_resource(
+                    live_change.get("before"),
+                    live_change.get("after"),
+                    None,
+                    resource_type=item.resource_type,
+                )
+            )
         ):
             raise OperatorError("EXECUTION_PLAN_DRIFT")
         if item.resource_type == "google_cloud_run_v2_service":
             if not reprovisioned:
                 service_updates += 1
             continue
-        if not iam_resource and not reprovisioned:
-            raise OperatorError("EXECUTION_PLAN_DRIFT")
-        approved_iam = approved_iam_by_address.get(item.address)
-        live_iam = live_iam_by_address.get(item.address)
         if not iam_resource:
             continue
+        approved_iam = approved_iam_by_address.get(item.address)
+        live_iam = live_iam_by_address.get(item.address)
         if approved_iam is None or live_iam is None:  # pragma: no cover - mapped above
             raise OperatorError("EXECUTION_PLAN_DRIFT")
         expected_authority_unknown = (
