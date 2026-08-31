@@ -25,6 +25,7 @@ from reconcile.contracts.base import (
 
 FIRESTORE_CAS_DOCUMENT_VERSION = "reconcile/firestore-cas-document/v1"
 FIRESTORE_RUNTIME_DATABASE = "reconcile-p5-runtime"
+FIRESTORE_SANDBOX_DATABASE = "reconcile-p5-sandbox"
 FIRESTORE_CAS_PAYLOAD_BYTE_CEILING = 900_000
 FIRESTORE_CAS_TIMEOUT_SECONDS = 5.0
 FIRESTORE_CAS_AMBIGUOUS_READ_CONCURRENCY = 32
@@ -321,13 +322,16 @@ class AsyncFirestoreCasClientPort(Protocol):
 type FirestoreCasClientFactory = Callable[[], AsyncFirestoreCasClientPort]
 
 
-def _default_client_factory(project_id: str) -> FirestoreCasClientFactory:
+def _default_client_factory(
+    project_id: str,
+    database_id: str,
+) -> FirestoreCasClientFactory:
     def create() -> AsyncFirestoreCasClientPort:
         from google.cloud import firestore_v1
 
         return firestore_v1.AsyncClient(
             project=project_id,
-            database=FIRESTORE_RUNTIME_DATABASE,
+            database=database_id,
         )
 
     return create
@@ -369,7 +373,7 @@ class _AmbiguousWrite(RuntimeError):
 
 
 class GoogleFirestoreCasStore:
-    """Single-document CAS operations sealed to the hosted runtime database."""
+    """Single-document CAS operations sealed to an approved hosted database."""
 
     def __init__(
         self,
@@ -383,13 +387,16 @@ class GoogleFirestoreCasStore:
             or _PROJECT_PATTERN.fullmatch(project_id) is None
         ):
             raise ValueError("Firestore CAS project identifier is invalid")
-        if database_id != FIRESTORE_RUNTIME_DATABASE:
-            raise ValueError("Firestore CAS runtime database is not approved")
+        if database_id not in {FIRESTORE_RUNTIME_DATABASE, FIRESTORE_SANDBOX_DATABASE}:
+            raise ValueError("Firestore CAS database is not approved")
         if client_factory is not None and not callable(client_factory):
             raise TypeError("Firestore CAS client factory must be callable")
         self._project_id = project_id
         self._database_id = database_id
-        self._client_factory = client_factory or _default_client_factory(project_id)
+        self._client_factory = client_factory or _default_client_factory(
+            project_id,
+            database_id,
+        )
         self._client_instance: AsyncFirestoreCasClientPort | None = None
         self._client_lock = asyncio.Lock()
 
@@ -888,6 +895,7 @@ __all__ = [
     "FIRESTORE_CAS_PAYLOAD_BYTE_CEILING",
     "FIRESTORE_CAS_TIMEOUT_SECONDS",
     "FIRESTORE_RUNTIME_DATABASE",
+    "FIRESTORE_SANDBOX_DATABASE",
     "AsyncFirestoreCasClientPort",
     "FirestoreCasClientFactory",
     "FirestoreCasCollection",

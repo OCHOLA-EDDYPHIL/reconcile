@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import io
 import json
 from datetime import UTC, datetime
@@ -10,8 +9,6 @@ from pydantic import ValidationError
 
 from reconcile.hosted.config import Component
 from reconcile.hosted.observability import (
-    LogOnlyOperationalEventOutbox,
-    OperationalEventDeliveryError,
     OperationalSignal,
     component_observer,
     emit_operational_event,
@@ -113,22 +110,3 @@ def test_default_sink_uses_stable_cloud_logging_insert_identity(
     assert payload["event_id"] == event.event_id
     assert payload["logging.googleapis.com/insertId"] == event.event_id
     assert payload["timestamp"] == "2026-08-31T12:00:00Z"
-
-
-def test_log_only_delivery_is_explicit_and_propagates_sink_failure() -> None:
-    event = emit_operational_event(
-        signal=OperationalSignal.WORKER_FAILURE,
-        component=Component.SANDBOX,
-        correlation_id="request-123",
-        occurred_at=_NOW,
-        sink=lambda _event: None,
-    )
-    outbox = LogOnlyOperationalEventOutbox()
-
-    with pytest.raises(OperationalEventDeliveryError):
-        asyncio.run(
-            outbox.deliver(
-                event,
-                sink=lambda _event: (_ for _ in ()).throw(OSError("private")),
-            )
-        )

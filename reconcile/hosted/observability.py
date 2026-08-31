@@ -251,24 +251,6 @@ class InMemoryOperationalEventOutbox:
             return True
 
 
-class LogOnlyOperationalEventOutbox:
-    """Emit stable structured logs without claiming Firestore write authority."""
-
-    async def deliver(
-        self,
-        event: OperationalEvent,
-        *,
-        sink: OperationalEventSink,
-    ) -> bool:
-        if type(event) is not OperationalEvent or not callable(sink):
-            raise TypeError("operational event delivery inputs must be exact")
-        try:
-            sink(event)
-        except Exception as error:
-            raise OperationalEventDeliveryError from error
-        return True
-
-
 def component_publisher(
     component: Component,
     outbox: OperationalEventOutbox,
@@ -334,7 +316,6 @@ def component_publisher(
 __all__ = [
     "OPERATIONAL_EVENT_VERSION",
     "InMemoryOperationalEventOutbox",
-    "LogOnlyOperationalEventOutbox",
     "OperationalEvent",
     "OperationalEventDeliveryError",
     "OperationalEventOutbox",

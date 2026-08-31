@@ -74,7 +74,6 @@ from reconcile.hosted.firestore_scenarios import (
     FirestoreScenarioOperationAuthority,
     FirestoreScenarioStore,
 )
-from reconcile.hosted.observability import LogOnlyOperationalEventOutbox
 from reconcile.hosted.operations import (
     DurableRuntimeReportLoader,
     FirestoreHostedOperationScopeAuthorizer,
@@ -1005,11 +1004,15 @@ def create_runtime_component_app(
         raise TypeError("hosted runtime requires exact configuration")
     candidate = build_hosted_candidate(config)
     cas = _cas(config)
-    operational_event_outbox = (
-        LogOnlyOperationalEventOutbox()
+    operational_event_cas = (
+        GoogleFirestoreCasStore(
+            project_id=config.project_id,
+            database_id=_required(config.target_database, "target database"),
+        )
         if config.component is Component.SANDBOX
-        else FirestoreOperationalEventOutbox(cas)
+        else cas
     )
+    operational_event_outbox = FirestoreOperationalEventOutbox(operational_event_cas)
     scenario_store = FirestoreScenarioStore(cas, candidate)
     selected_transport = transport or HostedHttpTransport(
         request_timeout_seconds=(

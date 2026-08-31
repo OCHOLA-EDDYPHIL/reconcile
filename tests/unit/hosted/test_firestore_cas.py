@@ -21,6 +21,7 @@ from reconcile.hosted.firestore_cas import (
     FIRESTORE_CAS_PAYLOAD_BYTE_CEILING,
     FIRESTORE_CAS_TIMEOUT_SECONDS,
     FIRESTORE_RUNTIME_DATABASE,
+    FIRESTORE_SANDBOX_DATABASE,
     FirestoreCasCollection,
     FirestoreCasConflict,
     FirestoreCasCorruptDocument,
@@ -320,6 +321,12 @@ def test_configuration_is_exact_and_missing_read_is_lazy_and_strong() -> None:
         client = _Client()
         store, factory = _store(client)
         assert store.database_id == FIRESTORE_RUNTIME_DATABASE
+        sandbox_store = GoogleFirestoreCasStore(
+            project_id=_PROJECT,
+            database_id=FIRESTORE_SANDBOX_DATABASE,
+            client_factory=factory,
+        )
+        assert sandbox_store.database_id == FIRESTORE_SANDBOX_DATABASE
         assert factory.calls == 0
 
         with pytest.raises(ValueError):
@@ -371,6 +378,13 @@ def test_default_factory_binds_the_named_database_only_when_first_used(
         await store.read(FirestoreCasCollection.RUNTIME, _LOGICAL_ID)
 
         assert calls == [(_PROJECT, FIRESTORE_RUNTIME_DATABASE)]
+
+        sandbox_store = GoogleFirestoreCasStore(
+            project_id=_PROJECT,
+            database_id=FIRESTORE_SANDBOX_DATABASE,
+        )
+        await sandbox_store.read(FirestoreCasCollection.OPERATIONAL_EVENT, _LOGICAL_ID)
+        assert calls[-1] == (_PROJECT, FIRESTORE_SANDBOX_DATABASE)
 
     asyncio.run(scenario())
 
