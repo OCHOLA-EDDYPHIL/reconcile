@@ -191,13 +191,13 @@ def _write_oci_archive(
                 (f"{site_packages}/{relative}", "directory", None)
                 for relative in project_directories
             ),
-            (f"{site_packages}/reconcile-0.1.1.dist-info", "directory", None),
+            (f"{site_packages}/reconcile-0.2.0.dist-info", "directory", None),
             *(
                 (f"{site_packages}/{relative}", "file", payload)
                 for relative, payload in project_entries
             ),
             (
-                f"{site_packages}/reconcile-0.1.1.dist-info/RECORD",
+                f"{site_packages}/reconcile-0.2.0.dist-info/RECORD",
                 "file",
                 record_payload,
             ),
@@ -600,7 +600,7 @@ def _write_project_dependency_files(
         project_dependency_paths,
     )
     root.chmod(0o700)
-    metadata = root / "reconcile-0.1.1.dist-info"
+    metadata = root / "reconcile-0.2.0.dist-info"
     metadata.mkdir(mode=0o700)
     project_directories: set[Path] = set()
     for relative, payload in project_entries:

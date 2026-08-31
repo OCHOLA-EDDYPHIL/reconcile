@@ -12,6 +12,7 @@ from pathlib import Path
 import pytest
 
 from reconcile import phase5_operator as operator
+from reconcile import public_evidence
 from reconcile.contracts import canonical_json_bytes
 from reconcile.deployment_profile import DeploymentProfile, resolve_deployment_identity
 from reconcile.phase5_hosted_acceptance import (
@@ -23,6 +24,7 @@ from reconcile.public_evidence import (
     PUBLIC_EVIDENCE_FILES,
     PostTeardownInventoryObservation,
     PublicEvidenceError,
+    canonical_post_teardown_capture,
     capture_post_teardown_inventory,
     export_public_evidence,
 )
@@ -107,6 +109,134 @@ def _empty_inventory_runner(command: tuple[str, ...]) -> object:
     return subprocess.CompletedProcess(list(command), 0, payload, b"")
 
 
+@pytest.mark.parametrize(
+    ("kind", "resources", "expected"),
+    (
+        (
+            "phase5-log-metrics",
+            [
+                {"name": "reconcile_p5_failed_run"},
+                {"name": "unrelated_metric"},
+            ],
+            ("reconcile_p5_failed_run",),
+        ),
+        (
+            "phase5-alert-policies",
+            [
+                {
+                    "displayName": "Reconcile failed-run",
+                    "name": "projects/example/alertPolicies/1",
+                },
+                {
+                    "displayName": "Unrelated policy",
+                    "name": "projects/example/alertPolicies/2",
+                },
+            ],
+            ("projects/example/alertPolicies/1",),
+        ),
+        (
+            "phase5-dashboards",
+            [
+                {
+                    "displayName": "Reconcile Phase 5 operational signals",
+                    "name": "projects/example/dashboards/1",
+                },
+                {
+                    "displayName": "Unrelated dashboard",
+                    "name": "projects/example/dashboards/2",
+                },
+            ],
+            ("projects/example/dashboards/1",),
+        ),
+        (
+            "phase5-project-org-policies",
+            [
+                {
+                    "name": (
+                        "projects/123456789012/policies/"
+                        "iam.automaticIamGrantsForDefaultServiceAccounts"
+                    )
+                },
+                {"name": "projects/123456789012/policies/other.constraint"},
+            ],
+            (
+                "projects/123456789012/policies/"
+                "iam.automaticIamGrantsForDefaultServiceAccounts",
+            ),
+        ),
+    ),
+)
+def test_post_teardown_inventory_matches_operational_resources_only(
+    kind: str,
+    resources: list[dict[str, str]],
+    expected: tuple[str, ...],
+) -> None:
+    assert (
+        public_evidence._matched_resource_ids(
+            kind,
+            resources,
+            project_id="reconcile-proof-123456",
+        )
+        == expected
+    )
+
+
+def test_post_teardown_capture_versions_are_strict_and_compatible() -> None:
+    legacy_inventory = {
+        "artifact_repositories": 0,
+        "cloud_run_jobs": 0,
+        "cloud_run_services": 0,
+        "custom_roles": 0,
+        "firestore_databases": 0,
+        "phase5_budgets": 0,
+        "phase5_named_service_accounts": 0,
+        "phase5_project_iam_members": 0,
+        "storage_buckets": 0,
+    }
+    legacy = {
+        "schema_version": "reconcile/post-teardown-capture/v1",
+        "status": "PASS",
+        "source_revision": "a" * 40,
+        "candidate_sha256": "b" * 64,
+        "captured_at": "2026-08-31T12:00:00Z",
+        "teardown_actions": {
+            "runtime_sha256": "c" * 64,
+            "foundation_sha256": "d" * 64,
+            "state_protection_sha256": "e" * 64,
+            "bootstrap_sha256": "f" * 64,
+        },
+        "inventory": legacy_inventory,
+        "observations_sha256": "1" * 64,
+    }
+    expected_legacy = json.dumps(
+        legacy,
+        allow_nan=False,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode()
+
+    assert canonical_post_teardown_capture(legacy) == expected_legacy
+
+    current = json.loads(expected_legacy)
+    current["schema_version"] = "reconcile/post-teardown-capture/v2"
+    current["inventory"].update(
+        {
+            "phase5_alert_policies": 0,
+            "phase5_dashboards": 0,
+            "phase5_log_metrics": 0,
+            "phase5_project_org_policies": 0,
+        }
+    )
+    current_capture = json.loads(canonical_post_teardown_capture(current))
+    assert current_capture["inventory"] == current["inventory"]
+
+    incomplete = json.loads(expected_legacy)
+    incomplete["schema_version"] = "reconcile/post-teardown-capture/v2"
+    with pytest.raises(PublicEvidenceError, match="POST_TEARDOWN_CAPTURE_INVALID"):
+        canonical_post_teardown_capture(incomplete)
+
+
 @pytest.fixture(scope="module")
 def accepted_inputs(
     tmp_path_factory: pytest.TempPathFactory,
@@ -181,7 +311,7 @@ def test_export_projects_positive_and_ambiguity_proofs_without_private_identity(
 ) -> None:
     provider_path = accepted_inputs.provider
     hosted_path = accepted_inputs.hosted
-    output = tmp_path / "v0.1.1"
+    output = tmp_path / "v0.2.0"
 
     export_public_evidence(
         provider_acceptance=provider_path,
@@ -198,6 +328,23 @@ def test_export_projects_positive_and_ambiguity_proofs_without_private_identity(
     assert {path.name for path in output.iterdir()} == PUBLIC_EVIDENCE_FILES
     assert stat.S_IMODE(output.stat().st_mode) == 0o700
     assert all(stat.S_IMODE(path.stat().st_mode) == 0o400 for path in output.iterdir())
+    cleanup = payload["cleanup_verification"]
+    assert cleanup["schema_version"] == "reconcile/cleanup-verification/v3"
+    assert cleanup["inventory"] == {
+        "artifact_repositories": 0,
+        "cloud_run_jobs": 0,
+        "cloud_run_services": 0,
+        "custom_roles": 0,
+        "firestore_databases": 0,
+        "phase5_alert_policies": 0,
+        "phase5_budgets": 0,
+        "phase5_dashboards": 0,
+        "phase5_log_metrics": 0,
+        "phase5_named_service_accounts": 0,
+        "phase5_project_iam_members": 0,
+        "phase5_project_org_policies": 0,
+        "storage_buckets": 0,
+    }
     adaptive = payload["provider_proof"]["adaptive_recovery"]
     assert adaptive["effects"] == {
         "revisions": 1,
@@ -310,7 +457,7 @@ def test_export_rejects_noncanonical_capture_and_existing_output(
             output=tmp_path / "rejected",
         )
 
-    output = tmp_path / "v0.1.1"
+    output = tmp_path / "v0.2.0"
     export_public_evidence(
         provider_acceptance=provider_path,
         hosted_acceptance=hosted_path,
@@ -340,7 +487,7 @@ def test_export_cli_accepts_only_explicit_absolute_inputs(
 ) -> None:
     provider_path = accepted_inputs.provider
     hosted_path = accepted_inputs.hosted
-    output = tmp_path / "v0.1.1"
+    output = tmp_path / "v0.2.0"
 
     completed = subprocess.run(
         [
@@ -404,6 +551,13 @@ def test_capture_cli_reports_empty_inventory_as_pass(
         accepted_inputs.inventory.read_bytes(),
         strict=True,
     )
+    assert observation.schema_version == "reconcile/post-teardown-inventory/v2"
+    assert tuple(query.kind for query in observation.queries[-4:]) == (
+        "phase5-log-metrics",
+        "phase5-alert-policies",
+        "phase5-dashboards",
+        "phase5-project-org-policies",
+    )
     monkeypatch.setattr(
         capture_inventory_cli,
         "capture_post_teardown_inventory_from_manifest",
@@ -424,6 +578,7 @@ def test_capture_cli_reports_empty_inventory_as_pass(
     assert capture_inventory_cli.main() == 0
     summary = json.loads(capsys.readouterr().out)
     assert summary["status"] == "PASS"
+    assert summary["query_count"] == 13
     assert set(summary["matched_resource_counts"].values()) == {0}
 
 

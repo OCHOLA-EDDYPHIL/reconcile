@@ -11,6 +11,7 @@ import subprocess
 import tarfile
 import tempfile
 import time
+import tomllib
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -26,6 +27,7 @@ _SOURCE_REVISION = re.compile(r"[0-9a-f]{40}")
 _IMAGE_DIGEST = re.compile(r"sha256:[0-9a-f]{64}")
 _ARCHIVE_SHA256 = re.compile(r"[0-9a-f]{64}")
 _MAX_ARTIFACT_BYTES = 4 * 1_073_741_824
+_PACKAGE_VERSION = "0.2.0"
 _PYTHON_MANIFEST = (
     "python:3.12.13-slim-bookworm@"
     "sha256:6e13e65c55e33adf203d77ee371cf8bf5d81bd4902ef07565721f46bf44917af"
@@ -146,6 +148,27 @@ def verify_static_contract(source_root: Path | None = None) -> None:
     root = _ROOT if source_root is None else source_root
     dockerfile = _read_exact(root / "Dockerfile")
     dockerignore = _read_exact(root / ".dockerignore", 4_096)
+    try:
+        project = tomllib.loads(_read_exact(root / "pyproject.toml"))["project"]
+        locked_packages = tomllib.loads(_read_exact(root / "uv.lock"))["package"]
+    except (KeyError, TypeError, tomllib.TOMLDecodeError):
+        _fail("package metadata is invalid")
+    if not isinstance(locked_packages, list):
+        _fail("package metadata is invalid")
+    locked_project = [
+        package
+        for package in locked_packages
+        if isinstance(package, dict) and package.get("name") == "reconcile"
+    ]
+    if (
+        not isinstance(project, dict)
+        or project.get("name") != "reconcile"
+        or project.get("version") != _PACKAGE_VERSION
+        or len(locked_project) != 1
+        or locked_project[0].get("version") != _PACKAGE_VERSION
+        or locked_project[0].get("source") != {"editable": "."}
+    ):
+        _fail("package version is not consistently locked")
     if tuple(dockerignore.splitlines()) != _DOCKERIGNORE_LINES:
         _fail(".dockerignore is not the closed build-context allowlist")
     required = (
@@ -154,10 +177,10 @@ def verify_static_contract(source_root: Path | None = None) -> None:
         "COPY pyproject.toml uv.lock ./",
         "COPY reconcile ./reconcile",
         "uv sync --locked --no-dev --no-editable",
-        "reconcile-0.1.1.dist-info",
+        f"reconcile-{_PACKAGE_VERSION}.dist-info",
         'cache="$metadata/uv_cache.json"',
         'rm "$cache"',
-        'org.opencontainers.image.version="0.1.1"',
+        f'org.opencontainers.image.version="{_PACKAGE_VERSION}"',
         "COPY --from=builder --chown=65532:65532 /opt/reconcile /opt/reconcile",
         "USER 65532:65532",
         'ENTRYPOINT ["/opt/reconcile/bin/python", "-m", "reconcile.hosted"]',

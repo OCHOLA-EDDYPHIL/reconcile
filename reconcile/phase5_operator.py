@@ -145,7 +145,7 @@ _OUTPUT_BUDGET_MIGRATION_TERRAFORM_PATHS = frozenset(
         "infra/environments/dev/runtime/locals.tf",
     }
 )
-_PROJECT_DEPENDENCY_RECORD_PATH = "reconcile-0.1.1.dist-info/RECORD"
+_PROJECT_DEPENDENCY_RECORD_PATH = "reconcile-0.2.0.dist-info/RECORD"
 
 _EXECUTION_ROOT_FILES = frozenset(
     {".dockerignore", "Dockerfile", "pyproject.toml", "uv.lock"}
