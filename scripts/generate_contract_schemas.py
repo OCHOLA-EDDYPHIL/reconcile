@@ -45,6 +45,7 @@ from reconcile.contracts import (
     RecoveryRunEvent,
     RecoveryRunRequest,
     RecoveryRunSnapshot,
+    RecoveryUtilityReport,
     ScenarioCleanupRequest,
     ScenarioCleanupResult,
     ScenarioFaultTrace,
@@ -103,6 +104,7 @@ PUBLIC_SCHEMAS: dict[str, type[BaseModel]] = {
 }
 V2_PUBLIC_SCHEMAS: dict[str, type[BaseModel]] = {
     "recovery-action-scope": RecoveryActionScope,
+    "recovery-utility-report": RecoveryUtilityReport,
     "scenario-operational-status": ScenarioOperationalStatus,
 }
 

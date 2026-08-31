@@ -148,6 +148,27 @@ class RecoveryQualificationProviderCounters:
 
         return self.stage_calls + self.promote_calls + self.record_calls
 
+    @property
+    def provider_read_contact_count(self) -> int:
+        """Return every provider read, including inventory and precondition reads."""
+
+        return sum(
+            (
+                self.cloud_service_reads,
+                self.cloud_revision_reads,
+                self.cloud_revision_lists,
+                self.cloud_operation_reads,
+                self.cloud_health_reads,
+                self.release_reads,
+            )
+        )
+
+    @property
+    def provider_contact_count(self) -> int:
+        """Return all workflow-side provider reads and mutations."""
+
+        return self.outbound_call_count + self.provider_read_contact_count
+
     def provider_mutations(self) -> RecoveryQualificationProviderMutations:
         """Project the live counters into the public qualification contract."""
 

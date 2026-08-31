@@ -161,8 +161,92 @@ RECOVERY_SCENARIO_VERSION = "release-chain-scenario-v1"
 RECOVERY_AUTHORITY_POLICY_VERSION = "recovery-authority-v1"
 RECOVERY_CLASSIFICATION_POLICY_VERSION = "recovery-classification-v1"
 RECOVERY_ACTION_POLICY_VERSION = "recovery-action-v1"
+RECOVERY_FIXED_STAGE_PROBE_POLICY_VERSION = (
+    "reconcile/recovery-fixed-stage-probe-policy/v1"
+)
+RECOVERY_FIXED_STAGE_VERIFICATION_MODE = "fixed-batch-then-verify"
+RECOVERY_FIXED_STAGE_PROBE_SEQUENCE = (
+    CLOUD_RUN_SERVICE_CAPABILITY,
+    CLOUD_RUN_REVISION_CAPABILITY,
+    CLOUD_RUN_HEALTH_CAPABILITY,
+)
+RECOVERY_FIXED_STAGE_REREAD_AFTER_CAPABILITY = CLOUD_RUN_REVISION_CAPABILITY
+RECOVERY_FIXED_STAGE_REREAD_CAPABILITY = CLOUD_RUN_SERVICE_CAPABILITY
+RECOVERY_FIXED_STAGE_REREAD_RELEVANT_EFFECT_IDS = ("stage-traffic",)
+RECOVERY_FIXED_STAGE_REREAD_REQUIRED_SCOPE_STATES = (
+    (STAGE_REVISION_EFFECT_SCOPE, EffectAssertionState.ESTABLISHED),
+    (STAGE_READINESS_EFFECT_SCOPE, EffectAssertionState.ESTABLISHED),
+    (STAGE_TRAFFIC_EFFECT_SCOPE, EffectAssertionState.UNVERIFIED),
+)
+RECOVERY_OBSERVATION_STAGE_PROBE_POLICY_VERSION = (
+    "reconcile/recovery-observation-stage-probe-policy/v1"
+)
+RECOVERY_OBSERVATION_STAGE_VERIFICATION_MODE = "incremental-after-each-probe"
+RECOVERY_OBSERVATION_STAGE_PROBE_CONDITION = (
+    "service-traffic-established-revision-readiness-unverified"
+)
+RECOVERY_OBSERVATION_STAGE_REQUIRED_EFFECT_STATES = (
+    ("stage-traffic", EffectAssertionState.ESTABLISHED),
+    ("stage-revision", EffectAssertionState.UNVERIFIED),
+    ("stage-readiness", EffectAssertionState.UNVERIFIED),
+)
+RECOVERY_OBSERVATION_STAGE_REQUIRED_MISSING_EFFECTS = frozenset(
+    {"stage-revision", "stage-readiness"}
+)
+RECOVERY_OBSERVATION_STAGE_TRUE_SEQUENCE = (
+    CLOUD_RUN_REVISION_CAPABILITY,
+    CLOUD_RUN_HEALTH_CAPABILITY,
+)
+RECOVERY_OBSERVATION_STAGE_FALSE_SEQUENCE = (
+    CLOUD_RUN_HEALTH_CAPABILITY,
+    CLOUD_RUN_REVISION_CAPABILITY,
+)
 RECOVERY_FRESHNESS_SECONDS = 60
 RECOVERY_EVIDENCE_BUDGET_MS = 60_000
+
+
+def recovery_utility_comparison_policy_descriptor() -> dict[str, object]:
+    """Return the canonical policies executed by the utility comparison."""
+
+    return {
+        "adaptive": {
+            "condition": RECOVERY_OBSERVATION_STAGE_PROBE_CONDITION,
+            "condition_false_sequence": list(RECOVERY_OBSERVATION_STAGE_FALSE_SEQUENCE),
+            "condition_true_sequence": list(RECOVERY_OBSERVATION_STAGE_TRUE_SEQUENCE),
+            "initial_sequence": [CLOUD_RUN_SERVICE_CAPABILITY],
+            "required_effect_states": [
+                {"effect_id": effect_id, "state": state.value}
+                for effect_id, state in (
+                    RECOVERY_OBSERVATION_STAGE_REQUIRED_EFFECT_STATES
+                )
+            ],
+            "required_missing_effects": sorted(
+                RECOVERY_OBSERVATION_STAGE_REQUIRED_MISSING_EFFECTS
+            ),
+            "stop_condition": "deterministic-certificate-or-budget",
+            "verification_mode": RECOVERY_OBSERVATION_STAGE_VERIFICATION_MODE,
+            "version": RECOVERY_OBSERVATION_STAGE_PROBE_POLICY_VERSION,
+        },
+        "fixed": {
+            "conditional_reread": {
+                "after_capability": RECOVERY_FIXED_STAGE_REREAD_AFTER_CAPABILITY,
+                "capability": RECOVERY_FIXED_STAGE_REREAD_CAPABILITY,
+                "relevant_effect_ids": list(
+                    RECOVERY_FIXED_STAGE_REREAD_RELEVANT_EFFECT_IDS
+                ),
+                "required_scope_states": [
+                    {"commit_scope": scope, "state": state.value}
+                    for scope, state in (
+                        RECOVERY_FIXED_STAGE_REREAD_REQUIRED_SCOPE_STATES
+                    )
+                ],
+            },
+            "sequence": list(RECOVERY_FIXED_STAGE_PROBE_SEQUENCE),
+            "stop_condition": ("controller-refuses-new-probe-or-sequence-completes"),
+            "verification_mode": RECOVERY_FIXED_STAGE_VERIFICATION_MODE,
+            "version": RECOVERY_FIXED_STAGE_PROBE_POLICY_VERSION,
+        },
+    }
 
 
 class ReleaseChainError(RuntimeError):
@@ -1049,11 +1133,7 @@ class ReleaseChainEvidenceSource:
     ):
         session = await self._session(run_id, node, envelope)
         sequence = {
-            "stage": (
-                CLOUD_RUN_SERVICE_CAPABILITY,
-                CLOUD_RUN_REVISION_CAPABILITY,
-                CLOUD_RUN_HEALTH_CAPABILITY,
-            ),
+            "stage": RECOVERY_FIXED_STAGE_PROBE_SEQUENCE,
             "promote": (CLOUD_RUN_SERVICE_CAPABILITY,),
             "record": (
                 FIRESTORE_RELEASE_CAPABILITY,
@@ -1067,28 +1147,26 @@ class ReleaseChainEvidenceSource:
                     break
             if (
                 node.node_id == "stage"
-                and capability_name == CLOUD_RUN_REVISION_CAPABILITY
+                and capability_name == RECOVERY_FIXED_STAGE_REREAD_AFTER_CAPABILITY
             ):
                 evaluation = session.engine.evaluate(session.controller.audit_trail)
                 findings = {
                     finding.commit_scope: finding
                     for finding in evaluation.proof.effect_findings
                 }
-                revision = findings.get(STAGE_REVISION_EFFECT_SCOPE)
-                readiness = findings.get(STAGE_READINESS_EFFECT_SCOPE)
-                traffic = findings.get(STAGE_TRAFFIC_EFFECT_SCOPE)
-                if (
-                    revision is not None
-                    and revision.state is EffectAssertionState.ESTABLISHED
-                    and readiness is not None
-                    and readiness.state is EffectAssertionState.ESTABLISHED
-                    and traffic is not None
-                    and traffic.state is EffectAssertionState.UNVERIFIED
+                if all(
+                    (finding := findings.get(scope)) is not None
+                    and finding.state is required_state
+                    for scope, required_state in (
+                        RECOVERY_FIXED_STAGE_REREAD_REQUIRED_SCOPE_STATES
+                    )
                 ):
                     traffic_request = self._request(
                         envelope,
-                        CLOUD_RUN_SERVICE_CAPABILITY,
-                        relevant_effect_ids=(traffic.effect_id,),
+                        RECOVERY_FIXED_STAGE_REREAD_CAPABILITY,
+                        relevant_effect_ids=(
+                            RECOVERY_FIXED_STAGE_REREAD_RELEVANT_EFFECT_IDS
+                        ),
                     )
                     if not await self._execute_request(session, traffic_request):
                         break

@@ -14,6 +14,9 @@ import reconcile.recovery_qualification as recovery_qualification_module
 from reconcile.contracts import (
     Classification,
     ContractError,
+    EffectAssertion,
+    EffectAssertionState,
+    PlannerMissingEvidence,
     canonical_json_bytes,
     canonical_sha256,
 )
@@ -38,6 +41,9 @@ from reconcile.recovery_qualification import (
     verify_recovery_qualification_bundle,
 )
 from reconcile.recovery_qualification_execution import (
+    _OBSERVED_SELECTION_CONDITION,
+    _UNMATCHED_SELECTION_CONDITION,
+    _UTILITY_OBSERVATION_SELECTION_MODE,
     _evidence_semantics,
     _ScriptedPlanner,
 )
@@ -273,6 +279,90 @@ def test_scripted_record_planner_stops_after_one_receipt_probe() -> None:
     assert second.output is not None
     assert second.output.probe_proposals == ()
     assert second.output.stop_advice.recommend_stop is True
+
+
+def test_recovery_utility_selector_changes_with_observed_service_state() -> None:
+    planner_input = make_planner_input()
+    invocation = planner_input.envelope.context.invocation.model_copy(
+        update={"tool_name": "stage-cloud-run-revision"}
+    )
+    context = planner_input.envelope.context.model_copy(
+        update={"invocation": invocation}
+    )
+    envelope = planner_input.envelope.model_copy(update={"context": context})
+    service_evidence = planner_input.admitted_evidence[0].model_copy(
+        update={
+            "capability_name": "cloud-run-service-get",
+            "effect_assertions": (
+                EffectAssertion(
+                    effect_id="stage-revision",
+                    state=EffectAssertionState.UNVERIFIED,
+                ),
+                EffectAssertion(
+                    effect_id="stage-readiness",
+                    state=EffectAssertionState.UNVERIFIED,
+                ),
+                EffectAssertion(
+                    effect_id="stage-traffic",
+                    state=EffectAssertionState.ESTABLISHED,
+                ),
+            ),
+        }
+    )
+    conditioned = planner_input.model_copy(
+        update={
+            "envelope": envelope,
+            "admitted_evidence": (service_evidence,),
+            "weak_evidence": (),
+            "rejected_evidence": (),
+            "missing_evidence": (
+                PlannerMissingEvidence(
+                    effect_id="stage-revision",
+                    reason="insufficient_authoritative_evidence",
+                ),
+                PlannerMissingEvidence(
+                    effect_id="stage-readiness",
+                    reason="insufficient_authoritative_evidence",
+                ),
+            ),
+            "prior_executable_request_hashes": (),
+        }
+    )
+    changed_assertions = tuple(
+        assertion.model_copy(update={"state": EffectAssertionState.NOT_ESTABLISHED})
+        if assertion.effect_id == "stage-traffic"
+        else assertion
+        for assertion in service_evidence.effect_assertions
+    )
+    changed = conditioned.model_copy(
+        update={
+            "admitted_evidence": (
+                service_evidence.model_copy(
+                    update={"effect_assertions": changed_assertions}
+                ),
+            )
+        }
+    )
+
+    observed_planner = _ScriptedPlanner(
+        utility_selection_mode=_UTILITY_OBSERVATION_SELECTION_MODE
+    )
+    changed_planner = _ScriptedPlanner(
+        utility_selection_mode=_UTILITY_OBSERVATION_SELECTION_MODE
+    )
+    observed_capability = observed_planner._normal_capability(conditioned)
+    changed_capability = changed_planner._normal_capability(changed)
+
+    assert observed_capability == "cloud-run-revision-get"
+    assert changed_capability == "cloud-run-revision-health"
+    assert (
+        observed_planner.selection_conditions_by_tool["stage-cloud-run-revision"]
+        == _OBSERVED_SELECTION_CONDITION
+    )
+    assert (
+        changed_planner.selection_conditions_by_tool["stage-cloud-run-revision"]
+        == _UNMATCHED_SELECTION_CONDITION
+    )
 
 
 @pytest.mark.parametrize("mutation", ("missing", "tampered"))

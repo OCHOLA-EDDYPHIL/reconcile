@@ -285,6 +285,23 @@ def test_stage_accepts_without_polling_and_pins_existing_serving_revision() -> N
     )
 
 
+def test_stage_rejects_a_stale_caller_held_etag_before_mutation() -> None:
+    services = _Services(_service())
+    adapter = _adapter(services, _Revisions(()))
+
+    with pytest.raises(CloudRunCanaryError) as raised:
+        adapter.stage_revision(
+            operation_id="operation-7",
+            release_id=RELEASE,
+            image_digest=DIGEST,
+            configuration_sha256=CONFIGURATION,
+            expected_service_etag="etag-6",
+        )
+
+    assert raised.value.code is CloudRunCanaryErrorCode.STALE_ETAG
+    assert not services.updates
+
+
 def test_drop_after_accept_hides_operation_but_preserves_provider_update() -> None:
     services = _Services(_service())
     proxy = CloudRunCanaryFaultProxy(_adapter(services, _Revisions(())))
