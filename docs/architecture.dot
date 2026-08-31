@@ -2,7 +2,7 @@ digraph ReconcileArchitecture {
   graph [
     bgcolor="#07111f",
     fontname="Liberation Sans",
-    label=<<FONT POINT-SIZE="32"><B>RECONCILE</B> — RECOVERY AUTHORITY</FONT><BR/><FONT POINT-SIZE="18">Advisory investigation proposes evidence. Deterministic verification controls action.</FONT>>,
+    label=<<FONT POINT-SIZE="32"><B>Reconcile</B> — RECOVERY AUTHORITY</FONT><BR/><FONT POINT-SIZE="18">Advisory investigation proposes evidence. Deterministic verification controls action.</FONT>>,
     labelloc="t",
     labeljust="l",
     fontcolor="#f8fafc",

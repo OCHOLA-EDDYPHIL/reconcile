@@ -6,7 +6,7 @@ ARG EVIDENCE_SOURCE_REVISION
 ARG SNAPSHOT_SHA256
 LABEL org.opencontainers.image.source="https://github.com/OCHOLA-EDDYPHIL/reconcile" \
       org.opencontainers.image.revision="${VIEWER_SOURCE_REVISION}" \
-      org.opencontainers.image.title="RECONCILE evidence viewer" \
+      org.opencontainers.image.title="Reconcile evidence viewer" \
       reconcile.evidence.source-revision="${EVIDENCE_SOURCE_REVISION}" \
       reconcile.evidence.snapshot="${SNAPSHOT_SHA256}"
 ENV PYTHONDONTWRITEBYTECODE=1 \

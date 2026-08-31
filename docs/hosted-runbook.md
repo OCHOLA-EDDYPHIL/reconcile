@@ -112,9 +112,9 @@ and independently inventory the scoped project afterward.
 ## Evidence references
 
 The recorded outcomes and evidence hashes are in the
-[provider evidence record](../evidence/v0.1.0/provider-proof.json). Teardown
+[provider evidence record](../evidence/v0.1.1/provider-proof.json). Teardown
 evidence and the zero-resource inventory are in
-[cleanup verification](../evidence/v0.1.0/cleanup-verification.json).
+[cleanup verification](../evidence/v0.1.1/cleanup-verification.json).
 
 For a new accepted revision, capture the fixed post-teardown inventory from the
 sealed manifest and export only after the capture returns `PASS`. A non-empty
@@ -179,7 +179,7 @@ SNAPSHOT_SHA256="$(sha256sum "$VIEWER_BUNDLE/snapshot.json" | awk '{print $1}')"
 ```
 
 Use a pre-created Artifact Registry repository and a dedicated runtime service
-account with no operational RECONCILE roles. Build, push, resolve the immutable
+account with no operational Reconcile roles. Build, push, resolve the immutable
 image digest, and deploy only that digest:
 
 ```bash

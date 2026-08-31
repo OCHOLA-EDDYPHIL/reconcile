@@ -15,7 +15,7 @@ from typing import Any
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
-DEFAULT_EVIDENCE = ROOT / "evidence" / "v0.1.0" / "proof-to-permit.json"
+DEFAULT_EVIDENCE = ROOT / "evidence" / "v0.1.1" / "proof-to-permit.json"
 
 SOURCE_REVISION = "4d626bb67739ca51c7569124724ea5d7ac8f5c0e"
 IMAGE_DIGEST = "sha256:160471416779de06923cf5addb622206c3a5281b1858a2e2a111077218a423ef"
@@ -798,12 +798,9 @@ def _print_human(payload: dict[str, Any]) -> None:
         provider = payload["provider_proof"]
         adaptive = provider["adaptive_recovery"]
         ambiguity = payload["live_corroboration"]["ambiguity_proof"]
-        print("RECONCILE - offline evidence validation")
+        print("Reconcile - offline evidence validation")
         print("Gemini guides evidence acquisition. Deterministic evidence decides.\n")
-        print(
-            "Recorded adaptive recovery | "
-            f"source {provider['candidate']['source_revision'][:7]}"
-        )
+        print("Recorded adaptive recovery")
         print(
             "  effects      -> "
             f"{adaptive['effects']['revisions']} revision / "
@@ -820,7 +817,7 @@ def _print_human(payload: dict[str, Any]) -> None:
         return
     baseline = payload["scripted_baseline"]["policies"]
     provider = payload["provider_proof"]
-    print("RECONCILE — offline evidence validation")
+    print("Reconcile — offline evidence validation")
     print("Gemini investigates. Deterministic evidence decides.\n")
     print("Accepted scripted baseline | fault: drop-after-accept")
     print("  blind retry  -> 2 revisions, 1 promotion, 1 record (duplicate revision)")
@@ -829,7 +826,7 @@ def _print_human(payload: dict[str, Any]) -> None:
         "(incomplete chain)"
     )
     _require(baseline["blind_retry"]["revisions_created"] == 2, "baseline drift")
-    print(f"\nRecorded direct live-cloud evidence | source {SOURCE_REVISION[:7]}")
+    print("\nRecorded direct live-cloud evidence")
     print(
         "  pass 1       -> UNKNOWN; CONTINUE denied; RETRY denied; "
         "0 recovery-action permits"

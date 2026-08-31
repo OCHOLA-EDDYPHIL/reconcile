@@ -11,7 +11,8 @@ import stat
 from collections.abc import Callable
 from typing import Any
 
-SNAPSHOT_VERSION = "reconcile/viewer-snapshot/v3"
+SNAPSHOT_VERSION = "reconcile/viewer-snapshot/v4"
+LEGACY_SNAPSHOT_VERSION = "reconcile/viewer-snapshot/v3"
 BUNDLE_VERSION = "reconcile/viewer-bundle/v2"
 DISPLAY_LABEL = "Recorded evidence - not a live operation"
 
@@ -24,6 +25,7 @@ _SOURCE_REVISION_PATTERN = re.compile(r"^[0-9a-f]{40}$")
 _IMAGE_DIGEST_PATTERN = re.compile(r"^sha256:[0-9a-f]{64}$")
 _EVIDENCE_VERSION_PATTERN = re.compile(r"^v[0-9]+\.[0-9]+\.[0-9]+$")
 _SCHEMA_VERSION_PATTERN = re.compile(r"^reconcile/[a-z0-9-]+/v[0-9]+$")
+_MODEL_PATTERN = re.compile(r"^gemini-3[.]5-[A-Za-z0-9._-]+$")
 _CLASSIFICATIONS = frozenset(
     {"COMMITTED", "NOT_COMMITTED", "PARTIAL", "PENDING", "UNKNOWN"}
 )
@@ -204,7 +206,7 @@ def _validate_claim_boundary(value: object) -> None:
     _boolean(boundary["live_endpoint_exists"], code)
 
 
-def _validate_recovery(value: object) -> None:
+def _validate_legacy_recovery(value: object) -> None:
     code = "SNAPSHOT_RECOVERY_INVALID"
     recovery = _keys(
         value,
@@ -250,7 +252,71 @@ def _validate_recovery(value: object) -> None:
         raise PublicContractError(code)
 
 
-def _validate_advisory(value: object) -> None:
+def _validate_recovery(value: object) -> None:
+    code = "SNAPSHOT_RECOVERY_INVALID"
+    recovery = _keys(
+        value,
+        (
+            "policy",
+            "fault",
+            "acknowledgement_lost",
+            "launch_outcome",
+            "terminal_disposition",
+            "chain_completed",
+            "certificate_count",
+            "continue_permits_issued",
+            "action_permits_consumed",
+            "provider_contacts",
+            "replay",
+            "effects",
+        ),
+        code,
+    )
+    _text(recovery["policy"], code=code, exact="adaptive")
+    _text(recovery["fault"], code=code, exact="drop-after-accept")
+    if not _boolean(recovery["acknowledgement_lost"], code):
+        raise PublicContractError(code)
+    _text(recovery["launch_outcome"], code=code, exact="OUTCOME_UNKNOWN")
+    _text(recovery["terminal_disposition"], code=code, exact="COMPLETED")
+    if not _boolean(recovery["chain_completed"], code):
+        raise PublicContractError(code)
+    for name in (
+        "certificate_count",
+        "continue_permits_issued",
+        "action_permits_consumed",
+        "provider_contacts",
+    ):
+        if _count(recovery[name], code, maximum=32) < 1:
+            raise PublicContractError(code)
+
+    replay = _keys(
+        recovery["replay"],
+        (
+            "snapshot_stable",
+            "rejected_before_provider_contact",
+            "provider_contact_delta",
+            "denial_count",
+        ),
+        code,
+    )
+    if (
+        not _boolean(replay["snapshot_stable"], code)
+        or not _boolean(replay["rejected_before_provider_contact"], code)
+        or _count(replay["provider_contact_delta"], code) != 0
+        or _count(replay["denial_count"], code) != 1
+    ):
+        raise PublicContractError(code)
+
+    effects = _keys(
+        recovery["effects"],
+        ("revisions", "promotions", "release_records"),
+        code,
+    )
+    if any(_count(count, code, maximum=16) != 1 for count in effects.values()):
+        raise PublicContractError(code)
+
+
+def _validate_legacy_advisory(value: object) -> None:
     code = "SNAPSHOT_ADVISORY_INVALID"
     advisory = _keys(
         value,
@@ -268,6 +334,40 @@ def _validate_advisory(value: object) -> None:
         _text(advisory[name], code=code)
     _boolean(advisory["bound_to_hypothesis"], code)
     _count(advisory["hypothesis_count"], code)
+    _text(
+        advisory["authority"],
+        code=code,
+        exact="read-only-probe-planning-only",
+    )
+
+
+def _validate_advisory(value: object) -> None:
+    code = "SNAPSHOT_ADVISORY_INVALID"
+    advisory = _keys(
+        value,
+        (
+            "configured_model",
+            "reported_model",
+            "planner_outcome",
+            "count_attempts",
+            "generation_attempts",
+            "authority",
+        ),
+        code,
+    )
+    _text(advisory["configured_model"], code=code, exact="gemini-3.5-flash")
+    _text(
+        advisory["reported_model"],
+        code=code,
+        pattern=_MODEL_PATTERN,
+        maximum_length=128,
+    )
+    _text(advisory["planner_outcome"], code=code, exact="planner-succeeded")
+    if (
+        _count(advisory["count_attempts"], code, maximum=16) != 1
+        or _count(advisory["generation_attempts"], code, maximum=16) != 1
+    ):
+        raise PublicContractError(code)
     _text(
         advisory["authority"],
         code=code,
@@ -363,7 +463,11 @@ def validate_snapshot(value: object) -> None:
         ),
         code,
     )
-    _text(snapshot["schema_version"], code=code, exact=SNAPSHOT_VERSION)
+    schema_version = _text(
+        snapshot["schema_version"],
+        code=code,
+        allowed=frozenset({LEGACY_SNAPSHOT_VERSION, SNAPSHOT_VERSION}),
+    )
     _text(snapshot["display_label"], code=code, exact=DISPLAY_LABEL)
     _text(
         snapshot["viewer_source_revision"],
@@ -382,9 +486,20 @@ def validate_snapshot(value: object) -> None:
     )
     _validate_evidence(snapshot["evidence"])
     _validate_claim_boundary(snapshot["claim_boundary"])
-    _validate_recovery(snapshot["recovery"])
+    if schema_version == LEGACY_SNAPSHOT_VERSION:
+        if snapshot["evidence"]["manifest_schema_version"] != "reconcile/demo-proof/v2":
+            raise PublicContractError(code)
+        _validate_legacy_recovery(snapshot["recovery"])
+        _validate_legacy_advisory(snapshot["advisory_planning"])
+    else:
+        if (
+            snapshot["evidence"]["manifest_schema_version"]
+            != "reconcile/public-evidence/v1"
+        ):
+            raise PublicContractError(code)
+        _validate_recovery(snapshot["recovery"])
+        _validate_advisory(snapshot["advisory_planning"])
     _validate_ambiguity(snapshot["ambiguity"])
-    _validate_advisory(snapshot["advisory_planning"])
     _validate_cleanup(snapshot["cleanup"])
     limitations = snapshot["limitations"]
     if type(limitations) is not list or len(limitations) != len(LIMITATIONS):
@@ -427,6 +542,55 @@ def render_html(snapshot: dict[str, Any]) -> bytes:
     advisory = snapshot["advisory_planning"]
     effects = recovery["effects"]
     ambiguity = snapshot["ambiguity"]
+    if snapshot["schema_version"] == LEGACY_SNAPSHOT_VERSION:
+        recovery_html = f"""
+<section class="grid">
+<article class="card"><h2>Initial result</h2>
+<p><strong>{html.escape(recovery["initial_classification"])}</strong></p>
+<p>Continue allowed: {str(recovery["initial_continue_allowed"]).lower()}</p>
+<p>Retry allowed: {str(recovery["initial_retry_allowed"]).lower()}</p></article>
+<article class="card"><h2>Settled result</h2>
+<p><strong>{html.escape(recovery["settled_classification"])}</strong></p>
+<p>Permits: {recovery["permit_count"]}; single-use: {str(recovery["all_permits_single_use"]).lower()}</p>
+<p>Replay: {html.escape(recovery["replay_outcome"])}</p></article>
+<article class="card"><h2>Observed effects</h2>
+<p>Revisions: {effects["revisions"]}</p>
+<p>Promotions: {effects["promotions"]}</p>
+<p>Release records: {effects["release_records"]}</p></article>
+</section>"""
+        advisory_html = f"""<section><h2>Advisory planning</h2>
+<p>{html.escape(advisory["reported_model"])} reported
+{html.escape(advisory["planner_outcome"])}. Its authority was limited to
+read-only probe planning.</p></section>"""
+    else:
+        replay = recovery["replay"]
+        recovery_html = f"""
+<section class="grid">
+<article class="card"><h2>Recorded recovery</h2>
+<p>Launch outcome: <strong>{html.escape(recovery["launch_outcome"])}</strong></p>
+<p>Terminal disposition: <strong>{html.escape(recovery["terminal_disposition"])}</strong></p>
+<p>Policy: {html.escape(recovery["policy"])}; fault: {html.escape(recovery["fault"])}</p>
+<p>Acknowledgement lost: {str(recovery["acknowledgement_lost"]).lower()}; chain completed: {str(recovery["chain_completed"]).lower()}</p></article>
+<article class="card"><h2>Recorded counts</h2>
+<p>Certificates: {recovery["certificate_count"]}</p>
+<p>Continue permits issued: {recovery["continue_permits_issued"]}</p>
+<p>Action permits consumed: {recovery["action_permits_consumed"]}</p>
+<p>Provider contacts: {recovery["provider_contacts"]}</p></article>
+<article class="card"><h2>Recorded replay</h2>
+<p>Rejected before provider contact: {str(replay["rejected_before_provider_contact"]).lower()}</p>
+<p>Provider contact delta: {replay["provider_contact_delta"]}; denial count: {replay["denial_count"]}</p>
+<p>Snapshot stable: {str(replay["snapshot_stable"]).lower()}</p></article>
+<article class="card"><h2>Observed effects</h2>
+<p>Revisions: {effects["revisions"]}</p>
+<p>Promotions: {effects["promotions"]}</p>
+<p>Release records: {effects["release_records"]}</p></article>
+</section>"""
+        advisory_html = f"""<section><h2>Advisory planning</h2>
+<p>Configured model: {html.escape(advisory["configured_model"])}</p>
+<p>Reported model: {html.escape(advisory["reported_model"])}</p>
+<p>Planner outcome: {html.escape(advisory["planner_outcome"])}</p>
+<p>Count attempts: {advisory["count_attempts"]}; generation attempts: {advisory["generation_attempts"]}</p>
+<p>Recorded authority: {html.escape(advisory["authority"])}</p></section>"""
     ambiguity_html = ""
     if ambiguity is not None:
         ambiguity_effects = ambiguity["effects"]
@@ -461,7 +625,7 @@ def render_html(snapshot: dict[str, Any]) -> bytes:
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>RECONCILE evidence viewer</title>
+<title>Reconcile evidence viewer</title>
 <style>
 :root {{ color-scheme: light; font-family: ui-sans-serif, system-ui, sans-serif; }}
 body {{ margin: 0; background: #f4f7f5; color: #12221b; }}
@@ -476,27 +640,11 @@ a {{ color: #145f40; }}
 </head>
 <body><main>
 <section class="banner"><strong>{html.escape(snapshot["display_label"])}</strong></section>
-<h1>RECONCILE evidence</h1>
+<h1>Reconcile evidence</h1>
 <p>A bounded projection of a validated versioned evidence bundle.</p>
-<section class="grid">
-<article class="card"><h2>Initial result</h2>
-<p><strong>{html.escape(recovery["initial_classification"])}</strong></p>
-<p>Continue allowed: {str(recovery["initial_continue_allowed"]).lower()}</p>
-<p>Retry allowed: {str(recovery["initial_retry_allowed"]).lower()}</p></article>
-<article class="card"><h2>Settled result</h2>
-<p><strong>{html.escape(recovery["settled_classification"])}</strong></p>
-<p>Permits: {recovery["permit_count"]}; single-use: {str(recovery["all_permits_single_use"]).lower()}</p>
-<p>Replay: {html.escape(recovery["replay_outcome"])}</p></article>
-<article class="card"><h2>Observed effects</h2>
-<p>Revisions: {effects["revisions"]}</p>
-<p>Promotions: {effects["promotions"]}</p>
-<p>Release records: {effects["release_records"]}</p></article>
-</section>
+{recovery_html}
 {ambiguity_html}
-<section><h2>Advisory planning</h2>
-<p>{html.escape(advisory["reported_model"])} reported
-{html.escape(advisory["planner_outcome"])}. Its authority was limited to
-read-only probe planning.</p></section>
+{advisory_html}
 <section><h2>Limitations</h2><ul>{limitations}</ul></section>
 <section class="identity"><h2>Verification</h2>
 <p>Viewer and evidence identities were verified before this bundle was built.</p>
@@ -657,6 +805,7 @@ def read_bounded_regular_at(
 __all__ = [
     "BUNDLE_VERSION",
     "DISPLAY_LABEL",
+    "LEGACY_SNAPSHOT_VERSION",
     "LIMITATIONS",
     "MAX_HTML_BYTES",
     "MAX_MANIFEST_BYTES",

@@ -15,6 +15,7 @@ from scripts.validate_evidence import EvidenceError, load_and_validate
 
 from .public_contract import (
     DISPLAY_LABEL,
+    LEGACY_SNAPSHOT_VERSION,
     LIMITATIONS,
     SNAPSHOT_VERSION,
     PublicContractError,
@@ -102,16 +103,17 @@ def _build_snapshot(evidence_root: Path, viewer_source_revision: str) -> dict[st
         effects = adaptive["effects"]
         ambiguity = live["ambiguity_proof"]
         recovery = {
-            "initial_classification": "UNKNOWN",
-            "settled_classification": "COMMITTED",
+            "policy": adaptive["policy"],
+            "fault": adaptive["fault"],
             "acknowledgement_lost": adaptive["acknowledgement_lost"],
-            "initial_continue_allowed": False,
-            "initial_retry_allowed": False,
-            "initial_action_permits_issued": 0,
-            "permit_count": adaptive["action_permits_consumed"],
-            "all_permits_single_use": replay["rejected_before_provider_contact"],
-            "replay_outcome": "rejected-before-provider-contact",
-            "replay_contacted_provider": replay["provider_contact_delta"] != 0,
+            "launch_outcome": adaptive["launch_outcome"],
+            "terminal_disposition": adaptive["terminal_disposition"],
+            "chain_completed": adaptive["chain_completed"],
+            "certificate_count": adaptive["certificate_count"],
+            "continue_permits_issued": adaptive["continue_permits_issued"],
+            "action_permits_consumed": adaptive["action_permits_consumed"],
+            "provider_contacts": adaptive["provider_contacts"],
+            "replay": dict(replay),
             "effects": {
                 "revisions": effects["revisions"],
                 "promotions": effects["promotions"],
@@ -123,8 +125,8 @@ def _build_snapshot(evidence_root: Path, viewer_source_revision: str) -> dict[st
             "configured_model": advisory["configured_model"],
             "reported_model": advisory["reported_model"],
             "planner_outcome": advisory["planner_outcome"],
-            "bound_to_hypothesis": True,
-            "hypothesis_count": advisory["generation_attempts"],
+            "count_attempts": advisory["count_attempts"],
+            "generation_attempts": advisory["generation_attempts"],
             "authority": advisory["authority"],
         }
         ambiguity_projection: dict[str, Any] | None = {
@@ -178,7 +180,7 @@ def _build_snapshot(evidence_root: Path, viewer_source_revision: str) -> dict[st
         inventory = cleanup["inventory"]
         candidate = provider["candidate"]
     base = {
-        "schema_version": SNAPSHOT_VERSION,
+        "schema_version": SNAPSHOT_VERSION if current else LEGACY_SNAPSHOT_VERSION,
         "display_label": DISPLAY_LABEL,
         "viewer_source_revision": viewer_source_revision,
         "evidence_source_revision": candidate["source_revision"],
