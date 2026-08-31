@@ -11,6 +11,7 @@ from contextlib import contextmanager
 from datetime import UTC, datetime
 from itertools import pairwise
 from pathlib import Path
+from threading import Lock
 
 from reconcile.contracts.api import (
     MAX_INVESTIGATION_EVENTS,
@@ -90,6 +91,7 @@ from reconcile.persistence.permits import (
     PermitCorruptState,
     PermitNotFound,
     PermitStoreError,
+    PermitStoreUnavailable,
     evaluate_permit_claim,
     evaluate_permit_completion,
     issued_audit_event,
@@ -101,6 +103,19 @@ from reconcile.persistence.permits import (
 _SQLITE_SCHEMA_VERSION = "5"
 _SQLITE_PREVIOUS_SCHEMA_VERSION = "4"
 _BUSY_TIMEOUT_MS = 5_000
+
+
+def _permit_database_error(
+    error: sqlite3.DatabaseError,
+    permit_id: str,
+) -> PermitStoreError:
+    code = getattr(error, "sqlite_errorcode", None)
+    if isinstance(code, int) and (code & 0xFF) in {
+        sqlite3.SQLITE_BUSY,
+        sqlite3.SQLITE_LOCKED,
+    }:
+        return PermitStoreUnavailable()
+    return PermitCorruptState(permit_id)
 
 
 def _aware_utc(value: datetime) -> datetime:
@@ -141,6 +156,7 @@ class SqliteDurableRuntimeStore:
         if candidate.exists() and not candidate.is_file():
             raise ValueError("SQLite runtime path must name a file")
         self._database_path = candidate
+        self._write_lock = Lock()
         self._initialize()
         os.chmod(self._database_path, 0o600)
 
@@ -157,16 +173,17 @@ class SqliteDurableRuntimeStore:
 
     @contextmanager
     def _write(self) -> Iterator[sqlite3.Connection]:
-        connection = self._connect()
-        try:
-            connection.execute("BEGIN IMMEDIATE")
-            yield connection
-            connection.commit()
-        except BaseException:
-            connection.rollback()
-            raise
-        finally:
-            connection.close()
+        with self._write_lock:
+            connection = self._connect()
+            try:
+                connection.execute("BEGIN IMMEDIATE")
+                yield connection
+                connection.commit()
+            except BaseException:
+                connection.rollback()
+                raise
+            finally:
+                connection.close()
 
     def _initialize(self) -> None:
         try:
@@ -2170,7 +2187,7 @@ class SqliteDurableRuntimeStore:
         except PermitStoreError:
             raise
         except sqlite3.DatabaseError as error:
-            raise PermitCorruptState(permit.permit_id) from error
+            raise _permit_database_error(error, permit.permit_id) from error
 
     async def get_permit(self, permit_id: str) -> ActionPermit:
         return await asyncio.to_thread(self._get_permit, permit_id)
@@ -2184,7 +2201,7 @@ class SqliteDurableRuntimeStore:
         except PermitStoreError:
             raise
         except sqlite3.DatabaseError as error:
-            raise PermitCorruptState(permit_id) from error
+            raise _permit_database_error(error, permit_id) from error
 
     async def claim_permit(self, request: PermitClaimRequest) -> ActionPermit:
         return await asyncio.to_thread(self._claim_permit, request)
@@ -2212,7 +2229,7 @@ class SqliteDurableRuntimeStore:
         except PermitStoreError:
             raise
         except sqlite3.DatabaseError as error:
-            raise PermitCorruptState(request.permit_id) from error
+            raise _permit_database_error(error, request.permit_id) from error
         if mutation.denial_reason is not None:
             raise PermitClaimDenied(request.permit_id, mutation.denial_reason)
         return mutation.permit
@@ -2245,8 +2262,10 @@ class SqliteDurableRuntimeStore:
                 self._append_permit_audit_locked(connection, mutation.event)
         except PermitStoreError:
             raise
-        except (TypeError, ValueError, sqlite3.DatabaseError) as error:
+        except (TypeError, ValueError) as error:
             raise PermitCorruptState(request.permit_id) from error
+        except sqlite3.DatabaseError as error:
+            raise _permit_database_error(error, request.permit_id) from error
         if mutation.denial_reason is not None:
             raise PermitCompletionDenied(request.permit_id, mutation.denial_reason)
         return mutation.permit
@@ -2268,7 +2287,7 @@ class SqliteDurableRuntimeStore:
         except PermitStoreError:
             raise
         except sqlite3.DatabaseError as error:
-            raise PermitCorruptState(permit_id) from error
+            raise _permit_database_error(error, permit_id) from error
 
 
 DurableRuntimeExceptionTypes = (
