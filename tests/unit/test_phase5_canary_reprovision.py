@@ -49,6 +49,20 @@ def test_phase5_command_runners_force_private_file_creation(
     assert [call["umask"] for call in calls] == [0o077, 0o077]
 
 
+def test_runtime_source_inventory_matches_repository() -> None:
+    runtime = Path(__file__).parents[2] / "infra" / "environments" / "dev" / "runtime"
+    source_names = tuple(
+        sorted(
+            path.name
+            for path in runtime.iterdir()
+            if path.is_file()
+            and (path.name == ".terraform.lock.hcl" or path.suffix == ".tf")
+        )
+    )
+
+    assert acceptance_module._RUNTIME_SOURCE_FILES == source_names
+
+
 class _ReleaseReader:
     def __init__(self, result: object | None = None) -> None:
         self.result = result
