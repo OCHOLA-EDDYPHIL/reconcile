@@ -77,6 +77,13 @@ class RecoveryRunStoreUnavailable(RecoveryRunStoreError):
     pass
 
 
+class RecoveryRunEventTooLarge(RecoveryRunStoreError):
+    """One valid recovery event cannot fit the configured durable record."""
+
+    def __init__(self) -> None:
+        super().__init__("recovery run event exceeds the durable byte limit")
+
+
 class RecoveryLaunchClaimDenied(RecoveryRunStoreError):
     def __init__(self, run_id: str) -> None:
         self.run_id = run_id
@@ -1230,6 +1237,7 @@ __all__ = [
     "RecoveryRunConflict",
     "RecoveryRunCorruptState",
     "RecoveryRunEventSnapshot",
+    "RecoveryRunEventTooLarge",
     "RecoveryRunNotFound",
     "RecoveryRunStore",
     "RecoveryRunStoreError",

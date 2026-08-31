@@ -88,6 +88,7 @@ from reconcile.hosted.provider import (
     HOSTED_CANDIDATE_IDENTITY_VERSION,
     HostedCandidateIdentity,
 )
+from reconcile.hosted.recovery_acceptance import HostedRecoveryAcceptanceObserver
 from reconcile.hosted.recovery_dispatch import HostedRecoveryDispatchGateway
 from reconcile.hosted.sandbox import (
     FirestoreSandboxEvidenceReader,
@@ -1127,6 +1128,22 @@ def create_runtime_component_app(
             transport=selected_transport,
             recovery_store=recovery_store,
             permit_authority=permit_authority,
+            observer=(
+                HostedRecoveryAcceptanceObserver(
+                    fault_proxy_url=_required(
+                        config.fault_proxy_url,
+                        "fault proxy URL",
+                    ),
+                    fault_proxy_audience=_required(
+                        config.fault_proxy_audience,
+                        "fault proxy audience",
+                    ),
+                    transport=selected_transport,
+                    recovery_store=recovery_store,
+                )
+                if config.acceptance_partial_read_outage_enabled
+                else None
+            ),
         )
 
         def recovery_service_factory() -> RecoveryRunApplicationService:

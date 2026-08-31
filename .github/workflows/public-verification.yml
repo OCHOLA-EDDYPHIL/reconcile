@@ -91,6 +91,7 @@ jobs:
               tests/unit/hosted/test_firestore_permits.py
               tests/unit/hosted/test_firestore_recovery_runs.py
               tests/unit/hosted/test_recovery_cloud_run_authority.py
+              tests/unit/hosted/test_runtime.py
               tests/unit/test_recovery_agents.py
               tests/unit/test_recovery_scenario.py
               tests/unit/test_recovery_workflow.py

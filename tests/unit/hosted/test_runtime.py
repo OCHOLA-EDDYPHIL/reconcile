@@ -295,6 +295,39 @@ def test_acceptance_partial_read_outage_enablement_reaches_each_runtime_boundary
         assert authorizer._acceptance_partial_read_outage_enabled is True
 
 
+@pytest.mark.parametrize("enabled", (False, True))
+def test_controller_installs_replay_observer_only_for_explicit_acceptance_config(
+    monkeypatch: pytest.MonkeyPatch,
+    enabled: bool,
+) -> None:
+    gateway_arguments: dict[str, object] = {}
+    sentinel = object()
+
+    def capture_gateway(**kwargs: object) -> object:
+        gateway_arguments.update(kwargs)
+        return object()
+
+    monkeypatch.setattr(
+        hosted_runtime, "HostedRecoveryDispatchGateway", capture_gateway
+    )
+    monkeypatch.setattr(
+        hosted_runtime,
+        "create_component_app",
+        lambda _config, **_kwargs: sentinel,
+    )
+    config = replace(
+        _config(Component.CONTROLLER),
+        acceptance_partial_read_outage_enabled=enabled,
+    )
+
+    assert create_runtime_component_app(config) is sentinel
+    observer = gateway_arguments["observer"]
+    if enabled:
+        assert type(observer) is hosted_runtime.HostedRecoveryAcceptanceObserver
+    else:
+        assert observer is None
+
+
 def test_controller_registers_lazy_recovery_with_manifest_bound_settings(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
