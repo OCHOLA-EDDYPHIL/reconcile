@@ -946,9 +946,7 @@ class _Runner:
             elif argv[1:] == ("remote", "get-url", "origin"):
                 output = b"git@github.com:OCHOLA-EDDYPHIL/reconcile.git\n"
             elif argv[1:3] == ("ls-remote", "--exit-code"):
-                revision = (
-                    "f" * 40 if self.wrong_remote else self.current_source
-                )
+                revision = "f" * 40 if self.wrong_remote else self.current_source
                 output = f"{revision}\trefs/heads/main\n".encode()
             else:  # pragma: no cover - the closed git inventory is asserted below
                 raise AssertionError(argv)
@@ -3459,7 +3457,9 @@ def test_non_teardown_still_requires_manifest_source_at_current_main(
             runner=runner,
         )
 
-    assert not any(call[1:3] == ("merge-base", "--is-ancestor") for call in runner.calls)
+    assert not any(
+        call[1:3] == ("merge-base", "--is-ancestor") for call in runner.calls
+    )
 
 
 def test_immutable_plan_byte_drift_blocks_before_mutation(tmp_path: Path) -> None:

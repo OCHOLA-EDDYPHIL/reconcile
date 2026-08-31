@@ -7,7 +7,7 @@ import pytest
 from viewer import export as viewer_export
 
 ROOT = Path(__file__).parents[3]
-EVIDENCE_ROOT = ROOT / "evidence" / "v0.1.0"
+EVIDENCE_ROOT = ROOT / "evidence" / "v0.1.1"
 VIEWER_SOURCE_REVISION = "a" * 40
 
 

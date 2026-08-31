@@ -32,29 +32,30 @@ lanes.
   needs stable semantic identity and authoritative read-after-write evidence.
 - No claim that the checked-in JSON is the original transcript. It is a sanitized
   derivative whose values and immutable hashes come from the recorded gate data.
-- No active hosted-service claim. The recorded environment was ephemeral and was
-  removed after evidence capture.
+- No active operational-service claim. The recorded recovery environment was
+  ephemeral and was removed after evidence capture. The public viewer is only a
+  static projection of checked-in evidence.
 
 ## Why this is not “just retry”
 
-Retries answer *when should the caller try again?* RECONCILE first answers *what
+Retries answer *when should the caller try again?* Reconcile first answers *what
 did the provider already do?* An exact retry or continuation is available only
 after deterministic evidence rules establish that action as safe.
 
 ## Relationship to prior art
 
 - **Idempotency keys** are the first choice when a provider offers a durable key
-  with well-defined replay semantics. RECONCILE helps when that contract is
+  with well-defined replay semantics. Reconcile helps when that contract is
   absent, partial, or does not cover a multi-step release chain.
 - **Provider operation IDs and status APIs** are high-value evidence sources.
   They become verifier inputs, not substitutes for effect-specific checks.
 - **Workflow engines, retries, and sagas** coordinate durable progress and
-  compensation. RECONCILE supplies an evidence-bound decision at an ambiguous
+  compensation. Reconcile supplies an evidence-bound decision at an ambiguous
   step before that workflow retries, continues, compensates, or holds.
 - **Transactional outboxes, inboxes, and leases** protect boundaries an
   application controls. They cannot by themselves establish what an external
   provider accepted after an acknowledgement was lost.
-- **Logs, traces, and observability** explain attempts. RECONCILE admits only
+- **Logs, traces, and observability** explain attempts. Reconcile admits only
   facts that satisfy source, correlation, freshness, and effect rules before
   mutation.
 
@@ -95,8 +96,9 @@ artifacts and identity material outside the repository.
 
 ## Evidence index
 
-- [Provider evidence record](../evidence/v0.1.0/provider-proof.json)
-- [Hash-linked live corroboration](../evidence/v0.1.0/live-corroboration.json)
-- [Cleanup verification](../evidence/v0.1.0/cleanup-verification.json)
-- [Scripted qualification manifest](../evidence/v0.1.0/proof-to-permit.json)
-- [v0.1.0 evidence release](https://github.com/OCHOLA-EDDYPHIL/reconcile/releases/tag/v0.1.0)
+- [Provider evidence record](../evidence/v0.1.1/provider-proof.json)
+- [Hash-linked live corroboration](../evidence/v0.1.1/live-corroboration.json)
+- [Cleanup verification](../evidence/v0.1.1/cleanup-verification.json)
+- [Evidence bundle manifest](../evidence/v0.1.1/proof-to-permit.json)
+- [v0.1.1 evidence release](https://github.com/OCHOLA-EDDYPHIL/reconcile/releases/tag/v0.1.1)
+- [Static evidence viewer](https://reconcile-evidence-g6fwwrme5a-uc.a.run.app)

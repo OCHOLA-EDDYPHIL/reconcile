@@ -247,7 +247,12 @@ def test_export_projects_positive_and_ambiguity_proofs_without_private_identity(
     assert all(value.encode() not in public_bytes for value in private_values)
 
     snapshot = _build_snapshot(output, "a" * 40)
-    assert snapshot["recovery"]["all_permits_single_use"] is True
+    assert snapshot["recovery"]["replay"] == adaptive["replay"]
+    assert (
+        snapshot["recovery"]["action_permits_consumed"]
+        == adaptive["action_permits_consumed"]
+    )
+    assert "all_permits_single_use" not in snapshot["recovery"]
     assert snapshot["ambiguity"]["history_ids"] == [
         "effects-occurred",
         "effects-not-occurred",

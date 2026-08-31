@@ -13,6 +13,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
 EVIDENCE_SOURCE = ROOT / "evidence" / "v0.1.0"
+CURRENT_EVIDENCE_SOURCE = ROOT / "evidence" / "v0.1.1"
 VALIDATOR_PATH = ROOT / "scripts" / "validate_evidence.py"
 PACKAGE_CHECK_PATH = ROOT / "scripts" / "check_public_package.py"
 
@@ -59,6 +60,36 @@ def test_offline_evidence_bundle_is_coherent() -> None:
     index_text = (EVIDENCE_SOURCE / "proof-to-permit.json").read_text(encoding="utf-8")
     assert "generated_from" not in index_text
     assert "https://" not in index_text
+
+
+def test_default_validator_selects_exact_current_evidence() -> None:
+    assert VALIDATOR.DEFAULT_EVIDENCE == (
+        CURRENT_EVIDENCE_SOURCE / "proof-to-permit.json"
+    )
+    payload = VALIDATOR.load_and_validate(VALIDATOR.DEFAULT_EVIDENCE)
+    assert payload["schema_version"] == "reconcile/public-evidence/v1"
+
+    expected = {
+        "cleanup-verification.json": (
+            "59b4d5d2f1ef7be880f992d4696e375e74e7acc1c96752b7f97ea159545627d5"
+        ),
+        "live-corroboration.json": (
+            "ee193f77e195c7d2b0801141770d42df9305e43662f297e20dbe9047f0e577ba"
+        ),
+        "proof-to-permit.json": (
+            "63c46b683ade4b4071479b21f15382fa96eb5cc8ba6ed567965a6bd7b7172262"
+        ),
+        "provider-proof.json": (
+            "4e72ffcb5bfb3a868abb7408699bf51b09c1461347683b115785cf708d5c2687"
+        ),
+    }
+    for filename, digest in expected.items():
+        assert (
+            hashlib.sha256(
+                (CURRENT_EVIDENCE_SOURCE / filename).read_bytes()
+            ).hexdigest()
+            == digest
+        )
 
 
 @pytest.mark.parametrize(
@@ -233,10 +264,10 @@ def test_legacy_schema_and_exact_evidence_bytes_are_preserved() -> None:
 
 def test_public_package_check_accepts_the_repository() -> None:
     completed = subprocess.run(
-        [sys.executable, str(PACKAGE_CHECK_PATH)],
+        [sys.executable, str(PACKAGE_CHECK_PATH), "--offline"],
         check=True,
         capture_output=True,
         text=True,
     )
 
-    assert "RECONCILE public package: PASS" in completed.stdout
+    assert "Reconcile public package: PASS" in completed.stdout

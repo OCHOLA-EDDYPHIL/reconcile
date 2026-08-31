@@ -1,0 +1,191 @@
+name: Public verification
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+    tags: ["v*.*.*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: public-verification-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHON_VERSION: "3.12.13"
+  UV_VERSION: "0.12.3"
+  UV_PYTHON_DOWNLOADS: never
+
+jobs:
+  quality:
+    name: Quality, evidence, and infrastructure
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+      - name: Verify dependencies and package build
+        run: |
+          uv lock --check
+          uv sync --locked --all-groups
+          uv build --no-sources
+      - name: Verify Python formatting and lint
+        run: |
+          uv run --no-sync ruff format --check .
+          uv run --no-sync ruff check .
+      - name: Verify current and historical public evidence
+        run: |
+          uv run --no-sync python -m scripts.validate_evidence
+          uv run --no-sync python scripts/check_public_package.py
+      - name: Build checksum-bound release assets
+        run: |
+          uv run --no-sync python scripts/build_public_release.py \
+            --output "$RUNNER_TEMP/reconcile-v0.1.1"
+          cd "$RUNNER_TEMP/reconcile-v0.1.1"
+          sha256sum --check --strict reconcile-v0.1.1-SHA256SUMS.txt
+      - uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3.1.2
+        with:
+          terraform_version: "1.15.8"
+          terraform_wrapper: false
+      - name: Install the network-isolation boundary
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes bubblewrap
+      - name: Verify Terraform formatting and offline plan policy
+        run: |
+          terraform fmt -check -recursive infra
+          profile="$RUNNER_TEMP/reconcile-ci-profile.json"
+          install -m 600 /dev/null "$profile"
+          printf '%s' '{"billing_account_id":"ABCDEF-123456-ABCDEF","owner_account":"ci@example.com","project_id":"reconcile-ci-123456","project_number":"123456789012","schema_version":"reconcile/deployment-profile/v1"}' > "$profile"
+          chmod 400 "$profile"
+          uv run --no-sync python scripts/check_phase5_terraform_plans.py \
+            --deployment-profile "$profile"
+          uv run --no-sync pytest -q tests/unit/test_phase5_terraform_plans.py
+
+  tests:
+    name: Tests / ${{ matrix.name }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    strategy:
+      fail-fast: false
+      matrix:
+        # Stateful qualification and reprovision suites remain maintainer-run.
+        include:
+          - name: recovery authority
+            command: >-
+              tests/unit/controller
+              tests/unit/evidence
+              tests/unit/persistence/test_permits.py
+              tests/unit/persistence/test_recovery_runs.py
+              tests/unit/hosted/test_firestore_permits.py
+              tests/unit/hosted/test_firestore_recovery_runs.py
+              tests/unit/hosted/test_recovery_cloud_run_authority.py
+              tests/unit/test_recovery_agents.py
+              tests/unit/test_recovery_scenario.py
+              tests/unit/test_recovery_workflow.py
+          - name: contracts
+            command: tests/contract -m contract
+          - name: recovery integration
+            command: >-
+              tests/integration/test_hosted_recovery_actions.py
+              tests/integration/test_recovery_api.py
+              tests/integration/test_recovery_release_chain.py
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+      - run: uv sync --locked --all-groups
+      - run: uv run --no-sync pytest -q ${{ matrix.command }}
+
+  public-coverage:
+    name: Public boundary coverage
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+      - run: uv sync --locked --all-groups
+      - name: Enforce bounded public-surface coverage
+        run: >-
+          uv run --no-sync pytest -q
+          --cov=viewer
+          --cov=scripts.build_public_release
+          --cov-branch
+          --cov-report=term-missing
+          --cov-fail-under=75
+          tests/unit/viewer
+          tests/unit/test_public_evidence_export.py
+          tests/unit/test_public_proof_bundle.py
+          tests/unit/test_public_release_assets.py
+
+  gate:
+    name: Public verification gate
+    if: always()
+    needs: [quality, tests, public-coverage]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    steps:
+      - name: Require every fast check
+        env:
+          QUALITY: ${{ needs.quality.result }}
+          TESTS: ${{ needs.tests.result }}
+          COVERAGE: ${{ needs.public-coverage.result }}
+        run: test "$QUALITY" = success && test "$TESTS" = success && test "$COVERAGE" = success
+
+  release-assets:
+    name: Verified tagged release assets
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: gate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+      - run: uv sync --locked --all-groups
+      - name: Build checksum-bound release assets
+        run: |
+          uv run --no-sync python scripts/build_public_release.py \
+            --output "$RUNNER_TEMP/reconcile-v0.1.1" \
+            --require-tag "$GITHUB_REF_NAME"
+          cd "$RUNNER_TEMP/reconcile-v0.1.1"
+          sha256sum --check --strict reconcile-v0.1.1-SHA256SUMS.txt
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: reconcile-v0.1.1-tag-${{ github.sha }}
+          path: ${{ runner.temp }}/reconcile-v0.1.1
+          if-no-files-found: error
+          retention-days: 7

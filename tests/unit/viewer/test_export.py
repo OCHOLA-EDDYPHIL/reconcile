@@ -17,7 +17,13 @@ from viewer.export import (
     export_bundle,
     stage_build_context,
 )
-from viewer.public_contract import decode_snapshot
+from viewer.public_contract import (
+    LEGACY_SNAPSHOT_VERSION,
+    SNAPSHOT_VERSION,
+    canonical_json_bytes,
+    decode_snapshot,
+    render_html,
+)
 from viewer.server import load_bundle
 
 pytestmark = pytest.mark.unit
@@ -26,17 +32,55 @@ pytestmark = pytest.mark.unit
 def test_versioned_evidence_projects_distinct_source_identities() -> None:
     snapshot = _build_snapshot(EVIDENCE_ROOT, VIEWER_SOURCE_REVISION)
     provider = json.loads((EVIDENCE_ROOT / "provider-proof.json").read_bytes())
+    live = json.loads((EVIDENCE_ROOT / "live-corroboration.json").read_bytes())
+    adaptive = provider["adaptive_recovery"]
 
     assert snapshot["viewer_source_revision"] == VIEWER_SOURCE_REVISION
     assert (
         snapshot["evidence_source_revision"] == provider["candidate"]["source_revision"]
     )
     assert snapshot["viewer_source_revision"] != snapshot["evidence_source_revision"]
-    assert snapshot["evidence_version"] == "v0.1.0"
-    assert snapshot["recovery"]["initial_classification"] == "UNKNOWN"
-    assert snapshot["recovery"]["initial_action_permits_issued"] == 0
-    assert snapshot["recovery"]["all_permits_single_use"] is True
-    assert snapshot["recovery"]["replay_contacted_provider"] is False
+    assert snapshot["evidence_version"] == "v0.1.1"
+    assert snapshot["schema_version"] == SNAPSHOT_VERSION
+    assert snapshot["recovery"] == {
+        "policy": adaptive["policy"],
+        "fault": adaptive["fault"],
+        "acknowledgement_lost": adaptive["acknowledgement_lost"],
+        "launch_outcome": adaptive["launch_outcome"],
+        "terminal_disposition": adaptive["terminal_disposition"],
+        "chain_completed": adaptive["chain_completed"],
+        "certificate_count": adaptive["certificate_count"],
+        "continue_permits_issued": adaptive["continue_permits_issued"],
+        "action_permits_consumed": adaptive["action_permits_consumed"],
+        "provider_contacts": adaptive["provider_contacts"],
+        "replay": adaptive["replay"],
+        "effects": adaptive["effects"],
+    }
+    assert snapshot["advisory_planning"] == live["advisory_planning"]
+    unsupported = {
+        "initial_classification",
+        "settled_classification",
+        "initial_continue_allowed",
+        "initial_retry_allowed",
+        "initial_action_permits_issued",
+        "permit_count",
+        "all_permits_single_use",
+        "replay_outcome",
+        "replay_contacted_provider",
+    }
+    assert unsupported.isdisjoint(snapshot["recovery"])
+    assert "bound_to_hypothesis" not in snapshot["advisory_planning"]
+    assert "hypothesis_count" not in snapshot["advisory_planning"]
+
+
+def test_legacy_evidence_keeps_the_v3_snapshot_contract() -> None:
+    legacy_root = EVIDENCE_ROOT.parent / "v0.1.0"
+
+    snapshot = _build_snapshot(legacy_root, VIEWER_SOURCE_REVISION)
+
+    assert snapshot["schema_version"] == LEGACY_SNAPSHOT_VERSION
+    assert decode_snapshot(canonical_json_bytes(snapshot)) == snapshot
+    assert b"Initial result" in render_html(snapshot)
 
 
 def test_export_writes_one_closed_immutable_bundle(
@@ -68,11 +112,11 @@ def test_export_writes_one_closed_immutable_bundle(
 
 
 def test_export_rejects_changed_or_extra_evidence(tmp_path: Path) -> None:
-    copied = tmp_path / "v0.1.0"
+    copied = tmp_path / "v0.1.1"
     shutil.copytree(EVIDENCE_ROOT, copied)
     provider_path = copied / "provider-proof.json"
     provider = json.loads(provider_path.read_bytes())
-    provider["effects"]["revisions"] += 1
+    provider["adaptive_recovery"]["effects"]["revisions"] += 1
     provider_path.write_text(json.dumps(provider), encoding="utf-8")
 
     with pytest.raises(ViewerExportError, match="EVIDENCE_CONTRACT_INVALID"):

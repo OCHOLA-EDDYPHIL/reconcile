@@ -118,7 +118,7 @@ class ViewerHandler(BaseHTTPRequestHandler):
     """Serve a closed route set without any mutation surface."""
 
     protocol_version = "HTTP/1.1"
-    server_version = "RECONCILE"
+    server_version = "Reconcile"
     sys_version = ""
     responses_by_path: ClassVar[dict[str, tuple[bytes, str]]]
 

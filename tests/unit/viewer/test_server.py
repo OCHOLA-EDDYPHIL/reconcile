@@ -76,7 +76,7 @@ def test_closed_routes_emit_security_headers(viewer: int) -> None:
     assert headers["Content-Security-Policy"].startswith("default-src 'none'")
     assert headers["Permissions-Policy"] == ("camera=(), microphone=(), geolocation=()")
     assert headers["X-Frame-Options"] == "DENY"
-    assert headers["Server"] == "RECONCILE"
+    assert headers["Server"] == "Reconcile"
 
 
 def test_head_health_manifest_and_etag_are_read_only(viewer: int) -> None:
