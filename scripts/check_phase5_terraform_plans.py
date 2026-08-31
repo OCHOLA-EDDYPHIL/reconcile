@@ -1835,7 +1835,7 @@ def _verify_observability(
         metric_name = f"reconcile_p5_{key}"
         log_filter = (
             'resource.type="cloud_run_revision" AND '
-            'jsonPayload.schema_version="reconcile/operational-event/v1" AND '
+            'jsonPayload.schema_version="reconcile/operational-event/v2" AND '
             'jsonPayload.event="operational-signal" AND '
             f'jsonPayload.signal="{signal}"'
         )

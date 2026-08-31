@@ -1,19 +1,25 @@
 from __future__ import annotations
 
+import asyncio
 import io
 import json
+from datetime import UTC, datetime
 
 import pytest
 from pydantic import ValidationError
 
 from reconcile.hosted.config import Component
 from reconcile.hosted.observability import (
+    LogOnlyOperationalEventOutbox,
+    OperationalEventDeliveryError,
     OperationalSignal,
     component_observer,
     emit_operational_event,
 )
 
 pytestmark = pytest.mark.unit
+
+_NOW = datetime(2026, 8, 31, 12, 0, tzinfo=UTC)
 
 
 def test_operational_event_is_bounded_canonical_structured_json() -> None:
@@ -23,6 +29,7 @@ def test_operational_event_is_bounded_canonical_structured_json() -> None:
         signal=OperationalSignal.WORKER_FAILURE,
         component=Component.CONTROLLER,
         correlation_id="run-123",
+        occurred_at=_NOW,
         sink=lambda value: output.write(value.model_dump_json()),
     )
 
@@ -32,7 +39,8 @@ def test_operational_event_is_bounded_canonical_structured_json() -> None:
         "correlation_id": "run-123",
         "event": "operational-signal",
         "event_id": event.event_id,
-        "schema_version": "reconcile/operational-event/v1",
+        "occurred_at": "2026-08-31T12:00:00Z",
+        "schema_version": "reconcile/operational-event/v2",
         "severity": "ERROR",
         "signal": "worker-failure",
         "source_event_cursor": None,
@@ -67,6 +75,7 @@ def test_operational_event_requires_correlation_and_binds_source_identity() -> N
         signal=OperationalSignal.FAILED_RUN,
         component=Component.API,
         correlation_id="run-123",
+        occurred_at=_NOW,
         source_event_cursor=7,
         source_event_sha256=source_sha256,
         sink=lambda _event: None,
@@ -75,6 +84,7 @@ def test_operational_event_requires_correlation_and_binds_source_identity() -> N
         signal=OperationalSignal.FAILED_RUN,
         component=Component.API,
         correlation_id="run-123",
+        occurred_at=_NOW,
         source_event_cursor=7,
         source_event_sha256=source_sha256,
         sink=lambda _event: None,
@@ -96,8 +106,29 @@ def test_default_sink_uses_stable_cloud_logging_insert_identity(
         signal=OperationalSignal.PROVIDER_UNAVAILABLE,
         component=Component.API,
         correlation_id="request-123",
+        occurred_at=_NOW,
     )
 
     payload = json.loads(capsys.readouterr().err)
     assert payload["event_id"] == event.event_id
     assert payload["logging.googleapis.com/insertId"] == event.event_id
+    assert payload["timestamp"] == "2026-08-31T12:00:00Z"
+
+
+def test_log_only_delivery_is_explicit_and_propagates_sink_failure() -> None:
+    event = emit_operational_event(
+        signal=OperationalSignal.WORKER_FAILURE,
+        component=Component.SANDBOX,
+        correlation_id="request-123",
+        occurred_at=_NOW,
+        sink=lambda _event: None,
+    )
+    outbox = LogOnlyOperationalEventOutbox()
+
+    with pytest.raises(OperationalEventDeliveryError):
+        asyncio.run(
+            outbox.deliver(
+                event,
+                sink=lambda _event: (_ for _ in ()).throw(OSError("private")),
+            )
+        )

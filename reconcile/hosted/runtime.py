@@ -74,6 +74,7 @@ from reconcile.hosted.firestore_scenarios import (
     FirestoreScenarioOperationAuthority,
     FirestoreScenarioStore,
 )
+from reconcile.hosted.observability import LogOnlyOperationalEventOutbox
 from reconcile.hosted.operations import (
     DurableRuntimeReportLoader,
     FirestoreHostedOperationScopeAuthorizer,
@@ -1004,7 +1005,11 @@ def create_runtime_component_app(
         raise TypeError("hosted runtime requires exact configuration")
     candidate = build_hosted_candidate(config)
     cas = _cas(config)
-    operational_event_outbox = FirestoreOperationalEventOutbox(cas)
+    operational_event_outbox = (
+        LogOnlyOperationalEventOutbox()
+        if config.component is Component.SANDBOX
+        else FirestoreOperationalEventOutbox(cas)
+    )
     scenario_store = FirestoreScenarioStore(cas, candidate)
     selected_transport = transport or HostedHttpTransport(
         request_timeout_seconds=(
@@ -1184,6 +1189,7 @@ def create_runtime_component_app(
                     HostedRecoveryHandler(
                         expected_caller_email=config.allowed_caller_emails[0],
                         service=recovery_service,
+                        operating_profile=config.operating_profile,
                         acceptance_partial_read_outage_enabled=(
                             config.acceptance_partial_read_outage_enabled
                         ),

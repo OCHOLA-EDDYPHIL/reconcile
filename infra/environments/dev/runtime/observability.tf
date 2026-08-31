@@ -24,7 +24,7 @@ resource "google_logging_metric" "operational_failure" {
   name        = "reconcile_p5_${each.key}"
   description = "Count of bounded Reconcile ${each.value} operational signals."
   disabled    = false
-  filter      = "resource.type=\"cloud_run_revision\" AND jsonPayload.schema_version=\"reconcile/operational-event/v1\" AND jsonPayload.event=\"operational-signal\" AND jsonPayload.signal=\"${each.value}\""
+  filter      = "resource.type=\"cloud_run_revision\" AND jsonPayload.schema_version=\"reconcile/operational-event/v2\" AND jsonPayload.event=\"operational-signal\" AND jsonPayload.signal=\"${each.value}\""
 
   metric_descriptor {
     metric_kind  = "DELTA"

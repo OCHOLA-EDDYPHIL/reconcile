@@ -770,6 +770,7 @@ def create_component_app(
             operator_service=operator_service,  # type: ignore[arg-type]
             recovery_service=recovery_service,  # type: ignore[arg-type]
             hosted=True,
+            operating_profile=config.operating_profile,
             acceptance_partial_read_outage_enabled=(
                 acceptance_partial_read_outage_enabled
             ),

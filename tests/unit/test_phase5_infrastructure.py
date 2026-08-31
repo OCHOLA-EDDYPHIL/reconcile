@@ -1034,7 +1034,7 @@ def test_operational_metrics_alerts_and_dashboard_cover_the_closed_signal_set() 
     }
 
     assert set(re.findall(r'= "([a-z]+(?:-[a-z]+)+)"', source)) >= expected_signals
-    assert 'jsonPayload.schema_version=\\"reconcile/operational-event/v1\\"' in source
+    assert 'jsonPayload.schema_version=\\"reconcile/operational-event/v2\\"' in source
     assert 'resource "google_logging_metric" "operational_failure"' in source
     assert 'resource "google_monitoring_alert_policy" "operational_failure"' in source
     assert 'resource "google_monitoring_dashboard" "operational"' in source

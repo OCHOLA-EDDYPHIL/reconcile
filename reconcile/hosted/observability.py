@@ -6,12 +6,14 @@ import asyncio
 import hashlib
 import sys
 from collections.abc import Callable
+from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Literal, Protocol, TextIO, runtime_checkable
 
 from pydantic import Field, model_validator
 
 from reconcile.contracts.base import (
+    AwareDatetime,
     Identifier,
     Sha256Digest,
     StrictModel,
@@ -19,7 +21,7 @@ from reconcile.contracts.base import (
 )
 from reconcile.hosted.config import Component
 
-OPERATIONAL_EVENT_VERSION = "reconcile/operational-event/v1"
+OPERATIONAL_EVENT_VERSION = "reconcile/operational-event/v2"
 
 
 class OperationalSignal(StrEnum):
@@ -34,12 +36,13 @@ class OperationalSignal(StrEnum):
 class OperationalEvent(StrictModel):
     """A fixed-field event safe for direct Cloud Logging JSON ingestion."""
 
-    schema_version: Literal["reconcile/operational-event/v1"]
+    schema_version: Literal["reconcile/operational-event/v2"]
     event: Literal["operational-signal"]
     severity: Literal["WARNING", "ERROR"]
     signal: OperationalSignal
     component: Component
     correlation_id: Identifier
+    occurred_at: AwareDatetime
     event_id: Identifier
     source_event_cursor: int | None = Field(default=None, ge=1, le=2**63 - 1)
     source_event_sha256: Sha256Digest | None = None
@@ -60,6 +63,7 @@ class OperationalEvent(StrictModel):
             signal=self.signal,
             component=self.component,
             correlation_id=self.correlation_id,
+            occurred_at=self.occurred_at,
             source_event_cursor=self.source_event_cursor,
             source_event_sha256=self.source_event_sha256,
         ):
@@ -93,7 +97,22 @@ class OperationalSignalPublisher(Protocol):
         *,
         source_event_cursor: int | None = None,
         source_event_sha256: str | None = None,
+        occurred_at: datetime | None = None,
     ) -> None: ...
+
+
+def _utc_timestamp(value: datetime) -> datetime:
+    if not isinstance(value, datetime) or value.tzinfo is None:
+        raise ValueError("operational event timestamp must be timezone-aware")
+    if value.utcoffset() is None:
+        raise ValueError("operational event timestamp must be timezone-aware")
+    return value.astimezone(UTC)
+
+
+def _timestamp_text(value: datetime) -> str:
+    utc = _utc_timestamp(value)
+    timespec = "microseconds" if utc.microsecond else "seconds"
+    return utc.isoformat(timespec=timespec).replace("+00:00", "Z")
 
 
 def operational_event_id(
@@ -101,6 +120,7 @@ def operational_event_id(
     signal: OperationalSignal,
     component: Component,
     correlation_id: str,
+    occurred_at: datetime,
     source_event_cursor: int | None = None,
     source_event_sha256: str | None = None,
 ) -> str:
@@ -117,6 +137,7 @@ def operational_event_id(
         {
             "component": component.value,
             "correlation_id": correlation_id,
+            "occurred_at": _timestamp_text(occurred_at),
             "signal": signal.value,
             "source_event_cursor": source_event_cursor,
             "source_event_sha256": source_event_sha256,
@@ -129,6 +150,7 @@ def _stderr_sink(event: OperationalEvent, *, stream: TextIO | None = None) -> No
     destination = sys.stderr if stream is None else stream
     payload = event.model_dump(mode="json")
     payload["logging.googleapis.com/insertId"] = event.event_id
+    payload["timestamp"] = payload["occurred_at"]
     destination.write(canonical_json_value_bytes(payload).decode("utf-8"))
     destination.write("\n")
     destination.flush()
@@ -139,6 +161,7 @@ def emit_operational_event(
     signal: OperationalSignal,
     component: Component,
     correlation_id: str,
+    occurred_at: datetime | None = None,
     source_event_cursor: int | None = None,
     source_event_sha256: str | None = None,
     sink: OperationalEventSink | None = None,
@@ -152,6 +175,9 @@ def emit_operational_event(
         if signal in {OperationalSignal.FAILED_RUN, OperationalSignal.WORKER_FAILURE}
         else "WARNING"
     )
+    timestamp = (
+        datetime.now(UTC) if occurred_at is None else _utc_timestamp(occurred_at)
+    )
     event = OperationalEvent(
         schema_version=OPERATIONAL_EVENT_VERSION,
         event="operational-signal",
@@ -159,10 +185,12 @@ def emit_operational_event(
         signal=signal,
         component=component,
         correlation_id=correlation_id,
+        occurred_at=timestamp,
         event_id=operational_event_id(
             signal=signal,
             component=component,
             correlation_id=correlation_id,
+            occurred_at=timestamp,
             source_event_cursor=source_event_cursor,
             source_event_sha256=source_event_sha256,
         ),
@@ -223,6 +251,24 @@ class InMemoryOperationalEventOutbox:
             return True
 
 
+class LogOnlyOperationalEventOutbox:
+    """Emit stable structured logs without claiming Firestore write authority."""
+
+    async def deliver(
+        self,
+        event: OperationalEvent,
+        *,
+        sink: OperationalEventSink,
+    ) -> bool:
+        if type(event) is not OperationalEvent or not callable(sink):
+            raise TypeError("operational event delivery inputs must be exact")
+        try:
+            sink(event)
+        except Exception as error:
+            raise OperationalEventDeliveryError from error
+        return True
+
+
 def component_publisher(
     component: Component,
     outbox: OperationalEventOutbox,
@@ -243,7 +289,11 @@ def component_publisher(
         *,
         source_event_cursor: int | None = None,
         source_event_sha256: str | None = None,
+        occurred_at: datetime | None = None,
     ) -> None:
+        timestamp = (
+            datetime.now(UTC) if occurred_at is None else _utc_timestamp(occurred_at)
+        )
         event = OperationalEvent(
             schema_version=OPERATIONAL_EVENT_VERSION,
             event="operational-signal",
@@ -256,12 +306,14 @@ def component_publisher(
             signal=OperationalSignal(signal),
             component=component,
             correlation_id=correlation_id,
+            occurred_at=timestamp,
             source_event_cursor=source_event_cursor,
             source_event_sha256=source_event_sha256,
             event_id=operational_event_id(
                 signal=OperationalSignal(signal),
                 component=component,
                 correlation_id=correlation_id,
+                occurred_at=timestamp,
                 source_event_cursor=source_event_cursor,
                 source_event_sha256=source_event_sha256,
             ),
@@ -282,6 +334,7 @@ def component_publisher(
 __all__ = [
     "OPERATIONAL_EVENT_VERSION",
     "InMemoryOperationalEventOutbox",
+    "LogOnlyOperationalEventOutbox",
     "OperationalEvent",
     "OperationalEventDeliveryError",
     "OperationalEventOutbox",

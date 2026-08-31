@@ -9,9 +9,10 @@ import re
 import stat
 from collections.abc import AsyncIterator, Awaitable
 from contextlib import asynccontextmanager
+from datetime import datetime
 from http import HTTPStatus
 from pathlib import Path
-from typing import Protocol, cast
+from typing import Literal, Protocol, cast
 
 import uvicorn
 from fastapi import FastAPI, Request
@@ -104,6 +105,7 @@ class OperationalSignalPublisher(Protocol):
         *,
         source_event_cursor: int | None = None,
         source_event_sha256: str | None = None,
+        occurred_at: datetime | None = None,
     ) -> None: ...
 
 
@@ -1230,6 +1232,7 @@ def create_app(
     operator_service: _OperatorService | None = None,
     recovery_service: _RecoveryRunService | None = None,
     hosted: bool = False,
+    operating_profile: Literal["evidence", "production"] = "evidence",
     acceptance_partial_read_outage_enabled: bool = False,
     operational_signal_publisher: OperationalSignalPublisher | None = None,
 ) -> FastAPI:
@@ -1237,6 +1240,8 @@ def create_app(
 
     if type(hosted) is not bool:
         raise TypeError("API hosted profile must be a boolean")
+    if operating_profile not in {"evidence", "production"}:
+        raise ValueError("API operating profile is invalid")
     if type(acceptance_partial_read_outage_enabled) is not bool:
         raise TypeError("partial-read acceptance state must be boolean")
 
@@ -1330,6 +1335,12 @@ def create_app(
         }:
             raise _InvalidApiRequest
         if (
+            hosted
+            and operating_profile == "production"
+            and launch.fault is not RecoveryRunFault.NO_FAULT
+        ):
+            raise _InvalidApiRequest
+        if (
             launch.fault
             is RecoveryRunFault.ACCEPTANCE_DROP_AFTER_ACCEPT_PARTIAL_READ_OUTAGE
             and not acceptance_partial_read_outage_enabled
@@ -1386,6 +1397,7 @@ def create_app(
                         snapshot.request.run_id,
                         source_event_cursor=terminal_event.cursor,
                         source_event_sha256=canonical_sha256(terminal_event),
+                        occurred_at=terminal_event.occurred_at,
                     )
                 except asyncio.CancelledError:
                     raise

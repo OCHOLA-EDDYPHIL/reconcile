@@ -342,6 +342,41 @@ def test_hosted_recovery_api_requires_explicit_partial_read_acceptance_enablemen
     assert enabled_service.launch_calls == 1
 
 
+@pytest.mark.parametrize(
+    "fault",
+    tuple(
+        fault for fault in RecoveryRunFault if fault is not RecoveryRunFault.NO_FAULT
+    ),
+)
+def test_production_recovery_api_rejects_every_fault_before_service_contact(
+    fault: RecoveryRunFault,
+) -> None:
+    request = make_recovery_run_examples()[0].model_copy(
+        update={
+            "run_id": f"p5w-fixed-{'a' * 32}",
+            "fault": fault,
+            "policy": RecoveryRunPolicy.FIXED,
+        }
+    )
+    service = _RecoveryService()
+
+    response = TestClient(
+        create_app(
+            recovery_service=service,
+            hosted=True,
+            operating_profile="production",
+        )
+    ).post(
+        "/api/v1/recovery-runs",
+        content=canonical_json_bytes(request),
+        headers={"Content-Type": "application/json"},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["code"] == "invalid_contract"
+    assert service.launch_calls == 0
+
+
 def test_recovery_api_rejects_noncanonical_cursor_without_calling_service() -> None:
     request = make_recovery_run_examples()[0]
     service = _RecoveryService()
