@@ -76,6 +76,7 @@ REQUIRED = (
     EVIDENCE_ROOT / "live-corroboration.json",
     EVIDENCE_ROOT / "cleanup-verification.json",
     ROOT / "scripts" / "build_public_release.py",
+    ROOT / "scripts" / "verify_publication.py",
     ROOT / "scripts" / "validate_evidence.py",
     ROOT / "viewer" / ".dockerignore",
     ROOT / "viewer" / "Dockerfile",
@@ -419,6 +420,7 @@ def _check_workflow() -> int:
         "tests/unit/test_phase5_terraform_plans.py",
         "tests/contract",
         "tests/unit",
+        "tests/unit/test_publication_verification.py",
         "tests/integration/test_recovery_api.py",
         "--cov-fail-under=",
     )

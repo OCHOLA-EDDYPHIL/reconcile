@@ -153,6 +153,7 @@ jobs:
           tests/unit/viewer
           tests/unit/test_public_evidence_export.py
           tests/unit/test_public_proof_bundle.py
+          tests/unit/test_publication_verification.py
           tests/unit/test_public_release_assets.py
 
   gate:
