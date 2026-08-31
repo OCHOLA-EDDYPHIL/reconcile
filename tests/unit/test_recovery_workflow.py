@@ -35,9 +35,11 @@ from reconcile.contracts import (
     canonical_sha256,
 )
 from reconcile.contracts.base import canonical_json_value_bytes
-from reconcile.controller.permits import PermitAuthority
+from reconcile.controller.permits import PermitAuthority, action_permit_from_certificate
 from reconcile.persistence import (
     InMemoryRecoveryRunStore,
+    PermitNotFound,
+    RecoveryRunConflict,
     RecoveryRunStoreUnavailable,
     SqliteDurableRuntimeStore,
 )
@@ -759,6 +761,86 @@ def test_adaptive_workflow_completes_with_model_hypotheses_and_exact_permits(
     assert evidence.probe_calls == []
     event_snapshot = asyncio.run(store.events(request.run_id))
     assert event_snapshot.events[-1].type is RecoveryRunEventType.LIFECYCLE
+
+
+def test_recovery_capacity_rejection_precedes_permit_issuance_and_dispatch(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    definition, states = _definition_and_states()
+    request = RecoveryRunRequest(
+        schema_version=RECOVERY_RUN_REQUEST_VERSION,
+        run_id="recovery-capacity-before-permit-7",
+        scenario="cloud-run-rollout",
+        policy=RecoveryRunPolicy.ADAPTIVE,
+        fault=RecoveryRunFault.DROP_AFTER_ACCEPT,
+    )
+    store = InMemoryRecoveryRunStore()
+    authority = PermitAuthority(
+        SqliteDurableRuntimeStore(tmp_path / "capacity-before-permit.sqlite3"),
+        clock=lambda: NOW + timedelta(seconds=7),
+    )
+    gateway = _Gateway(store, authority, definition)
+    original_append = store.append
+
+    async def reject_action_permit_capacity(
+        run_id,
+        *,
+        expected_revision,
+        event_type,
+        payload,
+        occurred_at,
+    ):
+        if event_type is RecoveryRunEventType.ACTION_PERMIT:
+            raise RecoveryRunConflict(run_id)
+        return await original_append(
+            run_id,
+            expected_revision=expected_revision,
+            event_type=event_type,
+            payload=payload,
+            occurred_at=occurred_at,
+        )
+
+    issue_calls = []
+    original_issue_permit = authority.issue_permit
+
+    async def observe_issue_permit(certificate):
+        issue_calls.append(certificate)
+        return await original_issue_permit(certificate)
+
+    monkeypatch.setattr(store, "append", reject_action_permit_capacity)
+    monkeypatch.setattr(authority, "issue_permit", observe_issue_permit)
+    workflow = ProofToPermitWorkflow(
+        store=store,
+        definition_factory=lambda _request: definition,
+        evidence_source=_Evidence(states),
+        action_preparer=_Preparer(),
+        recovery_agent=RecoveryAgent(_DynamicPlanner()),
+        rollout_agent=RolloutAgent(gateway),
+        permit_authority=authority,
+        clock=lambda: NOW + timedelta(seconds=7),
+        claim_id_factory=lambda: "claim-launch",
+    )
+
+    async def exercise():
+        await store.create(request, definition.chain, created_at=NOW)
+        with pytest.raises(RecoveryRunConflict):
+            await workflow.run(request.run_id)
+        snapshot = await store.get(request.run_id)
+        expected = action_permit_from_certificate(snapshot.certificates[-1])
+        assert expected is not None
+        with pytest.raises(PermitNotFound):
+            await authority.get_permit(expected.permit_id)
+        return snapshot
+
+    snapshot = asyncio.run(exercise())
+
+    assert snapshot.action_permits == ()
+    assert issue_calls == []
+    assert gateway.provider_calls == 0
+    assert tuple(scope.authority_kind for scope in gateway.scopes) == (
+        RecoveryAuthorityKind.LAUNCH_PERMIT,
+    )
 
 
 def test_claimed_action_permit_is_reconciled_after_restart_without_redispatch(

@@ -977,6 +977,29 @@ class ProofToPermitWorkflow:
         expected = action_permit_from_certificate(certificate)
         if expected is None:
             raise RecoveryWorkflowError("verified transition did not issue a permit")
+        run_id = snapshot.request.run_id
+        projected = tuple(
+            item
+            for item in (await self._store.get(run_id)).action_permits
+            if item.permit_id == expected.permit_id
+        )
+        if len(projected) > 1:
+            raise RecoveryWorkflowError("action permit projection is ambiguous")
+        if projected:
+            try:
+                projection_matches = same_action_permit_authority(
+                    projected[0],
+                    expected,
+                )
+            except (TypeError, ValueError):
+                projection_matches = False
+            if not projection_matches:
+                raise RecoveryWorkflowError("action permit projection changed")
+        else:
+            # Persist the deterministic permit projection first. Hosted stores use
+            # this transition to retain the complete claim/receipt/completion tail
+            # before the separate permit authority can create or advance authority.
+            await self._mirror_action_permit(run_id, expected)
         try:
             permit = await self._permit_authority.get_permit(expected.permit_id)
         except PermitNotFound:
@@ -994,7 +1017,6 @@ class ProofToPermitWorkflow:
             same_authority = False
         if not same_authority:
             raise RecoveryWorkflowError("durable action permit identity changed")
-        run_id = snapshot.request.run_id
         await self._mirror_action_permit(run_id, permit)
         if permit.state in {ActionPermitState.CLAIMED, ActionPermitState.COMPLETED}:
             latest = await self._store.get(run_id)

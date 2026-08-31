@@ -16,6 +16,7 @@ from pydantic import ValidationError
 
 from reconcile.contracts.base import canonical_json_value_bytes
 from reconcile.hosted.firestore_cas import (
+    FIRESTORE_CAS_AMBIGUOUS_READ_CONCURRENCY,
     FIRESTORE_CAS_DOCUMENT_VERSION,
     FIRESTORE_CAS_PAYLOAD_BYTE_CEILING,
     FIRESTORE_CAS_TIMEOUT_SECONDS,
@@ -216,10 +217,14 @@ class _Factory:
         return self.client
 
 
-def _payload(value: object = 1) -> bytes:
+def _payload(
+    value: object = 1,
+    *,
+    schema_version: str = "reconcile/test-firestore-state/v1",
+) -> bytes:
     return canonical_json_value_bytes(
         {
-            "schema_version": "reconcile/test-firestore-state/v1",
+            "schema_version": schema_version,
             "value": value,
         }
     )
@@ -232,13 +237,14 @@ def _document(
     value: object = 1,
     collection: FirestoreCasCollection = FirestoreCasCollection.RUNTIME,
     logical_id: str = _LOGICAL_ID,
+    payload_schema_version: str = "reconcile/test-firestore-state/v1",
 ) -> FirestoreCasDocument:
     return build_firestore_cas_document(
         collection=collection,
         logical_id=logical_id,
         revision=revision,
         mutation_id=mutation_id,
-        canonical_payload=_payload(value),
+        canonical_payload=_payload(value, schema_version=payload_schema_version),
     )
 
 
@@ -259,7 +265,7 @@ def test_wrapper_paths_and_payload_bounds_are_exact() -> None:
     assert document.payload_sha256 == hashlib.sha256(_payload()).hexdigest()
     assert mutation_id.startswith("mutation-")
     assert len(mutation_id) == 41
-    assert len({item.value for item in FirestoreCasCollection}) == 6
+    assert len({item.value for item in FirestoreCasCollection}) == 7
     assert firestore_cas_document_key(
         FirestoreCasCollection.RUNTIME,
         _LOGICAL_ID,
@@ -544,6 +550,121 @@ def test_atomic_pair_contention_creates_neither_document() -> None:
         current = await store.read(occupied.kind, occupied.logical_id)
         assert current is not None
         assert current.document == occupied
+
+    asyncio.run(scenario())
+
+
+def test_atomic_update_and_create_preserves_both_or_neither() -> None:
+    async def scenario() -> None:
+        client = _Client()
+        store, _ = _store(client)
+        original = await store.create(_document())
+        winner = _document(
+            revision=1,
+            mutation_id="mutation-winner",
+            value="winner",
+        )
+        await store.update(original, winner)
+        contender = _document(
+            revision=1,
+            mutation_id="mutation-contender",
+            value="contender",
+        )
+        event = _document(
+            collection=FirestoreCasCollection.RECOVERY_RUN_EVENT,
+            logical_id="recovery-event-1",
+            revision=1,
+            mutation_id="mutation-event",
+            value="event",
+        )
+
+        with pytest.raises(FirestoreCasConflict):
+            await store.update_and_create_many(original, contender, (event,))
+
+        current = await store.read(original.collection, original.document.logical_id)
+        assert current is not None
+        assert current.document == winner
+        assert await store.read(event.kind, event.logical_id) is None
+
+    asyncio.run(scenario())
+
+
+def test_same_revision_recovery_rewrite_is_limited_to_versioned_migration() -> None:
+    async def scenario() -> None:
+        store, _ = _store(_Client())
+        original = await store.create(
+            _document(
+                collection=FirestoreCasCollection.RECOVERY_RUN,
+                payload_schema_version="reconcile/recovery-run-aggregate/v1",
+            )
+        )
+        rewritten = _document(
+            collection=FirestoreCasCollection.RECOVERY_RUN,
+            mutation_id="mutation-rewrite",
+            value="rewritten",
+            payload_schema_version="reconcile/firestore-recovery-state/v2",
+        )
+
+        current = await store.rewrite_recovery_run(original, rewritten)
+
+        assert current.document == rewritten
+        with pytest.raises(ValueError, match="supported migration"):
+            await store.rewrite_recovery_run(
+                current,
+                _document(
+                    collection=FirestoreCasCollection.RECOVERY_RUN,
+                    mutation_id="mutation-current-format-rewrite",
+                    value="arbitrary-current-rewrite",
+                    payload_schema_version="reconcile/firestore-recovery-state/v2",
+                ),
+            )
+        with pytest.raises(FirestoreCasConflict):
+            await store.rewrite_recovery_run(
+                original,
+                _document(
+                    collection=FirestoreCasCollection.RECOVERY_RUN,
+                    mutation_id="mutation-stale-rewrite",
+                    value="stale",
+                    payload_schema_version="reconcile/firestore-recovery-state/v2",
+                ),
+            )
+
+    asyncio.run(scenario())
+
+
+def test_ambiguous_batch_readback_has_bounded_concurrency() -> None:
+    class BoundedReadStore(GoogleFirestoreCasStore):
+        def __init__(self, client: _Client) -> None:
+            super().__init__(project_id=_PROJECT, client_factory=lambda: client)
+            self.active_reads = 0
+            self.maximum_reads = 0
+
+        async def read(self, collection, logical_id):
+            self.active_reads += 1
+            self.maximum_reads = max(self.maximum_reads, self.active_reads)
+            try:
+                await asyncio.sleep(0)
+                return await super().read(collection, logical_id)
+            finally:
+                self.active_reads -= 1
+
+    async def scenario() -> None:
+        client = _Client()
+        client.commit_after[1] = RuntimeError("private provider response")
+        store = BoundedReadStore(client)
+        documents = tuple(
+            _document(
+                logical_id=f"ambiguous-batch-{index}",
+                mutation_id=f"mutation-ambiguous-batch-{index}",
+            )
+            for index in range(FIRESTORE_CAS_AMBIGUOUS_READ_CONCURRENCY * 2 + 1)
+        )
+
+        written = await store.create_many(documents)
+
+        assert tuple(item.document for item in written) == documents
+        assert store.maximum_reads == FIRESTORE_CAS_AMBIGUOUS_READ_CONCURRENCY
+        assert len(client.gets) == len(documents)
 
     asyncio.run(scenario())
 

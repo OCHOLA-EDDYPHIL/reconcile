@@ -50,6 +50,7 @@ from reconcile.hosted.firestore_release_action import (
     install_firestore_release_action_route,
 )
 from reconcile.hosted.identity import VerifiedCaller
+from reconcile.hosted.recovery_acceptance import HostedRecoveryAcceptanceObserver
 from reconcile.hosted.recovery_dispatch import HostedRecoveryDispatchGateway
 from reconcile.hosted.transport import HostedHttpTransport
 from reconcile.persistence import InMemoryRecoveryRunStore, SqliteDurableRuntimeStore
@@ -150,15 +151,22 @@ def test_hosted_suppression_retries_once_without_a_controller_side_claim(
             base_url="https://fault.example.test",
         ) as client:
             recording = _RecordingHttpClient(client)
+            transport = HostedHttpTransport(
+                token_supplier=lambda _audience: "e30.e30.sig",
+                http_client=recording,
+            )
             gateway = HostedRecoveryDispatchGateway(
                 fault_proxy_url="https://fault.example.test",
                 fault_proxy_audience="https://fault.example.test",
-                transport=HostedHttpTransport(
-                    token_supplier=lambda _audience: "e30.e30.sig",
-                    http_client=recording,
-                ),
+                transport=transport,
                 recovery_store=store,
                 permit_authority=authority,
+                observer=HostedRecoveryAcceptanceObserver(
+                    fault_proxy_url="https://fault.example.test",
+                    fault_proxy_audience="https://fault.example.test",
+                    transport=transport,
+                    recovery_store=store,
+                ),
             )
             definition = build_release_chain_definition(settings, invoked_at=NOW)
             workflow = build_release_chain_workflow(
@@ -299,15 +307,22 @@ def test_partial_read_outage_produces_a_replay_stable_ambiguity_witness(
             base_url="https://fault.example.test",
         ) as client:
             recording = _RecordingHttpClient(client)
+            transport = HostedHttpTransport(
+                token_supplier=lambda _audience: "e30.e30.sig",
+                http_client=recording,
+            )
             gateway = HostedRecoveryDispatchGateway(
                 fault_proxy_url="https://fault.example.test",
                 fault_proxy_audience="https://fault.example.test",
-                transport=HostedHttpTransport(
-                    token_supplier=lambda _audience: "e30.e30.sig",
-                    http_client=recording,
-                ),
+                transport=transport,
                 recovery_store=store,
                 permit_authority=authority,
+                observer=HostedRecoveryAcceptanceObserver(
+                    fault_proxy_url="https://fault.example.test",
+                    fault_proxy_audience="https://fault.example.test",
+                    transport=transport,
+                    recovery_store=store,
+                ),
             )
             workflow = build_release_chain_workflow(
                 settings=settings,
@@ -581,15 +596,22 @@ def test_acceptance_stage_replay_is_denied_before_a_second_provider_call(
             base_url="https://fault.example.test",
         ) as client:
             recording = _RecordingHttpClient(client)
+            transport = HostedHttpTransport(
+                token_supplier=lambda _audience: "e30.e30.sig",
+                http_client=recording,
+            )
             gateway = HostedRecoveryDispatchGateway(
                 fault_proxy_url="https://fault.example.test",
                 fault_proxy_audience="https://fault.example.test",
-                transport=HostedHttpTransport(
-                    token_supplier=lambda _audience: "e30.e30.sig",
-                    http_client=recording,
-                ),
+                transport=transport,
                 recovery_store=store,
                 permit_authority=authority,
+                observer=HostedRecoveryAcceptanceObserver(
+                    fault_proxy_url="https://fault.example.test",
+                    fault_proxy_audience="https://fault.example.test",
+                    transport=transport,
+                    recovery_store=store,
+                ),
             )
             dispatch = await gateway.dispatch(prepared, scope)
             resumed = await gateway.dispatch(prepared, scope)

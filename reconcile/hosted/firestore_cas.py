@@ -27,6 +27,7 @@ FIRESTORE_CAS_DOCUMENT_VERSION = "reconcile/firestore-cas-document/v1"
 FIRESTORE_RUNTIME_DATABASE = "reconcile-p5-runtime"
 FIRESTORE_CAS_PAYLOAD_BYTE_CEILING = 900_000
 FIRESTORE_CAS_TIMEOUT_SECONDS = 5.0
+FIRESTORE_CAS_AMBIGUOUS_READ_CONCURRENCY = 32
 
 _PROJECT_PATTERN = re.compile(r"[a-z][a-z0-9-]{4,28}[a-z0-9]")
 _DOCUMENT_KEY_PATTERN = re.compile(r"[0-9a-f]{64}")
@@ -41,6 +42,13 @@ _WRAPPER_FIELDS = frozenset(
         "payload_sha256",
     }
 )
+_RECOVERY_MIGRATION_SOURCE_VERSIONS = frozenset(
+    {
+        "reconcile/firestore-recovery-state/v1",
+        "reconcile/recovery-run-aggregate/v1",
+    }
+)
+_RECOVERY_MIGRATION_TARGET_VERSION = "reconcile/firestore-recovery-state/v2"
 
 
 class FirestoreCasCollection(StrEnum):
@@ -52,6 +60,7 @@ class FirestoreCasCollection(StrEnum):
     PROVIDER_CANDIDATE = "reconcile-p5-provider-candidates-v1"
     ACTION_PERMIT = "reconcile-action-permits-v1"
     RECOVERY_RUN = "reconcile-recovery-runs-v1"
+    RECOVERY_RUN_EVENT = "reconcile-recovery-run-events-v1"
 
 
 class FirestoreCasErrorCode(StrEnum):
@@ -129,6 +138,19 @@ def _canonical_payload_text(value: bytes | str) -> str:
     if canonical != encoded:
         raise ValueError("canonical payload is not in canonical form")
     return text
+
+
+def _canonical_payload_schema_version(document: FirestoreCasDocument) -> str:
+    try:
+        payload = json.loads(document.canonical_payload)
+        version = payload["schema_version"]
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
+        raise ValueError(
+            "Firestore CAS payload schema version is unavailable"
+        ) from error
+    if type(version) is not str:
+        raise ValueError("Firestore CAS payload schema version is invalid")
+    return version
 
 
 class FirestoreCasDocument(StrictModel):
@@ -501,7 +523,7 @@ class GoogleFirestoreCasStore:
         *,
         expected_writes: int = 1,
     ) -> tuple[datetime, ...]:
-        if type(expected_writes) is not int or not 1 <= expected_writes <= 2:
+        if type(expected_writes) is not int or not 1 <= expected_writes <= 500:
             raise ValueError("Firestore CAS commit size is invalid")
         try:
             async with asyncio.timeout(FIRESTORE_CAS_TIMEOUT_SECONDS):
@@ -557,6 +579,39 @@ class GoogleFirestoreCasStore:
             return first_current, second_current
         raise FirestoreCasOutcomeUnknown
 
+    async def _resolve_ambiguous_many(
+        self,
+        documents: tuple[FirestoreCasDocument, ...],
+    ) -> tuple[FirestoreCasSnapshot, ...]:
+        current: list[FirestoreCasSnapshot | None] = []
+        try:
+            for start in range(
+                0,
+                len(documents),
+                FIRESTORE_CAS_AMBIGUOUS_READ_CONCURRENCY,
+            ):
+                selected = documents[
+                    start : start + FIRESTORE_CAS_AMBIGUOUS_READ_CONCURRENCY
+                ]
+                current.extend(
+                    await asyncio.gather(
+                        *(
+                            self.read(document.kind, document.logical_id)
+                            for document in selected
+                        )
+                    )
+                )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            raise FirestoreCasOutcomeUnknown from None
+        if all(
+            snapshot is not None and _documents_equal(snapshot.document, document)
+            for snapshot, document in zip(current, documents, strict=True)
+        ):
+            return tuple(snapshot for snapshot in current if snapshot is not None)
+        raise FirestoreCasOutcomeUnknown
+
     async def create(
         self,
         document: FirestoreCasDocument,
@@ -590,44 +645,192 @@ class GoogleFirestoreCasStore:
     ) -> tuple[FirestoreCasSnapshot, FirestoreCasSnapshot]:
         """Atomically create two distinct absent wrappers without replay."""
 
+        created = await self.create_many((first, second))
+        return created[0], created[1]
+
+    async def create_many(
+        self,
+        documents: tuple[FirestoreCasDocument, ...],
+    ) -> tuple[FirestoreCasSnapshot, ...]:
+        """Atomically create a bounded set of distinct absent wrappers."""
+
         if (
-            type(first) is not FirestoreCasDocument
-            or type(second) is not FirestoreCasDocument
+            type(documents) is not tuple
+            or not 1 <= len(documents) <= 500
+            or any(type(document) is not FirestoreCasDocument for document in documents)
         ):
-            raise TypeError("Firestore CAS pair documents must be exact")
-        first_path = firestore_cas_document_path(first.kind, first.logical_id)
-        second_path = firestore_cas_document_path(second.kind, second.logical_id)
-        if first_path == second_path or first.mutation_id == second.mutation_id:
-            raise ValueError("Firestore CAS pair identities must be distinct")
+            raise TypeError("Firestore CAS create documents must be an exact tuple")
+        paths = tuple(
+            firestore_cas_document_path(document.kind, document.logical_id)
+            for document in documents
+        )
+        mutation_ids = tuple(document.mutation_id for document in documents)
+        if len(set(paths)) != len(paths) or len(set(mutation_ids)) != len(mutation_ids):
+            raise ValueError("Firestore CAS create identities must be distinct")
         client = await self._client()
-        first_reference = self._reference(client, first.kind, first.logical_id)
-        second_reference = self._reference(client, second.kind, second.logical_id)
+        references = tuple(
+            self._reference(client, document.kind, document.logical_id)
+            for document in documents
+        )
         batch = self._new_batch(client)
         try:
-            batch.create(first_reference, _document_data(first))
-            batch.create(second_reference, _document_data(second))
+            for reference, document in zip(references, documents, strict=True):
+                batch.create(reference, _document_data(document))
         except Exception:
             raise FirestoreCasProviderUnavailable from None
         try:
-            first_time, second_time = await self._commit(
+            update_times = await self._commit(
                 batch,
-                expected_writes=2,
+                expected_writes=len(documents),
             )
         except _AmbiguousWrite:
-            return await self._resolve_ambiguous_pair(first, second)
-        return (
+            return await self._resolve_ambiguous_many(documents)
+        return tuple(
             FirestoreCasSnapshot(
-                collection=first.kind,
-                document_key=first_reference.path.rsplit("/", 1)[1],
-                document=first,
-                update_time=first_time,
-            ),
+                collection=document.kind,
+                document_key=reference.path.rsplit("/", 1)[1],
+                document=document,
+                update_time=update_time,
+            )
+            for reference, document, update_time in zip(
+                references,
+                documents,
+                update_times,
+                strict=True,
+            )
+        )
+
+    async def update_and_create_many(
+        self,
+        current: FirestoreCasSnapshot,
+        replacement: FirestoreCasDocument,
+        created: tuple[FirestoreCasDocument, ...],
+    ) -> tuple[FirestoreCasSnapshot, ...]:
+        """Atomically advance one CAS target and create immutable companions."""
+
+        if type(current) is not FirestoreCasSnapshot:
+            raise TypeError("Firestore CAS current snapshot must be exact")
+        if type(replacement) is not FirestoreCasDocument:
+            raise TypeError("Firestore CAS replacement document must be exact")
+        if (
+            type(created) is not tuple
+            or not 1 <= len(created) <= 499
+            or any(type(document) is not FirestoreCasDocument for document in created)
+        ):
+            raise TypeError("Firestore CAS companion documents must be an exact tuple")
+        if (
+            replacement.kind is not current.collection
+            or replacement.logical_id != current.document.logical_id
+            or replacement.revision != current.document.revision + 1
+            or replacement.mutation_id == current.document.mutation_id
+        ):
+            raise ValueError("Firestore CAS replacement does not advance its target")
+        documents = (replacement, *created)
+        paths = tuple(
+            firestore_cas_document_path(document.kind, document.logical_id)
+            for document in documents
+        )
+        mutation_ids = tuple(document.mutation_id for document in documents)
+        if len(set(paths)) != len(paths) or len(set(mutation_ids)) != len(mutation_ids):
+            raise ValueError("Firestore CAS mutation identities must be distinct")
+        client = await self._client()
+        references = tuple(
+            self._reference(client, document.kind, document.logical_id)
+            for document in documents
+        )
+        batch = self._new_batch(client)
+        try:
+            option = client.write_option(last_update_time=current.update_time)
+            if option is None:
+                raise ValueError("provider write option is unavailable")
+            batch.update(
+                references[0],
+                _document_data(replacement),
+                option=option,
+            )
+            for reference, document in zip(
+                references[1:],
+                created,
+                strict=True,
+            ):
+                batch.create(reference, _document_data(document))
+        except Exception:
+            raise FirestoreCasProviderUnavailable from None
+        try:
+            update_times = await self._commit(
+                batch,
+                expected_writes=len(documents),
+            )
+        except _AmbiguousWrite:
+            return await self._resolve_ambiguous_many(documents)
+        return tuple(
             FirestoreCasSnapshot(
-                collection=second.kind,
-                document_key=second_reference.path.rsplit("/", 1)[1],
-                document=second,
-                update_time=second_time,
-            ),
+                collection=document.kind,
+                document_key=reference.path.rsplit("/", 1)[1],
+                document=document,
+                update_time=update_time,
+            )
+            for reference, document, update_time in zip(
+                references,
+                documents,
+                update_times,
+                strict=True,
+            )
+        )
+
+    async def rewrite_recovery_run(
+        self,
+        current: FirestoreCasSnapshot,
+        replacement: FirestoreCasDocument,
+    ) -> FirestoreCasSnapshot:
+        """Rewrite one recovery payload without advancing its logical revision."""
+
+        if type(current) is not FirestoreCasSnapshot:
+            raise TypeError("Firestore CAS current snapshot must be exact")
+        if type(replacement) is not FirestoreCasDocument:
+            raise TypeError("Firestore CAS replacement document must be exact")
+        if (
+            current.collection is not FirestoreCasCollection.RECOVERY_RUN
+            or replacement.kind is not current.collection
+            or replacement.logical_id != current.document.logical_id
+            or replacement.revision != current.document.revision
+            or replacement.mutation_id == current.document.mutation_id
+        ):
+            raise ValueError("Firestore recovery rewrite changed its logical identity")
+        source_version = _canonical_payload_schema_version(current.document)
+        target_version = _canonical_payload_schema_version(replacement)
+        if (
+            source_version not in _RECOVERY_MIGRATION_SOURCE_VERSIONS
+            or target_version != _RECOVERY_MIGRATION_TARGET_VERSION
+        ):
+            raise ValueError("Firestore recovery rewrite is not a supported migration")
+        client = await self._client()
+        reference = self._reference(
+            client,
+            replacement.kind,
+            replacement.logical_id,
+        )
+        batch = self._new_batch(client)
+        try:
+            option = client.write_option(last_update_time=current.update_time)
+            if option is None:
+                raise ValueError("provider write option is unavailable")
+            batch.update(
+                reference,
+                _document_data(replacement),
+                option=option,
+            )
+        except Exception:
+            raise FirestoreCasProviderUnavailable from None
+        try:
+            (update_time,) = await self._commit(batch)
+        except _AmbiguousWrite:
+            return await self._resolve_ambiguous(replacement)
+        return FirestoreCasSnapshot(
+            collection=replacement.kind,
+            document_key=reference.path.rsplit("/", 1)[1],
+            document=replacement,
+            update_time=update_time,
         )
 
     async def update(
@@ -679,6 +882,7 @@ class GoogleFirestoreCasStore:
 
 
 __all__ = [
+    "FIRESTORE_CAS_AMBIGUOUS_READ_CONCURRENCY",
     "FIRESTORE_CAS_DOCUMENT_VERSION",
     "FIRESTORE_CAS_PAYLOAD_BYTE_CEILING",
     "FIRESTORE_CAS_TIMEOUT_SECONDS",
