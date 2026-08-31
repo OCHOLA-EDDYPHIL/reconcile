@@ -485,6 +485,175 @@ def test_runtime_plan_requires_one_image_audiences_and_exact_environment() -> No
         plans._verify_cloud_run(stale_trigger)
 
 
+def _operational_resources() -> tuple[dict[str, dict[str, Any]], dict[str, Any]]:
+    signal = "failed-run"
+    log_filter = (
+        'resource.type="cloud_run_revision" AND '
+        'jsonPayload.schema_version="reconcile/operational-event/v2" AND '
+        'jsonPayload.event="operational-signal" AND '
+        f'jsonPayload.signal="{signal}"'
+    )
+    metric_name = "reconcile_p5_failed_run"
+    metric_filter = (
+        'resource.type = "cloud_run_revision" AND '
+        f'metric.type = "logging.googleapis.com/user/{metric_name}"'
+    )
+    resources = {
+        'google_logging_metric.operational_failure["failed_run"]': _resource(
+            'google_logging_metric.operational_failure["failed_run"]',
+            {
+                "bucket_name": None,
+                "bucket_options": [],
+                "deletion_policy": "DELETE",
+                "description": "Count of bounded Reconcile failed-run operational signals.",
+                "disabled": False,
+                "filter": log_filter,
+                "label_extractors": None,
+                "metric_descriptor": [
+                    {
+                        "display_name": "Reconcile failed-run",
+                        "labels": [],
+                        "metric_kind": "DELTA",
+                        "unit": "1",
+                        "value_type": "INT64",
+                    }
+                ],
+                "name": metric_name,
+                "project": plans._PROJECT,
+                "value_extractor": None,
+            },
+        ),
+        'google_monitoring_alert_policy.operational_failure["failed_run"]': (
+            _resource(
+                'google_monitoring_alert_policy.operational_failure["failed_run"]',
+                {
+                    "alert_strategy": [
+                        {
+                            "auto_close": "1800s",
+                            "notification_channel_strategy": [],
+                            "notification_prompts": ["OPENED"],
+                            "notification_rate_limit": [{"period": "300s"}],
+                        }
+                    ],
+                    "combiner": "OR",
+                    "conditions": [
+                        {
+                            "condition_absent": [],
+                            "condition_matched_log": [
+                                {"filter": log_filter, "label_extractors": None}
+                            ],
+                            "condition_monitoring_query_language": [],
+                            "condition_prometheus_query_language": [],
+                            "condition_sql": [],
+                            "condition_threshold": [],
+                            "display_name": "failed-run observed",
+                        }
+                    ],
+                    "deletion_policy": "DELETE",
+                    "display_name": "Reconcile failed-run",
+                    "documentation": [
+                        {
+                            "content": (
+                                "A bounded Reconcile failed-run signal was emitted by "
+                                "a hosted runtime component. Correlate with "
+                                "correlation_id in Cloud Logging."
+                            ),
+                            "links": [],
+                            "mime_type": "text/markdown",
+                            "subject": None,
+                        }
+                    ],
+                    "enabled": True,
+                    "notification_channels": [],
+                    "project": plans._PROJECT,
+                    "severity": "ERROR",
+                    "user_labels": {
+                        "app": "reconcile",
+                        "environment": "phase5",
+                        "operating_profile": "evidence",
+                    },
+                },
+            )
+        ),
+        "google_monitoring_dashboard.operational": _resource(
+            "google_monitoring_dashboard.operational",
+            {
+                "dashboard_json": json.dumps(
+                    {
+                        "displayName": "Reconcile Phase 5 operational signals",
+                        "labels": {
+                            "app": "reconcile",
+                            "environment": "phase5",
+                            "operating_profile": "evidence",
+                        },
+                        "mosaicLayout": {
+                            "columns": 12,
+                            "tiles": [
+                                {
+                                    "height": 4,
+                                    "widget": {
+                                        "scorecard": {
+                                            "sparkChartView": {
+                                                "sparkChartType": "SPARK_LINE"
+                                            },
+                                            "timeSeriesQuery": {
+                                                "timeSeriesFilter": {
+                                                    "aggregation": {
+                                                        "alignmentPeriod": "300s",
+                                                        "crossSeriesReducer": "REDUCE_SUM",
+                                                        "perSeriesAligner": "ALIGN_DELTA",
+                                                    },
+                                                    "filter": metric_filter,
+                                                }
+                                            },
+                                        },
+                                        "title": signal,
+                                    },
+                                    "width": 4,
+                                }
+                            ],
+                        },
+                    }
+                ),
+                "deletion_policy": "DELETE",
+                "project": plans._PROJECT,
+            },
+        ),
+    }
+    plan = {
+        "variables": {
+            "notification_channel_ids": {"value": []},
+            "operating_profile": {"value": "evidence"},
+        }
+    }
+    return resources, plan
+
+
+def test_observability_plan_requires_exact_log_match_and_rate_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(plans, "_OPERATIONAL_SIGNALS", {"failed_run": "failed-run"})
+    resources, plan = _operational_resources()
+
+    plans._verify_observability(resources, plan)
+
+    broad_filter = deepcopy(resources)
+    broad_filter['google_monitoring_alert_policy.operational_failure["failed_run"]'][
+        "change"
+    ]["after"]["conditions"][0]["condition_matched_log"][0][
+        "filter"
+    ] = 'resource.type="cloud_run_revision"'
+    with pytest.raises(ValueError, match="log-match condition drifted"):
+        plans._verify_observability(broad_filter, plan)
+
+    unbounded_rate = deepcopy(resources)
+    unbounded_rate['google_monitoring_alert_policy.operational_failure["failed_run"]'][
+        "change"
+    ]["after"]["alert_strategy"][0]["notification_rate_limit"][0]["period"] = "3600s"
+    with pytest.raises(ValueError, match="notification rate limit drifted"):
+        plans._verify_observability(unbounded_rate, plan)
+
+
 def test_canary_two_plan_model_stabilizes_drift_and_rotates_new_baseline() -> None:
     initial = {
         "image_digest": plans._IMAGE_DIGEST,

@@ -1046,6 +1046,15 @@ def test_operational_metrics_alerts_and_dashboard_cover_the_closed_signal_set() 
     assert 'resource "google_logging_metric" "operational_failure"' in source
     assert 'resource "google_monitoring_alert_policy" "operational_failure"' in source
     assert 'resource "google_monitoring_dashboard" "operational"' in source
+    assert "condition_matched_log" in source
+    assert (
+        "filter = google_logging_metric.operational_failure[each.key].filter" in source
+    )
+    assert "notification_rate_limit" in source
+    assert 'period = "300s"' in source
+    assert 'auto_close           = "1800s"' in source
+    assert 'notification_prompts = ["OPENED"]' in source
+    assert "condition_threshold" not in source
     assert "sparkChartView" in source
     assert (
         "notification_channels = local.production_profile ? "

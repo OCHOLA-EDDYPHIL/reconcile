@@ -1896,7 +1896,6 @@ def _verify_observability(
         _expect_fields(
             policy,
             {
-                "alert_strategy": [],
                 "combiner": "OR",
                 "deletion_policy": "DELETE",
                 "display_name": f"Reconcile {signal}",
@@ -1912,43 +1911,43 @@ def _verify_observability(
             },
             policy_address,
         )
+        strategy = _one_block(policy, "alert_strategy", policy_address)
+        _expect_fields(
+            strategy,
+            {
+                "auto_close": "1800s",
+                "notification_channel_strategy": [],
+                "notification_prompts": ["OPENED"],
+            },
+            f"{policy_address}.alert_strategy",
+        )
+        rate_limit = _one_block(
+            strategy,
+            "notification_rate_limit",
+            f"{policy_address}.alert_strategy",
+        )
+        if rate_limit != {"period": "300s"}:
+            _fail(f"{policy_address} notification rate limit drifted")
         condition = _one_block(policy, "conditions", policy_address)
         _expect_fields(
             condition,
-            {"display_name": f"{signal} observed"},
+            {
+                "condition_absent": [],
+                "condition_monitoring_query_language": [],
+                "condition_prometheus_query_language": [],
+                "condition_sql": [],
+                "condition_threshold": [],
+                "display_name": f"{signal} observed",
+            },
             f"{policy_address}.conditions",
         )
-        threshold = _one_block(
+        matched_log = _one_block(
             condition,
-            "condition_threshold",
+            "condition_matched_log",
             f"{policy_address}.conditions",
         )
-        _expect_fields(
-            threshold,
-            {
-                "comparison": "COMPARISON_GT",
-                "duration": "0s",
-                "filter": metric_filter,
-                "threshold_value": 0,
-                "trigger": [{"count": 1, "percent": None}],
-            },
-            f"{policy_address}.condition_threshold",
-        )
-        aggregation = _one_block(
-            threshold,
-            "aggregations",
-            f"{policy_address}.condition_threshold",
-        )
-        _expect_fields(
-            aggregation,
-            {
-                "alignment_period": "300s",
-                "cross_series_reducer": "REDUCE_SUM",
-                "group_by_fields": None,
-                "per_series_aligner": "ALIGN_DELTA",
-            },
-            f"{policy_address}.aggregations",
-        )
+        if matched_log != {"filter": log_filter, "label_extractors": None}:
+            _fail(f"{policy_address} log-match condition drifted")
         documentation = _one_block(policy, "documentation", policy_address)
         _expect_fields(
             documentation,

@@ -48,21 +48,17 @@ resource "google_monitoring_alert_policy" "operational_failure" {
   conditions {
     display_name = "${each.value} observed"
 
-    condition_threshold {
-      comparison      = "COMPARISON_GT"
-      duration        = "0s"
-      filter          = "resource.type = \"cloud_run_revision\" AND metric.type = \"logging.googleapis.com/user/${google_logging_metric.operational_failure[each.key].name}\""
-      threshold_value = 0
+    condition_matched_log {
+      filter = google_logging_metric.operational_failure[each.key].filter
+    }
+  }
 
-      aggregations {
-        alignment_period     = "300s"
-        per_series_aligner   = "ALIGN_DELTA"
-        cross_series_reducer = "REDUCE_SUM"
-      }
+  alert_strategy {
+    auto_close           = "1800s"
+    notification_prompts = ["OPENED"]
 
-      trigger {
-        count = 1
-      }
+    notification_rate_limit {
+      period = "300s"
     }
   }
 

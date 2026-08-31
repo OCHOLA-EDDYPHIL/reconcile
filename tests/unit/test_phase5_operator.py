@@ -614,10 +614,25 @@ def _observability_plan_resources(action: str) -> list[dict[str, Any]]:
             'google_monitoring_alert_policy.operational_failure["failed_run"]',
             "google_monitoring_alert_policy",
             {
+                "alert_strategy": [
+                    {
+                        "auto_close": "1800s",
+                        "notification_prompts": ["OPENED"],
+                        "notification_rate_limit": [{"period": "300s"}],
+                    }
+                ],
                 "conditions": [
                     {
-                        "condition_threshold": [
-                            {"trigger": [{"count": 1, "percent": None}]}
+                        "condition_matched_log": [
+                            {
+                                "filter": (
+                                    'resource.type="cloud_run_revision" AND '
+                                    "jsonPayload.schema_version="
+                                    '"reconcile/operational-event/v2" AND '
+                                    'jsonPayload.event="operational-signal" AND '
+                                    'jsonPayload.signal="failed-run"'
+                                )
+                            }
                         ]
                     }
                 ],
@@ -662,6 +677,31 @@ def _observability_plan_resources(action: str) -> list[dict[str, Any]]:
             }
         )
     return resources
+
+
+def _legacy_threshold_alert_plan_resource() -> dict[str, Any]:
+    return {
+        "address": 'google_monitoring_alert_policy.operational_failure["legacy"]',
+        "change": {
+            "actions": ["create"],
+            "after": {
+                "conditions": [
+                    {
+                        "condition_threshold": [
+                            {"trigger": [{"count": 1, "percent": None}]}
+                        ]
+                    }
+                ],
+                "display_name": "Reconcile legacy",
+                "id": None,
+                "project": "example-project-id",
+            },
+            "after_unknown": {"id": True},
+            "before": None,
+        },
+        "provider_name": "registry.terraform.io/hashicorp/google",
+        "type": "google_monitoring_alert_policy",
+    }
 
 
 def _plan_binding_with_additional_resources(
@@ -710,12 +750,13 @@ def _apply_observability_provider_normalization(
             value = (
                 change["after"] if dashboard_action == "update" else change["before"]
             )
-            trigger = value["conditions"][0]["condition_threshold"][0]["trigger"][0]
-            trigger["percent"] = 0
-            if dashboard_action == "update":
-                change["before"]["conditions"][0]["condition_threshold"][0]["trigger"][
-                    0
-                ]["percent"] = 0
+            thresholds = value["conditions"][0].get("condition_threshold", [])
+            if thresholds:
+                thresholds[0]["trigger"][0]["percent"] = 0
+                if dashboard_action == "update":
+                    change["before"]["conditions"][0]["condition_threshold"][0][
+                        "trigger"
+                    ][0]["percent"] = 0
         if resource["type"] != "google_monitoring_dashboard":
             continue
         if dashboard_action == "update":
@@ -3828,7 +3869,9 @@ def test_runtime_update_verifier_accepts_provider_normalized_observability(
     )
 
 
-def test_runtime_update_verifier_rejects_alert_percent_drift(tmp_path: Path) -> None:
+def test_runtime_update_verifier_rejects_alert_log_filter_drift(
+    tmp_path: Path,
+) -> None:
     binding, qualification = _plan_binding_with_additional_resources(
         tmp_path,
         action=operator.Phase5Action.RUNTIME_APPLY,
@@ -3843,6 +3886,42 @@ def test_runtime_update_verifier_rejects_alert_percent_drift(tmp_path: Path) -> 
         item
         for item in rendered["resource_changes"]
         if item["type"] == "google_monitoring_alert_policy"
+    )
+    for projection in (alert["change"]["before"], alert["change"]["after"]):
+        projection["conditions"][0]["condition_matched_log"][0]["filter"] = (
+            'resource.type="cloud_run_revision"'
+        )
+
+    with pytest.raises(operator.OperatorError, match="EXECUTION_PLAN_DRIFT"):
+        operator._verify_rendered_plan(
+            operator._canonical_value_bytes(rendered),
+            binding,
+        )
+
+
+def test_runtime_update_verifier_preserves_legacy_alert_percent_normalization(
+    tmp_path: Path,
+) -> None:
+    binding, qualification = _plan_binding_with_additional_resources(
+        tmp_path,
+        action=operator.Phase5Action.RUNTIME_APPLY,
+        resources=[_legacy_threshold_alert_plan_resource()],
+    )
+    rendered = _live_runtime_update_plan(qualification)
+    _apply_observability_provider_normalization(
+        rendered,
+        dashboard_action="update",
+    )
+
+    operator._verify_rendered_plan(
+        operator._canonical_value_bytes(rendered),
+        binding,
+    )
+
+    alert = next(
+        item
+        for item in rendered["resource_changes"]
+        if item["address"].endswith('["legacy"]')
     )
     for projection in (alert["change"]["before"], alert["change"]["after"]):
         projection["conditions"][0]["condition_threshold"][0]["trigger"][0][
