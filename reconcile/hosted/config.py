@@ -10,6 +10,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
+from typing import Literal
 from urllib.parse import urlsplit
 
 
@@ -39,6 +40,7 @@ class HostedConfig:
     image_digest: str
     infra_revision: str
     semantic_config_sha256: str
+    operating_profile: Literal["evidence", "production"] = "evidence"
     acceptance_partial_read_outage_enabled: bool = False
     runtime_database: str | None = None
     target_database: str | None = None
@@ -80,6 +82,7 @@ _SOURCE_REVISION = "RECONCILE_SOURCE_REVISION"
 _IMAGE_DIGEST = "RECONCILE_IMAGE_DIGEST"
 _INFRA_REVISION = "RECONCILE_INFRA_REVISION"
 _SEMANTIC_CONFIG_SHA256 = "RECONCILE_SEMANTIC_CONFIG_SHA256"
+_OPERATING_PROFILE = "RECONCILE_OPERATING_PROFILE"
 _ACCEPTANCE_PARTIAL_READ_OUTAGE_ENABLED = (
     "RECONCILE_ACCEPTANCE_PARTIAL_READ_OUTAGE_ENABLED"
 )
@@ -123,6 +126,7 @@ _COMMON_NAMES = frozenset(
         _IMAGE_DIGEST,
         _INFRA_REVISION,
         _SEMANTIC_CONFIG_SHA256,
+        _OPERATING_PROFILE,
     }
 )
 _COMPONENT_NAMES = {
@@ -374,7 +378,7 @@ def _single_allowed_caller(
     if "," in value or _EMAIL_PATTERN.fullmatch(value) is None or len(value) > 254:
         raise HostedConfigError("is invalid")
     expected = {
-        Component.API: _service_account(project_id, "rec-p5-apply"),
+        Component.API: _service_account(project_id, "rec-p5-operator"),
         Component.CONTROLLER: _service_account(project_id, "rec-p5-api"),
         Component.FAULT_PROXY: _service_account(project_id, "rec-p5-api"),
     }
@@ -494,11 +498,19 @@ def _load_config(environment: Mapping[str, str]) -> HostedConfig:
         "semantic_config_sha256": _pattern(
             managed, _SEMANTIC_CONFIG_SHA256, _SHA256_PATTERN
         ),
+        "operating_profile": _required(managed, _OPERATING_PROFILE),
         "acceptance_partial_read_outage_enabled": _optional_boolean(
             managed,
             _ACCEPTANCE_PARTIAL_READ_OUTAGE_ENABLED,
         ),
     }
+    if common["operating_profile"] not in {"evidence", "production"}:
+        raise HostedConfigError("is invalid")
+    if (
+        common["operating_profile"] == "production"
+        and common["acceptance_partial_read_outage_enabled"] is True
+    ):
+        raise HostedConfigError("is invalid")
     specific: dict[str, object]
     if component is Component.API:
         specific = {

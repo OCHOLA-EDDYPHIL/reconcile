@@ -19,13 +19,14 @@ from reconcile.deployment_profile import (
 )
 
 _GCLOUD = "/usr/bin/gcloud"
-_OPERATOR_SERVICE_ACCOUNT = "rec-p5-apply@example-project-id.iam.gserviceaccount.com"
+_OPERATOR_SERVICE_ACCOUNT = "rec-p5-operator@example-project-id.iam.gserviceaccount.com"
 _DEPLOYMENT_PROFILE = "RECONCILE_DEPLOYMENT_PROFILE"
 _REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 _MAX_TOKEN_BYTES = 16_384
 _AUDIENCE = re.compile(r"^[\x21-\x7e]{1,2048}$")
 _OPERATOR_SERVICE_ACCOUNT_PATTERN = re.compile(
-    r"^rec-p5-apply@[a-z][a-z0-9-]{4,28}[a-z0-9][.]iam[.]gserviceaccount[.]com$"
+    r"^rec-p5-(?:apply|operator)@"
+    r"[a-z][a-z0-9-]{4,28}[a-z0-9][.]iam[.]gserviceaccount[.]com$"
 )
 _CONFIGURATION = re.compile(r"^[a-z][a-z0-9-]{0,62}$")
 _COMPACT_JWT = re.compile(r"^[A-Za-z0-9_-]+[.][A-Za-z0-9_-]+[.][A-Za-z0-9_-]+$")
@@ -187,7 +188,7 @@ def operator_client_identity(
             raise GoogleIdentityTokenError from None
         if audience != deployment.audiences.api:
             raise GoogleIdentityTokenError from None
-        operator_service_account = deployment.apply_service_account_email
+        operator_service_account = deployment.operator_service_account_email
     return (
         GcloudIdentityTokenSupplier(
             source,

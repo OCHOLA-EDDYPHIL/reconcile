@@ -71,6 +71,12 @@ jobs:
           chmod 400 "$profile"
           uv run --no-sync python scripts/check_phase5_terraform_plans.py \
             --deployment-profile "$profile"
+          production_profile="$RUNNER_TEMP/reconcile-ci-production-profile.json"
+          install -m 600 /dev/null "$production_profile"
+          printf '%s' '{"billing_account_id":"ABCDEF-123456-ABCDEF","notification_channel_ids":["projects/reconcile-ci-123456/notificationChannels/123456"],"operating_profile":"production","owner_account":"ci@example.com","project_id":"reconcile-ci-123456","project_number":"123456789012","schema_version":"reconcile/deployment-profile/v2"}' > "$production_profile"
+          chmod 400 "$production_profile"
+          uv run --no-sync python scripts/check_phase5_terraform_plans.py \
+            --deployment-profile "$production_profile"
           uv run --no-sync pytest -q tests/unit/test_phase5_terraform_plans.py
 
   tests:

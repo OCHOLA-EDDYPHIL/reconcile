@@ -19,7 +19,7 @@ def test_main_binds_selected_component_to_injected_port(
         project_id="example-project-id",
         auth_audience=("https://reconcile.invalid/phase5/example-project-id/api"),
         allowed_caller_emails=(
-            "rec-p5-apply@example-project-id.iam.gserviceaccount.com",
+            "rec-p5-operator@example-project-id.iam.gserviceaccount.com",
         ),
         source_revision="a" * 40,
         image_digest=f"sha256:{'b' * 64}",

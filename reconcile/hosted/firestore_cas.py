@@ -61,6 +61,7 @@ class FirestoreCasCollection(StrEnum):
     ACTION_PERMIT = "reconcile-action-permits-v1"
     RECOVERY_RUN = "reconcile-recovery-runs-v1"
     RECOVERY_RUN_EVENT = "reconcile-recovery-run-events-v1"
+    OPERATIONAL_EVENT = "reconcile-operational-events-v1"
 
 
 class FirestoreCasErrorCode(StrEnum):

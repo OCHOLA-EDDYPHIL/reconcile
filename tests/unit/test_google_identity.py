@@ -182,7 +182,7 @@ def test_operator_identity_derives_live_account_from_sealed_profile(
     supplier, observed_audience = identity
     assert observed_audience == audience
     assert supplier._operator_service_account == (
-        f"rec-p5-apply@{project}.iam.gserviceaccount.com"
+        f"rec-p5-operator@{project}.iam.gserviceaccount.com"
     )
 
 

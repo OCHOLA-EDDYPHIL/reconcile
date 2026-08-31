@@ -14,6 +14,7 @@ from fastapi.testclient import TestClient
 
 import reconcile.adaptive as adaptive_module
 import reconcile.durable_scenarios as durable_scenarios_module
+import reconcile.operator as operator_module
 from reconcile.adaptive import AdvisoryPlannerTurn, PlannerFailureKind
 from reconcile.contracts import (
     SCENARIO_LAUNCH_REQUEST_VERSION,
@@ -475,6 +476,50 @@ def test_real_fixed_operator_scenarios_use_durable_parent_and_lane(
         assert status.recovery_state is ScenarioOperationalRecoveryState.NOT_ESCALATED
         lane = workspace_root / work.workspace_id / "runtime-fixed.sqlite3"
         assert lane.is_file()
+
+    asyncio.run(exercise())
+
+
+def test_durable_operator_evicts_terminal_cache_entries_and_rehydrates(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def exercise() -> None:
+        monkeypatch.setattr(operator_module, "MAX_RETAINED_SCENARIO_RUNS", 2)
+        os.chmod(tmp_path, 0o700)
+        workspace_root = tmp_path / "workspaces"
+        workspace_root.mkdir(mode=0o700)
+        store = SqliteScenarioStore(tmp_path / "parent.sqlite3")
+        workflow = DurableScenarioWorkflow(
+            store,
+            workspace_root,
+            semantic_config_sha256="a" * 64,
+        )
+        service = OperatorApplicationService(runner=workflow, projection_store=store)
+        launches = tuple(
+            ScenarioLaunchRequest(
+                schema_version=SCENARIO_LAUNCH_REQUEST_VERSION,
+                launch_id=f"durable-eviction-{index}",
+                scenario=ScenarioLaunchName.STORAGE,
+                mode=ScenarioRunMode.FIXED,
+            )
+            for index in range(3)
+        )
+
+        terminal = []
+        for launch in launches:
+            created = await service.launch(launch)
+            terminal.append(await _terminal(service, created.snapshot.investigation_id))
+
+        first_id = terminal[0].investigation_id
+        assert len(service._by_launch_id) == 2
+        assert first_id not in service._by_investigation_id
+        assert await service.get(first_id) == terminal[0]
+        assert len(service._by_launch_id) == 2
+        replay = await service.launch(launches[0])
+        assert replay.created is False
+        assert replay.snapshot == terminal[0]
+        await service.aclose()
 
     asyncio.run(exercise())
 

@@ -18,7 +18,7 @@ from reconcile.hosted.provider import (
 pytestmark = pytest.mark.unit
 
 _PROJECT = "example-project-id"
-_API_CALLER = f"rec-p5-apply@{_PROJECT}.iam.gserviceaccount.com"
+_API_CALLER = f"rec-p5-operator@{_PROJECT}.iam.gserviceaccount.com"
 _INTERNAL_CALLER = f"rec-p5-api@{_PROJECT}.iam.gserviceaccount.com"
 _SANDBOX_READ_CALLER = f"rec-p5-controller@{_PROJECT}.iam.gserviceaccount.com"
 _SANDBOX_MUTATION_CALLER = f"rec-p5-fault@{_PROJECT}.iam.gserviceaccount.com"
@@ -74,6 +74,7 @@ def _common(component: Component) -> dict[str, str]:
         "RECONCILE_IMAGE_DIGEST": f"sha256:{'b' * 64}",
         "RECONCILE_INFRA_REVISION": "c" * 64,
         "RECONCILE_SEMANTIC_CONFIG_SHA256": "d" * 64,
+        "RECONCILE_OPERATING_PROFILE": "evidence",
     }
 
 
@@ -180,6 +181,7 @@ def test_every_component_loads_only_its_exact_fields(component: Component) -> No
     assert config.image_digest == f"sha256:{'b' * 64}"
     assert config.infra_revision == "c" * 64
     assert config.semantic_config_sha256 == "d" * 64
+    assert config.operating_profile == "evidence"
 
     if component is Component.API:
         assert config.allowed_caller_emails == (_API_CALLER,)
@@ -425,6 +427,16 @@ def test_candidate_identity_is_complete_and_canonical(name: str, value: str) -> 
         load_config(environment)
 
 
+def test_operating_profile_is_explicit_and_closed() -> None:
+    environment = _environment(Component.API)
+    environment["RECONCILE_OPERATING_PROFILE"] = "production"
+    assert load_config(environment).operating_profile == "production"
+
+    environment["RECONCILE_OPERATING_PROFILE"] = "Production"
+    with pytest.raises(HostedConfigError, match="is invalid"):
+        load_config(environment)
+
+
 def test_unknown_application_environment_and_values_are_not_disclosed() -> None:
     marker = "Bearer private-marker-123456"
     environment = _environment(Component.API)
@@ -477,6 +489,21 @@ def test_partial_read_acceptance_enablement_is_strict_and_opt_in(
     assert load_config(environment).acceptance_partial_read_outage_enabled
 
     environment["RECONCILE_ACCEPTANCE_PARTIAL_READ_OUTAGE_ENABLED"] = "True"
+    with pytest.raises(HostedConfigError, match="is invalid"):
+        load_config(environment)
+
+
+@pytest.mark.parametrize(
+    "component",
+    (Component.API, Component.CONTROLLER, Component.FAULT_PROXY),
+)
+def test_production_rejects_partial_read_acceptance_fault(
+    component: Component,
+) -> None:
+    environment = _environment(component)
+    environment["RECONCILE_OPERATING_PROFILE"] = "production"
+    environment["RECONCILE_ACCEPTANCE_PARTIAL_READ_OUTAGE_ENABLED"] = "true"
+
     with pytest.raises(HostedConfigError, match="is invalid"):
         load_config(environment)
 

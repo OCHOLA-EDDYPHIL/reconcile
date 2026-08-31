@@ -28,6 +28,12 @@ from reconcile.contracts import (
     canonical_json_bytes,
     decode_contract,
 )
+from reconcile.hosted.config import Component
+from reconcile.hosted.observability import (
+    InMemoryOperationalEventOutbox,
+    OperationalEvent,
+    component_publisher,
+)
 from reconcile.interfaces.api import (
     _InternalApiFailure,
     _validated_recovery_event_snapshot,
@@ -47,6 +53,14 @@ from tests.contract._factories import (
 )
 
 pytestmark = pytest.mark.integration
+
+
+def _publisher():
+    return component_publisher(
+        Component.API,
+        InMemoryOperationalEventOutbox(),
+        sink=lambda _event: None,
+    )
 
 
 class _RecoveryService:
@@ -168,7 +182,19 @@ class _AdvancingTerminalAuditService(_TerminalAuditService):
 def test_recovery_api_launch_get_and_resumable_sse() -> None:
     request = make_recovery_run_examples()[0]
     service = _RecoveryService()
-    with TestClient(create_app(recovery_service=service, hosted=True)) as client:
+    signals: list[OperationalEvent] = []
+    publisher = component_publisher(
+        Component.API,
+        InMemoryOperationalEventOutbox(),
+        sink=signals.append,
+    )
+    with TestClient(
+        create_app(
+            recovery_service=service,
+            hosted=True,
+            operational_signal_publisher=publisher,
+        )
+    ) as client:
         launched = client.post(
             "/api/v1/recovery-runs",
             content=canonical_json_bytes(request),
@@ -195,7 +221,65 @@ def test_recovery_api_launch_get_and_resumable_sse() -> None:
     assert events.text.count("\nid: ") == 1
     assert "id: 3\nevent: LIFECYCLE" in events.text
     assert "id: 4\nevent: LIFECYCLE" in events.text
+    assert len(signals) == 1
+    assert signals[0].signal.value == "failed-run"
+    assert signals[0].correlation_id == request.run_id
+    assert signals[0].source_event_cursor == 4
+    assert signals[0].source_event_sha256 is not None
     assert service.closed is True
+
+
+def test_terminal_signal_failure_is_503_and_identical_replay_delivers_once() -> None:
+    request = make_recovery_run_examples()[0]
+    service = _RecoveryService()
+    attempts: list[OperationalEvent] = []
+    delivered: list[OperationalEvent] = []
+    available = False
+
+    def sink(event: OperationalEvent) -> None:
+        attempts.append(event)
+        if not available:
+            raise OSError("signal sink unavailable")
+        delivered.append(event)
+
+    publisher = component_publisher(
+        Component.API,
+        InMemoryOperationalEventOutbox(),
+        sink=sink,
+    )
+    with TestClient(
+        create_app(
+            recovery_service=service,
+            hosted=True,
+            operational_signal_publisher=publisher,
+        )
+    ) as client:
+        failed = client.post(
+            "/api/v1/recovery-runs",
+            content=canonical_json_bytes(request),
+            headers={"Content-Type": "application/json"},
+        )
+        available = True
+        recovered = client.post(
+            "/api/v1/recovery-runs",
+            content=canonical_json_bytes(request),
+            headers={"Content-Type": "application/json"},
+        )
+        replayed = client.post(
+            "/api/v1/recovery-runs",
+            content=canonical_json_bytes(request),
+            headers={"Content-Type": "application/json"},
+        )
+
+    assert failed.status_code == 503
+    assert recovered.status_code == 200
+    assert replayed.status_code == 200
+    assert len(attempts) == 3
+    assert len(delivered) == 1
+    assert {event.event_id for event in attempts} == {delivered[0].event_id}
+    assert delivered[0].source_event_cursor == 4
+    events = asyncio.run(service.store.events(request.run_id))
+    assert events.cursor == 4
 
 
 @pytest.mark.parametrize(
@@ -243,6 +327,7 @@ def test_hosted_recovery_api_requires_explicit_partial_read_acceptance_enablemen
             recovery_service=enabled_service,
             hosted=True,
             acceptance_partial_read_outage_enabled=True,
+            operational_signal_publisher=_publisher(),
         )
     ).post(
         "/api/v1/recovery-runs",
@@ -272,7 +357,11 @@ def test_recovery_api_rejects_noncanonical_cursor_without_calling_service() -> N
 def test_operator_client_validates_the_terminal_recovery_timeline() -> None:
     request = make_recovery_run_examples()[0]
     service = _RecoveryService()
-    application = create_app(recovery_service=service, hosted=True)
+    application = create_app(
+        recovery_service=service,
+        hosted=True,
+        operational_signal_publisher=_publisher(),
+    )
 
     async def exercise() -> None:
         async with OperatorApiClient(

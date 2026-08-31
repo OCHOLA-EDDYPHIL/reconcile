@@ -468,6 +468,32 @@ class OperatorApplicationService:
         self._closed = False
         self._close_task: asyncio.Task[None] | None = None
 
+    def _evict_oldest_terminal_locked(self) -> bool:
+        """Release one replayable terminal projection from the local cache."""
+
+        if self._projection_store is None:
+            return False
+        for launch_id, state in tuple(self._by_launch_id.items()):
+            notifier = state.task_exit_notifier
+            if (
+                not state.terminal
+                or state.task is not None
+                or (notifier is not None and not notifier.done())
+            ):
+                continue
+            snapshot = decode_contract(state.snapshot_bytes, ScenarioRunSnapshot)
+            if self._by_investigation_id.get(snapshot.investigation_id) is not state:
+                raise RuntimeError("operator registry indexes diverged")
+            del self._by_launch_id[launch_id]
+            del self._by_investigation_id[snapshot.investigation_id]
+            return True
+        return False
+
+    def _ensure_registry_capacity_locked(self) -> None:
+        while len(self._by_launch_id) >= MAX_RETAINED_SCENARIO_RUNS:
+            if not self._evict_oldest_terminal_locked():
+                raise OperatorCapacityExceeded
+
     @staticmethod
     def _terminal_projection_matches_authority(
         snapshot: ScenarioRunSnapshot,
@@ -584,6 +610,7 @@ class OperatorApplicationService:
                     advisory_turn_sequence=advisory_turn_sequence,
                     advisory_turn_open=advisory_turn_open,
                 )
+                self._ensure_registry_capacity_locked()
                 self._by_launch_id[launch_id] = state
                 self._by_investigation_id[investigation_id] = state
                 if state.terminal:
@@ -680,11 +707,9 @@ class OperatorApplicationService:
                     state.task is not None and not state.task.done()
                     for state in self._by_launch_id.values()
                 )
-                if (
-                    active_count >= MAX_ACTIVE_SCENARIO_RUNS
-                    or len(self._by_launch_id) >= MAX_RETAINED_SCENARIO_RUNS
-                ):
+                if active_count >= MAX_ACTIVE_SCENARIO_RUNS:
                     raise OperatorCapacityExceeded
+                self._ensure_registry_capacity_locked()
                 accepted_at = self._now()
                 event = ScenarioRunEvent(
                     schema_version=SCENARIO_RUN_EVENT_VERSION,
@@ -1055,8 +1080,7 @@ class OperatorApplicationService:
             collision = self._by_launch_id.get(launch.launch_id)
             if collision is not None:
                 raise OperatorServiceUnavailable(investigation_id)
-            if len(self._by_launch_id) >= MAX_RETAINED_SCENARIO_RUNS:
-                raise OperatorCapacityExceeded
+            self._ensure_registry_capacity_locked()
             self._by_launch_id[launch.launch_id] = hydrated
             self._by_investigation_id[investigation_id] = hydrated
             return hydrated

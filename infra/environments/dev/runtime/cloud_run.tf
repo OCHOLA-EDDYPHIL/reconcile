@@ -6,10 +6,10 @@ resource "google_cloud_run_v2_service" "canary" {
   project              = var.project_id
   name                 = "reconcile-p5-canary"
   location             = var.region
-  ingress              = "INGRESS_TRAFFIC_ALL"
+  ingress              = local.service_profiles.canary.ingress
   invoker_iam_disabled = false
-  deletion_protection  = false
-  deletion_policy      = "DELETE"
+  deletion_protection  = local.production_profile
+  deletion_policy      = local.production_profile ? "ABANDON" : "DELETE"
   custom_audiences     = [local.audiences.canary]
   labels               = merge(local.labels, { component = "canary" })
 
@@ -18,7 +18,7 @@ resource "google_cloud_run_v2_service" "canary" {
     service_account                  = local.service_account_emails.canary
     execution_environment            = "EXECUTION_ENVIRONMENT_GEN2"
     timeout                          = "${var.request_timeout_seconds.canary}s"
-    max_instance_request_concurrency = 1
+    max_instance_request_concurrency = local.service_profiles.canary.concurrency
     labels = {
       "reconcile-release" = "baseline"
     }
@@ -27,8 +27,8 @@ resource "google_cloud_run_v2_service" "canary" {
     }
 
     scaling {
-      min_instance_count = 0
-      max_instance_count = 1
+      min_instance_count = local.service_profiles.canary.min_count
+      max_instance_count = local.service_profiles.canary.max_count
     }
 
     containers {
@@ -81,10 +81,10 @@ resource "google_cloud_run_v2_service" "sandbox" {
   project              = var.project_id
   name                 = "reconcile-p5-sandbox"
   location             = var.region
-  ingress              = "INGRESS_TRAFFIC_ALL"
+  ingress              = local.service_profiles.sandbox.ingress
   invoker_iam_disabled = false
-  deletion_protection  = false
-  deletion_policy      = "DELETE"
+  deletion_protection  = local.production_profile
+  deletion_policy      = local.production_profile ? "ABANDON" : "DELETE"
   custom_audiences     = [local.audiences.sandbox]
   labels               = merge(local.labels, { component = "sandbox" })
 
@@ -92,11 +92,11 @@ resource "google_cloud_run_v2_service" "sandbox" {
     service_account                  = local.service_account_emails.sandbox
     execution_environment            = "EXECUTION_ENVIRONMENT_GEN2"
     timeout                          = "${var.request_timeout_seconds.sandbox}s"
-    max_instance_request_concurrency = 1
+    max_instance_request_concurrency = local.service_profiles.sandbox.concurrency
 
     scaling {
-      min_instance_count = 0
-      max_instance_count = 1
+      min_instance_count = local.service_profiles.sandbox.min_count
+      max_instance_count = local.service_profiles.sandbox.max_count
     }
 
     containers {
@@ -140,10 +140,10 @@ resource "google_cloud_run_v2_service" "fault_proxy" {
   project              = var.project_id
   name                 = "reconcile-p5-fault-proxy"
   location             = var.region
-  ingress              = "INGRESS_TRAFFIC_ALL"
+  ingress              = local.service_profiles.fault_proxy.ingress
   invoker_iam_disabled = false
-  deletion_protection  = false
-  deletion_policy      = "DELETE"
+  deletion_protection  = local.production_profile
+  deletion_policy      = local.production_profile ? "ABANDON" : "DELETE"
   custom_audiences     = [local.audiences.fault_proxy]
   labels               = merge(local.labels, { component = "fault-proxy" })
 
@@ -151,11 +151,11 @@ resource "google_cloud_run_v2_service" "fault_proxy" {
     service_account                  = local.service_account_emails.fault_proxy
     execution_environment            = "EXECUTION_ENVIRONMENT_GEN2"
     timeout                          = "${var.request_timeout_seconds.fault_proxy}s"
-    max_instance_request_concurrency = 1
+    max_instance_request_concurrency = local.service_profiles.fault_proxy.concurrency
 
     scaling {
-      min_instance_count = 0
-      max_instance_count = 1
+      min_instance_count = local.service_profiles.fault_proxy.min_count
+      max_instance_count = local.service_profiles.fault_proxy.max_count
     }
 
     containers {
@@ -207,10 +207,10 @@ resource "google_cloud_run_v2_service" "controller" {
   project              = var.project_id
   name                 = "reconcile-p5-controller"
   location             = var.region
-  ingress              = "INGRESS_TRAFFIC_ALL"
+  ingress              = local.service_profiles.controller.ingress
   invoker_iam_disabled = false
-  deletion_protection  = false
-  deletion_policy      = "DELETE"
+  deletion_protection  = local.production_profile
+  deletion_policy      = local.production_profile ? "ABANDON" : "DELETE"
   custom_audiences     = [local.audiences.controller]
   labels               = merge(local.labels, { component = "controller" })
 
@@ -218,11 +218,11 @@ resource "google_cloud_run_v2_service" "controller" {
     service_account                  = local.service_account_emails.controller
     execution_environment            = "EXECUTION_ENVIRONMENT_GEN2"
     timeout                          = "${var.request_timeout_seconds.controller}s"
-    max_instance_request_concurrency = 1
+    max_instance_request_concurrency = local.service_profiles.controller.concurrency
 
     scaling {
-      min_instance_count = 0
-      max_instance_count = 1
+      min_instance_count = local.service_profiles.controller.min_count
+      max_instance_count = local.service_profiles.controller.max_count
     }
 
     containers {
@@ -288,10 +288,10 @@ resource "google_cloud_run_v2_service" "api" {
   project              = var.project_id
   name                 = "reconcile-p5-api"
   location             = var.region
-  ingress              = "INGRESS_TRAFFIC_ALL"
+  ingress              = local.service_profiles.api.ingress
   invoker_iam_disabled = false
-  deletion_protection  = false
-  deletion_policy      = "DELETE"
+  deletion_protection  = local.production_profile
+  deletion_policy      = local.production_profile ? "ABANDON" : "DELETE"
   custom_audiences     = [local.audiences.api]
   labels               = merge(local.labels, { component = "api" })
 
@@ -299,11 +299,11 @@ resource "google_cloud_run_v2_service" "api" {
     service_account                  = local.service_account_emails.api
     execution_environment            = "EXECUTION_ENVIRONMENT_GEN2"
     timeout                          = "${var.request_timeout_seconds.api}s"
-    max_instance_request_concurrency = 1
+    max_instance_request_concurrency = local.service_profiles.api.concurrency
 
     scaling {
-      min_instance_count = 0
-      max_instance_count = 1
+      min_instance_count = local.service_profiles.api.min_count
+      max_instance_count = local.service_profiles.api.max_count
     }
 
     containers {

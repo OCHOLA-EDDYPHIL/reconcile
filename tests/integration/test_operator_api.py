@@ -468,7 +468,17 @@ def test_launch_response_must_retain_the_canonical_request_identity(
 def test_operator_capacity_refusal_is_a_canonical_503() -> None:
     service = _FakeOperatorService()
     service.launch_error = OperatorCapacityExceeded()
-    with TestClient(create_app(operator_service=service)) as client:
+    signals: list[tuple[str, str]] = []
+
+    async def publish(signal: str, correlation_id: str, **_: object) -> None:
+        signals.append((signal, correlation_id))
+
+    with TestClient(
+        create_app(
+            operator_service=service,
+            operational_signal_publisher=publish,
+        )
+    ) as client:
         response = client.post(
             "/api/v1/scenario-runs",
             content=canonical_json_bytes(_launch()),
@@ -477,6 +487,7 @@ def test_operator_capacity_refusal_is_a_canonical_503() -> None:
 
     assert response.status_code == 503
     assert _error(response).code is ApiErrorCode.DEPENDENCY_UNAVAILABLE
+    assert signals == [("worker-failure", _LAUNCH_INVESTIGATION_ID)]
 
 
 @pytest.mark.parametrize(

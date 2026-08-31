@@ -1118,6 +1118,7 @@ def component_environment(
         "RECONCILE_COMPONENT": component,
         "RECONCILE_IMAGE_DIGEST": image_digest,
         "RECONCILE_INFRA_REVISION": "1" * 64,
+        "RECONCILE_OPERATING_PROFILE": "evidence",
         "RECONCILE_SEMANTIC_CONFIG_SHA256": "2" * 64,
         "RECONCILE_SOURCE_REVISION": source_revision,
     }
@@ -1125,7 +1126,7 @@ def component_environment(
         specific = {
             "RECONCILE_ACCEPTANCE_PARTIAL_READ_OUTAGE_ENABLED": "true",
             "RECONCILE_ALLOWED_CALLER_EMAILS": (
-                f"rec-p5-apply@{_PROJECT}.iam.gserviceaccount.com"
+                f"rec-p5-operator@{_PROJECT}.iam.gserviceaccount.com"
             ),
             "RECONCILE_CONTROLLER_AUDIENCE": audiences["controller"],
             "RECONCILE_CONTROLLER_URL": "https://controller.example.test",

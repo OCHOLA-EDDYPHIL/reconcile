@@ -4,6 +4,7 @@ locals {
     "cloudresourcemanager.googleapis.com",
     "iam.googleapis.com",
     "iamcredentials.googleapis.com",
+    "orgpolicy.googleapis.com",
     "serviceusage.googleapis.com",
     "storage.googleapis.com",
   ])

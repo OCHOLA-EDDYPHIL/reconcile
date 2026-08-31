@@ -41,6 +41,12 @@ from reconcile.hosted.identity import (
     VerifiedCaller,
     validate_platform_authorization,
 )
+from reconcile.hosted.observability import (
+    InMemoryOperationalEventOutbox,
+    OperationalEventOutbox,
+    OperationalEventSink,
+    component_publisher,
+)
 from reconcile.hosted.sandbox import (
     SandboxEvidenceReader,
     SandboxEvidenceRequest,
@@ -249,6 +255,22 @@ def _internal_error(*, code: str, status_code: HTTPStatus) -> Response:
     )
 
 
+async def _observe(
+    application: FastAPI,
+    signal: str,
+    correlation_id: str,
+) -> None:
+    publisher = getattr(application.state, "operational_signal_publisher", None)
+    if not callable(publisher):
+        return
+    try:
+        await publisher(signal, correlation_id)
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        pass
+
+
 class ApplicationIdentityMiddleware:
     """Require independent platform and application identity on every route."""
 
@@ -403,21 +425,25 @@ def _install_handler(
         except asyncio.CancelledError:
             raise
         except InternalOperationDenied:
+            await _observe(application, "permit-denial", internal.request_id)
             return _internal_error(
                 code="operation-denied",
                 status_code=HTTPStatus.FORBIDDEN,
             )
         except InternalOperationConflict:
+            await _observe(application, "replay-denial", internal.request_id)
             return _internal_error(
                 code="operation-conflict",
                 status_code=HTTPStatus.CONFLICT,
             )
         except Exception:
+            await _observe(application, "worker-failure", internal.request_id)
             return _internal_error(
                 code="operation-unavailable",
                 status_code=HTTPStatus.SERVICE_UNAVAILABLE,
             )
         if response.accepted is not True:
+            await _observe(application, "permit-denial", internal.request_id)
             return _internal_error(
                 code="operation-denied",
                 status_code=HTTPStatus.FORBIDDEN,
@@ -475,6 +501,7 @@ def _install_sandbox_evidence(
                 payload=payload,  # type: ignore[arg-type]
             )
         except Exception:
+            await _observe(application, "worker-failure", internal.request_id)
             return Response(
                 content=b'{"code":"evidence-unavailable"}',
                 status_code=HTTPStatus.SERVICE_UNAVAILABLE,
@@ -651,6 +678,7 @@ def _internal_app(
 def create_component_app(
     config: HostedConfig,
     *,
+    operational_event_outbox: OperationalEventOutbox | None = None,
     verifier: _Verifier | None = None,
     transport: HostedHttpTransport | None = None,
     investigation_service: object | None = None,
@@ -665,6 +693,7 @@ def create_component_app(
     ) = None,
     recovery_action_caller_email: str | None = None,
     acceptance_partial_read_outage_enabled: bool = False,
+    operational_event_sink: OperationalEventSink | None = None,
     internal_operation_handlers: Mapping[InternalOperation, InternalOperationHandler]
     | None = None,
 ) -> FastAPI:
@@ -672,8 +701,14 @@ def create_component_app(
 
     if type(config) is not HostedConfig:
         raise TypeError("hosted app requires exact configuration")
+    if operational_event_outbox is not None and not isinstance(
+        operational_event_outbox, OperationalEventOutbox
+    ):
+        raise TypeError("hosted app requires an operational event outbox")
     if type(acceptance_partial_read_outage_enabled) is not bool:
         raise TypeError("partial-read acceptance state must be boolean")
+    if operational_event_sink is not None and not callable(operational_event_sink):
+        raise TypeError("operational event sink must be callable")
     if (
         sandbox_evidence_reader is not None
         and config.component is not Component.SANDBOX
@@ -724,6 +759,11 @@ def create_component_app(
     }[config.component]
     if not handlers.keys() <= allowed_handler_operations:
         raise ValueError("component received an unsupported operation handler")
+    publisher = component_publisher(
+        config.component,
+        operational_event_outbox or InMemoryOperationalEventOutbox(),
+        sink=operational_event_sink,
+    )
     if config.component is Component.API:
         application = create_app(
             investigation_service,  # type: ignore[arg-type]
@@ -733,6 +773,7 @@ def create_component_app(
             acceptance_partial_read_outage_enabled=(
                 acceptance_partial_read_outage_enabled
             ),
+            operational_signal_publisher=publisher,
         )
     else:
         if any(
@@ -756,6 +797,7 @@ def create_component_app(
         )
     application.state.hosted_config = config
     application.state.hosted_transport = transport or HostedHttpTransport()
+    application.state.operational_signal_publisher = publisher
     application.add_middleware(
         ApplicationIdentityMiddleware,
         config=config,

@@ -1,8 +1,11 @@
 locals {
   labels = {
-    app         = "reconcile"
-    environment = "phase5"
+    app               = "reconcile"
+    environment       = "phase5"
+    operating_profile = var.operating_profile
   }
+
+  production_profile = var.operating_profile == "production"
 
   runtime_database_name = "reconcile-p5-runtime"
   sandbox_database_name = "reconcile-p5-sandbox"
@@ -17,7 +20,7 @@ locals {
     sandbox     = "rec-p5-sandbox@${var.project_id}.iam.gserviceaccount.com"
   }
   api_invoker_members = toset([
-    "serviceAccount:rec-p5-apply@${var.project_id}.iam.gserviceaccount.com",
+    "serviceAccount:rec-p5-operator@${var.project_id}.iam.gserviceaccount.com",
   ])
 
   image_reference = "${var.region}-docker.pkg.dev/${var.project_id}/reconcile-p5/reconcile@${var.image_digest}"
@@ -65,7 +68,7 @@ locals {
   }
 
   caller_emails = {
-    operator    = "rec-p5-apply@${var.project_id}.iam.gserviceaccount.com"
+    operator    = "rec-p5-operator@${var.project_id}.iam.gserviceaccount.com"
     api         = local.service_account_emails.api
     controller  = local.service_account_emails.controller
     fault_proxy = local.service_account_emails.fault_proxy
@@ -77,5 +80,40 @@ locals {
     RECONCILE_INFRA_REVISION         = var.infrastructure_revision
     RECONCILE_SEMANTIC_CONFIG_SHA256 = var.semantic_config_sha256
     RECONCILE_SOURCE_REVISION        = var.source_revision
+    RECONCILE_OPERATING_PROFILE      = var.operating_profile
+  }
+
+
+  service_profiles = {
+    api = {
+      ingress     = "INGRESS_TRAFFIC_ALL"
+      min_count   = local.production_profile ? 1 : 0
+      max_count   = local.production_profile ? 3 : 1
+      concurrency = local.production_profile ? 8 : 1
+    }
+    canary = {
+      ingress     = "INGRESS_TRAFFIC_ALL"
+      min_count   = 0
+      max_count   = 1
+      concurrency = 1
+    }
+    controller = {
+      ingress     = "INGRESS_TRAFFIC_ALL"
+      min_count   = local.production_profile ? 1 : 0
+      max_count   = local.production_profile ? 3 : 1
+      concurrency = local.production_profile ? 8 : 1
+    }
+    fault_proxy = {
+      ingress     = "INGRESS_TRAFFIC_ALL"
+      min_count   = 0
+      max_count   = 1
+      concurrency = 1
+    }
+    sandbox = {
+      ingress     = "INGRESS_TRAFFIC_ALL"
+      min_count   = 0
+      max_count   = 1
+      concurrency = 1
+    }
   }
 }

@@ -64,7 +64,8 @@ _EMPTY_STATE_BUCKET_CLEANUP_STDERR = (
     "ERROR: (gcloud.storage.rm) The following URLs matched no objects or files:\n"
     f"gs://{_STATE_BUCKET}/**\n"
 ).encode("ascii")
-_OPERATOR_SERVICE_ACCOUNT = "rec-p5-apply@example-project-id.iam.gserviceaccount.com"
+_APPLY_SERVICE_ACCOUNT = "rec-p5-apply@example-project-id.iam.gserviceaccount.com"
+_OPERATOR_SERVICE_ACCOUNT = "rec-p5-operator@example-project-id.iam.gserviceaccount.com"
 _OPERATOR_PRINCIPAL = f"serviceAccount:{_OPERATOR_SERVICE_ACCOUNT}"
 _TERRAFORM_VERSION = "1.15.8"
 _GCLOUD_VERSION = "580.0.0"
@@ -248,6 +249,8 @@ def _legacy_deployment_identity() -> DeploymentIdentity:
     origin = f"https://reconcile.invalid/phase5/{project}"
     return DeploymentIdentity.model_construct(
         deployment_profile_sha256="0" * 64,
+        deployment_profile_schema_version="reconcile/deployment-profile/v1",
+        operating_profile="evidence",
         project_id=project,
         project_number=_PROJECT_NUMBER,
         billing_account_id="000000-000000-000000",
@@ -256,7 +259,8 @@ def _legacy_deployment_identity() -> DeploymentIdentity:
         region=_REGION,
         state_bucket_name=_STATE_BUCKET,
         target_bucket_name=f"{project}-p5-target",
-        apply_service_account_email=_OPERATOR_SERVICE_ACCOUNT,
+        apply_service_account_email=_APPLY_SERVICE_ACCOUNT,
+        operator_service_account_email=_OPERATOR_SERVICE_ACCOUNT,
         runtime_service_accounts=RuntimeServiceAccounts(
             api=f"rec-p5-api@{project}.iam.gserviceaccount.com",
             canary=f"rec-p5-canary@{project}.iam.gserviceaccount.com",
@@ -1180,7 +1184,9 @@ def _fixed_exposure(
         ExposureBinding(
             service="api",
             audience=identity.audiences.api,
-            allowed_callers=(f"serviceAccount:{identity.apply_service_account_email}",),
+            allowed_callers=(
+                f"serviceAccount:{identity.operator_service_account_email}",
+            ),
         ),
         ExposureBinding(
             service="controller",
@@ -3707,6 +3713,9 @@ def _capture_artifact_bindings(
                 deployment.project_id,
                 deployment.target_bucket_name,
                 deployment.apply_service_account_email,
+                deployment.operator_service_account_email,
+                deployment.operating_profile,
+                *deployment.notification_channel_ids,
                 *deployment.runtime_service_accounts.model_dump().values(),
                 *deployment.audiences.model_dump().values(),
             }
@@ -5780,6 +5789,18 @@ def authorize_action(
     moment = _utc(now)
     if manifest.source_revision in _LEGACY_IMAGE_ID_SOURCE_REVISIONS:
         raise OperatorError("LEGACY_MANIFEST_READ_ONLY")
+    if (
+        action.is_teardown
+        and manifest.deployment_profile is not None
+        and manifest.deployment_profile.identity.operating_profile == "production"
+    ):
+        raise OperatorError("PRODUCTION_TEARDOWN_FORBIDDEN")
+    if (
+        action in {Phase5Action.PROVIDER_ACCEPTANCE, Phase5Action.HOSTED_ACCEPTANCE}
+        and manifest.deployment_profile is not None
+        and manifest.deployment_profile.identity.operating_profile == "production"
+    ):
+        raise OperatorError("PRODUCTION_ACCEPTANCE_FORBIDDEN")
     _validate_approval_binding(manifest, approval)
     if moment < approval.approved_at:
         raise OperatorError("APPROVAL_NOT_YET_ACTIVE")

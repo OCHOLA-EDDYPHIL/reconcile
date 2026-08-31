@@ -32,7 +32,9 @@ _OWNER = "user:owner@example.invalid"
 _BILLING_ACCOUNT = "000000-000000-000000"
 _APPLY_EMAIL = f"rec-p5-apply@{_PROJECT}.iam.gserviceaccount.com"
 _APPLY_MEMBER = f"serviceAccount:{_APPLY_EMAIL}"
-_OPERATOR_MEMBER = _APPLY_MEMBER
+_OPERATOR_EMAIL = f"rec-p5-operator@{_PROJECT}.iam.gserviceaccount.com"
+_OPERATOR_MEMBER = f"serviceAccount:{_OPERATOR_EMAIL}"
+_NOTIFICATION_CHANNEL_IDS: tuple[str, ...] = ()
 _PROVIDER = "registry.terraform.io/hashicorp/google"
 _TERRAFORM_PROVIDER = "terraform.io/builtin/terraform"
 _OFFLINE_DOCKER_IMAGE = (
@@ -173,12 +175,13 @@ _COMMON_RUNTIME_ENVIRONMENT = {
     "RECONCILE_INFRA_REVISION": _INFRASTRUCTURE_REVISION,
     "RECONCILE_SEMANTIC_CONFIG_SHA256": _SEMANTIC_CONFIG_SHA256,
     "RECONCILE_SOURCE_REVISION": _SOURCE_REVISION,
+    "RECONCILE_OPERATING_PROFILE": "evidence",
 }
 _RUNTIME_ENVIRONMENT = {
     "api": _COMMON_RUNTIME_ENVIRONMENT
     | {
         "RECONCILE_ACCEPTANCE_PARTIAL_READ_OUTAGE_ENABLED": "true",
-        "RECONCILE_ALLOWED_CALLER_EMAILS": _APPLY_EMAIL,
+        "RECONCILE_ALLOWED_CALLER_EMAILS": _OPERATOR_EMAIL,
         "RECONCILE_AUTH_AUDIENCE": _AUDIENCES["api"],
         "RECONCILE_COMPONENT": "api",
         "RECONCILE_CONTROLLER_AUDIENCE": _AUDIENCES["controller"],
@@ -255,9 +258,10 @@ _APPLY_ROLES = {
     "roles/artifactregistry.admin",
     "roles/datastore.owner",
     "roles/iam.serviceAccountAdmin",
+    "roles/logging.configWriter",
     "roles/logging.viewer",
+    "roles/monitoring.editor",
     "roles/resourcemanager.projectIamAdmin",
-    "roles/run.admin",
     "roles/serviceusage.serviceUsageAdmin",
     "roles/storage.admin",
 }
@@ -266,6 +270,7 @@ _BOOTSTRAP_SERVICES = {
     "cloudresourcemanager.googleapis.com",
     "iam.googleapis.com",
     "iamcredentials.googleapis.com",
+    "orgpolicy.googleapis.com",
     "serviceusage.googleapis.com",
     "storage.googleapis.com",
 }
@@ -275,7 +280,16 @@ _FOUNDATION_SERVICES = {
     "billingbudgets.googleapis.com",
     "firestore.googleapis.com",
     "logging.googleapis.com",
+    "monitoring.googleapis.com",
     "run.googleapis.com",
+}
+_OPERATIONAL_SIGNALS = {
+    "failed_run": "failed-run",
+    "permit_denial": "permit-denial",
+    "provider_unavailable": "provider-unavailable",
+    "replay_denial": "replay-denial",
+    "unresolved_ambiguity": "unresolved-ambiguity",
+    "worker_failure": "worker-failure",
 }
 _SECRET_KEY = re.compile(
     r"(?:^|_)(?:secret|password|private_key|access_token|api_key|credentials?)(?:$|_)",
@@ -301,8 +315,14 @@ _BOOTSTRAP_ADDRESSES = frozenset(
         "google_project_iam_custom_role.canary_mutator",
         "google_project_iam_custom_role.canary_operation_reader",
         "google_project_iam_custom_role.canary_revision_reader",
+        "google_project_iam_custom_role.cloud_run_deployer",
         "google_service_account.phase5_apply",
+        "google_service_account.phase5_operator",
+        "google_project_default_service_accounts.phase5",
+        "google_project_organization_policy.disable_automatic_default_service_account_grants",
+        "google_project_iam_member.phase5_cloud_run_deployer",
         "google_service_account_iam_member.owner_impersonation",
+        "google_service_account_iam_member.owner_operator_impersonation",
         "google_storage_bucket.terraform_state",
         *_quoted("google_project_iam_member.phase5_apply", _APPLY_ROLES),
         *_quoted("google_project_service.bootstrap_required", _BOOTSTRAP_SERVICES),
@@ -357,6 +377,15 @@ _RUNTIME_ADDRESSES = frozenset(
         ),
         "google_artifact_registry_repository_iam_member.canary_mutator_image_reader",
         "google_service_account_iam_member.canary_mutator_act_as",
+        "google_monitoring_dashboard.operational",
+        *_quoted(
+            "google_logging_metric.operational_failure",
+            set(_OPERATIONAL_SIGNALS),
+        ),
+        *_quoted(
+            "google_monitoring_alert_policy.operational_failure",
+            set(_OPERATIONAL_SIGNALS),
+        ),
     }
 )
 _STACKS = (
@@ -376,6 +405,7 @@ _STACKS = (
         _FOUNDATION_ADDRESSES,
         {
             "billing_account_id": _BILLING_ACCOUNT,
+            "operating_profile": "evidence",
             "project_id": _PROJECT,
             "project_number": _PROJECT_NUMBER,
         },
@@ -388,6 +418,8 @@ _STACKS = (
             "acceptance_partial_read_outage_enabled": True,
             "image_digest": _IMAGE_DIGEST,
             "infrastructure_revision": _INFRASTRUCTURE_REVISION,
+            "notification_channel_ids": [],
+            "operating_profile": "evidence",
             "project_id": _PROJECT,
             "recovery_definition_created_at": _RECOVERY_DEFINITION_CREATED_AT,
             "semantic_config_sha256": _SEMANTIC_CONFIG_SHA256,
@@ -409,9 +441,12 @@ def _configure_deployment(profile: DeploymentProfile) -> None:
     global _IMAGE_REFERENCE
     global _IAM_EXPECTED
     global _OPERATOR_MEMBER
+    global _OPERATOR_EMAIL
+    global _NOTIFICATION_CHANNEL_IDS
     global _OWNER
     global _PROJECT
     global _PROJECT_NUMBER
+    global _FOUNDATION_ADDRESSES
     global _RECOVERY_PAYLOAD_SHA256
     global _RUNTIME_ADDRESSES
     global _RUNTIME_EMAILS
@@ -428,7 +463,9 @@ def _configure_deployment(profile: DeploymentProfile) -> None:
     _TARGET_BUCKET = f"{_PROJECT}-p5-target"
     _APPLY_EMAIL = f"rec-p5-apply@{_PROJECT}.iam.gserviceaccount.com"
     _APPLY_MEMBER = f"serviceAccount:{_APPLY_EMAIL}"
-    _OPERATOR_MEMBER = _APPLY_MEMBER
+    _OPERATOR_EMAIL = f"rec-p5-operator@{_PROJECT}.iam.gserviceaccount.com"
+    _OPERATOR_MEMBER = f"serviceAccount:{_OPERATOR_EMAIL}"
+    _NOTIFICATION_CHANNEL_IDS = profile.notification_channel_ids
     _IMAGE_REFERENCE = (
         f"{_REGION}-docker.pkg.dev/{_PROJECT}/reconcile-p5/reconcile@{_IMAGE_DIGEST}"
     )
@@ -460,18 +497,25 @@ def _configure_deployment(profile: DeploymentProfile) -> None:
         semantic_config_sha256=_SEMANTIC_CONFIG_SHA256,
         source_revision=_SOURCE_REVISION,
     )
+    acceptance_partial_read_outage_enabled = profile.operating_profile == "evidence"
+    acceptance_partial_read_outage_environment = (
+        "true" if acceptance_partial_read_outage_enabled else "false"
+    )
     _COMMON_RUNTIME_ENVIRONMENT = {
         "GOOGLE_CLOUD_PROJECT": _PROJECT,
         "RECONCILE_IMAGE_DIGEST": _IMAGE_DIGEST,
         "RECONCILE_INFRA_REVISION": _INFRASTRUCTURE_REVISION,
         "RECONCILE_SEMANTIC_CONFIG_SHA256": _SEMANTIC_CONFIG_SHA256,
         "RECONCILE_SOURCE_REVISION": _SOURCE_REVISION,
+        "RECONCILE_OPERATING_PROFILE": profile.operating_profile,
     }
     _RUNTIME_ENVIRONMENT = {
         "api": _COMMON_RUNTIME_ENVIRONMENT
         | {
-            "RECONCILE_ACCEPTANCE_PARTIAL_READ_OUTAGE_ENABLED": "true",
-            "RECONCILE_ALLOWED_CALLER_EMAILS": _APPLY_EMAIL,
+            "RECONCILE_ACCEPTANCE_PARTIAL_READ_OUTAGE_ENABLED": (
+                acceptance_partial_read_outage_environment
+            ),
+            "RECONCILE_ALLOWED_CALLER_EMAILS": _OPERATOR_EMAIL,
             "RECONCILE_AUTH_AUDIENCE": _AUDIENCES["api"],
             "RECONCILE_COMPONENT": "api",
             "RECONCILE_CONTROLLER_AUDIENCE": _AUDIENCES["controller"],
@@ -488,7 +532,9 @@ def _configure_deployment(profile: DeploymentProfile) -> None:
         },
         "controller": _COMMON_RUNTIME_ENVIRONMENT
         | {
-            "RECONCILE_ACCEPTANCE_PARTIAL_READ_OUTAGE_ENABLED": "true",
+            "RECONCILE_ACCEPTANCE_PARTIAL_READ_OUTAGE_ENABLED": (
+                acceptance_partial_read_outage_environment
+            ),
             "RECONCILE_ALLOWED_CALLER_EMAILS": _RUNTIME_EMAILS["api"],
             "RECONCILE_AUTH_AUDIENCE": _AUDIENCES["controller"],
             "RECONCILE_CANARY_AUDIENCE": _AUDIENCES["canary"],
@@ -521,7 +567,9 @@ def _configure_deployment(profile: DeploymentProfile) -> None:
         },
         "fault_proxy": _COMMON_RUNTIME_ENVIRONMENT
         | {
-            "RECONCILE_ACCEPTANCE_PARTIAL_READ_OUTAGE_ENABLED": "true",
+            "RECONCILE_ACCEPTANCE_PARTIAL_READ_OUTAGE_ENABLED": (
+                acceptance_partial_read_outage_environment
+            ),
             "RECONCILE_ALLOWED_CALLER_EMAILS": _RUNTIME_EMAILS["api"],
             "RECONCILE_AUTH_AUDIENCE": _AUDIENCES["fault_proxy"],
             "RECONCILE_CANARY_AUDIENCE": _AUDIENCES["canary"],
@@ -552,8 +600,25 @@ def _configure_deployment(profile: DeploymentProfile) -> None:
         if not address.startswith(
             "google_cloud_run_v2_service_iam_member.api_operator["
         )
+        and address != "terraform_data.runtime_production_guard[0]"
     ) | frozenset(
-        {f'google_cloud_run_v2_service_iam_member.api_operator["{_OPERATOR_MEMBER}"]'}
+        {
+            f'google_cloud_run_v2_service_iam_member.api_operator["{_OPERATOR_MEMBER}"]',
+            *(
+                {"terraform_data.runtime_production_guard[0]"}
+                if profile.operating_profile == "production"
+                else set()
+            ),
+        }
+    )
+    _FOUNDATION_ADDRESSES = frozenset(
+        address
+        for address in _FOUNDATION_ADDRESSES
+        if address != "terraform_data.foundation_production_guard[0]"
+    ) | frozenset(
+        {"terraform_data.foundation_production_guard[0]"}
+        if profile.operating_profile == "production"
+        else set()
     )
     _STACKS = (
         _Stack(
@@ -572,6 +637,7 @@ def _configure_deployment(profile: DeploymentProfile) -> None:
             _FOUNDATION_ADDRESSES,
             {
                 "billing_account_id": _BILLING_ACCOUNT,
+                "operating_profile": profile.operating_profile,
                 "project_id": _PROJECT,
                 "project_number": _PROJECT_NUMBER,
             },
@@ -581,9 +647,13 @@ def _configure_deployment(profile: DeploymentProfile) -> None:
             _ROOT / "infra" / "environments" / "dev" / "runtime",
             _RUNTIME_ADDRESSES,
             {
-                "acceptance_partial_read_outage_enabled": True,
+                "acceptance_partial_read_outage_enabled": (
+                    acceptance_partial_read_outage_enabled
+                ),
                 "image_digest": _IMAGE_DIGEST,
                 "infrastructure_revision": _INFRASTRUCTURE_REVISION,
+                "notification_channel_ids": list(_NOTIFICATION_CHANNEL_IDS),
+                "operating_profile": profile.operating_profile,
                 "project_id": _PROJECT,
                 "recovery_definition_created_at": (_RECOVERY_DEFINITION_CREATED_AT),
                 "semantic_config_sha256": _SEMANTIC_CONFIG_SHA256,
@@ -606,6 +676,7 @@ _VARIABLE_NAMES = {
     "foundation": {
         "billing_account_id",
         "budget_amount_usd",
+        "operating_profile",
         "project_id",
         "project_number",
         "region",
@@ -614,6 +685,8 @@ _VARIABLE_NAMES = {
         "acceptance_partial_read_outage_enabled",
         "image_digest",
         "infrastructure_revision",
+        "notification_channel_ids",
+        "operating_profile",
         "project_id",
         "region",
         "request_timeout_seconds",
@@ -627,7 +700,11 @@ _VARIABLE_NAMES = {
     },
 }
 _OUTPUT_NAMES = {
-    "bootstrap": {"apply_service_account_email", "state_bucket_name"},
+    "bootstrap": {
+        "apply_service_account_email",
+        "operator_service_account_email",
+        "state_bucket_name",
+    },
     "foundation": {
         "artifact_repository_url",
         "firestore_databases",
@@ -651,6 +728,18 @@ def _iam_expectations() -> dict[str, dict[str, Any]]:
             "service_account_id": (
                 f"projects/{_PROJECT}/serviceAccounts/{_APPLY_EMAIL}"
             ),
+        },
+        "google_service_account_iam_member.owner_operator_impersonation": {
+            "member": _OWNER,
+            "role": "roles/iam.serviceAccountTokenCreator",
+            "service_account_id": (
+                f"projects/{_PROJECT}/serviceAccounts/{_OPERATOR_EMAIL}"
+            ),
+        },
+        "google_project_iam_member.phase5_cloud_run_deployer": {
+            "member": _APPLY_MEMBER,
+            "project": _PROJECT,
+            "role": f"projects/{_PROJECT}/roles/reconcileP5CloudRunDeployer",
         },
         'google_project_iam_member.runtime_database_user["api"]': {
             "member": f"serviceAccount:{_RUNTIME_EMAILS['api']}",
@@ -833,6 +922,23 @@ def _custom_role_expectations() -> dict[str, dict[str, Any]]:
             "role_id": "reconcileP5CanaryRevisionReader",
             "stage": "GA",
         },
+        "google_project_iam_custom_role.cloud_run_deployer": {
+            "permissions": [
+                "run.locations.list",
+                "run.operations.get",
+                "run.operations.list",
+                "run.services.create",
+                "run.services.delete",
+                "run.services.get",
+                "run.services.getIamPolicy",
+                "run.services.list",
+                "run.services.setIamPolicy",
+                "run.services.update",
+            ],
+            "project": _PROJECT,
+            "role_id": "reconcileP5CloudRunDeployer",
+            "stage": "GA",
+        },
     }
 
 
@@ -999,6 +1105,10 @@ def _verify_project_services(resources: dict[str, dict[str, Any]]) -> None:
 def _verify_service_accounts(resources: dict[str, dict[str, Any]]) -> None:
     expected = {
         "google_service_account.phase5_apply": ("rec-p5-apply", _APPLY_EMAIL),
+        "google_service_account.phase5_operator": (
+            "rec-p5-operator",
+            _OPERATOR_EMAIL,
+        ),
         **{
             f'google_service_account.runtime["{component}"]': (
                 email.split("@", 1)[0],
@@ -1027,6 +1137,74 @@ def _verify_service_accounts(resources: dict[str, dict[str, Any]]) -> None:
             },
             address,
         )
+    default_accounts = resources.get("google_project_default_service_accounts.phase5")
+    if default_accounts is not None:
+        _expect_fields(
+            default_accounts["change"]["after"],
+            {
+                "action": "DEPRIVILEGE",
+                "project": _PROJECT,
+                "restore_policy": "REVERT",
+            },
+            "google_project_default_service_accounts.phase5",
+        )
+
+
+def _verify_default_service_account_policy(
+    resources: dict[str, dict[str, Any]],
+) -> None:
+    address = (
+        "google_project_organization_policy."
+        "disable_automatic_default_service_account_grants"
+    )
+    policy = resources.get(address)
+    if policy is None:
+        return
+    after = policy["change"]["after"]
+    _expect_fields(
+        after,
+        {
+            "constraint": "iam.automaticIamGrantsForDefaultServiceAccounts",
+            "project": _PROJECT,
+        },
+        address,
+    )
+    if _one_block(after, "boolean_policy", address) != {"enforced": True}:
+        _fail(f"{address} does not enforce the automatic-grant constraint")
+    _require_disabled_fields(after, ("list_policy", "restore_policy"), address)
+
+
+def _verify_production_guard(
+    stack: _Stack,
+    resources: dict[str, dict[str, Any]],
+    plan: dict[str, Any],
+) -> None:
+    if stack.name not in {"foundation", "runtime"}:
+        return
+    profile = _rendered_variables(plan).get("operating_profile")
+    if profile not in {"evidence", "production"}:
+        _fail(f"{stack.name} operating profile is invalid")
+    address = f"terraform_data.{stack.name}_production_guard[0]"
+    guard = resources.get(address)
+    if profile == "evidence":
+        if guard is not None:
+            _fail(f"{stack.name} evidence plan contains a production guard")
+        return
+    if guard is None:
+        _fail(f"{stack.name} production plan lacks its destruction guard")
+    after = guard["change"]["after"]
+    _expect_fields(
+        after,
+        {
+            "input": {
+                "operating_profile": "production",
+                "project_id": _PROJECT,
+                "stack": stack.name,
+            },
+            "triggers_replace": None,
+        },
+        address,
+    )
 
 
 def _one_block(after: dict[str, Any], key: str, address: str) -> dict[str, Any]:
@@ -1094,11 +1272,15 @@ def _verify_cloud_run(
         }
     )
     image_digest = variables.get("image_digest")
+    operating_profile = variables.get("operating_profile", "evidence")
     if (
         not isinstance(image_digest, str)
         or re.fullmatch(r"sha256:[0-9a-f]{64}", image_digest) is None
     ):
         _fail("runtime image digest variable is invalid")
+    if operating_profile not in {"evidence", "production"}:
+        _fail("runtime operating profile is invalid")
+    production_profile = operating_profile == "production"
     image_reference = (
         f"{_REGION}-docker.pkg.dev/{_PROJECT}/reconcile-p5/reconcile@{image_digest}"
     )
@@ -1108,6 +1290,7 @@ def _verify_cloud_run(
         "RECONCILE_INFRA_REVISION": variables.get("infrastructure_revision"),
         "RECONCILE_SEMANTIC_CONFIG_SHA256": variables.get("semantic_config_sha256"),
         "RECONCILE_SOURCE_REVISION": variables.get("source_revision"),
+        "RECONCILE_OPERATING_PROFILE": operating_profile,
     }
     for environment in runtime_environment.values():
         environment.update(dynamic_environment)
@@ -1185,14 +1368,15 @@ def _verify_cloud_run(
             after,
             {
                 "custom_audiences": [_AUDIENCES[component]],
-                "deletion_policy": "DELETE",
-                "deletion_protection": False,
+                "deletion_policy": "ABANDON" if production_profile else "DELETE",
+                "deletion_protection": production_profile,
                 "ingress": "INGRESS_TRAFFIC_ALL",
                 "invoker_iam_disabled": False,
                 "labels": {
                     "app": "reconcile",
                     "component": component.replace("_", "-"),
                     "environment": "phase5",
+                    "operating_profile": operating_profile,
                 },
                 "location": _REGION,
                 "name": _SERVICE_NAMES[component],
@@ -1218,7 +1402,11 @@ def _verify_cloud_run(
             template,
             {
                 "execution_environment": "EXECUTION_ENVIRONMENT_GEN2",
-                "max_instance_request_concurrency": 1,
+                "max_instance_request_concurrency": (
+                    8
+                    if production_profile and component in {"api", "controller"}
+                    else 1
+                ),
                 "service_account": _RUNTIME_EMAILS[component],
                 "timeout": _SERVICE_TIMEOUTS[component],
             },
@@ -1267,9 +1455,15 @@ def _verify_cloud_run(
                 f"{address}.template",
             )
         scaling = _one_block(template, "scaling", address)
+        expected_min = (
+            1 if production_profile and component in {"api", "controller"} else 0
+        )
+        expected_max = (
+            3 if production_profile and component in {"api", "controller"} else 1
+        )
         if (
-            scaling.get("min_instance_count") != 0
-            or scaling.get("max_instance_count") != 1
+            scaling.get("min_instance_count") != expected_min
+            or scaling.get("max_instance_count") != expected_max
         ):
             _fail(f"{address} has unbounded scaling")
         container = _one_block(template, "containers", address)
@@ -1363,7 +1557,15 @@ def _verify_cloud_run(
         _fail("runtime does not use exactly one approved image digest")
 
 
-def _verify_storage(resources: dict[str, dict[str, Any]]) -> None:
+def _verify_storage(
+    resources: dict[str, dict[str, Any]],
+    plan: dict[str, Any] | None = None,
+) -> None:
+    variables = _rendered_variables(plan) if plan is not None else {}
+    operating_profile = variables.get("operating_profile", "evidence")
+    if operating_profile not in {"evidence", "production"}:
+        _fail("storage operating profile is invalid")
+    production_profile = operating_profile == "production"
     expected = {
         "google_storage_bucket.terraform_state": {
             "component": "terraform-state",
@@ -1374,30 +1576,42 @@ def _verify_storage(resources: dict[str, dict[str, Any]]) -> None:
         },
         "google_storage_bucket.target": {
             "component": "target",
-            "deletion_policy": "DELETE",
-            "force_destroy": True,
+            "deletion_policy": "PREVENT" if production_profile else "DELETE",
+            "force_destroy": not production_profile,
             "name": _TARGET_BUCKET,
-            "versioning": [{"enabled": False}],
+            "versioning": [{"enabled": production_profile}],
         },
     }
     for address in set(expected) & set(resources):
         after = resources[address]["change"]["after"]
         contract = expected[address]
+        labels = {
+            "app": "reconcile",
+            "component": contract["component"],
+            "environment": "phase5",
+        }
+        if address == "google_storage_bucket.target":
+            labels["operating_profile"] = operating_profile
         _expect_fields(
             after,
             {
                 "deletion_policy": contract["deletion_policy"],
                 "force_destroy": contract["force_destroy"],
-                "labels": {
-                    "app": "reconcile",
-                    "component": contract["component"],
-                    "environment": "phase5",
-                },
+                "labels": labels,
                 "location": "US-CENTRAL1",
                 "name": contract["name"],
                 "project": _PROJECT,
                 "public_access_prevention": "enforced",
-                "soft_delete_policy": [{"retention_duration_seconds": 0}],
+                "soft_delete_policy": [
+                    {
+                        "retention_duration_seconds": (
+                            604_800
+                            if production_profile
+                            and address == "google_storage_bucket.target"
+                            else 0
+                        )
+                    }
+                ],
                 "storage_class": "STANDARD",
                 "uniform_bucket_level_access": True,
                 "versioning": contract["versioning"],
@@ -1424,9 +1638,17 @@ def _verify_storage(resources: dict[str, dict[str, Any]]) -> None:
         )
 
 
-def _verify_foundation(resources: dict[str, dict[str, Any]]) -> None:
+def _verify_foundation(
+    resources: dict[str, dict[str, Any]],
+    plan: dict[str, Any] | None = None,
+) -> None:
     if "google_artifact_registry_repository.runtime" not in resources:
         return
+    variables = _rendered_variables(plan) if plan is not None else {}
+    operating_profile = variables.get("operating_profile", "evidence")
+    if operating_profile not in {"evidence", "production"}:
+        _fail("foundation operating profile is invalid")
+    production_profile = operating_profile == "production"
     database_names = {
         'google_firestore_database.phase5["runtime"]': "reconcile-p5-runtime",
         'google_firestore_database.phase5["sandbox"]': _SANDBOX_DATABASE,
@@ -1440,12 +1662,18 @@ def _verify_foundation(resources: dict[str, dict[str, Any]]) -> None:
                 "app_engine_integration_mode": "DISABLED",
                 "concurrency_mode": "OPTIMISTIC",
                 "database_edition": "STANDARD",
-                "delete_protection_state": "DELETE_PROTECTION_DISABLED",
-                "deletion_policy": "DELETE",
+                "delete_protection_state": (
+                    "DELETE_PROTECTION_ENABLED"
+                    if production_profile
+                    else "DELETE_PROTECTION_DISABLED"
+                ),
+                "deletion_policy": "ABANDON" if production_profile else "DELETE",
                 "location_id": _REGION,
                 "name": name,
                 "point_in_time_recovery_enablement": (
-                    "POINT_IN_TIME_RECOVERY_DISABLED"
+                    "POINT_IN_TIME_RECOVERY_ENABLED"
+                    if production_profile
+                    else "POINT_IN_TIME_RECOVERY_DISABLED"
                 ),
                 "project": _PROJECT,
                 "type": "FIRESTORE_NATIVE",
@@ -1468,6 +1696,7 @@ def _verify_foundation(resources: dict[str, dict[str, Any]]) -> None:
                 "app": "reconcile",
                 "component": "runtime-images",
                 "environment": "phase5",
+                "operating_profile": operating_profile,
             },
             "location": _REGION,
             "mode": "STANDARD_REPOSITORY",
@@ -1569,6 +1798,203 @@ def _verify_foundation(resources: dict[str, dict[str, Any]]) -> None:
         _fail("billing budget is not exactly USD 5")
 
 
+def _verify_observability(
+    resources: dict[str, dict[str, Any]],
+    plan: dict[str, Any] | None = None,
+) -> None:
+    if "google_monitoring_dashboard.operational" not in resources:
+        return
+    variables = _rendered_variables(plan) if plan is not None else {}
+    operating_profile = variables.get("operating_profile", "evidence")
+    notification_channels = variables.get("notification_channel_ids", [])
+    if (
+        not isinstance(notification_channels, list)
+        or notification_channels != sorted(set(notification_channels))
+        or any(
+            not isinstance(channel, str)
+            or re.fullmatch(
+                rf"projects/{re.escape(_PROJECT)}/notificationChannels/[0-9]+",
+                channel,
+            )
+            is None
+            for channel in notification_channels
+        )
+        or (operating_profile == "production" and not notification_channels)
+        or (operating_profile == "evidence" and bool(notification_channels))
+    ):
+        _fail("runtime notification channels are invalid")
+    labels = {
+        "app": "reconcile",
+        "environment": "phase5",
+        "operating_profile": operating_profile,
+    }
+    expected_filters: set[str] = set()
+    for key, signal in _OPERATIONAL_SIGNALS.items():
+        metric_address = f'google_logging_metric.operational_failure["{key}"]'
+        metric = resources[metric_address]["change"]["after"]
+        metric_name = f"reconcile_p5_{key}"
+        log_filter = (
+            'resource.type="cloud_run_revision" AND '
+            'jsonPayload.schema_version="reconcile/operational-event/v1" AND '
+            'jsonPayload.event="operational-signal" AND '
+            f'jsonPayload.signal="{signal}"'
+        )
+        _expect_fields(
+            metric,
+            {
+                "bucket_name": None,
+                "bucket_options": [],
+                "deletion_policy": "DELETE",
+                "description": (
+                    f"Count of bounded Reconcile {signal} operational signals."
+                ),
+                "disabled": False,
+                "filter": log_filter,
+                "label_extractors": None,
+                "name": metric_name,
+                "project": _PROJECT,
+                "value_extractor": None,
+            },
+            metric_address,
+        )
+        descriptor = _one_block(metric, "metric_descriptor", metric_address)
+        if descriptor != {
+            "display_name": f"Reconcile {signal}",
+            "labels": [],
+            "metric_kind": "DELTA",
+            "unit": "1",
+            "value_type": "INT64",
+        }:
+            _fail(f"{metric_address} descriptor drifted")
+
+        metric_filter = (
+            'resource.type = "cloud_run_revision" AND '
+            f'metric.type = "logging.googleapis.com/user/{metric_name}"'
+        )
+        expected_filters.add(metric_filter)
+        policy_address = f'google_monitoring_alert_policy.operational_failure["{key}"]'
+        policy = resources[policy_address]["change"]["after"]
+        _expect_fields(
+            policy,
+            {
+                "alert_strategy": [],
+                "combiner": "OR",
+                "deletion_policy": "DELETE",
+                "display_name": f"Reconcile {signal}",
+                "enabled": True,
+                "notification_channels": (
+                    notification_channels if operating_profile == "production" else []
+                ),
+                "project": _PROJECT,
+                "severity": (
+                    "ERROR" if key in {"failed_run", "worker_failure"} else "WARNING"
+                ),
+                "user_labels": labels,
+            },
+            policy_address,
+        )
+        condition = _one_block(policy, "conditions", policy_address)
+        _expect_fields(
+            condition,
+            {"display_name": f"{signal} observed"},
+            f"{policy_address}.conditions",
+        )
+        threshold = _one_block(
+            condition,
+            "condition_threshold",
+            f"{policy_address}.conditions",
+        )
+        _expect_fields(
+            threshold,
+            {
+                "comparison": "COMPARISON_GT",
+                "duration": "0s",
+                "filter": metric_filter,
+                "threshold_value": 0,
+                "trigger": [{"count": 1, "percent": None}],
+            },
+            f"{policy_address}.condition_threshold",
+        )
+        aggregation = _one_block(
+            threshold,
+            "aggregations",
+            f"{policy_address}.condition_threshold",
+        )
+        _expect_fields(
+            aggregation,
+            {
+                "alignment_period": "300s",
+                "cross_series_reducer": "REDUCE_SUM",
+                "group_by_fields": None,
+                "per_series_aligner": "ALIGN_DELTA",
+            },
+            f"{policy_address}.aggregations",
+        )
+        documentation = _one_block(policy, "documentation", policy_address)
+        _expect_fields(
+            documentation,
+            {
+                "content": (
+                    f"A bounded Reconcile {signal} signal was emitted by a hosted "
+                    "runtime component. Correlate with correlation_id in Cloud Logging."
+                ),
+                "links": [],
+                "mime_type": "text/markdown",
+                "subject": None,
+            },
+            f"{policy_address}.documentation",
+        )
+
+    dashboard_address = "google_monitoring_dashboard.operational"
+    dashboard = resources[dashboard_address]["change"]["after"]
+    _expect_fields(
+        dashboard,
+        {"deletion_policy": "DELETE", "project": _PROJECT},
+        dashboard_address,
+    )
+    try:
+        definition = json.loads(dashboard.get("dashboard_json"))
+        layout = definition["mosaicLayout"]
+        tiles = layout["tiles"]
+    except (KeyError, TypeError, ValueError):
+        _fail("operational dashboard definition is malformed")
+    if (
+        definition.get("displayName") != "Reconcile Phase 5 operational signals"
+        or definition.get("labels") != labels
+        or layout.get("columns") != 12
+        or not isinstance(tiles, list)
+        or len(tiles) != len(_OPERATIONAL_SIGNALS)
+    ):
+        _fail("operational dashboard definition drifted")
+    observed_filters: set[str] = set()
+    observed_titles: set[str] = set()
+    try:
+        for tile in tiles:
+            widget = tile["widget"]
+            scorecard = widget["scorecard"]
+            query = scorecard["timeSeriesQuery"]["timeSeriesFilter"]
+            if (
+                tile["width"] != 4
+                or tile["height"] != 4
+                or scorecard["sparkChartType"] != "SPARK_LINE"
+                or query["aggregation"]
+                != {
+                    "alignmentPeriod": "300s",
+                    "crossSeriesReducer": "REDUCE_SUM",
+                    "perSeriesAligner": "ALIGN_DELTA",
+                }
+            ):
+                _fail("operational dashboard tile drifted")
+            observed_titles.add(widget["title"])
+            observed_filters.add(query["filter"])
+    except (KeyError, TypeError):
+        _fail("operational dashboard tile is malformed")
+    if observed_titles != set(_OPERATIONAL_SIGNALS.values()) or (
+        observed_filters != expected_filters
+    ):
+        _fail("operational dashboard coverage drifted")
+
+
 def _resource_semantics_digest(resources: dict[str, dict[str, Any]]) -> str:
     canonical_resources = [resources[address] for address in sorted(resources)]
     encoded = json.dumps(
@@ -1588,9 +2014,12 @@ def verify_create_plan(stack: _Stack, plan: dict[str, Any]) -> str:
     _verify_iam(resources)
     _verify_project_services(resources)
     _verify_service_accounts(resources)
+    _verify_default_service_account_policy(resources)
+    _verify_production_guard(stack, resources, plan)
     _verify_cloud_run(resources, plan)
-    _verify_storage(resources)
-    _verify_foundation(resources)
+    _verify_storage(resources, plan)
+    _verify_foundation(resources, plan)
+    _verify_observability(resources, plan)
     return _resource_semantics_digest(resources)
 
 
@@ -1846,6 +2275,9 @@ def _validate_stack_source(stack: _Stack) -> tuple[Path, ...]:
                     "replace_triggered_by = [terraform_data.canary_baseline]": 3,
                 }
                 if stack.name == "runtime" and source.name == "invocation_iam.tf"
+                else {"prevent_destroy = true": 1}
+                if stack.name in {"foundation", "runtime"}
+                and source.name == "profile_guard.tf"
                 else {}
             )
             actual = {
@@ -1902,22 +2334,10 @@ def _copy_stack(stack: _Stack, destination: Path) -> None:
         if assignments:
             _fail("bootstrap local backend path drifted")
         return
-    backend = re.compile(r'(?ms)^\s*backend "gcs" \{.*?^\s*\}')
-    matches = backend.findall(source)
-    if len(matches) != 1:
+    backend = 'backend "gcs" {}'
+    if source.count(backend) != 1:
         _fail(f"{stack.name} backend block is not unique")
-    block = matches[0]
-    assignments = re.findall(r"(?m)^\s*([a-z_]+)\s*=", block)
-    if (
-        assignments != ["prefix"]
-        or _string_attribute(
-            block,
-            "prefix",
-        )
-        != f"phase5/{stack.name}"
-    ):
-        _fail(f"{stack.name} backend identity drifted")
-    versions.write_text(backend.sub('\n  backend "local" {}', source), encoding="utf-8")
+    versions.write_text(source.replace(backend, 'backend "local" {}'), encoding="utf-8")
     provider = destination / "providers.tf"
     source = provider.read_text(encoding="utf-8")
     impersonation = (
@@ -2159,6 +2579,86 @@ def _minimal_environment(*, network: bool) -> dict[str, str]:
     return environment
 
 
+def _verify_production_transition_guards(
+    terraform: Path,
+    stack: _Stack,
+    working: Path,
+    *,
+    environment: dict[str, str],
+    backend: tuple[str, Path],
+    read_only_paths: tuple[Path, ...],
+) -> None:
+    if (
+        stack.name not in {"foundation", "runtime"}
+        or stack.variables.get("operating_profile") != "production"
+    ):
+        return
+    guard = f"terraform_data.{stack.name}_production_guard[0]"
+    _run_offline(
+        [
+            str(terraform),
+            f"-chdir={working}",
+            "apply",
+            "-auto-approve",
+            "-input=false",
+            "-lock=false",
+            "-no-color",
+            "-refresh=false",
+            f"-target={guard}",
+        ],
+        working_directory=working,
+        environment=environment,
+        backend=backend,
+        read_only_paths=read_only_paths,
+    )
+    destroy = _run_offline(
+        [
+            str(terraform),
+            f"-chdir={working}",
+            "plan",
+            "-destroy",
+            "-input=false",
+            "-lock=false",
+            "-no-color",
+            "-refresh=false",
+        ],
+        working_directory=working,
+        environment=environment,
+        backend=backend,
+        read_only_paths=read_only_paths,
+        expected=frozenset({1}),
+    )
+    if "Instance cannot be destroyed" not in destroy.stdout + destroy.stderr:
+        _fail(f"{stack.name} production destroy did not fail on its state guard")
+
+    downgraded = dict(stack.variables)
+    downgraded["operating_profile"] = "evidence"
+    if stack.name == "runtime":
+        downgraded["notification_channel_ids"] = []
+    (working / "terraform.tfvars.json").write_text(
+        json.dumps(downgraded),
+        encoding="utf-8",
+    )
+    downgrade = _run_offline(
+        [
+            str(terraform),
+            f"-chdir={working}",
+            "plan",
+            "-input=false",
+            "-lock=false",
+            "-no-color",
+            "-refresh=false",
+        ],
+        working_directory=working,
+        environment=environment,
+        backend=backend,
+        read_only_paths=read_only_paths,
+        expected=frozenset({1}),
+    )
+    if "Instance cannot be destroyed" not in downgrade.stdout + downgrade.stderr:
+        _fail(f"{stack.name} profile downgrade did not fail on its state guard")
+
+
 def _verify_provider_mirror(provider_mirror: Path) -> Path:
     provider_mirror = provider_mirror.resolve()
     google_mirror = provider_mirror / "registry.terraform.io" / "hashicorp" / "google"
@@ -2340,6 +2840,14 @@ def _offline_create(
             rendered_plan = json.loads(rendered.stdout)
             digest = verify_create_plan(stack, rendered_plan)
             create_plans[stack.name] = _operator_plan_projection(rendered_plan)
+            _verify_production_transition_guards(
+                terraform,
+                stack,
+                working,
+                environment=environment,
+                backend=backend,
+                read_only_paths=read_only_paths,
+            )
             print(
                 f"{stack.name}: {len(stack.addresses)} create-only resources; "
                 f"inventory_sha256={digest}"

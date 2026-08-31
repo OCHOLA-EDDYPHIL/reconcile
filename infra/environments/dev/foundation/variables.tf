@@ -44,3 +44,12 @@ variable "budget_amount_usd" {
     error_message = "The Phase 5 billing budget must remain exactly USD 5."
   }
 }
+
+variable "operating_profile" {
+  type = string
+
+  validation {
+    condition     = contains(["evidence", "production"], var.operating_profile)
+    error_message = "The operating profile must be evidence or production."
+  }
+}

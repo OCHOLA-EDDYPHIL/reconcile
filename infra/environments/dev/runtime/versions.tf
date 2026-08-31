@@ -8,7 +8,5 @@ terraform {
     }
   }
 
-  backend "gcs" {
-    prefix = "phase5/runtime"
-  }
+  backend "gcs" {}
 }
